@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "context-capture",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["app.py"],
+      "port": 8056
+    }
+  ]
+}

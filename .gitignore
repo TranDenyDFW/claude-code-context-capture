@@ -1,0 +1,37 @@
+# Captured data NEVER leaves this machine.
+#
+# data/ holds harvested session state: the SQLite store, raw status line payloads, and
+# pre-compaction transcript SNAPSHOTS, which are verbatim copies of real conversations and
+# carry session ids, account and organization UUIDs, working directory paths and file contents.
+# It also holds a backup of the user's settings.json. None of it is publishable, and a private
+# repository is not a good enough reason to put it in git history where it cannot be removed.
+data/
+
+# Scratch. Self-ignoring by convention in this project.
+tmp/
+
+# Per-project harness state (hook exec-state files), not source.
+# The launch config IS source: it is how the app gets started.
+.claude/*
+!.claude/launch.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# OS and editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+
+# Session records: the plan/result/review/verify trail this extension was built from.
+#
+# These are working documents, not repository content. They carry the machine they were written
+# on - home directory, drive letters, unrelated project names, session uuids - and they describe
+# process rather than the extension. A reader who clones this repo wants the extension.
+#
+# They stay ON DISK deliberately. They are the only account of WHY the code is shaped this way:
+# why status line samples carry a probe flag, why windows are resolved per model segment, why a
+# minified identifier may never anchor a claim. Read them before changing behaviour they explain.
+.md/
