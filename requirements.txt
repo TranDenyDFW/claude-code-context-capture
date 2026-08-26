@@ -1,0 +1,13 @@
+# Python dependencies. The capture tools themselves are node and need nothing from pip.
+
+# Explorer UI (app.py).
+dash>=4.0.0
+plotly>=6.0.0
+pandas>=2.0.0
+psutil>=5.9.0
+
+# tools/pty-control-arm.py only: the paired positive control for the status-line finding, which
+# spawns the CLI on a real ConPTY so process.stdout.isTTY is true. Windows only - there is no
+# ConPTY elsewhere, and the arm is the one thing in this repo that cannot be run cross-platform.
+# Everything above works anywhere Python does.
+pywinpty>=2.0.0 ; sys_platform == "win32"
