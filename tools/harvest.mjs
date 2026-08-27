@@ -38,12 +38,6 @@ const DB_PATH = resolveDbPath();
 const RAW_DIR = join(ROOT, 'data', 'raw');
 const UNKNOWN_LOG = join(RAW_DIR, 'unknown-records.ndjson');
 
-// Message text is captured by default: without it a compaction summary is a character count and a
-// dropped message is unrecoverable, which is most of what this store is for. Opt out with
-// C4X_NO_TEXT=1 to keep the older measurement-only behaviour. Read at call time, not at import,
-// so a test can flip it without reloading the module.
-const captureText = () => process.env.C4X_NO_TEXT !== '1';
-
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS files (
   path TEXT PRIMARY KEY, size INTEGER, mtime_ms INTEGER,
@@ -97,7 +91,9 @@ GROUP BY request_id;
 -- It is what makes a compaction summary readable instead of a character count, and what makes a
 -- dropped message recoverable at all.
 --
--- Set C4X_NO_TEXT=1 to skip it and keep the store measurement-only.
+-- Unconditional while installed. There was an opt-out; it was removed, because a store that can be
+-- silently switched to measurements-only still LOOKS complete, and a reader has no way to tell
+-- which sessions were captured under which setting. To stop capturing, uninstall.
 CREATE TABLE IF NOT EXISTS messages (
   uuid TEXT PRIMARY KEY, session_id TEXT, ts TEXT, role TEXT, type TEXT,
   text TEXT, chars INTEGER, model TEXT, request_id TEXT,
@@ -461,7 +457,6 @@ class Harvest {
   //
   // Keyed by uuid, so re-harvesting a file replaces rows instead of duplicating them.
   captureMessage(d, path, lineNo) {
-    if (!captureText()) return;
     if (typeof d?.uuid !== 'string') return;   // no stable identity: would duplicate on every run
     const text = messageText(d);
     if (!text) return;                         // nothing readable, do not store an empty row
@@ -566,13 +561,8 @@ async function run({ full }) {
     // Only comparable on a full run: records_seen is per-run, rows_stored is cumulative.
     duplicate_turn_records: full ? h.stats.turns - rowTurns : null,
     compaction_records_seen: h.stats.compactions, compaction_rows_stored: rowComp,
-    // Say plainly whether text was captured. "0 messages" and "text capture off" look identical
-    // in a row count, and the difference is the whole reason someone would set C4X_NO_TEXT.
-    message_rows_stored: captureText() ? db.prepare('SELECT COUNT(*) n FROM messages').get().n : null,
-    message_text_mb: captureText()
-      ? +((db.prepare('SELECT COALESCE(SUM(chars),0) c FROM messages').get().c) / 1048576).toFixed(1)
-      : null,
-    text_capture: captureText() ? 'on' : 'off (C4X_NO_TEXT=1)',
+    message_rows_stored: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
+    message_text_mb: +((db.prepare('SELECT COALESCE(SUM(chars),0) c FROM messages').get().c) / 1048576).toFixed(1),
     unpaired_boundaries: unpaired,
     unknown_record_types: [...h.unknownSeen],
     seconds: +(ms / 1000).toFixed(1),
@@ -759,7 +749,9 @@ async function selfTest() {
       before.n === after.n && before.c === after.c && after.n > 0]);
   }
 
-  // C4X_NO_TEXT=1 must actually suppress capture. Same fixture, same code path, one variable.
+  // Text capture is UNCONDITIONAL. There used to be a C4X_NO_TEXT opt-out; this asserts it is
+  // really gone rather than merely undocumented, by setting it and proving text is captured anyway.
+  // A leftover read of that variable anywhere in the capture path fails this check.
   {
     const t = new DatabaseSync(':memory:');
     t.exec(SCHEMA);
@@ -772,9 +764,7 @@ async function selfTest() {
       if (prev === undefined) delete process.env.C4X_NO_TEXT; else process.env.C4X_NO_TEXT = prev;
     }
     const n = t.prepare('SELECT COUNT(*) n FROM messages').get().n;
-    const turns = t.prepare('SELECT COUNT(*) n FROM turns').get().n;
-    checks.push(['C4X_NO_TEXT=1 stores no message text (gate can fail)', n === 0]);
-    checks.push(['C4X_NO_TEXT=1 still captures measurements', turns > 0]);
+    checks.push(['the removed C4X_NO_TEXT opt-out no longer suppresses capture (gate can fail)', n > 0]);
   }
 
   // api_calls: one row per API call, not per transcript entry.
