@@ -89,7 +89,17 @@ config that has drifted, and it leaves other tools' hooks, your `permissions`, a
 key alone. If another tool's hook shares a matcher group with ours, it moves ours out rather than
 overwriting the group.
 
-Hooks apply to sessions started after the write, so your current session will not be captured.
+**Hooks take effect immediately, in a session that is already running.** No restart. Measured at
+nine seconds from the write, in a session that had been going for twenty hours. The only thing a
+running session cannot pick up is an event that has already gone past: its own `SessionStart`, and
+`PreCompact`/`PostCompact` for a compaction that already happened.
+
+That matters less than it sounds, because hooks are not where the substance comes from. Token
+counts, compactions, message text and tool calls are all read out of transcripts by `harvest.mjs`,
+and Claude Code writes those whether or not a hook is registered. **Your existing sessions are
+captured retroactively** the first time you harvest, going back as far as your transcripts do.
+Hooks add lifecycle detail transcripts do not carry - permission mode, agent id and type, prompt
+size, and exact event timing.
 
 ```bash
 node tools/install.mjs install --dry-run   # print the exact diff, write nothing

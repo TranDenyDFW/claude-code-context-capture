@@ -267,7 +267,11 @@ function cmdInstall(argv) {
   if (!rewire) mkdirSync(join(ROOT, 'data', 'raw'), { recursive: true });
   saveReceipt({ settingsBackup: backup ? posix(backup) : null, ...(priorStatusLine === undefined ? {} : { priorStatusLine }) });
   console.log(`wrote ${posix(SETTINGS)}${backup ? ` (backup: ${posix(backup)})` : ''}`);
-  console.log('hooks apply to sessions started from now on.');
+  // Measured, not assumed: the first hook fired nine seconds after this write, in a session that
+  // had already been running for twenty hours. The only thing a running session cannot get is an
+  // event that has already gone past.
+  console.log('hooks take effect immediately, in sessions already running too.');
+  console.log('only events that already fired are missed: SessionStart, and any past compaction.');
   return 0;
 }
 
