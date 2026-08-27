@@ -590,8 +590,8 @@ app = Dash(__name__, title="Context capture", update_title=None,
            suppress_callback_exceptions=True)
 server = app.server
 
-TAB_IDS = ["tab-overview", "tab-session", "tab-compactions", "tab-mirror", "tab-waste"]
-TAB_LABELS = ["Overview", "Session", "Compactions", "Mirror", "Waste"]
+TAB_IDS = ["tab-overview", "tab-session", "tab-compactions", "tab-breakdown", "tab-mirror", "tab-waste"]
+TAB_LABELS = ["Overview", "Session", "Compactions", "Breakdown", "Mirror", "Waste"]
 
 
 def tab_button(i: int, label: str, active: bool) -> html.Button:
@@ -779,6 +779,127 @@ def compactions_layout():
     ])
 
 
+# ---- Breakdown --------------------------------------------------------------
+# The context tooltip's category split. It is DERIVED, not read: the split exists only in Claude
+# Code's UI and is written to no transcript, no hook payload and no status line sample. What makes
+# it recoverable is that the arithmetic is closed - resident = static + messages, and free =
+# window - resident - so one observation of a configuration's fixed overhead unlocks the split for
+# every turn ever harvested. tools/breakdown.mjs owns that logic and its baselines table.
+BREAKDOWN_COLORS = {
+    "messages": ACCENT, "system_tools": "#e8590c", "mcp_tools": GOOD,
+    "skills": WARN, "system_prompt": "#d6336c", "free": BORDER,
+}
+BREAKDOWN_LABELS = {
+    "messages": "Messages", "system_tools": "System tools", "mcp_tools": "MCP tools",
+    "skills": "Skills", "system_prompt": "System prompt", "free": "Free space",
+}
+
+
+def latest_baseline():
+    """Newest recorded baseline, or None. Missing table is a valid 'never calibrated' state."""
+    try:
+        df = q("SELECT * FROM context_baselines ORDER BY ts DESC LIMIT 1")
+    except Exception:
+        return None
+    return None if df.empty else df.iloc[0].to_dict()
+
+
+def breakdown_layout():
+    b = latest_baseline()
+    if not b:
+        return html.Div([
+            html.Div("No baseline recorded yet", style={"color": TEXT, "fontSize": "15px",
+                                                        "fontWeight": 700, "marginBottom": "10px"}),
+            html.Div(
+                "The category split is not stored anywhere by Claude Code - it is computed for the "
+                "tooltip and discarded. It becomes derivable once this store knows your "
+                "configuration's fixed overhead, which is a single reading you take from that "
+                "tooltip. Free space is exact without it; Messages and the category split are not.",
+                style={"color": MUTED, "fontSize": "12.5px", "maxWidth": "760px",
+                       "lineHeight": "1.6", "marginBottom": "14px"}),
+            html.Pre(
+                "node tools/breakdown.mjs --calibrate --system-prompt 5100 "
+                "--system-tools 19100 --mcp-tools 11000 --skills 6100",
+                style={"background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
+                       "padding": "12px 14px", "color": TEXT, "fontFamily": MONO,
+                       "fontSize": "12px", "display": "inline-block"}),
+        ])
+
+    static_total = int(b["static_total"])
+    window = int(b["window_size"] or 1000000)
+    turns = q("""SELECT ts, total_resident FROM api_calls
+                 WHERE total_resident IS NOT NULL AND COALESCE(is_sidechain,0) = 0
+                 ORDER BY ts""")
+    if turns.empty:
+        return html.Div("No turns in the store yet. Run node tools/harvest.mjs.",
+                        style={"color": MUTED})
+
+    resident = int(turns["total_resident"].iloc[-1])
+    messages = max(0, resident - static_total)
+    free = max(0, window - resident)
+
+    # Current split, as a single proportional bar - the same shape the tooltip uses, so the two
+    # can be compared at a glance rather than translated.
+    parts, rows = [], []
+    for key in ("messages", "system_tools", "mcp_tools", "skills", "system_prompt", "free"):
+        val = messages if key == "messages" else (free if key == "free" else b.get(key))
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            continue
+        val = int(val)
+        if val <= 0:
+            continue
+        pct = val / window * 100
+        parts.append(html.Div(style={"width": f"{pct}%", "background": BREAKDOWN_COLORS[key],
+                                     "height": "100%"}))
+        rows.append({"category": BREAKDOWN_LABELS[key], "tokens": fmt_tokens(val),
+                     "percent": f"{pct:.1f}%"})
+
+    bar = html.Div(parts, style={"display": "flex", "width": "100%", "height": "16px",
+                                 "borderRadius": "4px", "overflow": "hidden",
+                                 "border": f"1px solid {BORDER}"})
+
+    # History: the same split across every turn, which is the part a tooltip can never show.
+    x = list(range(1, len(turns) + 1))
+    res = turns["total_resident"].astype(int)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=x, y=[static_total] * len(x), mode="lines", name="static overhead",
+                             line=dict(width=0), stackgroup="one", fillcolor="#e8590c"))
+    fig.add_trace(go.Scatter(x=x, y=(res - static_total).clip(lower=0), mode="lines",
+                             name="messages", line=dict(width=0), stackgroup="one",
+                             fillcolor=ACCENT))
+    fig.add_trace(go.Scatter(x=x, y=(window - res).clip(lower=0), mode="lines", name="free space",
+                             line=dict(width=0), stackgroup="one", fillcolor="#21262d"))
+    fig.update_layout(title=f"Context window composition over {len(turns):,} API calls",
+                      title_font=dict(color=TEXT, size=13),
+                      xaxis_title="API call", yaxis_title="tokens")
+
+    applies = str(b["ts"])[:19].replace("T", " ")
+    return html.Div([
+        html.Div([
+            html.Span("context window", style={"color": MUTED, "fontSize": "12px"}),
+            html.Span(f"  {fmt_tokens(resident)} / {fmt_tokens(window)} "
+                      f"({resident / window * 100:.0f}%)",
+                      style={"color": TEXT, "fontFamily": MONO, "fontSize": "14px",
+                             "fontWeight": 700, "marginLeft": "8px"}),
+        ], style={"marginBottom": "8px"}),
+        bar,
+        html.Div(style={"height": "14px"}),
+        dash_table.DataTable(
+            columns=[{"name": c, "id": c} for c in ["category", "tokens", "percent"]],
+            data=rows, **TABLE_STYLE),
+        html.Div(
+            f"DERIVED, not measured. Claude Code stores this split nowhere, so Messages and the "
+            f"category rows are computed as resident minus a recorded baseline of "
+            f"{static_total:,} tokens (source: {b['source']}, recorded {applies}). Resident and "
+            f"free space are exact. A turn from before that baseline was recorded is split using "
+            f"an overhead that may not have applied to it - re-calibrate after adding an MCP "
+            f"server, a skill, or editing CLAUDE.md.",
+            style={"color": MUTED, "fontSize": "11.5px", "margin": "12px 0 14px 0",
+                   "maxWidth": "900px", "lineHeight": "1.55"}),
+        dcc.Graph(figure=dark_fig(fig, 420), config={"displayModeBar": False}),
+    ])
+
+
 # ---- Mirror ---------------------------------------------------------------
 def mirror_layout():
     rows = []
@@ -918,8 +1039,9 @@ app.layout = html.Div(
                 html.Div(overview_layout(), id="pane-0"),
                 html.Div(session_layout(), id="pane-1", style={"display": "none"}),
                 html.Div(compactions_layout(), id="pane-2", style={"display": "none"}),
-                html.Div(mirror_layout(), id="pane-3", style={"display": "none"}),
-                html.Div(waste_layout(), id="pane-4", style={"display": "none"}),
+                html.Div(breakdown_layout(), id="pane-3", style={"display": "none"}),
+                html.Div(mirror_layout(), id="pane-4", style={"display": "none"}),
+                html.Div(waste_layout(), id="pane-5", style={"display": "none"}),
             ],
             style={"padding": "20px"},
         ),
@@ -933,7 +1055,7 @@ app.layout = html.Div(
 # Callbacks
 # ---------------------------------------------------------------------------
 @callback(
-    [Output(f"pane-{i}", "style") for i in range(5)]
+    [Output(f"pane-{i}", "style") for i in range(6)]
     + [Output(f"btn-{t}", "style") for t in TAB_IDS]
     + [Output("active-tab", "data")],
     [Input(f"btn-{t}", "n_clicks") for t in TAB_IDS],
@@ -945,8 +1067,8 @@ def _switch_tab(*args):
     current = args[-1]
     which = ctx.triggered_id
     idx = TAB_IDS.index(which.replace("btn-", "")) if which else current
-    panes = [{"display": "block"} if i == idx else {"display": "none"} for i in range(5)]
-    tabs = [tab_style(i == idx) for i in range(5)]
+    panes = [{"display": "block"} if i == idx else {"display": "none"} for i in range(6)]
+    tabs = [tab_style(i == idx) for i in range(6)]
     return panes + tabs + [idx]
 
 

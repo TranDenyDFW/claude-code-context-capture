@@ -15,6 +15,8 @@ Five questions it answers about your own sessions:
 - **When will it compact?** The trigger threshold for the model you are on, and how far from it you are.
 - **What did a compaction throw away?** The summary it wrote, in full, and the messages that are
   absent from its survivor list.
+- **What is actually filling the window?** The category split Claude Code shows in its tooltip,
+  with the history the tooltip cannot show.
 - **What am I paying for twice?** Files read repeatedly in one session, and tools loaded but never called.
 
 Everything stays on your machine. `data/` is gitignored and nothing is sent anywhere.
@@ -45,6 +47,7 @@ with a mark on the bar where the trigger sits.
 | **Overview** | totals, and which projects consume the most context |
 | **Session** | context growth turn by turn, compaction boundaries, the threshold for each model run, and every message in the session - click one to read it |
 | **Compactions** | every compaction, the predicted trigger, how far past it you went, and on click: the summary it wrote plus what it dropped |
+| **Breakdown** | the context tooltip's category split - Messages, System tools, MCP tools, Skills, System prompt, Free space - for the current turn and across every turn on record |
 | **Mirror** | a live calculator: given N tokens and a window, what happens |
 | **Waste** | files re-read inside one session, MCP servers by invocation, tool schema cost |
 
@@ -148,6 +151,7 @@ node tools/waste.mjs --servers         # MCP servers, including loaded-but-never
 node tools/mirror.mjs --predict 850000 --window 1000000
 node tools/harvest.mjs --stats         # what the store holds
 node tools/statusline.mjs --report     # has the live status-line capture ever run
+node tools/breakdown.mjs --show        # the category split for the newest turn
 node tools/segments.mjs --session ID  # which model ran when, and the window for each run
 ```
 
@@ -213,6 +217,8 @@ leaves every other hook and setting untouched.
   This is the one table that holds content rather than measurements. It is what the Compactions tab
   reads to show you a summary as prose, and what makes "which messages did this compaction throw
   away" answerable. Roughly the size of your transcripts, and not optional while installed.
+- `context_baselines` - one row per observation of your configuration's fixed overhead, which is
+  what makes the category split derivable. See [The breakdown](#the-breakdown).
 - `tool_calls` - one row per tool use: tool and MCP server name, the file or url, the result size.
 - `hook_events` - lifecycle events, sizes only and never contents.
 - `request_bodies`, `tool_schemas` - per-tool schema cost, populated only if you opt into raw-body
@@ -237,6 +243,43 @@ gated behind two environment variables. This ingest stores sizes and hashes only
 prompt text and never tool descriptions - so opting into it does not add the *system* side of a
 request to the store. Your message text is a separate matter and is captured by `harvest.mjs`
 regardless of this setting; see `messages` under [The store](#the-store).
+
+## The breakdown
+
+Claude Code's context tooltip splits the window into Messages, System tools, MCP tools, Skills,
+System prompt and Free space. **That split is stored nowhere.** It is computed for the UI and
+discarded: it appears in no transcript record, no hook payload and no status line sample.
+
+It is still recoverable, because the arithmetic is closed:
+
+```
+resident = static + messages          static   = your configuration's fixed overhead
+free     = window - resident          messages = everything the conversation added
+```
+
+`resident` is exact and already recorded for every turn ever harvested. So one reading of `static`
+unlocks the split for all of your history at once, with no further capture. Take that reading from
+the tooltip and record it:
+
+```bash
+node tools/breakdown.mjs --calibrate --system-prompt 5100 --system-tools 19100 --mcp-tools 11000 --skills 6100
+```
+
+Baselines are kept as a history, not a single value, because the overhead moves when you add an MCP
+server or a skill - so an old turn is split using the overhead that was in force then. Re-calibrate
+after changing your setup.
+
+**What is exact and what is derived.** Resident and free space are measured. Messages and the
+category rows are computed from a baseline, and the Breakdown tab says so on the page rather than
+presenting them as readings. A turn from before your first calibration is flagged, because it is
+being split with an overhead that may not have applied to it.
+
+**Why not just ask Claude Code?** `tools/probe.mjs` can request the split over the control
+protocol, but only from a session it spawns, and a spawned CLI session is not configured like your
+desktop app - measured here, MCP tools was 11k in the app and 0 in the CLI, which reports no MCP
+servers configured at all. The desktop app's messaging socket is an inbox for injecting messages,
+not a query channel: `get_context_usage` appears at 14 offsets in the binary and none of them lie
+inside that socket's code.
 
 ## Limits
 
