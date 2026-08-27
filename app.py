@@ -250,6 +250,80 @@ def all_compactions() -> pd.DataFrame:
     """)
 
 
+def compaction_summary_text(compaction_uuid: str) -> pd.DataFrame:
+    """The summary a compaction produced, as prose.
+
+    Until the messages table existed this was only ever a character count, so the page could tell
+    you 14,115 chars had replaced 981k tokens without showing you a word of it.
+    """
+    return q(
+        """
+        SELECT m.text, m.chars, m.ts
+        FROM compactions c JOIN messages m ON m.uuid = c.summary_uuid
+        WHERE c.uuid = ?
+        """,
+        (compaction_uuid,),
+    )
+
+
+def compaction_dropped(compaction_uuid: str, limit: int = 300) -> pd.DataFrame:
+    """Messages from before a compaction that are absent from its survivor list.
+
+    A LOWER BOUND in both directions, and labelled as one in the UI. Survivor uuids that the store
+    holds no message for cannot be matched, and a message with no readable text was never stored,
+    so this lists what can be shown to have gone rather than everything that went.
+    """
+    return q(
+        """
+        SELECT m.uuid, m.ts, m.role, m.type, m.chars,
+               substr(replace(replace(m.text, char(10), ' '), char(13), ' '), 1, 220) AS preview
+        FROM compactions c
+        JOIN messages m ON m.session_id = c.session_id AND m.ts < c.ts
+        WHERE c.uuid = ?
+          AND m.uuid NOT IN (SELECT uuid FROM compaction_survivors WHERE compaction_uuid = c.uuid)
+          AND m.uuid <> COALESCE(c.summary_uuid, '')
+        ORDER BY m.chars DESC
+        LIMIT ?
+        """,
+        (compaction_uuid, limit),
+    )
+
+
+def compaction_dropped_count(compaction_uuid: str) -> int:
+    """How many dropped messages EXIST, as opposed to how many the table shows.
+
+    compaction_dropped() caps its result, and reporting the capped length as the count states the
+    limit as though it were a finding.
+    """
+    df = q(
+        """
+        SELECT COUNT(*) AS n
+        FROM compactions c
+        JOIN messages m ON m.session_id = c.session_id AND m.ts < c.ts
+        WHERE c.uuid = ?
+          AND m.uuid NOT IN (SELECT uuid FROM compaction_survivors WHERE compaction_uuid = c.uuid)
+          AND m.uuid <> COALESCE(c.summary_uuid, '')
+        """,
+        (compaction_uuid,),
+    )
+    return int(df.iloc[0]["n"]) if not df.empty else 0
+
+
+def session_messages(session_id: str, limit: int = 400) -> pd.DataFrame:
+    return q(
+        """
+        SELECT uuid, ts, role, type, chars,
+               substr(replace(replace(text, char(10), ' '), char(13), ' '), 1, 220) AS preview
+        FROM messages WHERE session_id = ? ORDER BY ts LIMIT ?
+        """,
+        (session_id, limit),
+    )
+
+
+def message_text(uuid: str) -> pd.DataFrame:
+    return q("SELECT text, chars, ts, role, type FROM messages WHERE uuid = ?", (uuid,))
+
+
 def load_compaction_windows():
     """Window per compaction, resolved by model segment in one node pass.
 
@@ -281,6 +355,126 @@ def fit_window(pre_tokens: int):
 
 
 # ---------------------------------------------------------------------------
+# Live mirror of the context bar.
+#
+# The desktop shows CURRENT context. This app only ever surfaced PEAK, so the two could not agree
+# even though the arithmetic behind them is identical - the desktop read 128.5k/1M while the page
+# showed a 996.2k high-water mark from before a compaction. Everything below answers the desktop's
+# question from the same numbers.
+# ---------------------------------------------------------------------------
+_harvest_lock = _threading.Lock()
+_harvest_state = {"ts": 0.0, "error": None, "runs": 0}
+
+
+def refresh_store(min_interval: float = 4.0) -> None:
+    """Run an incremental harvest so the store follows the live session.
+
+    Nothing else ever triggers one. hooks/event-hook.mjs only appends lifecycle sizes to an ndjson
+    file, so without this the page shows whatever was true the last time someone ran the command
+    by hand - which is exactly how an hour-stale number ends up on screen next to a live one.
+
+    Guarded twice: a non-blocking lock so overlapping ticks cannot start a second node process,
+    and a floor on frequency so a fast Interval cannot spawn harvests in a loop. A failure is
+    recorded rather than raised; a dashboard that cannot refresh must still render.
+    """
+    if not _harvest_lock.acquire(blocking=False):
+        return
+    try:
+        now = _time.time()
+        if now - _harvest_state["ts"] < min_interval:
+            return
+        _harvest_state["ts"] = now
+        proc = subprocess.run(
+            ["node", str(ROOT / "tools" / "harvest.mjs")],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=120,
+        )
+        _harvest_state["error"] = None if proc.returncode == 0 else (proc.stderr or "").strip()[:200]
+        _harvest_state["runs"] += 1
+    except Exception as exc:                        # noqa: BLE001 - reported in the UI, not raised
+        _harvest_state["error"] = str(exc)[:200]
+    finally:
+        _harvest_lock.release()
+
+
+_window_cache: dict = {}
+
+
+def session_window(session_id: str, ttl: float = 60.0):
+    """The window a session is actually running, resolved from evidence and cached.
+
+    A model-name lookup is not sufficient: claude-opus-5 is listed in SMALL_WINDOW_MODELS, yet
+    this build demonstrably runs it at 1M, and the proof is the session's own compaction and peak.
+    tools/segments.mjs already performs that reasoning, so it is asked rather than reimplemented -
+    once per session per ttl, to keep a node spawn off the per-tick path.
+    """
+    hit = _window_cache.get(session_id)
+    now = _time.time()
+    if hit and now - hit[0] < ttl:
+        return hit[1], hit[2]
+    window, confidence = None, "unresolved"
+    try:
+        info = segments_for(session_id)
+        segs = [s for s in info.get("segments", []) if s.get("window")]
+        if segs:
+            window = segs[-1]["window"]
+            confidence = segs[-1].get("confidence") or "segment"
+    except Exception:                               # noqa: BLE001 - unresolved is a valid answer
+        pass
+    _window_cache[session_id] = (now, window, confidence)
+    return window, confidence
+
+
+def live_context():
+    """The newest API call in the store, expressed the way the desktop expresses it.
+
+    Reads api_calls rather than turns: a streamed assistant message is several turn rows sharing
+    one request id, so the newest turn row is not necessarily the newest call.
+    """
+    df = q(
+        """
+        SELECT session_id, ts, model, total_resident
+        FROM api_calls
+        WHERE total_resident IS NOT NULL AND COALESCE(is_sidechain, 0) = 0
+        ORDER BY ts DESC LIMIT 1
+        """
+    )
+    if df.empty:
+        return None
+    r = df.iloc[0]
+    tokens = int(r["total_resident"])
+    window, confidence = session_window(str(r["session_id"]))
+    out = {
+        "tokens": tokens, "window": window, "confidence": confidence,
+        "session_id": str(r["session_id"]), "ts": str(r["ts"]), "model": r["model"],
+        "pct": None, "threshold": None, "level": "unknown",
+    }
+    if window:
+        t = THRESHOLDS.get(window)
+        out["pct"] = tokens / window * 100
+        if t:
+            out["threshold"] = t["compact"]
+            out["level"] = ("compact" if tokens >= t["compact"]
+                            else "warn" if tokens >= t["warn"] else "ok")
+    return out
+
+
+# Pseudo-models that appear in the transcript but are not models anyone ran. Printing <synthetic>
+# beside claude-opus-5 in a MODELS card invites the reader to think they used two. segments.mjs
+# already treats it as not-a-model-switch; this is the display half of the same rule.
+SYNTHETIC_MODELS = {"<synthetic>", "synthetic", "", None}
+
+
+def real_models(values) -> list:
+    seen = []
+    for m in values:
+        if m in SYNTHETIC_MODELS or (isinstance(m, float) and pd.isna(m)):
+            continue
+        if m not in seen:
+            seen.append(m)
+    return sorted(seen)
+
+
+# ---------------------------------------------------------------------------
 # Presentation helpers
 # ---------------------------------------------------------------------------
 def fmt_tokens(n) -> str:
@@ -305,6 +499,60 @@ def stat_card(label: str, value: str, color: str = TEXT, sub: str = "") -> html.
         ],
         style={"background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
                "padding": "14px 16px", "minWidth": "150px", "flex": "1"},
+    )
+
+
+def context_bar(live) -> html.Div:
+    """The desktop's context readout, rebuilt: used / window (pct) over a proportional bar.
+
+    Deliberately the same shape as the thing it mirrors, so the two can be compared at a glance
+    instead of translated. Colour comes from the compact/warn thresholds, not from a fixed scale.
+    """
+    if not live:
+        return html.Div("no context data yet", style={"color": MUTED, "fontSize": "11px",
+                                                      "fontFamily": MONO})
+    colour = {"ok": ACCENT, "warn": WARN, "compact": DANGER}.get(live["level"], MUTED)
+    if live["window"]:
+        label = f"{fmt_tokens(live['tokens'])} / {fmt_tokens(live['window'])} ({live['pct']:.0f}%)"
+        width = max(0.0, min(100.0, live["pct"]))
+        # Where the trigger sits on the same bar, so "how close am I" is visible rather than
+        # arithmetic the reader has to do.
+        thr_pct = (live["threshold"] / live["window"] * 100) if live["threshold"] else None
+    else:
+        label = f"{fmt_tokens(live['tokens'])} / window unresolved"
+        width, thr_pct = 0.0, None
+
+    marks = []
+    if thr_pct is not None:
+        marks.append(html.Div(style={
+            "position": "absolute", "left": f"{thr_pct}%", "top": "-2px",
+            "width": "2px", "height": "12px", "background": DANGER, "opacity": 0.9,
+        }))
+
+    stale = ""
+    if _harvest_state["error"]:
+        stale = f"  refresh failed: {_harvest_state['error'][:60]}"
+
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span("context window", style={"color": MUTED, "fontSize": "11px",
+                                                       "marginRight": "10px"}),
+                    html.Span(label, style={"color": colour, "fontFamily": MONO,
+                                            "fontSize": "13px", "fontWeight": 700}),
+                    html.Span(stale, style={"color": DANGER, "fontSize": "10px",
+                                            "fontFamily": MONO, "marginLeft": "8px"}),
+                ],
+                style={"display": "flex", "alignItems": "baseline"},
+            ),
+            html.Div(
+                [html.Div(style={"width": f"{width}%", "height": "8px", "background": colour,
+                                 "borderRadius": "4px", "transition": "width .4s ease"})] + marks,
+                style={"position": "relative", "width": "260px", "height": "8px",
+                       "background": BORDER, "borderRadius": "4px", "marginTop": "5px"},
+            ),
+        ],
     )
 
 
@@ -334,7 +582,11 @@ def empty_fig(msg: str) -> go.Figure:
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
-app = Dash(__name__, title="Context capture", update_title=None)
+# suppress_callback_exceptions: the message table and its detail pane are built inside the session
+# callback, so they do not exist when the layout is first validated. Without this, Dash refuses to
+# register their callback at import time.
+app = Dash(__name__, title="Context capture", update_title=None,
+           suppress_callback_exceptions=True)
 server = app.server
 
 TAB_IDS = ["tab-overview", "tab-session", "tab-compactions", "tab-mirror", "tab-waste"]
@@ -371,9 +623,10 @@ header = html.Div(
         ),
         html.Div(
             [
-                html.Span(f"compact at window - {MATH['K']['MAX_OUTPUT_RESERVE']} - "
-                          f"{MATH['K']['AUTOCOMPACT_BUFFER']}",
-                          style={"color": MUTED, "fontSize": "11px", "fontFamily": MONO}),
+                # The live reading, in the one place that is visible from every tab. The constants
+                # that used to sit here are documented on the Mirror tab, which is where someone
+                # goes to read them; this is where someone goes to see where they stand.
+                html.Div(id="live-context", children=context_bar(None)),
                 html.Button(
                     "⏻ Quit", id="btn-quit-app", n_clicks=0,
                     title="Stop the Dash server and exit the Python process",
@@ -513,12 +766,19 @@ def compactions_layout():
         dash_table.DataTable(
             id="tbl-compactions",
             columns=[{"name": c, "id": c} for c in cols],
-            data=show[cols].to_dict("records"),
+            # uuid rides along in the data but is not a displayed column, so a click can be traced
+            # back to the right compaction even after the user sorts or filters the table.
+            data=show[cols + ["uuid"]].to_dict("records"),
             page_size=15, sort_action="native", filter_action="native",
             style_table={"overflowX": "auto"},
             style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
             **TABLE_STYLE,
         ),
+        html.Div(
+            "Click a row to read the summary it produced, and what it dropped.",
+            style={"color": MUTED, "fontSize": "11.5px", "margin": "10px 0 0 0"},
+        ),
+        html.Div(id="compaction-detail", style={"marginTop": "12px"}),
     ])
 
 
@@ -653,6 +913,9 @@ app.layout = html.Div(
                  style={"display": "flex", "gap": "2px", "padding": "0 14px",
                         "borderBottom": f"1px solid {BORDER}", "background": BG}),
         dcc.Store(id="active-tab", data=0),
+        # Drives the live mirror. 5s is well under how fast a context window moves, and the
+        # harvest behind it is rate-limited and lock-guarded, so a slow tick cannot pile up.
+        dcc.Interval(id="tick", interval=5000, n_intervals=0),
         html.Div(
             [
                 html.Div(overview_layout(), id="pane-0"),
@@ -688,6 +951,116 @@ def _switch_tab(*args):
     panes = [{"display": "block"} if i == idx else {"display": "none"} for i in range(5)]
     tabs = [tab_style(i == idx) for i in range(5)]
     return panes + tabs + [idx]
+
+
+@callback(
+    Output("live-context", "children"),
+    Input("tick", "n_intervals"),
+)
+def _tick(_n):
+    """Harvest, then re-render the live reading.
+
+    Ordered deliberately: refresh first, read second, so the number rendered is the one just
+    collected rather than the one from the previous tick.
+    """
+    refresh_store()
+    try:
+        return context_bar(live_context())
+    except Exception as exc:                        # noqa: BLE001 - never blank the header
+        return html.Div(f"context unavailable: {str(exc)[:80]}",
+                        style={"color": DANGER, "fontSize": "11px", "fontFamily": MONO})
+
+
+def text_panel(title: str, body: str, colour: str = TEXT) -> html.Div:
+    """A scrollable block of real text. Pre-wrapped, because this is prose, not a data grid."""
+    return html.Div([
+        html.Div(title, style={"color": colour, "fontSize": "12px", "fontWeight": 700,
+                               "marginBottom": "6px", "fontFamily": MONO}),
+        html.Pre(body, style={
+            "whiteSpace": "pre-wrap", "wordBreak": "break-word", "margin": 0,
+            "maxHeight": "420px", "overflowY": "auto", "background": PANEL,
+            "border": f"1px solid {BORDER}", "borderRadius": "8px", "padding": "12px 14px",
+            "color": TEXT, "fontSize": "12px", "fontFamily": MONO, "lineHeight": "1.5",
+        }),
+    ])
+
+
+@callback(
+    Output("compaction-detail", "children"),
+    Input("tbl-compactions", "active_cell"),
+    State("tbl-compactions", "derived_viewport_data"),
+    prevent_initial_call=True,
+)
+def _compaction_clicked(active_cell, rows):
+    if not active_cell or not rows:
+        return ""
+    try:
+        row = rows[active_cell["row"]]
+    except (IndexError, KeyError, TypeError):
+        return ""
+    uuid = row.get("uuid")
+    if not uuid:
+        return ""
+
+    out = []
+    summ = compaction_summary_text(uuid)
+    if summ.empty:
+        out.append(text_panel(
+            "summary text not in the store",
+            "No summary message was harvested for this compaction. Older boundaries record token "
+            "counts only, and C4X_NO_TEXT=1 suppresses text capture entirely.", MUTED))
+    else:
+        s = summ.iloc[0]
+        out.append(text_panel(
+            f"the summary that replaced the dropped context - {int(s['chars']):,} chars",
+            str(s["text"]), GOOD))
+
+    dropped = compaction_dropped(uuid)
+    if not dropped.empty:
+        d = dropped.copy()
+        d["ts"] = d["ts"].astype(str).str.slice(11, 19)
+        d["chars"] = d["chars"].map(lambda n: f"{int(n):,}")
+        total = compaction_dropped_count(uuid)
+        shown = f"showing the {len(d)} largest of {total:,}" if total > len(d) else f"all {total:,}"
+        out.append(html.Div([
+            html.Div(
+                f"{total:,} messages were present before this compaction and are absent from its "
+                f"survivor list ({shown}, largest first). A LOWER BOUND: survivor uuids the store "
+                f"holds no message for cannot be matched, so some rows here may in fact have "
+                f"survived.",
+                style={"color": MUTED, "fontSize": "11.5px", "margin": "14px 0 6px 0"},
+            ),
+            dash_table.DataTable(
+                columns=[{"name": c, "id": c} for c in ["ts", "role", "type", "chars", "preview"]],
+                data=d.to_dict("records"), page_size=10,
+                style_table={"overflowX": "auto"}, **TABLE_STYLE,
+            ),
+        ]))
+    return html.Div(out)
+
+
+@callback(
+    Output("message-detail", "children"),
+    Input("tbl-messages", "active_cell"),
+    State("tbl-messages", "derived_viewport_data"),
+    prevent_initial_call=True,
+)
+def _message_clicked(active_cell, rows):
+    if not active_cell or not rows:
+        return ""
+    try:
+        uuid = rows[active_cell["row"]].get("uuid")
+    except (IndexError, KeyError, TypeError):
+        return ""
+    if not uuid:
+        return ""
+    df = message_text(uuid)
+    if df.empty:
+        return text_panel("not found", "No stored text for that message.", MUTED)
+    r = df.iloc[0]
+    return text_panel(
+        f"{r['role']} / {r['type']} - {int(r['chars']):,} chars - {str(r['ts'])[:19]}",
+        str(r["text"]), ACCENT)
 
 
 @callback(
@@ -792,12 +1165,22 @@ def _session_selected(session_id):
 
     total_out = int(turns["output_tokens"].sum())
     think = int(turns["thinking_tokens"].sum())
+
+    # The session's LATEST reading leads, because that is the number the context bar shows and the
+    # one a reader compares against. Peak stays - it is the right number for a finished session -
+    # but it is a high-water mark, and leading with it is what made the page disagree with the
+    # desktop even when both were correct.
+    latest = int(turns["total_resident"].iloc[-1]) if len(turns) else 0
+    win, conf = session_window(session_id)
+    latest_sub = f"{latest / win * 100:.0f}% of {fmt_tokens(win)}" if win else "window unresolved"
+
     cards = html.Div([
+        stat_card("current", fmt_tokens(latest), color=ACCENT, sub=latest_sub),
+        stat_card("peak resident", fmt_tokens(peak), color=VIOLET, sub="high-water mark"),
         stat_card("turns", f"{len(turns):,}"),
-        stat_card("peak resident", fmt_tokens(peak), color=VIOLET),
         stat_card("output", fmt_tokens(total_out), sub=f"{fmt_tokens(think)} thinking"),
         stat_card("compactions", str(len(comps)), color=DANGER if len(comps) else TEXT),
-        stat_card("models", ", ".join(sorted({m for m in turns["model"] if m})[:2]) or "-"),
+        stat_card("models", ", ".join(real_models(turns["model"])[:2]) or "-"),
     ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
 
     if not comps.empty:
@@ -811,6 +1194,34 @@ def _session_selected(session_id):
                           dash_table.DataTable(
                               columns=[{"name": c, "id": c} for c in cols],
                               data=show[cols].to_dict("records"), **TABLE_STYLE)])
+
+    # What was actually said. The chart shows the window filling; this shows what filled it.
+    msgs = session_messages(session_id)
+    if not msgs.empty:
+        m = msgs.copy()
+        m["ts"] = m["ts"].astype(str).str.slice(11, 19)
+        m["chars"] = m["chars"].map(lambda n: f"{int(n):,}")
+        # The query is capped, so len(m) is how many are shown, not how many exist. Saying
+        # "400 messages" when 400 is the LIMIT reports the cap as if it were a measurement.
+        total_msgs = int(q("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
+                           (session_id,)).iloc[0]["n"])
+        note = (f"{total_msgs:,} messages in this session, showing the first {len(m):,}"
+                if total_msgs > len(m) else f"{total_msgs:,} messages in this session")
+        cards = html.Div([
+            cards,
+            html.Div(f"{note}, oldest first. Click a row to read it in full.",
+                     style={"color": MUTED, "fontSize": "11.5px", "margin": "16px 0 6px 0"}),
+            dash_table.DataTable(
+                id="tbl-messages",
+                columns=[{"name": c, "id": c} for c in ["ts", "role", "type", "chars", "preview"]],
+                data=m[["ts", "role", "type", "chars", "preview", "uuid"]].to_dict("records"),
+                page_size=12, sort_action="native", filter_action="native",
+                style_table={"overflowX": "auto"},
+                style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
+                **TABLE_STYLE,
+            ),
+            html.Div(id="message-detail", style={"marginTop": "12px"}),
+        ])
     return dark_fig(fig, 460), cards
 
 

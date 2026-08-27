@@ -7,25 +7,40 @@ and you cannot see it coming.
 This captures that state into a local SQLite store on your machine, and mirrors Claude Code's own
 window arithmetic closely enough to tell you when the next compaction will fire.
 
-Three questions it answers about your own sessions:
+Five questions it answers about your own sessions:
 
+- **Where am I right now?** A live mirror of the context bar - `128.5k / 1M (13%)` - refreshed on a
+  timer, so the page tracks the session instead of showing whenever you last ran a command.
 - **Where did the window go?** Context growth per turn, with every compaction marked.
 - **When will it compact?** The trigger threshold for the model you are on, and how far from it you are.
+- **What did a compaction throw away?** The summary it wrote, in full, and the messages that are
+  absent from its survivor list.
 - **What am I paying for twice?** Files read repeatedly in one session, and tools loaded but never called.
 
 Everything stays on your machine. `data/` is gitignored and nothing is sent anywhere.
+
+**The store keeps the text of your conversations, not just their sizes.** That is what makes a
+compaction summary readable instead of a character count, and what makes a dropped message
+recoverable at all. It lives in `data/context.db` on your disk and goes nowhere else. If you would
+rather keep measurements only, set `C4X_NO_TEXT=1` and no message text is written.
 
 ## What you get
 
 A dashboard over the store, five tabs:
 
+The header carries the live reading on every tab, coloured by how close the next compaction is,
+with a mark on the bar where the trigger sits.
+
 | Tab | Answers |
 |---|---|
 | **Overview** | totals, and which projects consume the most context |
-| **Session** | context growth turn by turn, compaction boundaries, the threshold for each model run |
-| **Compactions** | every compaction, the predicted trigger, and how far past it you actually went |
+| **Session** | context growth turn by turn, compaction boundaries, the threshold for each model run, and every message in the session - click one to read it |
+| **Compactions** | every compaction, the predicted trigger, how far past it you went, and on click: the summary it wrote plus what it dropped |
 | **Mirror** | a live calculator: given N tokens and a window, what happens |
 | **Waste** | files re-read inside one session, MCP servers by invocation, tool schema cost |
+
+The dashboard runs an incremental harvest on a timer, so it follows a live session on its own.
+Nothing else triggers one: hooks record lifecycle events, not token counts.
 
 And a command line, when you want a number rather than a page:
 
@@ -174,6 +189,10 @@ leaves every other hook and setting untouched.
   columns repeat while `output_tokens` accumulates as the message streams.
 - `compactions` - trigger, tokens before and after, duration, dropped tokens, paired summary.
 - `compaction_survivors` - which records lived through each compaction, by uuid.
+- `messages` - **the text of every record**, with its role, kind, character count and source line.
+  This is the one table that holds content rather than measurements. It is what the Compactions tab
+  reads to show you a summary as prose, and what makes "which messages did this compaction throw
+  away" answerable. Roughly the size of your transcripts. Set `C4X_NO_TEXT=1` to skip it.
 - `tool_calls` - one row per tool use: tool and MCP server name, the file or url, the result size.
 - `hook_events` - lifecycle events, sizes only and never contents.
 - `request_bodies`, `tool_schemas` - per-tool schema cost, populated only if you opt into raw-body
@@ -194,9 +213,10 @@ node tools/waste.mjs --tools         # now shows measured schema bytes per tool
 ```
 
 **A raw body is the entire conversation plus the system prompt**, so this is off by default and
-gated behind two environment variables. The ingest stores sizes and hashes only, never message text,
-system prompt text or tool descriptions, so the store never becomes a second copy of your
-conversations.
+gated behind two environment variables. This ingest stores sizes and hashes only - never system
+prompt text and never tool descriptions - so opting into it does not add the *system* side of a
+request to the store. Your message text is a separate matter and is captured by `harvest.mjs`
+regardless of this setting; see `messages` under [The store](#the-store).
 
 ## Limits
 
