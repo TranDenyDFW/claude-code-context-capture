@@ -315,7 +315,15 @@ class Harvest {
         VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
         last_ts=MAX(COALESCE(sessions.last_ts,''), COALESCE(excluded.last_ts,'')),
         first_ts=MIN(COALESCE(NULLIF(sessions.first_ts,''),excluded.first_ts), COALESCE(excluded.first_ts,sessions.first_ts)),
-        version=COALESCE(excluded.version, sessions.version)`),
+        -- These arrive on SOME records and not others, so the first row for a session usually
+        -- lacks them. Without a COALESCE here the first insert wins permanently and the column
+        -- stays NULL forever: entrypoint, cwd and git_branch were null on 161 of 161 sessions
+        -- while version, which had one, was null on none. The transcript carried entrypoint on
+        -- 3,624 records the whole time.
+        version=COALESCE(excluded.version, sessions.version),
+        entrypoint=COALESCE(excluded.entrypoint, sessions.entrypoint),
+        cwd=COALESCE(excluded.cwd, sessions.cwd),
+        git_branch=COALESCE(excluded.git_branch, sessions.git_branch)`),
       putTurn: db.prepare(`INSERT OR REPLACE INTO turns
         (uuid,session_id,ts,model,request_id,input_tokens,cache_creation_input_tokens,cache_read_input_tokens,
          output_tokens,thinking_tokens,eph_1h,eph_5m,service_tier,total_resident,is_sidechain,file_path,line_no)
@@ -685,7 +693,10 @@ async function selfTest() {
     // Text shapes the rows above do not reach: thinking + text blocks on one assistant message,
     // and a tool_result whose content is an ARRAY of text blocks rather than a bare string. Both
     // were silently dropped by an earlier draft of messageText that only handled b.text.
-    { type: 'assistant', uuid: 'm1', sessionId: 's1', timestamp: '2026-08-20T00:07:00Z', message: { model: 'claude-opus-5', content: [{ type: 'thinking', thinking: 'THINKTEXT' }, { type: 'text', text: 'SPOKENTEXT' }] } },
+    // entrypoint and gitBranch arrive HERE, not on the session's first record (u1 above has
+    // neither). That is the real shape of a transcript, and the shape that used to leave both
+    // columns null forever because the upsert only coalesced version.
+    { type: 'assistant', uuid: 'm1', sessionId: 's1', timestamp: '2026-08-20T00:07:00Z', entrypoint: 'claude-desktop', gitBranch: 'main', message: { model: 'claude-opus-5', content: [{ type: 'thinking', thinking: 'THINKTEXT' }, { type: 'text', text: 'SPOKENTEXT' }] } },
     { type: 'user', uuid: 'm2', sessionId: 's1', timestamp: '2026-08-20T00:07:01Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu9', content: [{ type: 'text', text: 'ARRAYRESULT' }] }] } },
   ];
   writeFileSync(tf, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
@@ -709,6 +720,17 @@ async function selfTest() {
   const att = db.prepare('SELECT n FROM attachments WHERE session_id = ? AND type = ?').get('s1', 'hook_success');
   checks.push(['attachment counted', att?.n === 1]);
   checks.push(['unknown record type flagged', h.unknownSeen.has('zzz-brand-new-type')]);
+
+  // sessions: fields that arrive on a LATER record than the first must still land. The upsert
+  // coalesced version and nothing else, so entrypoint, cwd and git_branch read null on 161 of 161
+  // real sessions while the transcript carried entrypoint on 3,624 records.
+  {
+    const s = db.prepare('SELECT * FROM sessions WHERE session_id = ?').get('s1');
+    checks.push(['sessions: entrypoint from a later record is kept', s?.entrypoint === 'claude-desktop']);
+    checks.push(['sessions: git_branch from a later record is kept', s?.git_branch === 'main']);
+    checks.push(['sessions: cwd from the first record survives later nulls', s?.cwd === 'C:\\x']);
+    checks.push(['sessions: version still resolves', s?.version === '2.1.229']);
+  }
 
   // messages: the table that holds content rather than measurements. Each shape is checked on its
   // own, because a extractor that handles two of the three still looks healthy in aggregate.
