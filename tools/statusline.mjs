@@ -51,8 +51,14 @@ export function capture(raw, outPath = OUT, isProbe = (outPath === DEFAULT_OUT ?
   mkdirSync(dirname(outPath), { recursive: true });
   // Wrap rather than mutate: the captured payload stays byte-faithful to what Claude Code sent,
   // and our own receive timestamp sits beside it instead of inside it.
+  // ppid is the Claude Code process that invoked us. Without it a sample can only be tied back to
+  // a process by correlating timestamps, which is inference: proving the first genuine sample here
+  // came from a terminal rather than the desktop app rested on a session having started 3.5s
+  // earlier and a child process having spawned 18s before that. Recording the parent makes the
+  // next sample say so outright.
   appendFileSync(outPath, JSON.stringify({
-    captured_at: new Date().toISOString(), probe: isProbe, payload: raw,
+    captured_at: new Date().toISOString(), probe: isProbe,
+    pid: process.pid, ppid: process.ppid, payload: raw,
   }) + '\n');
 }
 
@@ -172,6 +178,13 @@ function selfTest() {
   const back = JSON.parse(lines[0]);
   add('capture preserves unknown future fields', JSON.stringify(back.payload.some_future_field) === JSON.stringify(weird.some_future_field));
   add('capture stamps its own timestamp outside the payload', typeof back.captured_at === 'string' && back.payload.captured_at === undefined);
+  // Provenance. ppid is the process that invoked us, which is what turns "this sample probably came
+  // from the terminal" into something a query can answer. Checked against process.ppid rather than
+  // a literal, and asserted to sit OUTSIDE the payload like captured_at.
+  add('capture records its own pid and its invoker ppid',
+    back.pid === process.pid && back.ppid === process.ppid);
+  add('provenance sits outside the payload, not inside it',
+    back.payload.pid === undefined && back.payload.ppid === undefined);
 
   // Negative control: a renderer that ignored its input would still pass the checks above if
   // they were vacuous, so assert a DIFFERENT payload produces a DIFFERENT line.
