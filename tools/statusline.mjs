@@ -47,18 +47,58 @@ function fmtTokens(n) {
   return String(n);
 }
 
+// Names that must never have their VALUE written to disk. This file lives in data/raw; a captured
+// credential would sit there in plain text forever. Matched on the variable NAME, so a new secret
+// following the usual naming conventions is redacted without anyone remembering to add it.
+const SECRETISH = /KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL|COOKIE/i;
+
+/**
+ * The CLAUDE- and ANTHROPIC-prefixed variables Claude Code puts in our environment.
+ *
+ * Recorded because ppid did NOT identify the caller: measured, the parent is a short-lived wrapper
+ * shell that has already exited by the time anyone reads the sample, so it cannot be resolved back
+ * to the Claude Code process. The environment is in memory already and costs no syscall.
+ *
+ * It carries what ppid could not. Observed under the desktop app:
+ *   CLAUDE_CODE_ENTRYPOINT   claude-desktop     <- names the surface outright
+ *   CLAUDE_PID               17224              <- the Claude process, cross-checked against the
+ *                                                 real parent chain and matching exactly
+ *   CLAUDE_CODE_SESSION_ID   <uuid>             <- cross-checks the payload's own session_id
+ *
+ * So a sample no longer needs a timing argument to say where it came from.
+ *
+ * CAVEAT, measured: these variables are INHERITED, not re-stamped per process. A plain node
+ * subprocess that is not Claude Code at all reports CLAUDE_CODE_ENTRYPOINT=claude-desktop, and so
+ * does a grandchild two levels down. That is exactly why a `claude -p` subprocess writes
+ * entrypoint:claude-desktop into its own transcript and looks like the desktop app.
+ *
+ * For THIS file the value is still right, because the status line is spawned by the Claude Code
+ * process that renders it and inherits that process's environment. It stops being right for a
+ * Claude nested inside another Claude, which is the case the transcript field gets wrong. Read a
+ * captured entrypoint as "the outermost Claude in this process chain", not "this session".
+ *
+ * Exported so the self-test can drive redaction directly instead of hoping a real key shows up.
+ */
+export function claudeEnv(env = process.env) {
+  const out = {};
+  for (const k of Object.keys(env).sort()) {
+    if (!/^(CLAUDE|ANTHROPIC)/i.test(k)) continue;
+    out[k] = SECRETISH.test(k) ? '[redacted]' : env[k];
+  }
+  return out;
+}
+
 export function capture(raw, outPath = OUT, isProbe = (outPath === DEFAULT_OUT ? IS_PROBE : true)) {
   mkdirSync(dirname(outPath), { recursive: true });
   // Wrap rather than mutate: the captured payload stays byte-faithful to what Claude Code sent,
   // and our own receive timestamp sits beside it instead of inside it.
-  // ppid is the Claude Code process that invoked us. Without it a sample can only be tied back to
-  // a process by correlating timestamps, which is inference: proving the first genuine sample here
-  // came from a terminal rather than the desktop app rested on a session having started 3.5s
-  // earlier and a child process having spawned 18s before that. Recording the parent makes the
-  // next sample say so outright.
+  //
+  // pid/ppid are kept even though ppid proved to be the wrapper shell rather than Claude Code:
+  // knowing the sample came through a wrapper is itself the finding, and pid still distinguishes
+  // concurrent renders.
   appendFileSync(outPath, JSON.stringify({
     captured_at: new Date().toISOString(), probe: isProbe,
-    pid: process.pid, ppid: process.ppid, payload: raw,
+    pid: process.pid, ppid: process.ppid, env: claudeEnv(), payload: raw,
   }) + '\n');
 }
 
@@ -185,6 +225,61 @@ function selfTest() {
     back.pid === process.pid && back.ppid === process.ppid);
   add('provenance sits outside the payload, not inside it',
     back.payload.pid === undefined && back.payload.ppid === undefined);
+
+  // Environment capture. The redaction check is the one that matters: this file is written to
+  // data/raw and a leaked key there would persist in plain text.
+  {
+    const fake = {
+      CLAUDECODE: '1',
+      CLAUDE_CODE_ENTRYPOINT: 'cli',
+      ANTHROPIC_API_KEY: 'FAKE-VALUE-SHOULD-NEVER-BE-WRITTEN',
+      CLAUDE_SESSION_TOKEN: 'tok-SHOULD-NEVER-BE-WRITTEN',
+      PATH: '/should/not/appear',
+      HOME: '/should/not/appear',
+    };
+    const got = claudeEnv(fake);
+    add('env capture keeps CLAUDE-prefixed values', got.CLAUDECODE === '1' && got.CLAUDE_CODE_ENTRYPOINT === 'cli');
+    add('env capture ignores unrelated variables', got.PATH === undefined && got.HOME === undefined);
+    add('env capture REDACTS anything key-shaped (gate can fail)',
+      got.ANTHROPIC_API_KEY === '[redacted]' && got.CLAUDE_SESSION_TOKEN === '[redacted]');
+    // Negative control: the secret must not survive anywhere in the serialised record.
+    const serialised = JSON.stringify({ env: got });
+    add('no secret value survives serialisation (gate can fail)',
+      !serialised.includes('SHOULD-NEVER-BE-WRITTEN'));
+    add('redacted names are still listed, so the variable is known to exist',
+      Object.keys(got).includes('ANTHROPIC_API_KEY'));
+  }
+
+  // END TO END, through capture() and back off disk. The checks above only exercise the helper;
+  // they would all pass while capture() dropped the field entirely, or wrote it unredacted.
+  {
+    const CANARY = 'CANARY-MUST-NOT-REACH-DISK';
+    const prevKey = process.env.ANTHROPIC_API_KEY;
+    const prevEp = process.env.CLAUDE_CODE_ENTRYPOINT;
+    process.env.ANTHROPIC_API_KEY = CANARY;
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'entrypoint-under-test';
+    const e2e = join(ROOT, 'tmp', 'statusline-e2e.ndjson');
+    let rawFile = '';
+    try {
+      rmSync(e2e, { force: true });
+      capture(sample, e2e);
+      rawFile = readFileSync(e2e, 'utf8');
+    } finally {
+      if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+      if (prevEp === undefined) delete process.env.CLAUDE_CODE_ENTRYPOINT; else process.env.CLAUDE_CODE_ENTRYPOINT = prevEp;
+      rmSync(e2e, { force: true });
+    }
+    const rec = JSON.parse(rawFile.trim().split(String.fromCharCode(10))[0]);
+    add('capture() actually writes the env field to disk', rec.env !== undefined);
+    add('the entrypoint survives the round trip to disk',
+      rec.env?.CLAUDE_CODE_ENTRYPOINT === 'entrypoint-under-test');
+    // The one that matters: assert against the RAW FILE BYTES, not the parsed object, so a leak
+    // anywhere in the line is caught rather than only a leak at the expected key.
+    add('no secret reaches the file, checked against raw bytes (gate can fail)',
+      !rawFile.includes(CANARY));
+    add('the redacted key is still present on disk by name',
+      rec.env?.ANTHROPIC_API_KEY === '[redacted]');
+  }
 
   // Negative control: a renderer that ignored its input would still pass the checks above if
   // they were vacuous, so assert a DIFFERENT payload produces a DIFFERENT line.
