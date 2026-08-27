@@ -38,6 +38,12 @@ const DB_PATH = resolveDbPath();
 const RAW_DIR = join(ROOT, 'data', 'raw');
 const UNKNOWN_LOG = join(RAW_DIR, 'unknown-records.ndjson');
 
+// Message text is captured by default: without it a compaction summary is a character count and a
+// dropped message is unrecoverable, which is most of what this store is for. Opt out with
+// C4X_NO_TEXT=1 to keep the older measurement-only behaviour. Read at call time, not at import,
+// so a test can flip it without reloading the module.
+const captureText = () => process.env.C4X_NO_TEXT !== '1';
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS files (
   path TEXT PRIMARY KEY, size INTEGER, mtime_ms INTEGER,
@@ -86,6 +92,19 @@ SELECT
 FROM turns
 WHERE request_id IS NOT NULL
 GROUP BY request_id;
+-- The text of every record, so the store can answer "what was actually said" and not only "how
+-- big was it". Everything else here is measurements; this table is the one that holds content.
+-- It is what makes a compaction summary readable instead of a character count, and what makes a
+-- dropped message recoverable at all.
+--
+-- Set C4X_NO_TEXT=1 to skip it and keep the store measurement-only.
+CREATE TABLE IF NOT EXISTS messages (
+  uuid TEXT PRIMARY KEY, session_id TEXT, ts TEXT, role TEXT, type TEXT,
+  text TEXT, chars INTEGER, model TEXT, request_id TEXT,
+  is_sidechain INTEGER, file_path TEXT, line_no INTEGER
+);
+CREATE INDEX IF NOT EXISTS messages_session_ts ON messages(session_id, ts);
+CREATE INDEX IF NOT EXISTS messages_type ON messages(type);
 CREATE TABLE IF NOT EXISTS compactions (
   uuid TEXT PRIMARY KEY, session_id TEXT, ts TEXT, trigger TEXT, version TEXT, entrypoint TEXT,
   pre_tokens INTEGER, post_tokens INTEGER, duration_ms INTEGER,
@@ -200,6 +219,48 @@ export function extractSurvivors(preserved) {
   return [...out.values()];
 }
 
+/**
+ * Pull the readable text out of one transcript record.
+ *
+ * Three shapes occur and all three carry text a reader would want back:
+ *   1. content is a plain string                        - most user messages
+ *   2. content is an array of blocks with text/thinking - assistant messages
+ *   3. content holds tool_result blocks, whose own content is a string OR an array of text blocks
+ *
+ * Handling only the first two loses every tool result, which is the bulk of a working session.
+ * Exported so the self-test can drive all three shapes directly rather than through a file.
+ */
+export function messageText(d) {
+  const c = d?.message?.content;
+  if (c == null) return '';
+  if (typeof c === 'string') return c;
+  if (!Array.isArray(c)) return '';
+  const parts = [];
+  for (const b of c) {
+    if (typeof b === 'string') { parts.push(b); continue; }
+    if (!b || typeof b !== 'object') continue;
+    if (typeof b.text === 'string') parts.push(b.text);
+    else if (typeof b.thinking === 'string') parts.push(b.thinking);
+    else if (b.type === 'tool_result') {
+      const rc = b.content;
+      if (typeof rc === 'string') parts.push(rc);
+      else if (Array.isArray(rc)) {
+        for (const x of rc) if (typeof x?.text === 'string') parts.push(x.text);
+      }
+    }
+  }
+  return parts.join('\n');
+}
+
+// The record's own label, kept distinct from role so a compact summary stays findable. It arrives
+// as type:'user' with isCompactSummary:true, which would otherwise be indistinguishable from a
+// prompt the user typed.
+export function messageKind(d) {
+  if (d?.isCompactSummary === true) return 'compact_summary';
+  if (d?.type === 'system' && d?.subtype) return `system/${d.subtype}`;
+  return typeof d?.type === 'string' ? d.type : 'unknown';
+}
+
 function openDb(dbPath = DB_PATH) {
   mkdirSync(dirname(dbPath), { recursive: true });
   mkdirSync(RAW_DIR, { recursive: true });
@@ -265,6 +326,9 @@ class Harvest {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
       paircompaction: db.prepare('UPDATE compactions SET summary_uuid = ?, summary_chars = ? WHERE uuid = ?'),
       putSurvivor: db.prepare('INSERT OR IGNORE INTO compaction_survivors (compaction_uuid,kind,uuid) VALUES (?,?,?)'),
+      putMessage: db.prepare(`INSERT OR REPLACE INTO messages
+        (uuid,session_id,ts,role,type,text,chars,model,request_id,is_sidechain,file_path,line_no)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`),
       putToolCall: db.prepare(`INSERT OR REPLACE INTO tool_calls
         (tool_use_id,session_id,turn_uuid,ts,tool_name,server_name,target,input_sha1,input_bytes,
          result_bytes,is_error,is_sidechain,file_path,line_no)
@@ -285,7 +349,7 @@ class Harvest {
     };
     this.typeCounts = new Map();
     this.unknownSeen = new Set();
-    this.stats = { filesSeen: 0, filesRead: 0, rewrites: 0, lines: 0, bytes: 0, turns: 0, compactions: 0, paired: 0, toolCalls: 0, toolResults: 0 };
+    this.stats = { filesSeen: 0, filesRead: 0, rewrites: 0, lines: 0, bytes: 0, turns: 0, compactions: 0, paired: 0, toolCalls: 0, toolResults: 0, messages: 0, messageChars: 0 };
   }
 
   countType(t) { this.typeCounts.set(t, (this.typeCounts.get(t) || 0) + 1); }
@@ -340,6 +404,7 @@ class Harvest {
       }
 
       this.scanBlocks(d, path, lineNo);
+      this.captureMessage(d, path, lineNo);
 
       if (d.type === 'assistant' && d.message?.usage) {
         const u = d.message.usage;
@@ -380,6 +445,25 @@ class Harvest {
 
     this.stmt.putFile.run(path, st.size, Math.round(st.mtimeMs), consumed, lineNo,
       (prev?.rewrites ?? 0) + (rewritten ? 1 : 0), new Date().toISOString());
+  }
+
+  // Store the record's text. Called for EVERY record, like scanBlocks and for the same reason:
+  // text sits on assistant messages, on user messages, and on compact summaries alike, so folding
+  // this into the type chain would silently drop whichever branch lost the else-if race.
+  //
+  // Keyed by uuid, so re-harvesting a file replaces rows instead of duplicating them.
+  captureMessage(d, path, lineNo) {
+    if (!captureText()) return;
+    if (typeof d?.uuid !== 'string') return;   // no stable identity: would duplicate on every run
+    const text = messageText(d);
+    if (!text) return;                         // nothing readable, do not store an empty row
+    this.stmt.putMessage.run(
+      d.uuid, d.sessionId ?? null, d.timestamp ?? null,
+      typeof d.type === 'string' ? d.type : null, messageKind(d),
+      text, text.length, d.message?.model ?? null, d.requestId ?? null,
+      d.isSidechain ? 1 : 0, path, lineNo);
+    this.stats.messages++;
+    this.stats.messageChars += text.length;
   }
 
   // Walk a record's content blocks for tool_use and tool_result. Called for EVERY record rather
@@ -474,6 +558,13 @@ async function run({ full }) {
     // Only comparable on a full run: records_seen is per-run, rows_stored is cumulative.
     duplicate_turn_records: full ? h.stats.turns - rowTurns : null,
     compaction_records_seen: h.stats.compactions, compaction_rows_stored: rowComp,
+    // Say plainly whether text was captured. "0 messages" and "text capture off" look identical
+    // in a row count, and the difference is the whole reason someone would set C4X_NO_TEXT.
+    message_rows_stored: captureText() ? db.prepare('SELECT COUNT(*) n FROM messages').get().n : null,
+    message_text_mb: captureText()
+      ? +((db.prepare('SELECT COALESCE(SUM(chars),0) c FROM messages').get().c) / 1048576).toFixed(1)
+      : null,
+    text_capture: captureText() ? 'on' : 'off (C4X_NO_TEXT=1)',
     unpaired_boundaries: unpaired,
     unknown_record_types: [...h.unknownSeen],
     seconds: +(ms / 1000).toFixed(1),
@@ -591,6 +682,11 @@ async function selfTest() {
     { type: 'assistant', uuid: 'u3', sessionId: 's1', timestamp: '2026-08-20T00:05:00Z', isSidechain: false, message: { model: 'claude-opus-5', content: [{ type: 'tool_use', id: 'tu2', name: 'Read', input: { file_path: 'C:/x/a.md' } }] } },
     { type: 'assistant', uuid: 'u4', sessionId: 's1', timestamp: '2026-08-20T00:06:00Z', isSidechain: true, message: { model: 'claude-opus-5', content: [{ type: 'tool_use', id: 'tu3', name: 'mcp__azure__storage', input: { query: 'x' } }] } },
     { type: 'user', uuid: 'ur2', sessionId: 's1', timestamp: '2026-08-20T00:06:01Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu3', content: 'boom', is_error: true }] } },
+    // Text shapes the rows above do not reach: thinking + text blocks on one assistant message,
+    // and a tool_result whose content is an ARRAY of text blocks rather than a bare string. Both
+    // were silently dropped by an earlier draft of messageText that only handled b.text.
+    { type: 'assistant', uuid: 'm1', sessionId: 's1', timestamp: '2026-08-20T00:07:00Z', message: { model: 'claude-opus-5', content: [{ type: 'thinking', thinking: 'THINKTEXT' }, { type: 'text', text: 'SPOKENTEXT' }] } },
+    { type: 'user', uuid: 'm2', sessionId: 's1', timestamp: '2026-08-20T00:07:01Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu9', content: [{ type: 'text', text: 'ARRAYRESULT' }] }] } },
   ];
   writeFileSync(tf, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
 
@@ -613,6 +709,51 @@ async function selfTest() {
   const att = db.prepare('SELECT n FROM attachments WHERE session_id = ? AND type = ?').get('s1', 'hook_success');
   checks.push(['attachment counted', att?.n === 1]);
   checks.push(['unknown record type flagged', h.unknownSeen.has('zzz-brand-new-type')]);
+
+  // messages: the table that holds content rather than measurements. Each shape is checked on its
+  // own, because a extractor that handles two of the three still looks healthy in aggregate.
+  {
+    const msg = (u) => db.prepare('SELECT * FROM messages WHERE uuid = ?').get(u);
+    checks.push(['messages: plain string content stored',
+      msg('sum1')?.text === 'This session is being continued from a previous conversation.']);
+    checks.push(['messages: thinking AND text blocks both stored',
+      msg('m1')?.text === 'THINKTEXT\nSPOKENTEXT']);
+    checks.push(['messages: tool_result string content stored', msg('ur1')?.text === 'hello world']);
+    checks.push(['messages: tool_result ARRAY content stored', msg('m2')?.text === 'ARRAYRESULT']);
+    checks.push(['messages: compact summary is typed, not just a user turn',
+      msg('sum1')?.type === 'compact_summary' && msg('sum1')?.role === 'user']);
+    checks.push(['messages: chars matches the stored text length',
+      msg('m1')?.chars === 'THINKTEXT\nSPOKENTEXT'.length]);
+    checks.push(['messages: a record with no readable text stores no row', msg('u1') === undefined]);
+    checks.push(['messages: sidechain flag survives', msg('ur2')?.is_sidechain === 0]);
+
+    // Idempotency. A second harvest of the same file must replace rows, not duplicate them: the
+    // table is keyed by uuid precisely so a re-run is free.
+    const before = db.prepare('SELECT COUNT(*) n, SUM(chars) c FROM messages').get();
+    const h2 = new Harvest(db);
+    await h2.file(tf, true);
+    const after = db.prepare('SELECT COUNT(*) n, SUM(chars) c FROM messages').get();
+    checks.push(['messages: re-harvest is idempotent, not duplicating',
+      before.n === after.n && before.c === after.c && after.n > 0]);
+  }
+
+  // C4X_NO_TEXT=1 must actually suppress capture. Same fixture, same code path, one variable.
+  {
+    const t = new DatabaseSync(':memory:');
+    t.exec(SCHEMA);
+    const prev = process.env.C4X_NO_TEXT;
+    process.env.C4X_NO_TEXT = '1';
+    try {
+      const hq = new Harvest(t);
+      await hq.file(tf, true);
+    } finally {
+      if (prev === undefined) delete process.env.C4X_NO_TEXT; else process.env.C4X_NO_TEXT = prev;
+    }
+    const n = t.prepare('SELECT COUNT(*) n FROM messages').get().n;
+    const turns = t.prepare('SELECT COUNT(*) n FROM turns').get().n;
+    checks.push(['C4X_NO_TEXT=1 stores no message text (gate can fail)', n === 0]);
+    checks.push(['C4X_NO_TEXT=1 still captures measurements', turns > 0]);
+  }
 
   // api_calls: one row per API call, not per transcript entry.
   {
