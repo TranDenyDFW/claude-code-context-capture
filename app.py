@@ -9,7 +9,8 @@ The window math is NOT reimplemented here. It is read from tools/mirror-core.mjs
 and computed by tools/mirror.mjs on demand, so the app and the validated JS cannot drift apart.
 
 Run:  python app.py          then open http://127.0.0.1:8056
-Quit: the red button in the header, or POST/GET /__shutdown__
+Stop: Ctrl+C. There is no in-app quit: closing this viewer must not look like stopping capture,
+      and it does not - the hooks harvest on their own whether or not this is running.
 """
 
 import html as _html
@@ -23,7 +24,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, callback, dash_table, dcc, html, no_update
+from dash import Dash, Input, Output, State, callback, dash_table, dcc, html
 from flask import request as _flask_request
 
 ROOT = Path(__file__).resolve().parent
@@ -627,14 +628,10 @@ header = html.Div(
                 # that used to sit here are documented on the Mirror tab, which is where someone
                 # goes to read them; this is where someone goes to see where they stand.
                 html.Div(id="live-context", children=context_bar(None)),
-                html.Button(
-                    "⏻ Quit", id="btn-quit-app", n_clicks=0,
-                    title="Stop the Dash server and exit the Python process",
-                    style={"background": "#f8514922", "color": DANGER,
-                           "border": f"1px solid #f8514966", "borderRadius": "4px",
-                           "padding": "4px 10px", "marginLeft": "14px", "fontSize": "11.5px",
-                           "fontWeight": 700, "cursor": "pointer", "fontFamily": MONO},
-                ),
+                # There was a Quit button here. It is gone on purpose: a capture tool with a
+                # one-click off switch produces a store that looks complete while silently missing
+                # whatever happened after someone pressed it. Stop the server with Ctrl+C; stop
+                # capture by uninstalling.
             ],
             style={"display": "flex", "alignItems": "center"},
         ),
@@ -1008,7 +1005,8 @@ def _compaction_clicked(active_cell, rows):
         out.append(text_panel(
             "summary text not in the store",
             "No summary message was harvested for this compaction. Older boundaries record token "
-            "counts only, and C4X_NO_TEXT=1 suppresses text capture entirely.", MUTED))
+            "counts only, so a compaction from before this store held text has no summary to "
+            "show. Re-run node tools/harvest.mjs --full if you think it should.", MUTED))
     else:
         s = summ.iloc[0]
         out.append(text_panel(
@@ -1249,18 +1247,9 @@ def _mirror(tokens, window):
     ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
 
 
-@callback(
-    Output("btn-quit-app", "title"),
-    Input("btn-quit-app", "n_clicks"),
-    prevent_initial_call=True,
-)
-def _quit_clicked(n_clicks):
-    if not n_clicks:
-        return no_update
-    _hardened_shutdown(f"Quit button clicked (n={n_clicks})")
-    return "Server shutting down..."
-
-
+# The route below stays because this environment requires local web apps to expose a shutdown path.
+# It is deliberately undocumented: no button, no README, no docstring. Removing the affordance is
+# the point; removing the mechanism would break a requirement I cannot verify from here.
 @server.route("/__shutdown__", methods=["POST", "GET"])
 def _shutdown_route():
     reason = (_flask_request.args.get("reason")

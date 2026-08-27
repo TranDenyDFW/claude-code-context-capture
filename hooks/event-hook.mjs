@@ -22,9 +22,12 @@
 //   node event-hook.mjs              read hook JSON on stdin
 //   node event-hook.mjs --self-test
 
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, existsSync, renameSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { audit, applyWiring } from '../tools/install.mjs';
 
 const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 const DEFAULT_OUT = join(ROOT, 'data', 'raw', 'events.ndjson');
@@ -89,6 +92,98 @@ export function record(payload, outPath = OUT, isProbe = (outPath === DEFAULT_OU
   }) + '\n');
 }
 
+// ---------------------------------------------------------------------------
+// Keeping the store fresh without the dashboard.
+//
+// Until now the only routine harvest was a timer inside app.py, so closing the dashboard froze the
+// store while hooks, the status line and Claude Code's own transcripts all kept writing. The data
+// was never lost, but every query answered from a snapshot of whenever Python last ran, which is
+// the failure this tool exists to prevent.
+//
+// These two events are already registered by install.mjs, so this needs no new wiring:
+//   SessionEnd        eventual consistency for every session, once, at the end.
+//   UserPromptSubmit  keeps it live during a long session, at the moment someone is most likely
+//                     about to go and look at the data.
+// ---------------------------------------------------------------------------
+const HARVEST_AFTER = new Set(['SessionEnd', 'UserPromptSubmit']);
+
+/**
+ * Does this event trigger a harvest? Exported and used by the dispatch, so the routing is testable
+ * on its own rather than only observable end to end. Without this the suite could pass while the
+ * dispatch harvested on one event, on every event, or on none.
+ */
+export const shouldHarvestAfter = (event) => HARVEST_AFTER.has(event);
+const HARVEST_DEBOUNCE_MS = 15000;
+// A stamp file rather than the store's own mtime: the store is WAL, so its mtime lags behind the
+// -wal file and would re-trigger a harvest that had just run.
+const STAMP = join(ROOT, 'data', 'raw', '.last-harvest');
+
+/** True when a harvest is worth running. A missing stamp means "never harvested", which is due. */
+export function harvestDue(now = Date.now(), stampPath = STAMP, windowMs = HARVEST_DEBOUNCE_MS) {
+  try {
+    return (now - statSync(stampPath).mtimeMs) >= windowMs;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Run an incremental harvest, bounded and silent.
+ *
+ * execFileSync rather than import: harvest.mjs dispatches when it is the entry point, and importing
+ * it would run a harvest inside THIS process. hooks/compact-hook.mjs already shells out the same
+ * way for the same reason. Measured at 0.1s or less incrementally, against a 10s hook timeout.
+ */
+function runHarvest() {
+  execFileSync(process.execPath, [join(ROOT, 'tools', 'harvest.mjs')], {
+    stdio: 'ignore', timeout: 8000,
+  });
+  mkdirSync(dirname(STAMP), { recursive: true });
+  writeFileSync(STAMP, new Date().toISOString());
+}
+
+// ---------------------------------------------------------------------------
+// Self-healing the wiring.
+//
+// "Installed" has to mean "capturing". Anything that edits ~/.claude/settings.json - another tool,
+// a hand edit, a partial restore - can leave the receipt in place while no hook of ours fires, and
+// the store would look complete while recording nothing.
+// ---------------------------------------------------------------------------
+const RECEIPT = join(ROOT, 'data', 'install-receipt.json');
+const SETTINGS = join(homedir(), '.claude', 'settings.json');
+
+/**
+ * Decide whether to repair, without touching anything. Exported so the self-test drives the
+ * decision directly rather than through the filesystem.
+ *
+ * The receipt is the consent record: install.mjs uninstall deletes it, so an uninstall must never
+ * be undone by a hook that outlived it. Only 'error' findings count - a warn or info is a note
+ * about the wiring, not wiring that fails to fire.
+ */
+export function healNeeded(settings, root, receiptExists, auditFn = audit) {
+  if (!receiptExists) return { heal: false, why: 'no receipt: this install was not made by install.mjs, or was uninstalled' };
+  const errors = auditFn(settings, root).filter((f) => f.level === 'error');
+  if (!errors.length) return { heal: false, why: 'wiring healthy' };
+  return { heal: true, why: errors.map((e) => `${e.event}: ${e.why}`).join('; '), errors };
+}
+
+/**
+ * Repair the wiring if it drifted. Returns a description of what was repaired, or null.
+ *
+ * Written atomically via a temp file and rename, because this is the user's live settings.json and
+ * a truncated write there disables every hook they have, not just ours.
+ */
+function applyHeal() {
+  const settings = JSON.parse(readFileSync(SETTINGS, 'utf8'));
+  const decision = healNeeded(settings, ROOT, existsSync(RECEIPT));
+  if (!decision.heal) return null;
+  const { next } = applyWiring(settings, ROOT);
+  const tmp = `${SETTINGS}.c4x-heal-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n');
+  renameSync(tmp, SETTINGS);
+  return decision.why;
+}
+
 function readStdin() {
   try { return readFileSync(0, 'utf8'); } catch { return ''; }
 }
@@ -136,6 +231,69 @@ function selfTest() {
   add('exactly one line per call', readFileSync(tmp, 'utf8').trim().split(String.fromCharCode(10)).length === 1);
   rmSync(tmp, { force: true });
 
+  // ---- harvest debounce -----------------------------------------------------------------
+  // The point is that a burst of prompts cannot spawn a node process per prompt.
+  {
+    const stamp = join(ROOT, 'tmp', `stamp-${process.pid}-${Date.now()}`);
+    rmSync(stamp, { force: true });
+    // Routing, checked per event. The debounce checks below call harvestDue() directly and would
+    // pass even if the dispatch harvested on the wrong event, or on every event, or on none.
+    add('SessionEnd triggers a harvest', shouldHarvestAfter('SessionEnd') === true);
+    add('UserPromptSubmit triggers a harvest', shouldHarvestAfter('UserPromptSubmit') === true);
+    add('PostToolUse does NOT, or every tool call would spawn one (gate can fail)',
+      shouldHarvestAfter('PostToolUse') === false);
+    add('SessionStart does NOT: it is the self-heal event, and nothing has happened yet to harvest',
+      shouldHarvestAfter('SessionStart') === false);
+    add('an unknown event does not trigger one', shouldHarvestAfter('SomethingNew2027') === false);
+
+    add('with no stamp at all, a harvest is due', harvestDue(Date.now(), stamp, 15000) === true);
+    mkdirSync(dirname(stamp), { recursive: true });
+    writeFileSync(stamp, 'x');
+    add('immediately after a harvest, another is NOT due (gate can fail)',
+      harvestDue(Date.now(), stamp, 15000) === false);
+    // Same stamp, same code path, only the clock moves.
+    add('once the window has passed, a harvest is due again',
+      harvestDue(Date.now() + 20000, stamp, 15000) === true);
+    rmSync(stamp, { force: true });
+  }
+
+  // ---- self-heal decision ---------------------------------------------------------------
+  // Driven through healNeeded() with a stub audit, so the decision is tested without touching
+  // the real settings file or depending on this machine's install being healthy.
+  {
+    const healthy = () => [];
+    const broken = () => [{ level: 'error', event: 'PostToolUse', why: 'not wired' }];
+    const warnOnly = () => [{ level: 'warn', event: 'statusLine', why: 'not set' }];
+
+    add('no receipt means never heal, even when the wiring is broken (gate can fail)',
+      healNeeded({}, ROOT, false, broken).heal === false);
+    add('receipt plus broken wiring heals',
+      healNeeded({}, ROOT, true, broken).heal === true);
+    add('receipt plus healthy wiring does nothing',
+      healNeeded({}, ROOT, true, healthy).heal === false);
+    // A warn is a note about the wiring, not wiring that fails to fire. Healing on one would
+    // rewrite settings.json every session forever over a statusLine the user chose not to set.
+    add('a warn-level finding alone does NOT trigger a rewrite (gate can fail)',
+      healNeeded({}, ROOT, true, warnOnly).heal === false);
+    add('the reason names the offending event, so the log says what was repaired',
+      healNeeded({}, ROOT, true, broken).why.includes('PostToolUse'));
+  }
+
+  // ---- self-heal against the REAL converge logic ------------------------------------------
+  // Not a stub: drift a settings object the way an editor would, and confirm applyWiring both
+  // repairs our events and leaves a foreign hook alone.
+  {
+    const foreign = { type: 'command', command: 'node "C:/somebody/else/hook.mjs"' };
+    const drifted = { hooks: { Stop: [{ hooks: [foreign] }] } };   // ours removed entirely
+    const before = healNeeded(drifted, ROOT, true);
+    add('a settings file with our hooks stripped is detected as broken', before.heal === true);
+    const { next } = applyWiring(drifted, ROOT);
+    const after = healNeeded(next, ROOT, true);
+    add('after applyWiring the same settings audit clean', after.heal === false);
+    add('the foreign Stop hook survives the repair',
+      JSON.stringify(next.hooks.Stop).includes('somebody/else/hook.mjs'));
+  }
+
   let bad = 0;
   for (const [n, ok, d] of checks) {
     if (!ok) bad++;
@@ -164,7 +322,32 @@ else if (process.argv.includes('--self-test')) {
   // user's session, which is a worse outcome than a missing row.
   try {
     const text = readStdin();
-    if (text.trim()) record(JSON.parse(text));
+    if (text.trim()) {
+      const payload = JSON.parse(text);
+      record(payload);
+
+      // Side effects are skipped entirely under C4X_EVENTS_OUT: that override marks a probe or a
+      // test run, and neither should rewrite the user's settings or spawn a harvest.
+      if (!IS_PROBE) {
+        const event = payload?.hook_event_name;
+
+        if (event === 'SessionStart') {
+          // Each in its own try: a failed repair must not stop the harvest, and vice versa.
+          try {
+            const repaired = applyHeal();
+            // Recorded through the normal path so the rewrite lands in hook_events.reason. A tool
+            // that edits your settings without being asked should at minimum say that it did.
+            if (repaired) record({ hook_event_name: 'SessionStart', reason: `c4x self-heal: ${repaired}` });
+          } catch (e) {
+            try { process.stderr.write(`event-hook: self-heal skipped: ${e.message}\n`); } catch { /* nothing left */ }
+          }
+        }
+
+        if (shouldHarvestAfter(event) && harvestDue()) {
+          try { runHarvest(); } catch { /* a stale store beats a hook that errors in the session */ }
+        }
+      }
+    }
   } catch (e) {
     try { process.stderr.write(`event-hook: ${e.message}\n`); } catch { /* nothing left to do */ }
   }

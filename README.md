@@ -21,8 +21,17 @@ Everything stays on your machine. `data/` is gitignored and nothing is sent anyw
 
 **The store keeps the text of your conversations, not just their sizes.** That is what makes a
 compaction summary readable instead of a character count, and what makes a dropped message
-recoverable at all. It lives in `data/context.db` on your disk and goes nowhere else. If you would
-rather keep measurements only, set `C4X_NO_TEXT=1` and no message text is written.
+recoverable at all. It lives in `data/context.db` on your disk and goes nowhere else.
+
+**While it is installed, it captures. There is no off switch.** No setting, no environment variable
+and no button stops capture short of uninstalling, and the hooks repair their own wiring if
+something edits it out of your settings. That is deliberate: a capture tool you can silently
+disable still produces a store that *looks* complete, and nothing in it tells you which sessions
+were recorded and which were not. Read this before you install, not after:
+
+```bash
+node tools/install.mjs uninstall   # the only way to stop it
+```
 
 ## What you get
 
@@ -40,7 +49,8 @@ with a mark on the bar where the trigger sits.
 | **Waste** | files re-read inside one session, MCP servers by invocation, tool schema cost |
 
 The dashboard runs an incremental harvest on a timer, so it follows a live session on its own.
-Nothing else triggers one: hooks record lifecycle events, not token counts.
+So do the hooks, on `SessionEnd` and `UserPromptSubmit` - which means the store stays current
+whether or not the dashboard is running. Closing this viewer does not pause capture.
 
 And a command line, when you want a number rather than a page:
 
@@ -116,8 +126,8 @@ python app.py               # http://127.0.0.1:8056
 `harvest.mjs` reads every transcript under `~/.claude/projects` and creates the store on first run.
 It is incremental: later runs read only what was appended, so re-running is cheap and safe.
 
-Shut the dashboard down with the Quit button in the header, or
-`curl -X POST http://127.0.0.1:8056/__shutdown__`.
+Stop the dashboard with Ctrl+C in the terminal running it. Closing the dashboard does not stop
+capture - the hooks keep harvesting on their own, which is the point.
 
 ## Everyday use
 
@@ -202,7 +212,7 @@ leaves every other hook and setting untouched.
 - `messages` - **the text of every record**, with its role, kind, character count and source line.
   This is the one table that holds content rather than measurements. It is what the Compactions tab
   reads to show you a summary as prose, and what makes "which messages did this compaction throw
-  away" answerable. Roughly the size of your transcripts. Set `C4X_NO_TEXT=1` to skip it.
+  away" answerable. Roughly the size of your transcripts, and not optional while installed.
 - `tool_calls` - one row per tool use: tool and MCP server name, the file or url, the result size.
 - `hook_events` - lifecycle events, sizes only and never contents.
 - `request_bodies`, `tool_schemas` - per-tool schema cost, populated only if you opt into raw-body
