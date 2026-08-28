@@ -27,7 +27,7 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { audit, applyWiring } from '../tools/install.mjs';
+import { audit, applyWiring, backupSettings } from '../tools/install.mjs';
 
 const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 const DEFAULT_OUT = join(ROOT, 'data', 'raw', 'events.ndjson');
@@ -173,15 +173,33 @@ export function healNeeded(settings, root, receiptExists, auditFn = audit) {
  * Written atomically via a temp file and rename, because this is the user's live settings.json and
  * a truncated write there disables every hook they have, not just ours.
  */
-function applyHeal() {
-  const settings = JSON.parse(readFileSync(SETTINGS, 'utf8'));
-  const decision = healNeeded(settings, ROOT, existsSync(RECEIPT));
+/**
+ * Repair the wiring, backing the file up first.
+ *
+ * The io seam exists so the ORDER is testable. This is the most dangerous writer in the repo: it
+ * fires unattended on SessionStart and rewrites the user's entire settings file, and until now it
+ * did so with no backup at all, while install.mjs called backupSettings() before all three of its
+ * write paths. A comment saying "back up first" is not a guarantee; a check on the call order is.
+ */
+export function applyHeal(io = {}) {
+  const {
+    loadSettings = () => JSON.parse(readFileSync(SETTINGS, 'utf8')),
+    hasReceipt = () => existsSync(RECEIPT),
+    backup = backupSettings,
+    writeTmp = (p, s) => writeFileSync(p, s),
+    promote = renameSync,
+    settingsPath = SETTINGS,
+  } = io;
+  const settings = loadSettings();
+  const decision = healNeeded(settings, ROOT, hasReceipt());
   if (!decision.heal) return null;
   const { next } = applyWiring(settings, ROOT);
-  const tmp = `${SETTINGS}.c4x-heal-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n');
-  renameSync(tmp, SETTINGS);
-  return decision.why;
+  // Same function the installer uses, so the two cannot drift apart.
+  const saved = backup();
+  const tmp = `${settingsPath}.c4x-heal-${process.pid}`;
+  writeTmp(tmp, JSON.stringify(next, null, 2) + '\n');
+  promote(tmp, settingsPath);
+  return saved ? `${decision.why} (backup: ${saved})` : decision.why;
 }
 
 function readStdin() {
@@ -288,6 +306,31 @@ function selfTest() {
     const before = healNeeded(drifted, ROOT, true);
     add('a settings file with our hooks stripped is detected as broken', before.heal === true);
     const { next } = applyWiring(drifted, ROOT);
+    // The write ORDER. A backup that happens after the write, or not at all, is what this repo
+    // shipped: the hook rewrote the whole settings file unattended with nothing to go back to.
+    {
+      const calls = [];
+      const stripped = structuredClone(drifted);
+      const healed = applyHeal({
+        loadSettings: () => structuredClone(stripped),
+        hasReceipt: () => true,
+        backup: () => { calls.push('backup'); return '/tmp/settings.bak'; },
+        writeTmp: () => calls.push('write'),
+        promote: () => calls.push('promote'),
+        settingsPath: '/tmp/settings.json',
+      });
+      add('self-heal backs up BEFORE it writes', calls.join(',') === 'backup,write,promote', calls.join(','));
+      add('self-heal reports the backup it took', String(healed).includes('/tmp/settings.bak'), String(healed));
+
+      const noop = [];
+      applyHeal({
+        loadSettings: () => ({}), hasReceipt: () => false,
+        backup: () => { noop.push('backup'); return null; },
+        writeTmp: () => noop.push('write'), promote: () => noop.push('promote'),
+      });
+      add('no receipt means no backup and no write (gate can fail)', noop.length === 0, noop.join(','));
+    }
+
     const after = healNeeded(next, ROOT, true);
     add('after applyWiring the same settings audit clean', after.heal === false);
     add('the foreign Stop hook survives the repair',

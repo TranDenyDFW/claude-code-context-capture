@@ -51,7 +51,33 @@ const WIRING = [
 const STATUSLINE_SCRIPT = 'tools/statusline.mjs';
 
 export const cmdFor = (root, script) => `node "${posix(join(root, script))}"`;
-export const ownsCommand = (cmd, root) => typeof cmd === 'string' && cmd.includes(posix(root));
+
+// Ownership used to be `cmd.includes(root)`, and a bare substring is wrong in both directions.
+// Downwards: with root .../c4x, a hook at .../c4x-old/hooks/event-hook.mjs read as ours, and
+// applyWiring dropped that other install's group on the floor. Upwards: c4x sits INSIDE
+// P:/ClaudeExt/ccxe, so an installer rooted at the parent claimed every c4x hook as its own and
+// removeWiring stripped all of them plus the statusLine. A segment boundary alone does not fix
+// the second case, because the child genuinely is under the parent.
+//
+// So ownership is not "somewhere under root", it is "points at one of OUR script files in THIS
+// root". Both siblings and parents fail that test, and an exact install still passes it.
+// Case-insensitive on Windows, where the same path in different case is the same path and would
+// otherwise be wired a second time rather than recognised as already present.
+const OUR_SCRIPTS = [...new Set([...WIRING.map((w) => w.script), STATUSLINE_SCRIPT])];
+const BOUNDARY_AFTER = new Set(['', '"', "'", ' ']);
+const referencesPath = (cmd, abs) => {
+  const fold = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
+  const subject = fold(posix(cmd));
+  const needle = fold(posix(abs));
+  for (let i = subject.indexOf(needle); i !== -1; i = subject.indexOf(needle, i + 1)) {
+    if (BOUNDARY_AFTER.has(subject[i + needle.length] ?? '')) return true;
+  }
+  return false;
+};
+export const ownsCommand = (cmd, root) => {
+  if (typeof cmd !== 'string' || !posix(root).replace(/\/+$/, '')) return false;
+  return OUR_SCRIPTS.some((s) => referencesPath(cmd, join(root, s)));
+};
 
 // ---------------------------------------------------------------- pure state transforms
 
@@ -183,8 +209,24 @@ export function audit(settings, root, { rootExists = true } = {}) {
 
 const readJson = (p, dflt = null) => { try { return JSON.parse(readFileSync(p, 'utf8').replace(/^\uFEFF/, '')); } catch { return dflt; } };
 
-// Claude Code writes this file too. Re-read immediately before serialising, then temp+rename so a
-// concurrent reader never observes a half-written file.
+// The settings file is NOT allowed to fall back to a default. The old `readJson(SETTINGS, {})` treated an
+// unparseable file as an empty one, and since install converges {} to "our wiring", the write that
+// followed replaced the user's entire configuration with our hooks plus statusLine. backupSettings()
+// made that recoverable, which is not the same as harmless.
+//
+// Absent and unparseable are different states and only the first one is ordinary: a missing file is
+// a first install, a corrupt file is a question for its owner.
+export class SettingsUnreadable extends Error {}
+export function parseSettings(raw) {
+  if (raw === null || raw === undefined) return {};
+  try { return JSON.parse(String(raw).replace(/^\uFEFF/, '')); }
+  catch (e) { throw new SettingsUnreadable(`${posix(SETTINGS)} exists but is not valid JSON: ${e.message}`); }
+}
+const readSettings = () => parseSettings(existsSync(SETTINGS) ? readFileSync(SETTINGS, 'utf8') : null);
+
+// temp+rename, so a concurrent reader never observes a half-written file. This one serialises the
+// object it is handed; the re-read belongs to writeSettingsAtomic below, which is the only writer
+// that has a file someone else also owns.
 function writeJsonAtomic(p, obj) {
   mkdirSync(join(p, '..'), { recursive: true });
   const tmp = `${p}.tmp-${process.pid}`;
@@ -192,7 +234,25 @@ function writeJsonAtomic(p, obj) {
   renameSync(tmp, p);
 }
 
-function backupSettings() {
+// Claude Code writes settings.json too, and so does our own SessionStart hook. Everything above
+// computes `next` from a snapshot taken earlier in the command, prints a diff from it, and then
+// wrote that stale object back, silently discarding anything that landed in between. The comment
+// on writeJsonAtomic claimed a re-read that never existed.
+//
+// So: re-read immediately before serialising and re-apply the transform to what is actually on
+// disk. Both transforms converge, which is what makes replaying them on fresher input safe rather
+// than merely different. The printed diff still comes from the earlier snapshot, so it can differ
+// from what lands; that is reported instead of hidden.
+function writeSettingsAtomic(transform) {
+  const before = readSettings();
+  const next = transform(before);
+  writeJsonAtomic(SETTINGS, next);
+  return { before, next };
+}
+
+// Exported because event-hook.mjs rewrites this same file when it self-heals, and a second copy
+// of "where the backup goes" is exactly the kind of parallel literal that drifts apart.
+export function backupSettings() {
   if (!existsSync(SETTINGS)) return null;
   const dest = `${SETTINGS}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   copyFileSync(SETTINGS, dest);
@@ -221,7 +281,7 @@ function saveReceipt(extra) {
 // ---------------------------------------------------------------- commands
 
 function cmdStatus() {
-  const settings = readJson(SETTINGS, {});
+  const settings = readSettings();
   const findings = audit(settings, ROOT, { rootExists: existsSync(ROOT) });
   const db = defaultDb(ROOT);
   const receipt = loadReceipt();
@@ -253,7 +313,7 @@ function cmdInstall(argv) {
     else { mkdirSync(join(ROOT, 'data'), { recursive: true }); copyFileSync(src, dest); adopted = `copied ${posix(src)} -> ${posix(dest)}`; }
   }
 
-  const settings = readJson(SETTINGS, {});
+  const settings = readSettings();
   const { next, changes } = applyWiring(settings, ROOT);
 
   if (!changes.length && !adopted) { console.log('no changes: already converged'); return 0; }
@@ -261,9 +321,11 @@ function cmdInstall(argv) {
   if (adopted) console.log(adopted);
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
 
-  const priorStatusLine = ownsCommand(settings?.statusLine?.command, ROOT) ? undefined : (settings?.statusLine ?? null);
   const backup = backupSettings();
-  writeJsonAtomic(SETTINGS, next);
+  const { before } = writeSettingsAtomic((s) => applyWiring(s, ROOT).next);
+  // Taken from what was actually on disk at write time, not from the earlier snapshot, so a
+  // statusLine that arrived in between is still the one we record as the prior value.
+  const priorStatusLine = ownsCommand(before?.statusLine?.command, ROOT) ? undefined : (before?.statusLine ?? null);
   if (!rewire) mkdirSync(join(ROOT, 'data', 'raw'), { recursive: true });
   saveReceipt({ settingsBackup: backup ? posix(backup) : null, ...(priorStatusLine === undefined ? {} : { priorStatusLine }) });
   console.log(`wrote ${posix(SETTINGS)}${backup ? ` (backup: ${posix(backup)})` : ''}`);
@@ -278,7 +340,7 @@ function cmdInstall(argv) {
 function cmdUninstall(argv) {
   const dry = argv.includes('--dry-run');
   const purge = argv.includes('--purge');
-  const settings = readJson(SETTINGS, {});
+  const settings = readSettings();
   const { next, changes } = removeWiring(settings, ROOT, loadReceipt());
 
   if (!changes.length) console.log('nothing of ours found in settings');
@@ -289,7 +351,7 @@ function cmdUninstall(argv) {
   else if (existsSync(db)) console.log(`store kept at ${posix(db)} - pass --purge to delete it`);
 
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
-  if (changes.length) { backupSettings(); writeJsonAtomic(SETTINGS, next); }
+  if (changes.length) { backupSettings(); writeSettingsAtomic((s) => removeWiring(s, ROOT, loadReceipt()).next); }
   if (purge) { for (const f of sidecars(db)) rmSync(f, { force: true }); rmSync(join(ROOT, 'data', 'raw'), { recursive: true, force: true }); }
   rmSync(RECEIPT, { force: true });
   return 0;
@@ -321,11 +383,11 @@ function cmdReset(argv) {
   }
 
   if (wantSettings) {
-    const settings = readJson(SETTINGS, {});
+    const settings = readSettings();
     const cleared = removeWiring(settings, ROOT, loadReceipt()).next;
     const { next, changes } = applyWiring(cleared, ROOT);
     for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
-    if (!dry) { backupSettings(); writeJsonAtomic(SETTINGS, next); saveReceipt({}); }
+    if (!dry) { backupSettings(); writeSettingsAtomic((s) => applyWiring(removeWiring(s, ROOT, loadReceipt()).next, ROOT).next); saveReceipt({}); }
   }
   if (dry) console.log('--dry-run: nothing written');
   return 0;
@@ -375,6 +437,60 @@ function selfTest() {
   const dupe = structuredClone(good);
   dupe.hooks.PostToolUse.push(structuredClone(good.hooks.PostToolUse[0]));
   add('a duplicate of our group is collapsed', applyWiring(dupe, R).next.hooks.PostToolUse.length === 1);
+
+  // Ownership. Every one of these passed as "ours" under the old substring test, and the two
+  // consequence checks below are the damage that followed from it.
+  const SIBLING = 'X:/fake/root-old';
+  const NESTED = 'X:/fake/root/nested';
+  add('our own hook is owned', ownsCommand(cmdFor(R, 'hooks/event-hook.mjs'), R));
+  add('our own statusLine is owned', ownsCommand(cmdFor(R, STATUSLINE_SCRIPT), R));
+  add("another tool's hook is not owned", !ownsCommand('node "D:/other-tool/watch.mjs"', R));
+  add('a sibling root whose name merely starts with ours is NOT owned',
+    !ownsCommand(cmdFor(SIBLING, 'hooks/event-hook.mjs'), R), cmdFor(SIBLING, 'hooks/event-hook.mjs'));
+  add('a nested install one directory down is NOT owned by the parent root',
+    !ownsCommand(cmdFor(NESTED, 'hooks/event-hook.mjs'), R), cmdFor(NESTED, 'hooks/event-hook.mjs'));
+  add('a path under our root that is not one of our scripts is not owned',
+    !ownsCommand(`node "${R}/hooks/somebody-elses.mjs"`, R));
+
+  // Consequence 1: installing must not delete a sibling install's group.
+  const withSibling = structuredClone(good);
+  withSibling.hooks.SessionStart.push({ hooks: [{ type: 'command', command: cmdFor(SIBLING, 'hooks/event-hook.mjs') }] });
+  add('install leaves a sibling install\u0027s hook alone',
+    JSON.stringify(applyWiring(withSibling, R).next.hooks.SessionStart).includes('root-old'));
+
+  // Reading settings. Absent and unparseable are different states, and only the first is ordinary.
+  const threw = (fn) => { try { fn(); return null; } catch (e) { return e; } };
+  add('a missing settings file reads as empty, which is a normal first install', JSON.stringify(parseSettings(null)) === '{}');
+  add('a valid settings file parses', parseSettings('{"permissions":{"allow":["Bash"]}}').permissions.allow[0] === 'Bash');
+  add('a leading BOM does not break the parse', parseSettings('﻿{"a":1}').a === 1);
+  const corrupt = threw(() => parseSettings('{"hooks": {oops'));
+  add('an unparseable settings file throws instead of becoming {}', corrupt instanceof SettingsUnreadable, String(corrupt));
+  // The stakes, stated as a check rather than a comment: this is what a {} fallback would write.
+  add('converging {} would have written only our keys, which is what the throw prevents',
+    Object.keys(applyWiring({}, R).next).join(',') === 'hooks,statusLine');
+
+  // The race. writeSettingsAtomic re-reads and re-applies rather than writing a stale snapshot,
+  // so what has to hold is that replaying a transform on fresher input keeps what it did not put
+  // there, and settles. Both transforms are checked, in both directions.
+  const raced = structuredClone(good);
+  raced.env = { ARRIVED_LATE: '1' };
+  raced.hooks.Stop = [{ hooks: [{ type: 'command', command: 'node "D:/guard/stop.mjs"' }] }];
+  const replayedIn = applyWiring(raced, R).next;
+  add('a key that lands between read and write survives the replay', replayedIn.env?.ARRIVED_LATE === '1');
+  add('a hook event that lands between read and write survives the replay',
+    JSON.stringify(replayedIn.hooks.Stop).includes('guard/stop.mjs'));
+  add('replaying install on its own output settles', applyWiring(replayedIn, R).changes.length === 0);
+  const replayedOut = removeWiring(raced, R, null).next;
+  add('uninstall replayed on fresher input keeps the late arrival', replayedOut.env?.ARRIVED_LATE === '1');
+  add('uninstall replayed on its own output settles', removeWiring(replayedOut, R, null).changes.length === 0);
+
+  // Consequence 2: uninstalling at the PARENT root must not strip the nested install.
+  const nestedInstalled = applyWiring({}, NESTED).next;
+  const afterParentRemove = removeWiring(nestedInstalled, R, null);
+  add('uninstall at a parent root leaves a nested install wired',
+    JSON.stringify(afterParentRemove.next.hooks) === JSON.stringify(nestedInstalled.hooks), afterParentRemove.changes.join(','));
+  add('uninstall at a parent root leaves the nested statusLine alone',
+    JSON.stringify(afterParentRemove.next.statusLine) === JSON.stringify(nestedInstalled.statusLine));
 
   // Foreign entries must survive both directions.
   const foreignHook = { hooks: [{ type: 'command', command: 'node "D:/someone-else/thing.mjs"' }] };
@@ -442,10 +558,20 @@ if (argv.includes('--help') || !verb) {
   // --help was asked for and answered, so it succeeded. Only a bare invocation is a misuse.
   process.exit(argv.includes('--help') ? 0 : 2);
 }
-if (verb === 'status' || verb === 'doctor') process.exit(cmdStatus());
-if (verb === 'install') process.exit(cmdInstall(argv));
-if (verb === 'uninstall') process.exit(cmdUninstall(argv));
-if (verb === 'reset') process.exit(cmdReset(argv));
+try {
+  if (verb === 'status' || verb === 'doctor') process.exit(cmdStatus());
+  if (verb === 'install') process.exit(cmdInstall(argv));
+  if (verb === 'uninstall') process.exit(cmdUninstall(argv));
+  if (verb === 'reset') process.exit(cmdReset(argv));
+} catch (e) {
+  if (!(e instanceof SettingsUnreadable)) throw e;
+  // Stop rather than converge. Converging an unreadable file means writing our wiring over
+  // whatever could not be parsed, and a backup makes that undoable, not correct.
+  console.error(`ERROR ${e.message}`);
+  console.error('Refusing to write, because converging this file would replace your configuration with ours.');
+  console.error('Fix the JSON, or move the file aside to start fresh, then run this again.');
+  process.exit(2);
+}
 console.error(`unknown command: ${verb}`);
 process.exit(2);
 }
