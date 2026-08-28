@@ -788,10 +788,12 @@ def compactions_layout():
 BREAKDOWN_COLORS = {
     "messages": ACCENT, "system_tools": "#e8590c", "mcp_tools": GOOD,
     "skills": WARN, "system_prompt": "#d6336c", "free": BORDER,
+    "memory_files": "#a371f7", "custom_agents": "#39c5cf",
 }
 BREAKDOWN_LABELS = {
     "messages": "Messages", "system_tools": "System tools", "mcp_tools": "MCP tools",
     "skills": "Skills", "system_prompt": "System prompt", "free": "Free space",
+    "memory_files": "Memory files", "custom_agents": "Custom agents",
 }
 
 
@@ -841,7 +843,12 @@ def breakdown_layout():
     # Current split, as a single proportional bar - the same shape the tooltip uses, so the two
     # can be compared at a glance rather than translated.
     parts, rows = [], []
-    for key in ("messages", "system_tools", "mcp_tools", "skills", "system_prompt", "free"):
+    # Every static category the baselines table can hold, in the order the tooltip lists them, so
+    # the two line up row for row. Omitting one does not just hide a row: this loop feeds the bar
+    # as well, so a missing key silently shortens the bar and makes the rows under-sum the window.
+    # A baseline recorded before a category existed leaves it NULL, which the None check skips.
+    for key in ("messages", "system_tools", "memory_files", "skills", "mcp_tools",
+                "system_prompt", "custom_agents", "free"):
         val = messages if key == "messages" else (free if key == "free" else b.get(key))
         if val is None or (isinstance(val, float) and pd.isna(val)):
             continue
