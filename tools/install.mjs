@@ -209,6 +209,21 @@ export function audit(settings, root, { rootExists = true } = {}) {
 
 const readJson = (p, dflt = null) => { try { return JSON.parse(readFileSync(p, 'utf8').replace(/^\uFEFF/, '')); } catch { return dflt; } };
 
+// The settings file is NOT allowed to fall back to a default. The old `readJson(SETTINGS, {})` treated an
+// unparseable file as an empty one, and since install converges {} to "our wiring", the write that
+// followed replaced the user's entire configuration with our hooks plus statusLine. backupSettings()
+// made that recoverable, which is not the same as harmless.
+//
+// Absent and unparseable are different states and only the first one is ordinary: a missing file is
+// a first install, a corrupt file is a question for its owner.
+export class SettingsUnreadable extends Error {}
+export function parseSettings(raw) {
+  if (raw === null || raw === undefined) return {};
+  try { return JSON.parse(String(raw).replace(/^\uFEFF/, '')); }
+  catch (e) { throw new SettingsUnreadable(`${posix(SETTINGS)} exists but is not valid JSON: ${e.message}`); }
+}
+const readSettings = () => parseSettings(existsSync(SETTINGS) ? readFileSync(SETTINGS, 'utf8') : null);
+
 // Claude Code writes this file too. Re-read immediately before serialising, then temp+rename so a
 // concurrent reader never observes a half-written file.
 function writeJsonAtomic(p, obj) {
@@ -247,7 +262,7 @@ function saveReceipt(extra) {
 // ---------------------------------------------------------------- commands
 
 function cmdStatus() {
-  const settings = readJson(SETTINGS, {});
+  const settings = readSettings();
   const findings = audit(settings, ROOT, { rootExists: existsSync(ROOT) });
   const db = defaultDb(ROOT);
   const receipt = loadReceipt();
@@ -279,7 +294,7 @@ function cmdInstall(argv) {
     else { mkdirSync(join(ROOT, 'data'), { recursive: true }); copyFileSync(src, dest); adopted = `copied ${posix(src)} -> ${posix(dest)}`; }
   }
 
-  const settings = readJson(SETTINGS, {});
+  const settings = readSettings();
   const { next, changes } = applyWiring(settings, ROOT);
 
   if (!changes.length && !adopted) { console.log('no changes: already converged'); return 0; }
@@ -304,7 +319,7 @@ function cmdInstall(argv) {
 function cmdUninstall(argv) {
   const dry = argv.includes('--dry-run');
   const purge = argv.includes('--purge');
-  const settings = readJson(SETTINGS, {});
+  const settings = readSettings();
   const { next, changes } = removeWiring(settings, ROOT, loadReceipt());
 
   if (!changes.length) console.log('nothing of ours found in settings');
@@ -347,7 +362,7 @@ function cmdReset(argv) {
   }
 
   if (wantSettings) {
-    const settings = readJson(SETTINGS, {});
+    const settings = readSettings();
     const cleared = removeWiring(settings, ROOT, loadReceipt()).next;
     const { next, changes } = applyWiring(cleared, ROOT);
     for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
@@ -421,6 +436,17 @@ function selfTest() {
   withSibling.hooks.SessionStart.push({ hooks: [{ type: 'command', command: cmdFor(SIBLING, 'hooks/event-hook.mjs') }] });
   add('install leaves a sibling install\u0027s hook alone',
     JSON.stringify(applyWiring(withSibling, R).next.hooks.SessionStart).includes('root-old'));
+
+  // Reading settings. Absent and unparseable are different states, and only the first is ordinary.
+  const threw = (fn) => { try { fn(); return null; } catch (e) { return e; } };
+  add('a missing settings file reads as empty, which is a normal first install', JSON.stringify(parseSettings(null)) === '{}');
+  add('a valid settings file parses', parseSettings('{"permissions":{"allow":["Bash"]}}').permissions.allow[0] === 'Bash');
+  add('a leading BOM does not break the parse', parseSettings('﻿{"a":1}').a === 1);
+  const corrupt = threw(() => parseSettings('{"hooks": {oops'));
+  add('an unparseable settings file throws instead of becoming {}', corrupt instanceof SettingsUnreadable, String(corrupt));
+  // The stakes, stated as a check rather than a comment: this is what a {} fallback would write.
+  add('converging {} would have written only our keys, which is what the throw prevents',
+    Object.keys(applyWiring({}, R).next).join(',') === 'hooks,statusLine');
 
   // Consequence 2: uninstalling at the PARENT root must not strip the nested install.
   const nestedInstalled = applyWiring({}, NESTED).next;
@@ -496,10 +522,20 @@ if (argv.includes('--help') || !verb) {
   // --help was asked for and answered, so it succeeded. Only a bare invocation is a misuse.
   process.exit(argv.includes('--help') ? 0 : 2);
 }
-if (verb === 'status' || verb === 'doctor') process.exit(cmdStatus());
-if (verb === 'install') process.exit(cmdInstall(argv));
-if (verb === 'uninstall') process.exit(cmdUninstall(argv));
-if (verb === 'reset') process.exit(cmdReset(argv));
+try {
+  if (verb === 'status' || verb === 'doctor') process.exit(cmdStatus());
+  if (verb === 'install') process.exit(cmdInstall(argv));
+  if (verb === 'uninstall') process.exit(cmdUninstall(argv));
+  if (verb === 'reset') process.exit(cmdReset(argv));
+} catch (e) {
+  if (!(e instanceof SettingsUnreadable)) throw e;
+  // Stop rather than converge. Converging an unreadable file means writing our wiring over
+  // whatever could not be parsed, and a backup makes that undoable, not correct.
+  console.error(`ERROR ${e.message}`);
+  console.error('Refusing to write, because converging this file would replace your configuration with ours.');
+  console.error('Fix the JSON, or move the file aside to start fresh, then run this again.');
+  process.exit(2);
+}
 console.error(`unknown command: ${verb}`);
 process.exit(2);
 }
