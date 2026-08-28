@@ -785,11 +785,21 @@ def compactions_layout():
 # it recoverable is that the arithmetic is closed - resident = static + messages, and free =
 # window - resident - so one observation of a configuration's fixed overhead unlocks the split for
 # every turn ever harvested. tools/breakdown.mjs owns that logic and its baselines table.
-BREAKDOWN_COLORS = {
-    "messages": ACCENT, "system_tools": "#e8590c", "mcp_tools": GOOD,
-    "skills": WARN, "system_prompt": "#d6336c", "free": BORDER,
-    "memory_files": "#a371f7", "custom_agents": "#39c5cf",
-}
+# Colours are assigned from a palette in spec order rather than a dict keyed by category name.
+# A name-keyed dict is one more literal that has to be kept in step with breakdown.mjs, and an
+# independent reviewer was right to flag it: a category added there and missed here would have
+# rendered a grey segment, which reads as a real colour rather than as a missing entry.
+# `messages` and `free` are not spec categories and keep their fixed identities.
+BREAKDOWN_FIXED = {"messages": ACCENT, "free": BORDER}
+BREAKDOWN_PALETTE = ["#e8590c", "#a371f7", WARN, GOOD, "#d6336c", "#39c5cf",
+                     "#4c9aff", "#f2cc60", "#7ee787", "#ff7b72"]
+
+
+def breakdown_color(key, spec_index):
+    """Fixed colour for the two synthetic rows, else the palette position for its spec index."""
+    if key in BREAKDOWN_FIXED:
+        return BREAKDOWN_FIXED[key]
+    return BREAKDOWN_PALETTE[spec_index % len(BREAKDOWN_PALETTE)]
 BREAKDOWN_LABELS = {"messages": "Messages", "free": "Free space"}
 
 
@@ -891,10 +901,11 @@ def breakdown_layout():
     sized = [("messages", messages)] + [(c, cell(b.get(c))) for c in resident_cols]
     sized = [(k, v) for k, v in sized if v]
     sized.sort(key=lambda kv: -kv[1])
+    order = {c: i for i, c in enumerate(resident_cols)}
     for key, val in sized + [("free", free)]:
         pct = val / window * 100
         parts.append(html.Div(style={"width": f"{pct}%",
-                                     "background": BREAKDOWN_COLORS.get(key, MUTED),
+                                     "background": breakdown_color(key, order.get(key, 0)),
                                      "height": "100%"}))
         items = cell(b.get(count_for.get(key, ""), None)) if key in count_for else None
         rows.append({"category": BREAKDOWN_LABELS.get(key) or labels.get(key, key),
