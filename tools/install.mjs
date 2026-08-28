@@ -51,7 +51,33 @@ const WIRING = [
 const STATUSLINE_SCRIPT = 'tools/statusline.mjs';
 
 export const cmdFor = (root, script) => `node "${posix(join(root, script))}"`;
-export const ownsCommand = (cmd, root) => typeof cmd === 'string' && cmd.includes(posix(root));
+
+// Ownership used to be `cmd.includes(root)`, and a bare substring is wrong in both directions.
+// Downwards: with root .../c4x, a hook at .../c4x-old/hooks/event-hook.mjs read as ours, and
+// applyWiring dropped that other install's group on the floor. Upwards: c4x sits INSIDE
+// P:/ClaudeExt/ccxe, so an installer rooted at the parent claimed every c4x hook as its own and
+// removeWiring stripped all of them plus the statusLine. A segment boundary alone does not fix
+// the second case, because the child genuinely is under the parent.
+//
+// So ownership is not "somewhere under root", it is "points at one of OUR script files in THIS
+// root". Both siblings and parents fail that test, and an exact install still passes it.
+// Case-insensitive on Windows, where the same path in different case is the same path and would
+// otherwise be wired a second time rather than recognised as already present.
+const OUR_SCRIPTS = [...new Set([...WIRING.map((w) => w.script), STATUSLINE_SCRIPT])];
+const BOUNDARY_AFTER = new Set(['', '"', "'", ' ']);
+const referencesPath = (cmd, abs) => {
+  const fold = (s) => (process.platform === 'win32' ? s.toLowerCase() : s);
+  const subject = fold(posix(cmd));
+  const needle = fold(posix(abs));
+  for (let i = subject.indexOf(needle); i !== -1; i = subject.indexOf(needle, i + 1)) {
+    if (BOUNDARY_AFTER.has(subject[i + needle.length] ?? '')) return true;
+  }
+  return false;
+};
+export const ownsCommand = (cmd, root) => {
+  if (typeof cmd !== 'string' || !posix(root).replace(/\/+$/, '')) return false;
+  return OUR_SCRIPTS.some((s) => referencesPath(cmd, join(root, s)));
+};
 
 // ---------------------------------------------------------------- pure state transforms
 
@@ -375,6 +401,34 @@ function selfTest() {
   const dupe = structuredClone(good);
   dupe.hooks.PostToolUse.push(structuredClone(good.hooks.PostToolUse[0]));
   add('a duplicate of our group is collapsed', applyWiring(dupe, R).next.hooks.PostToolUse.length === 1);
+
+  // Ownership. Every one of these passed as "ours" under the old substring test, and the two
+  // consequence checks below are the damage that followed from it.
+  const SIBLING = 'X:/fake/root-old';
+  const NESTED = 'X:/fake/root/nested';
+  add('our own hook is owned', ownsCommand(cmdFor(R, 'hooks/event-hook.mjs'), R));
+  add('our own statusLine is owned', ownsCommand(cmdFor(R, STATUSLINE_SCRIPT), R));
+  add("another tool's hook is not owned", !ownsCommand('node "D:/other-tool/watch.mjs"', R));
+  add('a sibling root whose name merely starts with ours is NOT owned',
+    !ownsCommand(cmdFor(SIBLING, 'hooks/event-hook.mjs'), R), cmdFor(SIBLING, 'hooks/event-hook.mjs'));
+  add('a nested install one directory down is NOT owned by the parent root',
+    !ownsCommand(cmdFor(NESTED, 'hooks/event-hook.mjs'), R), cmdFor(NESTED, 'hooks/event-hook.mjs'));
+  add('a path under our root that is not one of our scripts is not owned',
+    !ownsCommand(`node "${R}/hooks/somebody-elses.mjs"`, R));
+
+  // Consequence 1: installing must not delete a sibling install's group.
+  const withSibling = structuredClone(good);
+  withSibling.hooks.SessionStart.push({ hooks: [{ type: 'command', command: cmdFor(SIBLING, 'hooks/event-hook.mjs') }] });
+  add('install leaves a sibling install\u0027s hook alone',
+    JSON.stringify(applyWiring(withSibling, R).next.hooks.SessionStart).includes('root-old'));
+
+  // Consequence 2: uninstalling at the PARENT root must not strip the nested install.
+  const nestedInstalled = applyWiring({}, NESTED).next;
+  const afterParentRemove = removeWiring(nestedInstalled, R, null);
+  add('uninstall at a parent root leaves a nested install wired',
+    JSON.stringify(afterParentRemove.next.hooks) === JSON.stringify(nestedInstalled.hooks), afterParentRemove.changes.join(','));
+  add('uninstall at a parent root leaves the nested statusLine alone',
+    JSON.stringify(afterParentRemove.next.statusLine) === JSON.stringify(nestedInstalled.statusLine));
 
   // Foreign entries must survive both directions.
   const foreignHook = { hooks: [{ type: 'command', command: 'node "D:/someone-else/thing.mjs"' }] };
