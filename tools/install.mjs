@@ -250,7 +250,9 @@ function writeSettingsAtomic(transform) {
   return { before, next };
 }
 
-function backupSettings() {
+// Exported because event-hook.mjs rewrites this same file when it self-heals, and a second copy
+// of "where the backup goes" is exactly the kind of parallel literal that drifts apart.
+export function backupSettings() {
   if (!existsSync(SETTINGS)) return null;
   const dest = `${SETTINGS}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   copyFileSync(SETTINGS, dest);
