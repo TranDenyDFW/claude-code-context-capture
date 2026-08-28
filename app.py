@@ -793,6 +793,20 @@ BREAKDOWN_COLORS = {
 BREAKDOWN_LABELS = {"messages": "Messages", "free": "Free space"}
 
 
+def tool_spec(script, flag):
+    """Read a spec a tool publishes, so the dashboard does not keep a second copy in Python.
+
+    Returns (value, error). The caller decides what to show when it fails; nothing here falls back
+    to a literal, because a stale literal that renders normally is the failure being avoided.
+    """
+    try:
+        out = subprocess.run(["node", str(ROOT / "tools" / script), flag],
+                             capture_output=True, text=True, timeout=20, check=True)
+        return json.loads(out.stdout), None
+    except Exception as exc:
+        return None, f"could not read {flag} from tools/{script}: {exc}"
+
+
 def breakdown_fields():
     """The category spec, read from breakdown.mjs rather than copied into Python.
 
@@ -801,13 +815,8 @@ def breakdown_fields():
     owns the schema also publishes the spec, and this reads it. A failure here is reported on the
     page instead of silently falling back to a list that may be a release behind.
     """
-    try:
-        out = subprocess.run(
-            ["node", str(ROOT / "tools" / "breakdown.mjs"), "--fields"],
-            capture_output=True, text=True, timeout=20, check=True)
-        return json.loads(out.stdout), None
-    except Exception as exc:
-        return [], f"could not read the category spec from tools/breakdown.mjs: {exc}"
+    fields, err = tool_spec("breakdown.mjs", "--fields")
+    return (fields or []), err
 
 
 def latest_baseline():
@@ -1044,15 +1053,25 @@ def waste_layout():
     store records exact API token counts per turn, but not per tool call, and inventing a
     tokens-per-byte ratio would dress an estimate up as a measurement.
     """
+    # What counts as a read, and how many make a re-read, come from waste.mjs. The query runs here
+    # for speed, but the definition lives in one place: these were two literals under a docstring
+    # asserting they could not disagree, which asserted it rather than ensuring it.
+    spec, spec_err = tool_spec("waste.mjs", "--spec")
+    if spec:
+        read_tools, dup_min = spec["read_tools"], int(spec["duplicate_min"])
+    else:
+        read_tools, dup_min = [], 3
+    placeholders = ",".join("?" for _ in read_tools)
     dup = q(
-        """SELECT session_id, target, COUNT(*) reads,
-                  SUM(COALESCE(result_bytes,0)) bytes,
-                  COUNT(DISTINCT input_sha1) variants
-           FROM tool_calls
-           WHERE tool_name IN ('Read','NotebookRead') AND target IS NOT NULL
-           GROUP BY session_id, target HAVING reads >= 3
-           ORDER BY reads DESC LIMIT 200"""
-    )
+        f"""SELECT session_id, target, COUNT(*) reads,
+                   SUM(COALESCE(result_bytes,0)) bytes,
+                   COUNT(DISTINCT input_sha1) variants
+            FROM tool_calls
+            WHERE tool_name IN ({placeholders}) AND target IS NOT NULL
+            GROUP BY session_id, target HAVING reads >= ?
+            ORDER BY reads DESC LIMIT 200""",
+        tuple(read_tools) + (dup_min,),
+    ) if read_tools else pd.DataFrame()
     srv = q(
         """SELECT server_name AS server, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes, MAX(ts) last_call
@@ -1078,7 +1097,9 @@ def waste_layout():
 
     return html.Div([
         html.Div([
-            stat_card("Re-read groups", f"{len(dup):,}", sub="same file, one session, 3+ reads"),
+            stat_card("Re-read groups", f"{len(dup):,}",
+                      sub=(f"same file, one session, {dup_min}+ reads" if read_tools
+                           else "UNAVAILABLE: read-tool spec unreadable")),
             stat_card("Re-reads beyond the first", f"{repeats:,}", color=DANGER if repeats else TEXT),
             stat_card("KB in the repeats", f"{repeat_bytes/1024:,.1f}", sub="tool result bytes"),
             stat_card("Tool calls recorded", f"{int(tools['calls'].sum()):,}" if not tools.empty else "0"),

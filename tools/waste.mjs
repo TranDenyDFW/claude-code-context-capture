@@ -54,15 +54,24 @@ function open(dbPath) {
   return new DatabaseSync(`file:${dbPath.replace(/\\/g, '/')}?mode=ro`, { readOnly: true });
 }
 
+// What counts as a read, and how many reads make a re-read worth reporting. The dashboard runs
+// its own copy of this query for speed, so these are published via `--spec` rather than written
+// out a second time in Python: the two used to be separate literals under a docstring asserting
+// they could not disagree, which is the assertion, not the mechanism. A read tool added to Claude
+// Code has to be added here once, not once per language.
+export const READ_TOOLS = ['Read', 'NotebookRead'];
+export const DUPLICATE_MIN = 3;
+
 /** Re-reads of one target inside one session. n is the read count, not the extra count. */
-export function duplicateReads(db, { min = 3, session = null } = {}) {
+export function duplicateReads(db, { min = DUPLICATE_MIN, session = null } = {}) {
   const where = session ? 'AND session_id = ?' : '';
   const args = session ? [session, min] : [min];
+  const inList = READ_TOOLS.map((t) => `'${t}'`).join(',');
   return db.prepare(`
     SELECT session_id, target, COUNT(*) reads, SUM(COALESCE(result_bytes,0)) bytes,
            COUNT(DISTINCT input_sha1) distinct_inputs
     FROM tool_calls
-    WHERE tool_name IN ('Read','NotebookRead') AND target IS NOT NULL ${where}
+    WHERE tool_name IN (${inList}) AND target IS NOT NULL ${where}
     GROUP BY session_id, target
     HAVING reads >= ?
     ORDER BY reads DESC`).all(...args);
@@ -462,6 +471,11 @@ const IS_ENTRY = (() => {
 const argv = process.argv.slice(2);
 if (IS_ENTRY) {
   if (argv.includes('--self-test')) process.exit(selfTest());
+  // Published for the dashboard, which runs this query itself rather than shelling out per render.
+  if (argv.includes('--spec')) {
+    console.log(JSON.stringify({ read_tools: READ_TOOLS, duplicate_min: DUPLICATE_MIN }, null, 2));
+    process.exit(0);
+  }
   const db = open(resolveDbArg(argv));
   if (argv.includes('--duplicates')) reportDuplicates(db, argv);
   else if (argv.includes('--servers')) reportServers(db, argv);
