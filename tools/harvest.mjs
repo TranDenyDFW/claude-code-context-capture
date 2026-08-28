@@ -140,9 +140,9 @@ CREATE INDEX IF NOT EXISTS tool_calls_name ON tool_calls (tool_name);
 -- live ones at write time rather than by a later heuristic.
 CREATE TABLE IF NOT EXISTS hook_events (
   captured_at TEXT, probe INTEGER, event TEXT, known INTEGER,
-  session_id TEXT, cwd TEXT, permission_mode TEXT, tool_name TEXT,
+  session_id TEXT, transcript_path TEXT, cwd TEXT, permission_mode TEXT, tool_name TEXT,
   tool_input_bytes INTEGER, tool_response_bytes INTEGER, prompt_chars INTEGER,
-  source TEXT, reason TEXT, agent_id TEXT, agent_type TEXT, truncated INTEGER
+  source TEXT, reason TEXT, agent_id TEXT, agent_type TEXT, truncated INTEGER, extra TEXT
 );
 -- Identity is an EXPRESSION index, not a primary key. SQLite treats NULLs in a PK as distinct,
 -- so a row with no tool_name (SessionStart, UserPromptSubmit) would re-insert on every run and
@@ -164,12 +164,23 @@ CREATE TABLE IF NOT EXISTS harvest_runs (
  * counts rather than printing, so the caller decides what to say. A missing file is 0 rows and
  * not an error: the hook may simply never have fired yet, which is itself a finding.
  */
+// The columns this ingest stores, in INSERT order. Exported because the hook decides what a row
+// CONTAINS and this decides what survives, and the two used to be hand-written lists that
+// disagreed: transcript_path and extra were written by every hook row and stored by none of them.
+// `extra` is the field the hook adds specifically so that a key introduced by a future Claude Code
+// build is not silently lost, so dropping it defeated the one mechanism built to prevent this.
+export const HOOK_EVENT_COLUMNS = [
+  'captured_at', 'probe', 'event', 'known', 'session_id', 'transcript_path', 'cwd',
+  'permission_mode', 'tool_name', 'tool_input_bytes', 'tool_response_bytes', 'prompt_chars',
+  'source', 'reason', 'agent_id', 'agent_type', 'truncated', 'extra',
+];
+const BOOLEAN_EVENT_COLUMNS = new Set(['probe', 'known', 'truncated']);
+
 export function ingestEvents(db, path) {
   if (!existsSync(path)) return { file: path, exists: false, seen: 0, stored: 0, genuine: 0, bad: 0 };
   const ins = db.prepare(`INSERT OR IGNORE INTO hook_events
-    (captured_at,probe,event,known,session_id,cwd,permission_mode,tool_name,
-     tool_input_bytes,tool_response_bytes,prompt_chars,source,reason,agent_id,agent_type,truncated)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    (${HOOK_EVENT_COLUMNS.join(',')})
+    VALUES (${new Array(HOOK_EVENT_COLUMNS.length).fill('?').join(',')})`);
   let seen = 0, stored = 0, genuine = 0, bad = 0;
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     if (!line.trim()) continue;
@@ -177,11 +188,11 @@ export function ingestEvents(db, path) {
     let d;
     try { d = JSON.parse(line); } catch { bad++; continue; }
     if (!d || typeof d !== 'object') { bad++; continue; }
-    const r = ins.run(d.captured_at ?? null, d.probe ? 1 : 0, d.event ?? null, d.known ? 1 : 0,
-      d.session_id ?? null, d.cwd ?? null, d.permission_mode ?? null, d.tool_name ?? null,
-      d.tool_input_bytes ?? null, d.tool_response_bytes ?? null, d.prompt_chars ?? null,
-      d.source ?? null, d.reason ?? null, d.agent_id ?? null, d.agent_type ?? null,
-      d.truncated ? 1 : 0);
+    const r = ins.run(...HOOK_EVENT_COLUMNS.map((c) => {
+      const v = d[c];
+      if (BOOLEAN_EVENT_COLUMNS.has(c)) return v ? 1 : 0;
+      return v ?? null;
+    }));
     if (r.changes > 0) stored++;
     if (d.probe === false) genuine++;
   }
@@ -271,6 +282,13 @@ function openDb(dbPath = DB_PATH) {
     console.error('harvest: rebuilt hook_events, the old nullable primary key could not dedupe');
   }
   db.exec(SCHEMA);
+  // A store written before transcript_path and extra were stored keeps its rows; the columns are
+  // added in place. Non-destructive, unlike the primary-key rebuild above, because nothing about
+  // the existing rows is wrong, they are merely missing two fields. Announced rather than silent.
+  const have = new Set(db.prepare('PRAGMA table_info(hook_events)').all().map((r) => r.name));
+  const missing = HOOK_EVENT_COLUMNS.filter((c) => !have.has(c));
+  for (const c of missing) db.exec(`ALTER TABLE hook_events ADD COLUMN ${c} TEXT`);
+  if (missing.length) console.error(`harvest: hook_events gained ${missing.join(', ')}`);
   return db;
 }
 
@@ -817,6 +835,32 @@ async function selfTest() {
     ingestEvents(db, join(tmp, 'no-such-events.ndjson')).exists === false]);
   checks.push(['probe flag survives into the table',
     db.prepare('SELECT COUNT(*) n FROM hook_events WHERE probe = 1').get().n === 1]);
+
+  // The two fields that were written by every hook row and stored by none of them.
+  writeFileSync(evFile, JSON.stringify({
+    captured_at: '2026-08-22T00:00:02Z', probe: false, event: 'PostToolUse', known: true,
+    session_id: 'e2', tool_name: 'Read', transcript_path: 'P:/x/t.jsonl',
+    extra: '{"future_field":1}',
+  }) + '\n');
+  ingestEvents(db, evFile);
+  const kept = db.prepare('SELECT transcript_path, extra FROM hook_events WHERE session_id = ?').get('e2');
+  checks.push(['transcript_path survives the ingest', kept?.transcript_path === 'P:/x/t.jsonl', JSON.stringify(kept)]);
+  checks.push(['extra survives the ingest, which is the field built to preserve future keys',
+    kept?.extra === '{"future_field":1}', JSON.stringify(kept)]);
+
+  // The mechanical guard. The hook decides what a row CONTAINS and this file decides what
+  // survives; when those were two hand-written lists they disagreed for the whole life of the
+  // table. Now a field added to summarise() with no column here fails the suite instead.
+  {
+    const { summarise } = await import(pathToFileURL(join(ROOT, 'hooks', 'event-hook.mjs')).href);
+    const emitted = Object.keys(summarise({ hook_event_name: 'PostToolUse' }));
+    const homeless = emitted.filter((k) => !HOOK_EVENT_COLUMNS.includes(k));
+    checks.push(['every field the hook emits has a column in the ingest (gate can fail)',
+      homeless.length === 0, `unstored: ${homeless.join(',')}`]);
+    const cols = new Set(db.prepare('PRAGMA table_info(hook_events)').all().map((r) => r.name));
+    const notInTable = HOOK_EVENT_COLUMNS.filter((c) => !cols.has(c));
+    checks.push(['every ingest column exists in the table', notInTable.length === 0, notInTable.join(',')]);
+  }
 
   // Tool-call extraction.
   const tc = db.prepare('SELECT * FROM tool_calls WHERE tool_use_id = ?').get('tu1');
