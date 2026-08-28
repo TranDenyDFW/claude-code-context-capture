@@ -47,7 +47,7 @@ with a mark on the bar where the trigger sits.
 | **Overview** | totals, and which projects consume the most context |
 | **Session** | context growth turn by turn, compaction boundaries, the threshold for each model run, and every message in the session - click one to read it |
 | **Compactions** | every compaction, the predicted trigger, how far past it you went, and on click: the summary it wrote plus what it dropped |
-| **Breakdown** | the context tooltip's category split - Messages, System tools, MCP tools, Skills, System prompt, Free space - for the current turn and across every turn on record |
+| **Breakdown** | the context tooltip's category split - Messages, System tools, Memory files, Skills, MCP tools, System prompt, Custom agents, Free space - plus the deferred tools it lists without a percentage, and the item counts, for the current turn and across every turn on record |
 | **Mirror** | a live calculator: given N tokens and a window, what happens |
 | **Waste** | files re-read inside one session, MCP servers by invocation, tool schema cost |
 
@@ -246,9 +246,12 @@ regardless of this setting; see `messages` under [The store](#the-store).
 
 ## The breakdown
 
-Claude Code's context tooltip splits the window into Messages, System tools, MCP tools, Skills,
-System prompt and Free space. **That split is stored nowhere.** It is computed for the UI and
-discarded: it appears in no transcript record, no hook payload and no status line sample.
+Claude Code's context tooltip splits the window into Messages, System tools, Memory files, Skills,
+MCP tools, System prompt, Custom agents and Free space. Below those it lists deferred tools, MCP and
+system, with no percentage: a deferred tool is not loaded, so it costs nothing until it is. Several
+rows also carry an item count, e.g. MCP tools 113.4k across 214 items. **None of that split is
+stored anywhere.** It is computed for the UI and discarded: it appears in no transcript record, no
+hook payload and no status line sample.
 
 It is still recoverable, because the arithmetic is closed:
 
@@ -262,7 +265,7 @@ unlocks the split for all of your history at once, with no further capture. Take
 the tooltip and record it:
 
 ```bash
-node tools/breakdown.mjs --calibrate --system-prompt 5100 --system-tools 19100 --mcp-tools 11000 --skills 6100
+node tools/breakdown.mjs --calibrate   --system-prompt 5100 --system-tools 23500 --mcp-tools 8400   --skills 9900 --memory-files 11700 --custom-agents 1000   --mcp-tools-deferred 104900 --system-tools-deferred 16200   --mcp-tools-items 214 --memory-files-items 1 --custom-agents-items 10
 ```
 
 Baselines are kept as a history, not a single value, because the overhead moves when you add an MCP

@@ -790,11 +790,33 @@ BREAKDOWN_COLORS = {
     "skills": WARN, "system_prompt": "#d6336c", "free": BORDER,
     "memory_files": "#a371f7", "custom_agents": "#39c5cf",
 }
-BREAKDOWN_LABELS = {
-    "messages": "Messages", "system_tools": "System tools", "mcp_tools": "MCP tools",
-    "skills": "Skills", "system_prompt": "System prompt", "free": "Free space",
-    "memory_files": "Memory files", "custom_agents": "Custom agents",
-}
+BREAKDOWN_LABELS = {"messages": "Messages", "free": "Free space"}
+
+
+def tool_spec(script, flag):
+    """Read a spec a tool publishes, so the dashboard does not keep a second copy in Python.
+
+    Returns (value, error). The caller decides what to show when it fails; nothing here falls back
+    to a literal, because a stale literal that renders normally is the failure being avoided.
+    """
+    try:
+        out = subprocess.run(["node", str(ROOT / "tools" / script), flag],
+                             capture_output=True, text=True, timeout=20, check=True)
+        return json.loads(out.stdout), None
+    except Exception as exc:
+        return None, f"could not read {flag} from tools/{script}: {exc}"
+
+
+def breakdown_fields():
+    """The category spec, read from breakdown.mjs rather than copied into Python.
+
+    Two hardcoded lists either side of a language boundary drift the same way the four literals
+    inside breakdown.mjs used to, except neither language's tests can catch it. So the tool that
+    owns the schema also publishes the spec, and this reads it. A failure here is reported on the
+    page instead of silently falling back to a list that may be a release behind.
+    """
+    fields, err = tool_spec("breakdown.mjs", "--fields")
+    return (fields or []), err
 
 
 def latest_baseline():
@@ -820,12 +842,25 @@ def breakdown_layout():
                 style={"color": MUTED, "fontSize": "12.5px", "maxWidth": "760px",
                        "lineHeight": "1.6", "marginBottom": "14px"}),
             html.Pre(
-                "node tools/breakdown.mjs --calibrate --system-prompt 5100 "
-                "--system-tools 19100 --mcp-tools 11000 --skills 6100",
+                # Every row the tooltip shows, including the two deferred ones and the item
+                # counts. A command listing only some of them records a fixed overhead that is
+                # too small, and every turn in history then reports that many tokens too many
+                # under Messages, with nothing on the page saying so.
+                "node tools/breakdown.mjs --calibrate \\\n"
+                "  --system-prompt 5100 --system-tools 23500 --mcp-tools 8400 \\\n"
+                "  --skills 9900 --memory-files 11700 --custom-agents 1000 \\\n"
+                "  --mcp-tools-deferred 104900 --system-tools-deferred 16200 \\\n"
+                "  --mcp-tools-items 214 --memory-files-items 1 --custom-agents-items 10",
                 style={"background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
                        "padding": "12px 14px", "color": TEXT, "fontFamily": MONO,
                        "fontSize": "12px", "display": "inline-block"}),
         ])
+
+    fields, spec_error = breakdown_fields()
+    labels = {f["col"]: f["label"] for f in fields}
+    resident_cols = [f["col"] for f in fields if f["kind"] == "resident"]
+    deferred_cols = [f["col"] for f in fields if f["kind"] == "deferred"]
+    count_for = {f["of"]: f["col"] for f in fields if f["kind"] == "count"}
 
     static_total = int(b["static_total"])
     window = int(b["window_size"] or 1000000)
@@ -840,47 +875,102 @@ def breakdown_layout():
     messages = max(0, resident - static_total)
     free = max(0, window - resident)
 
+    def cell(val):
+        """A stored value, or None when the baseline never recorded it."""
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return None
+        return int(val)
+
     # Current split, as a single proportional bar - the same shape the tooltip uses, so the two
     # can be compared at a glance rather than translated.
     parts, rows = [], []
-    # Every static category the baselines table can hold, in the order the tooltip lists them, so
-    # the two line up row for row. Omitting one does not just hide a row: this loop feeds the bar
-    # as well, so a missing key silently shortens the bar and makes the rows under-sum the window.
-    # A baseline recorded before a category existed leaves it NULL, which the None check skips.
-    for key in ("messages", "system_tools", "memory_files", "skills", "mcp_tools",
-                "system_prompt", "custom_agents", "free"):
-        val = messages if key == "messages" else (free if key == "free" else b.get(key))
-        if val is None or (isinstance(val, float) and pd.isna(val)):
-            continue
-        val = int(val)
-        if val <= 0:
-            continue
+    # Ordered largest first, which is the order the tooltip itself lists them in. The order comes
+    # from the data rather than a hand-written sequence, so a category added to the spec appears
+    # here without an edit, and none can be omitted: this loop feeds the bar as well, so a missing
+    # key would silently shorten the bar and make the rows under-sum the window.
+    sized = [("messages", messages)] + [(c, cell(b.get(c))) for c in resident_cols]
+    sized = [(k, v) for k, v in sized if v]
+    sized.sort(key=lambda kv: -kv[1])
+    for key, val in sized + [("free", free)]:
         pct = val / window * 100
-        parts.append(html.Div(style={"width": f"{pct}%", "background": BREAKDOWN_COLORS[key],
+        parts.append(html.Div(style={"width": f"{pct}%",
+                                     "background": BREAKDOWN_COLORS.get(key, MUTED),
                                      "height": "100%"}))
-        rows.append({"category": BREAKDOWN_LABELS[key], "tokens": fmt_tokens(val),
-                     "percent": f"{pct:.1f}%"})
+        items = cell(b.get(count_for.get(key, ""), None)) if key in count_for else None
+        rows.append({"category": BREAKDOWN_LABELS.get(key) or labels.get(key, key),
+                     "tokens": fmt_tokens(val), "percent": f"{pct:.1f}%",
+                     "items": f"{items:,}" if items is not None else ""})
+
+    # Deferred tools are listed by the tooltip with no percentage, because they are not resident:
+    # a deferred tool costs nothing until it loads. They are shown here for the same reason the
+    # tooltip shows them - 104.9k of MCP schema sitting one ToolSearch away is worth knowing about
+    # - but they are never added to the bar, the percentages, or the fixed overhead.
+    for col in deferred_cols:
+        val = cell(b.get(col))
+        if not val:
+            continue
+        rows.append({"category": labels.get(col, col), "tokens": fmt_tokens(val),
+                     "percent": "not resident", "items": ""})
 
     bar = html.Div(parts, style={"display": "flex", "width": "100%", "height": "16px",
                                  "borderRadius": "4px", "overflow": "hidden",
                                  "border": f"1px solid {BORDER}"})
 
     # History: the same split across every turn, which is the part a tooltip can never show.
-    x = list(range(1, len(turns) + 1))
-    res = turns["total_resident"].astype(int)
+    #
+    # Each turn is split by the baseline that was in force AT THAT TURN, not by the newest one.
+    # Back-applying today's overhead to a turn from before an MCP server was added overstates that
+    # turn's static share and understates its Messages by exactly the difference, and it does so
+    # invisibly. merge_asof is the same "last row at or before this timestamp" rule that
+    # breakdown.mjs baselineFor() applies.
+    all_b = q("SELECT ts, static_total FROM context_baselines ORDER BY ts")
+    t = turns.copy()
+    t["_ts"] = pd.to_datetime(t["ts"], format="mixed", utc=True, errors="coerce")
+    t = t.dropna(subset=["_ts"]).sort_values("_ts")
+    bl = all_b.copy()
+    bl["_ts"] = pd.to_datetime(bl["ts"], format="mixed", utc=True, errors="coerce")
+    bl = bl.dropna(subset=["_ts"]).sort_values("_ts")
+    if bl.empty or t.empty:
+        # No parseable baseline timestamps. Fall back to the single newest value rather than
+        # failing the tab, and say which turns that affects: all of them.
+        merged = t.assign(static_total=static_total)
+        pre_baseline = len(merged)
+    else:
+        merged = pd.merge_asof(t, bl[["_ts", "static_total"]], on="_ts", direction="backward")
+        # Turns older than every recorded baseline get no match. They are counted and reported
+        # rather than quietly filled with the earliest value.
+        pre_baseline = int(merged["static_total"].isna().sum())
+        merged["static_total"] = merged["static_total"].fillna(bl["static_total"].iloc[0]).astype(int)
+
+    x = list(range(1, len(merged) + 1))
+    res = merged["total_resident"].astype(int)
+    stat = merged["static_total"].clip(upper=res)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=[static_total] * len(x), mode="lines", name="static overhead",
+    fig.add_trace(go.Scatter(x=x, y=stat, mode="lines", name="static overhead",
                              line=dict(width=0), stackgroup="one", fillcolor="#e8590c"))
-    fig.add_trace(go.Scatter(x=x, y=(res - static_total).clip(lower=0), mode="lines",
+    fig.add_trace(go.Scatter(x=x, y=(res - stat).clip(lower=0), mode="lines",
                              name="messages", line=dict(width=0), stackgroup="one",
                              fillcolor=ACCENT))
     fig.add_trace(go.Scatter(x=x, y=(window - res).clip(lower=0), mode="lines", name="free space",
                              line=dict(width=0), stackgroup="one", fillcolor="#21262d"))
-    fig.update_layout(title=f"Context window composition over {len(turns):,} API calls",
+    fig.update_layout(title=f"Context window composition over {len(merged):,} API calls",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="API call", yaxis_title="tokens")
 
     applies = str(b["ts"])[:19].replace("T", " ")
+    notes = []
+    if spec_error:
+        notes.append(html.Div(f"CATEGORY SPEC UNREADABLE: {spec_error}. Rows below may be "
+                              f"missing categories this store can hold.",
+                              style={"color": DANGER, "fontSize": "11.5px",
+                                     "marginBottom": "8px"}))
+    if pre_baseline:
+        notes.append(html.Div(
+            f"{pre_baseline:,} of {len(merged):,} charted turns predate every recorded baseline "
+            f"({len(bl):,} on record). They are split using the earliest one, which was not "
+            f"observed on their configuration, so their category split is an estimate and their "
+            f"Messages figure is the least trustworthy number on this page.",
+            style={"color": WARN, "fontSize": "11.5px", "marginBottom": "8px"}))
     return html.Div([
         html.Div([
             html.Span("context window", style={"color": MUTED, "fontSize": "12px"}),
@@ -892,15 +982,17 @@ def breakdown_layout():
         bar,
         html.Div(style={"height": "14px"}),
         dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in ["category", "tokens", "percent"]],
+            columns=[{"name": c, "id": c} for c in ["category", "tokens", "percent", "items"]],
             data=rows, **TABLE_STYLE),
+        html.Div(notes, style={"margin": "10px 0 0 0"}),
         html.Div(
             f"DERIVED, not measured. Claude Code stores this split nowhere, so Messages and the "
             f"category rows are computed as resident minus a recorded baseline of "
             f"{static_total:,} tokens (source: {b['source']}, recorded {applies}). Resident and "
-            f"free space are exact. A turn from before that baseline was recorded is split using "
-            f"an overhead that may not have applied to it - re-calibrate after adding an MCP "
-            f"server, a skill, or editing CLAUDE.md.",
+            f"free space are exact. Each charted turn is split by the baseline in force at that "
+            f"turn, not by the newest one. Rows marked 'not resident' are deferred tools, which "
+            f"the tooltip lists without a percentage because they cost nothing until they load - "
+            f"re-calibrate after adding an MCP server, a skill, or editing CLAUDE.md.",
             style={"color": MUTED, "fontSize": "11.5px", "margin": "12px 0 14px 0",
                    "maxWidth": "900px", "lineHeight": "1.55"}),
         dcc.Graph(figure=dark_fig(fig, 420), config={"displayModeBar": False}),
@@ -961,15 +1053,25 @@ def waste_layout():
     store records exact API token counts per turn, but not per tool call, and inventing a
     tokens-per-byte ratio would dress an estimate up as a measurement.
     """
+    # What counts as a read, and how many make a re-read, come from waste.mjs. The query runs here
+    # for speed, but the definition lives in one place: these were two literals under a docstring
+    # asserting they could not disagree, which asserted it rather than ensuring it.
+    spec, spec_err = tool_spec("waste.mjs", "--spec")
+    if spec:
+        read_tools, dup_min = spec["read_tools"], int(spec["duplicate_min"])
+    else:
+        read_tools, dup_min = [], 3
+    placeholders = ",".join("?" for _ in read_tools)
     dup = q(
-        """SELECT session_id, target, COUNT(*) reads,
-                  SUM(COALESCE(result_bytes,0)) bytes,
-                  COUNT(DISTINCT input_sha1) variants
-           FROM tool_calls
-           WHERE tool_name IN ('Read','NotebookRead') AND target IS NOT NULL
-           GROUP BY session_id, target HAVING reads >= 3
-           ORDER BY reads DESC LIMIT 200"""
-    )
+        f"""SELECT session_id, target, COUNT(*) reads,
+                   SUM(COALESCE(result_bytes,0)) bytes,
+                   COUNT(DISTINCT input_sha1) variants
+            FROM tool_calls
+            WHERE tool_name IN ({placeholders}) AND target IS NOT NULL
+            GROUP BY session_id, target HAVING reads >= ?
+            ORDER BY reads DESC LIMIT 200""",
+        tuple(read_tools) + (dup_min,),
+    ) if read_tools else pd.DataFrame()
     srv = q(
         """SELECT server_name AS server, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes, MAX(ts) last_call
@@ -995,7 +1097,9 @@ def waste_layout():
 
     return html.Div([
         html.Div([
-            stat_card("Re-read groups", f"{len(dup):,}", sub="same file, one session, 3+ reads"),
+            stat_card("Re-read groups", f"{len(dup):,}",
+                      sub=(f"same file, one session, {dup_min}+ reads" if read_tools
+                           else "UNAVAILABLE: read-tool spec unreadable")),
             stat_card("Re-reads beyond the first", f"{repeats:,}", color=DANGER if repeats else TEXT),
             stat_card("KB in the repeats", f"{repeat_bytes/1024:,.1f}", sub="tool result bytes"),
             stat_card("Tool calls recorded", f"{int(tools['calls'].sum()):,}" if not tools.empty else "0"),
