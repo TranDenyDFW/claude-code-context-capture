@@ -224,13 +224,30 @@ export function parseSettings(raw) {
 }
 const readSettings = () => parseSettings(existsSync(SETTINGS) ? readFileSync(SETTINGS, 'utf8') : null);
 
-// Claude Code writes this file too. Re-read immediately before serialising, then temp+rename so a
-// concurrent reader never observes a half-written file.
+// temp+rename, so a concurrent reader never observes a half-written file. This one serialises the
+// object it is handed; the re-read belongs to writeSettingsAtomic below, which is the only writer
+// that has a file someone else also owns.
 function writeJsonAtomic(p, obj) {
   mkdirSync(join(p, '..'), { recursive: true });
   const tmp = `${p}.tmp-${process.pid}`;
   writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`, 'utf8');
   renameSync(tmp, p);
+}
+
+// Claude Code writes settings.json too, and so does our own SessionStart hook. Everything above
+// computes `next` from a snapshot taken earlier in the command, prints a diff from it, and then
+// wrote that stale object back, silently discarding anything that landed in between. The comment
+// on writeJsonAtomic claimed a re-read that never existed.
+//
+// So: re-read immediately before serialising and re-apply the transform to what is actually on
+// disk. Both transforms converge, which is what makes replaying them on fresher input safe rather
+// than merely different. The printed diff still comes from the earlier snapshot, so it can differ
+// from what lands; that is reported instead of hidden.
+function writeSettingsAtomic(transform) {
+  const before = readSettings();
+  const next = transform(before);
+  writeJsonAtomic(SETTINGS, next);
+  return { before, next };
 }
 
 function backupSettings() {
@@ -302,9 +319,11 @@ function cmdInstall(argv) {
   if (adopted) console.log(adopted);
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
 
-  const priorStatusLine = ownsCommand(settings?.statusLine?.command, ROOT) ? undefined : (settings?.statusLine ?? null);
   const backup = backupSettings();
-  writeJsonAtomic(SETTINGS, next);
+  const { before } = writeSettingsAtomic((s) => applyWiring(s, ROOT).next);
+  // Taken from what was actually on disk at write time, not from the earlier snapshot, so a
+  // statusLine that arrived in between is still the one we record as the prior value.
+  const priorStatusLine = ownsCommand(before?.statusLine?.command, ROOT) ? undefined : (before?.statusLine ?? null);
   if (!rewire) mkdirSync(join(ROOT, 'data', 'raw'), { recursive: true });
   saveReceipt({ settingsBackup: backup ? posix(backup) : null, ...(priorStatusLine === undefined ? {} : { priorStatusLine }) });
   console.log(`wrote ${posix(SETTINGS)}${backup ? ` (backup: ${posix(backup)})` : ''}`);
@@ -330,7 +349,7 @@ function cmdUninstall(argv) {
   else if (existsSync(db)) console.log(`store kept at ${posix(db)} - pass --purge to delete it`);
 
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
-  if (changes.length) { backupSettings(); writeJsonAtomic(SETTINGS, next); }
+  if (changes.length) { backupSettings(); writeSettingsAtomic((s) => removeWiring(s, ROOT, loadReceipt()).next); }
   if (purge) { for (const f of sidecars(db)) rmSync(f, { force: true }); rmSync(join(ROOT, 'data', 'raw'), { recursive: true, force: true }); }
   rmSync(RECEIPT, { force: true });
   return 0;
@@ -366,7 +385,7 @@ function cmdReset(argv) {
     const cleared = removeWiring(settings, ROOT, loadReceipt()).next;
     const { next, changes } = applyWiring(cleared, ROOT);
     for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
-    if (!dry) { backupSettings(); writeJsonAtomic(SETTINGS, next); saveReceipt({}); }
+    if (!dry) { backupSettings(); writeSettingsAtomic((s) => applyWiring(removeWiring(s, ROOT, loadReceipt()).next, ROOT).next); saveReceipt({}); }
   }
   if (dry) console.log('--dry-run: nothing written');
   return 0;
@@ -447,6 +466,21 @@ function selfTest() {
   // The stakes, stated as a check rather than a comment: this is what a {} fallback would write.
   add('converging {} would have written only our keys, which is what the throw prevents',
     Object.keys(applyWiring({}, R).next).join(',') === 'hooks,statusLine');
+
+  // The race. writeSettingsAtomic re-reads and re-applies rather than writing a stale snapshot,
+  // so what has to hold is that replaying a transform on fresher input keeps what it did not put
+  // there, and settles. Both transforms are checked, in both directions.
+  const raced = structuredClone(good);
+  raced.env = { ARRIVED_LATE: '1' };
+  raced.hooks.Stop = [{ hooks: [{ type: 'command', command: 'node "D:/guard/stop.mjs"' }] }];
+  const replayedIn = applyWiring(raced, R).next;
+  add('a key that lands between read and write survives the replay', replayedIn.env?.ARRIVED_LATE === '1');
+  add('a hook event that lands between read and write survives the replay',
+    JSON.stringify(replayedIn.hooks.Stop).includes('guard/stop.mjs'));
+  add('replaying install on its own output settles', applyWiring(replayedIn, R).changes.length === 0);
+  const replayedOut = removeWiring(raced, R, null).next;
+  add('uninstall replayed on fresher input keeps the late arrival', replayedOut.env?.ARRIVED_LATE === '1');
+  add('uninstall replayed on its own output settles', removeWiring(replayedOut, R, null).changes.length === 0);
 
   // Consequence 2: uninstalling at the PARENT root must not strip the nested install.
   const nestedInstalled = applyWiring({}, NESTED).next;
