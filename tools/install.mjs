@@ -30,7 +30,15 @@ import { rootFrom, defaultDb } from './paths.mjs';
 
 const ROOT = rootFrom(import.meta.url);
 const SETTINGS = join(homedir(), '.claude', 'settings.json');
-const RECEIPT = join(ROOT, 'data', 'install-receipt.json');
+// The receipt records an install into ONE settings file, but its path is derived from the install
+// ROOT, and ROOT does not move when HOME does. So pointing HOME at a scratch directory to exercise
+// the installer safely still reads and REWRITES the receipt belonging to the real install, and an
+// uninstall run that way deletes it outright. Measured, not theorised: a round trip against a
+// scratch HOME destroyed the live receipt on this machine twice, taking priorStatusLine with it,
+// which is the value a genuine uninstall needs to put the previous status line back.
+//
+// C4X_RECEIPT scopes the receipt to match a scoped HOME. Set both together or neither.
+const RECEIPT = process.env.C4X_RECEIPT || join(ROOT, 'data', 'install-receipt.json');
 const RECEIPT_VERSION = 1;
 
 // Settings hold forward-slash paths even on Windows: backslashes would need escaping inside a
@@ -266,6 +274,22 @@ export const sidecars = (db) => [db, `${db}-wal`, `${db}-shm`];
 
 function loadReceipt() { return readJson(RECEIPT, null); }
 
+// The receipt lives beside the ROOT, but it describes a particular SETTINGS file. Those are not
+// the same scope, and pointing HOME somewhere else to exercise the installer safely does not move
+// the receipt with it: an uninstall run that way deletes the receipt belonging to the real install,
+// taking priorStatusLine with it, so the genuine uninstall can no longer restore the status line it
+// replaced and the SessionStart self-heal stops recognising itself as installed.
+//
+// Observed, not theorised: an install/uninstall round trip against a scratch HOME destroyed the
+// live receipt on this machine and it had to be restored from a backup.
+//
+// A receipt with no settings field predates this and is treated as describing whatever it is asked
+// about, so an older install still uninstalls cleanly.
+export const receiptDescribes = (receipt, settingsPath) => {
+  if (!receipt || typeof receipt.settings !== 'string') return true;
+  return posix(receipt.settings).toLowerCase() === posix(settingsPath).toLowerCase();
+};
+
 function saveReceipt(extra) {
   mkdirSync(join(ROOT, 'data'), { recursive: true });
   const prior = loadReceipt();
@@ -341,7 +365,8 @@ function cmdUninstall(argv) {
   const dry = argv.includes('--dry-run');
   const purge = argv.includes('--purge');
   const settings = readSettings();
-  const { next, changes } = removeWiring(settings, ROOT, loadReceipt());
+  const receipt = loadReceipt();
+  const { next, changes } = removeWiring(settings, ROOT, receipt);
 
   if (!changes.length) console.log('nothing of ours found in settings');
   for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
@@ -353,7 +378,8 @@ function cmdUninstall(argv) {
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
   if (changes.length) { backupSettings(); writeSettingsAtomic((s) => removeWiring(s, ROOT, loadReceipt()).next); }
   if (purge) { for (const f of sidecars(db)) rmSync(f, { force: true }); rmSync(join(ROOT, 'data', 'raw'), { recursive: true, force: true }); }
-  rmSync(RECEIPT, { force: true });
+  if (receiptDescribes(receipt, SETTINGS)) rmSync(RECEIPT, { force: true });
+  else console.log(`kept the receipt: it records an install into ${posix(receipt.settings)}, not ${posix(SETTINGS)}`);
   return 0;
 }
 
@@ -457,6 +483,20 @@ function selfTest() {
   withSibling.hooks.SessionStart.push({ hooks: [{ type: 'command', command: cmdFor(SIBLING, 'hooks/event-hook.mjs') }] });
   add('install leaves a sibling install\u0027s hook alone',
     JSON.stringify(applyWiring(withSibling, R).next.hooks.SessionStart).includes('root-old'));
+
+  // The receipt describes ONE settings file, and it does not travel when HOME is pointed elsewhere.
+  // Uninstalling against a scratch HOME used to delete the real install's receipt, which is how the
+  // live one on this machine was lost and had to be restored from a backup.
+  const liveReceipt = { settings: 'C:/Users/Shake/.claude/settings.json', priorStatusLine: null };
+  add('a receipt is deleted when it describes the settings file being uninstalled',
+    receiptDescribes(liveReceipt, 'C:/Users/Shake/.claude/settings.json'));
+  add('a receipt describing a DIFFERENT settings file is kept (gate can fail)',
+    !receiptDescribes(liveReceipt, `${R}/tmp/scratch/.claude/settings.json`));
+  add('the comparison ignores separator and case, which are the same path on Windows',
+    receiptDescribes({ settings: 'C:\\Users\\Shake\\.claude\\settings.json' }, 'C:/Users/shake/.claude/settings.json'));
+  add('a receipt with no settings field predates this and still uninstalls',
+    receiptDescribes({ priorStatusLine: null }, 'anything'));
+  add('no receipt at all is not an obstacle', receiptDescribes(null, 'anything'));
 
   // Reading settings. Absent and unparseable are different states, and only the first is ordinary.
   const threw = (fn) => { try { fn(); return null; } catch (e) { return e; } };
