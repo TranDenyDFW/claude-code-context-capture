@@ -35,3 +35,7 @@ desktop.ini
 # why status line samples carry a probe flag, why windows are resolved per model segment, why a
 # minified identifier may never anchor a claim. Read them before changing behaviour they explain.
 .md/
+
+# Research notes dropped in for review. Working documents about OTHER tools, not this extension's
+# source, and they carry third-party product descriptions verbatim. They stay on disk, out of git.
+Extension Features and Context Capture.md
