@@ -30,6 +30,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { rootFrom, resolveDb } from './paths.mjs';
 import { inspectBody } from './otel-gate.mjs';
 
+// Three writers share this store by design: a manual harvest, the SessionEnd and UserPromptSubmit
+// hooks, and the dashboard's refresh loop. SQLite's default busy timeout is ZERO, so a reader that
+// arrives mid-write fails outright with SQLITE_BUSY instead of waiting. A reader losing a race
+// should be slow, not absent.
+const BUSY_TIMEOUT = 'PRAGMA busy_timeout = 15000';
+
 const ROOT = rootFrom(import.meta.url);
 const GATE_DIR = join(ROOT, 'tmp', 'otel-bodies');
 const UNPARSED = join(ROOT, 'data', 'raw', 'otel-unparsed.ndjson');
@@ -92,6 +98,7 @@ export function toolRows(json) {
 export function openStore(dbPath) {
   mkdirSync(join(dbPath, '..'), { recursive: true });
   const db = new DatabaseSync(dbPath);
+  db.exec(BUSY_TIMEOUT);
   db.exec(SCHEMA);
   return db;
 }
@@ -192,6 +199,7 @@ function cmdStatus(argv) {
 
   if (!existsSync(dbPath)) { console.log(`store        : ${dbPath} (not created yet)`); return files.length ? 1 : 0; }
   const db = new DatabaseSync(dbPath);
+  db.exec(BUSY_TIMEOUT);
   db.exec(SCHEMA);
   const b = db.prepare('SELECT COUNT(*) c, COALESCE(SUM(probe),0) p FROM request_bodies').get();
   const t = db.prepare('SELECT COUNT(*) c, COUNT(DISTINCT tool_name) d, COALESCE(SUM(schema_bytes),0) s FROM tool_schemas').get();

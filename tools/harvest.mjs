@@ -150,6 +150,26 @@ CREATE TABLE IF NOT EXISTS hook_events (
 CREATE UNIQUE INDEX IF NOT EXISTS hook_events_key ON hook_events
   (captured_at, event, COALESCE(session_id,''), COALESCE(tool_name,''));
 CREATE INDEX IF NOT EXISTS hook_events_session ON hook_events (session_id);
+-- What the session is CALLED. The desktop sidebar shows a title for every session and the store
+-- had none, so the dashboard could only identify a session by an encoded directory slug and a
+-- date. The transcripts have carried the titles all along and this ingest ignored them.
+--
+-- Three sources, in descending trust: custom-title is what the user named it, ai-title is what
+-- Claude named it, last-prompt is the opening request and is a description rather than a title.
+-- Kept as separate rows rather than one resolved column, because which source a title came from is
+-- worth showing and a later run must not silently promote a fallback over a real name.
+--
+-- These records carry NO timestamp, so ordering is file order: the last one read wins per kind.
+-- Both key columns are NOT NULL, which is what makes this a safe PRIMARY KEY, unlike the nullable
+-- one hook_events had to be rebuilt to remove.
+CREATE TABLE IF NOT EXISTS session_titles (
+  session_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  title TEXT,
+  file_path TEXT,
+  line_no INTEGER,
+  PRIMARY KEY (session_id, kind)
+);
 CREATE TABLE IF NOT EXISTS record_types (type TEXT PRIMARY KEY, n INTEGER);
 CREATE TABLE IF NOT EXISTS harvest_runs (
   ts TEXT, mode TEXT, files_seen INTEGER, files_read INTEGER, rewrites INTEGER,
@@ -169,6 +189,22 @@ CREATE TABLE IF NOT EXISTS harvest_runs (
 // disagreed: transcript_path and extra were written by every hook row and stored by none of them.
 // `extra` is the field the hook adds specifically so that a key introduced by a future Claude Code
 // build is not silently lost, so dropping it defeated the one mechanism built to prevent this.
+// Which record type carries a title, and under which field. One map rather than a chain of ifs,
+// so a new title source is added in one place and the self-test can enumerate them.
+export const TITLE_FIELD = {
+  'custom-title': 'customTitle',
+  'ai-title': 'aiTitle',
+  'last-prompt': 'lastPrompt',
+};
+export const TITLE_KIND = {
+  'custom-title': 'custom',
+  'ai-title': 'ai',
+  'last-prompt': 'last-prompt',
+};
+// A last-prompt is a whole opening request and can be thousands of characters. It is a fallback
+// label, not a transcript, and the store already holds the full text in `messages`.
+const TITLE_MAX_CHARS = 200;
+
 export const HOOK_EVENT_COLUMNS = [
   'captured_at', 'probe', 'event', 'known', 'session_id', 'transcript_path', 'cwd',
   'permission_mode', 'tool_name', 'tool_input_bytes', 'tool_response_bytes', 'prompt_chars',
@@ -272,6 +308,17 @@ function openDb(dbPath = DB_PATH) {
   mkdirSync(dirname(dbPath), { recursive: true });
   mkdirSync(RAW_DIR, { recursive: true });
   const db = new DatabaseSync(dbPath);
+  // This store has THREE writers by design: a manual harvest, the SessionEnd and UserPromptSubmit
+  // hooks that spawn their own, and the dashboard's refresh loop. SQLite's default busy timeout is
+  // zero, so a concurrent writer does not wait, it fails immediately with SQLITE_BUSY. A --full
+  // run died on "database is locked" after 1,500 files and 7.5 GB because a hook harvest started
+  // while a prompt was submitted. Waiting is the correct behaviour for a capture tool: the loser
+  // of a race should be slow, not absent.
+  //
+  // It is set BEFORE journal_mode, not after: switching journal mode takes an exclusive lock, so
+  // on a store still in rollback-journal mode that very statement is the first thing that can lose
+  // the race, and with the timeout set after it there is nothing yet telling it to wait.
+  db.exec('PRAGMA busy_timeout = 15000');
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA synchronous = NORMAL');
   const existing = db.prepare(
@@ -290,6 +337,54 @@ function openDb(dbPath = DB_PATH) {
   for (const c of missing) db.exec(`ALTER TABLE hook_events ADD COLUMN ${c} TEXT`);
   if (missing.length) console.error(`harvest: hook_events gained ${missing.join(', ')}`);
   return db;
+}
+
+/**
+ * Read ONLY the title records out of every transcript.
+ *
+ * A field added to the ingest is not retroactive: the incremental walk stores a byte offset per
+ * file and never looks at what it already consumed, so titles that had always been on disk stayed
+ * invisible until a re-read. `--full` would do it, but it re-reads 10 GB to collect a few kilobytes
+ * and it lost a race with a hook harvest halfway through.
+ *
+ * This reads each file line by line and parses only lines that could be a title, which is a string
+ * test before any JSON.parse. Cheap enough to re-run whenever a new title source is added.
+ */
+async function backfillTitles(dbPath = DB_PATH) {
+  const db = openDb(dbPath);
+  const put = db.prepare(`INSERT INTO session_titles (session_id,kind,title,file_path,line_no)
+    VALUES (?,?,?,?,?) ON CONFLICT(session_id,kind) DO UPDATE SET
+    title=excluded.title, file_path=excluded.file_path, line_no=excluded.line_no`);
+  const files = listTranscripts(PROJECTS);
+  let stored = 0, scanned = 0, skipped = 0;
+  const types = Object.keys(TITLE_FIELD);
+  for (const path of files) {
+    scanned++;
+    let text;
+    try { text = readFileSync(path, 'utf8'); } catch (e) { skipped++; continue; }
+    let lineNo = 0;
+    for (const line of text.split('\n')) {
+      lineNo++;
+      if (!line || !types.some((t) => line.includes(`"${t}"`))) continue;
+      let d;
+      try { d = JSON.parse(line); } catch { continue; }
+      const field = TITLE_FIELD[d?.type];
+      if (!field || !d.sessionId) continue;
+      const raw = d[field];
+      if (typeof raw !== 'string' || !raw.trim()) continue;
+      put.run(d.sessionId, TITLE_KIND[d.type], raw.trim().slice(0, TITLE_MAX_CHARS), path, lineNo);
+      stored++;
+    }
+    if (scanned % 1000 === 0) console.error(`  ${scanned}/${files.length} files, ${stored} titles`);
+  }
+  const rows = db.prepare('SELECT kind, COUNT(*) n FROM session_titles GROUP BY kind').all();
+  console.log(JSON.stringify({
+    files_scanned: scanned, files_unreadable: skipped, title_records_stored: stored,
+    by_kind: Object.fromEntries(rows.map((r) => [r.kind, r.n])),
+    sessions_with_a_title: db.prepare('SELECT COUNT(DISTINCT session_id) n FROM session_titles').get().n,
+  }, null, 2));
+  db.close();
+  return 0;
 }
 
 function listTranscripts(dir) {
@@ -311,7 +406,7 @@ function listTranscripts(dir) {
 // appear in the line. A regex cannot tell depth 1 from a nested content block, so every line is
 // parsed. Measured cost of parsing everything rather than prefiltering: see harvest_runs.
 const KNOWN_TYPES = new Set([
-  'user', 'assistant', 'attachment', 'system', 'summary',
+  'user', 'assistant', 'attachment', 'system', 'summary', 'ai-title',
   'bridge-session', 'queue-operation', 'last-prompt', 'custom-title', 'atis-latch', 'mode',
   'file-history-snapshot', 'x-anthropic-log',
 ]);
@@ -325,6 +420,9 @@ class Harvest {
         VALUES (?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
         size=excluded.size, mtime_ms=excluded.mtime_ms, bytes_read=excluded.bytes_read,
         lines_read=excluded.lines_read, rewrites=excluded.rewrites, last_harvest_ts=excluded.last_harvest_ts`),
+      putTitle: db.prepare(`INSERT INTO session_titles (session_id,kind,title,file_path,line_no)
+        VALUES (?,?,?,?,?) ON CONFLICT(session_id,kind) DO UPDATE SET
+        title=excluded.title, file_path=excluded.file_path, line_no=excluded.line_no`),
       putSession: db.prepare(`INSERT INTO sessions (session_id,project_slug,cwd,git_branch,version,entrypoint,first_ts,last_ts,transcript_path)
         VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
         last_ts=MAX(COALESCE(sessions.last_ts,''), COALESCE(excluded.last_ts,'')),
@@ -462,6 +560,13 @@ class Harvest {
         if (pendingBoundary) { this.stmt.paircompaction.run(d.uuid, chars, pendingBoundary); this.stats.paired++; pendingBoundary = null; }
       } else if (d.type === 'attachment') {
         this.stmt.bumpAttachment.run(d.sessionId ?? 'unknown', d.attachment?.type ?? 'unknown');
+      } else if (TITLE_FIELD[type] && d.sessionId) {
+        const raw = d[TITLE_FIELD[type]];
+        // A blank title is not a title. Storing '' would outrank a real fallback at read time.
+        if (typeof raw === 'string' && raw.trim()) {
+          this.stmt.putTitle.run(d.sessionId, TITLE_KIND[type], raw.trim().slice(0, TITLE_MAX_CHARS), path, lineNo);
+          this.stats.titles = (this.stats.titles ?? 0) + 1;
+        }
       }
     }
 
@@ -649,11 +754,15 @@ export function backfillSurvivors(dbPath = DB_PATH, { quiet = false } = {}) {
 
 function stats() {
   if (!existsSync(DB_PATH)) { console.error('no store yet at ' + DB_PATH); return 1; }
-  const db = new DatabaseSync(DB_PATH);
-  // Apply the schema before reading. --stats used to open the store raw, so a store written by an
-  // older build was missing the api_calls view and --stats died with "no such table" rather than
-  // creating it. The schema is all IF NOT EXISTS, so this is a no-op on an up-to-date store.
-  db.exec(SCHEMA);
+  // openDb rather than a second connection of its own. This opened the real store read-write and
+  // ran DDL with NO busy timeout, while every other on-disk connection in the repo had one, so
+  // --stats was the one command that still died outright against a concurrent hook harvest. It was
+  // missed because the earlier sweep patched one call site per FILE instead of every call site.
+  //
+  // openDb applies the schema too, which is what this needed anyway: --stats used to open the
+  // store raw, so a store written by an older build was missing the api_calls view and --stats
+  // died with "no such table" rather than creating it.
+  const db = openDb(DB_PATH);
   const q = (s) => db.prepare(s).all();
   const out = {
     db: DB_PATH,
@@ -848,6 +957,42 @@ async function selfTest() {
   checks.push(['extra survives the ingest, which is the field built to preserve future keys',
     kept?.extra === '{"future_field":1}', JSON.stringify(kept)]);
 
+  // Session titles. The field names are NOT guessable: custom-title carries `customTitle`,
+  // ai-title carries `aiTitle`, last-prompt carries `lastPrompt`. An earlier version of this
+  // ingest assumed ai-title used `title` and would have stored nothing for all 681 of them,
+  // silently, which is why each field name is asserted against a record shaped like the real one.
+  {
+    const tf = join(tmp, 'projects', 'P--titles', 'sess.jsonl');
+    mkdirSync(dirname(tf), { recursive: true });
+    writeFileSync(tf, [
+      JSON.stringify({ type: 'last-prompt', lastPrompt: 'do the thing please', sessionId: 'T1' }),
+      JSON.stringify({ type: 'ai-title', aiTitle: 'Doing the thing', sessionId: 'T1' }),
+      JSON.stringify({ type: 'custom-title', customTitle: 'My name for it', sessionId: 'T1' }),
+      JSON.stringify({ type: 'custom-title', customTitle: '   ', sessionId: 'T2' }),
+      JSON.stringify({ type: 'custom-title', customTitle: 'no session id here' }),
+    ].join('\n') + '\n');
+    const th = new Harvest(db);
+    await th.file(tf, true);
+    const got = Object.fromEntries(
+      db.prepare('SELECT kind, title FROM session_titles WHERE session_id = ?').all('T1')
+        .map((r) => [r.kind, r.title]));
+    checks.push(['a custom title is stored under its own kind', got.custom === 'My name for it', JSON.stringify(got)]);
+    checks.push(['an ai title is stored, proving the aiTitle field name (gate can fail)', got.ai === 'Doing the thing', JSON.stringify(got)]);
+    checks.push(['a last prompt is kept as the weakest fallback', got['last-prompt'] === 'do the thing please', JSON.stringify(got)]);
+    checks.push(['all three sources coexist rather than overwriting each other', Object.keys(got).length === 3, JSON.stringify(got)]);
+    checks.push(['a blank title is not stored, so it cannot outrank a real fallback',
+      db.prepare('SELECT COUNT(*) n FROM session_titles WHERE session_id = ?').get('T2').n === 0]);
+    checks.push(['a title with no session id is dropped rather than keyed to null',
+      db.prepare("SELECT COUNT(*) n FROM session_titles WHERE session_id IS NULL OR session_id = ''").get().n === 0]);
+    const before = db.prepare('SELECT COUNT(*) n FROM session_titles').get().n;
+    await new Harvest(db).file(tf, true);
+    checks.push(['re-reading the same titles adds no rows (gate can fail)',
+      db.prepare('SELECT COUNT(*) n FROM session_titles').get().n === before]);
+    checks.push(['every title record type this build knows has a field mapping',
+      Object.keys(TITLE_FIELD).every((t) => typeof TITLE_KIND[t] === 'string'),
+      Object.keys(TITLE_FIELD).filter((t) => !TITLE_KIND[t]).join(',')]);
+  }
+
   // The mechanical guard. The hook decides what a row CONTAINS and this file decides what
   // survives; when those were two hand-written lists they disagreed for the whole life of the
   // table. Now a field added to summarise() with no column here fails the suite instead.
@@ -978,5 +1123,6 @@ if (!IS_ENTRY) { /* imported for its exports: do nothing */ }
 else if (argv.includes('--self-test')) code = await selfTest();
 else if (argv.includes('--stats')) code = stats();
 else if (argv.includes('--backfill-survivors')) code = backfillSurvivors(DB_PATH) ? 0 : 1;
+else if (argv.includes('--backfill-titles')) code = await backfillTitles();
 else code = await run({ full: argv.includes('--full') });
 if (IS_ENTRY) process.exit(code);
