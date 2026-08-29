@@ -19,7 +19,6 @@
 //   node mirror.mjs --predict <tokens> --window <n> [--max-output <n>] [--no-autocompact]
 
 import { DatabaseSync } from 'node:sqlite';
-import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { rootFrom, resolveDb } from './paths.mjs';
 
@@ -58,7 +57,7 @@ const BUSY_TIMEOUT = 'PRAGMA busy_timeout = 15000';
 
 const CANDIDATE_WINDOWS = [200000, 500000, 967000, 1000000];
 
-function thresholdsFor(formula) {
+function _thresholdsFor(formula) {
   return CANDIDATE_WINDOWS.map((w) => ({
     window: w,
     threshold: formula === 'A' ? reportedAutoCompactThreshold(w) : compactThreshold(w),

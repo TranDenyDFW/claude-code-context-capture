@@ -17,8 +17,8 @@ import html as _html
 import json
 import os
 import sqlite3
-import sys
 import subprocess
+import sys
 import threading as _threading
 import time as _time
 from pathlib import Path
@@ -26,8 +26,8 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html
-from dash.exceptions import PreventUpdate
 from dash.dash_table.Format import Format, Group, Scheme
+from dash.exceptions import PreventUpdate
 from flask import request as _flask_request
 
 ROOT = Path(__file__).resolve().parent
@@ -155,7 +155,8 @@ def _node_json_argv(args, timeout=120):
     if proc.returncode != 0:
         raise RuntimeError(f"node {args[0]} exited {proc.returncode}: {proc.stderr.strip()[:400]}")
     if not proc.stdout.strip():
-        raise RuntimeError(f"node {args[0]} produced no stdout. stderr: {proc.stderr.strip()[:400]}")
+        raise RuntimeError(
+            f"node {args[0]} produced no stdout. stderr: {proc.stderr.strip()[:400]}")
     return json.loads(proc.stdout)
 
 
@@ -274,11 +275,14 @@ def _session_rows_uncached() -> pd.DataFrame:
                COALESCE(s.last_ts, MAX(t.ts))                AS last_ts,
                COUNT(*)                                      AS turns,
                MAX(t.total_resident)                         AS peak,
-               (SELECT COUNT(*) FROM compactions c WHERE c.session_id = t.session_id) AS compactions,
+               (SELECT COUNT(*) FROM compactions c
+                 WHERE c.session_id = t.session_id) AS compactions,
                (SELECT title FROM session_titles st WHERE st.session_id = t.session_id
-                 ORDER BY CASE st.kind WHEN 'custom' THEN 0 WHEN 'ai' THEN 1 ELSE 2 END LIMIT 1) AS title,
+                 ORDER BY CASE st.kind WHEN 'custom' THEN 0 WHEN 'ai' THEN 1
+                          ELSE 2 END LIMIT 1) AS title,
                (SELECT kind FROM session_titles st WHERE st.session_id = t.session_id
-                 ORDER BY CASE st.kind WHEN 'custom' THEN 0 WHEN 'ai' THEN 1 ELSE 2 END LIMIT 1) AS title_kind
+                 ORDER BY CASE st.kind WHEN 'custom' THEN 0 WHEN 'ai' THEN 1
+                          ELSE 2 END LIMIT 1) AS title_kind
         FROM turns t LEFT JOIN sessions s ON s.session_id = t.session_id
         GROUP BY t.session_id
         HAVING COUNT(*) >= 5
@@ -297,14 +301,16 @@ def _session_rows_uncached() -> pd.DataFrame:
         if isinstance(path, str) and path and not os.path.exists(path):
             # Absent because it was written on another machine, or absent because it was deleted
             # here. Those are different facts and must not share a label.
-            return ("Imported from another machine" if HOME_DIR.lower() not in path.replace("/", "\\").lower()
+            elsewhere = HOME_DIR.lower() not in path.replace("/", "\\").lower()
+            return ("Imported from another machine" if elsewhere
                     else "Deleted from this machine")
         if isinstance(r.entrypoint, str) and r.entrypoint and r.entrypoint != "claude-desktop":
             return "CLI and SDK"
         return "Projects"
 
     df["section"] = df.apply(classify, axis=1)
-    df["project"] = [project_label(c, s) for c, s in zip(df["cwd"], df["project_slug"])]
+    df["project"] = [project_label(c, s)
+                     for c, s in zip(df["cwd"], df["project_slug"], strict=True)]
     # A session with no title of any kind says so, rather than showing an empty cell that reads
     # like a rendering fault.
     df["title"] = [
@@ -473,7 +479,8 @@ def all_compactions(session_id=None, cohort=None) -> pd.DataFrame:
     # sidechain filter does not apply to this table.
     where, args = scoped(session_id, "all", alias="c", cohort=cohort)
     return q(f"""
-        SELECT c.uuid, c.ts, COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project, c.trigger, c.version,
+        SELECT c.uuid, c.ts, c.trigger, c.version,
+               COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project,
                c.pre_tokens, c.post_tokens, c.cumulative_dropped_tokens AS dropped,
                c.duration_ms,
                (SELECT t.model FROM turns t
@@ -625,7 +632,8 @@ def refresh_store(min_interval: float = 4.0) -> None:
             ["node", str(ROOT / "tools" / "harvest.mjs")],
             capture_output=True, text=True, cwd=str(ROOT), timeout=120,
         )
-        _harvest_state["error"] = None if proc.returncode == 0 else (proc.stderr or "").strip()[:200]
+        _harvest_state["error"] = (None if proc.returncode == 0
+                                   else (proc.stderr or "").strip()[:200])
         _harvest_state["runs"] += 1
     except Exception as exc:                        # noqa: BLE001 - reported in the UI, not raised
         _harvest_state["error"] = str(exc)[:200]
@@ -755,6 +763,7 @@ def fmt_bytes(n) -> str:
 # The two styles every tab's prose already uses inline. Named once so a new tab cannot drift into
 # its own heading size, which is how a dashboard stops looking like one product.
 SECTION_HEAD = {"color": TEXT, "fontSize": "14px", "fontWeight": "600", "margin": "18px 0 4px"}
+CONTROL_LABEL = {"color": MUTED, "fontSize": "11.5px", "fontFamily": MONO}
 SECTION_NOTE = {"color": MUTED, "fontSize": "12px", "marginBottom": "8px", "maxWidth": "900px",
                 "lineHeight": "1.55"}
 CODE_BLOCK = {"background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
@@ -890,7 +899,8 @@ def quick_view(session_id, scope="main"):
             r = churn.iloc[0]
             mult = (r["churn"] / r["peak"]) if r["peak"] else 0
             bits.append(html.Span(
-                f"{int(r['calls']):,} calls · re-read {fmt_tokens(r['churn'])} ({mult:,.0f}x peak) · {scope_note}",
+                f"{int(r['calls']):,} calls · re-read {fmt_tokens(r['churn'])} "
+                f"({mult:,.0f}x peak) · {scope_note}",
                 style={"color": MUTED, "fontSize": "10px", "fontFamily": MONO}))
     return html.Div([html.Div(bits, style={"marginBottom": "2px"}), context_bar(live)])
 
@@ -901,6 +911,30 @@ def empty_fig(msg: str) -> go.Figure:
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False)
     return dark_fig(fig, height=300)
+
+
+_text_note_cache = {"at": 0.0, "note": None}
+
+
+def stored_text_note(ttl: float = 300.0) -> str:
+    """One line naming what the store holds, with the scale, for the header.
+
+    Cached the way the rest of this file caches, because the header is rebuilt by every callback and
+    a COUNT over messages on each of those would be a self-inflicted cost on the page that exists to
+    show what things cost.
+    """
+    now = _time.time()
+    if _text_note_cache["note"] is not None and now - _text_note_cache["at"] < ttl:
+        return _text_note_cache["note"]
+    try:
+        row = q("SELECT COUNT(*) AS n, COALESCE(SUM(chars), 0) AS chars FROM messages").iloc[0]
+        note = (f"this store keeps the TEXT of {int(row['n']):,} records "
+                f"({fmt_bytes(int(row['chars']))} of it), not just their sizes")
+    except Exception:                               # noqa: BLE001 - a header must always render
+        note = "this store keeps the text of your conversations, not just their sizes"
+    _text_note_cache["at"] = now
+    _text_note_cache["note"] = note
+    return note
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +973,21 @@ header = html.Div(
                 html.Span("context capture", style={"fontWeight": 800, "fontSize": "15px"}),
                 html.Span(f"  {DB_PATH}", style={"color": MUTED, "fontSize": "11px",
                                                  "marginLeft": "10px"}),
+                # What is in that file, said on every tab rather than only in the README. Someone
+                # can otherwise use this for an hour without learning that the store holds
+                # conversation text rather than measurements of it.
+                html.Div(
+                    [
+                        html.Span("PRIVACY  ", style={"color": WARN, "fontWeight": 700,
+                                                      "letterSpacing": "0.06em"}),
+                        html.Span(stored_text_note()),
+                        html.Span("  Nothing leaves this machine, and uninstalling is the only "
+                                  "way to stop capture: see the README.",
+                                  style={"color": MUTED}),
+                    ],
+                    style={"color": TEXT, "fontSize": "10.5px", "fontFamily": MONO,
+                           "marginTop": "3px", "maxWidth": "760px"},
+                ),
             ],
         ),
         html.Div(
@@ -1014,8 +1063,9 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
                                style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
         ])
     records = df.to_dict("records") if hasattr(df, "to_dict") else list(df)
-    cols = columns or [c for c in (df.columns if hasattr(df, "columns") else records[0].keys())]
-    truncated = " (table shows the first page; export gives every row)" if len(records) > page_size else ""
+    cols = columns or list(df.columns if hasattr(df, "columns") else records[0].keys())
+    truncated = (" (table shows the first page; export gives every row)"
+                 if len(records) > page_size else "")
     return html.Div([
         html.Div(title, style=SECTION_HEAD),
         html.Div(f"{len(records):,} rows.{truncated}" + (f" {note}" if note else ""),
@@ -1150,16 +1200,19 @@ def summary_layout(session_id=None, scope="main", cohort=None):
                       style_cell_conditional=[
                           {"if": {"column_id": "finding"}, "minWidth": "200px", "maxWidth": "240px",
                            "whiteSpace": "normal"},
-                          {"if": {"column_id": "evidence"}, "minWidth": "300px", "maxWidth": "420px",
+                          {"if": {"column_id": "evidence"},
+                           "minWidth": "300px", "maxWidth": "420px",
                            "whiteSpace": "normal"},
-                          {"if": {"column_id": "do this"}, "minWidth": "300px", "whiteSpace": "normal"},
+                          {"if": {"column_id": "do this"},
+                           "minWidth": "300px", "whiteSpace": "normal"},
                       ],
                       style_table={"overflowX": "auto"}, **TABLE_STYLE)
-                  if rows else html.Div("Nothing to act on from this store yet.", style=SECTION_NOTE),
+                  if rows else html.Div("Nothing to act on from this store yet.",
+                                        style=SECTION_NOTE),
                   open_by_default=True),
 
         accordion("Store totals", "lifetime counts, no action implied",
-                  html.Div([stat_card(l, v, sub=sub) for l, v, sub in totals],
+                  html.Div([stat_card(label, value, sub=note) for label, value, note in totals],
                            style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})),
 
         accordion("Where the tokens went", "cumulative resident by project, top 15",
@@ -1393,7 +1446,8 @@ def decisions() -> list:
         mult = (r["churn"] / r["peak"]) if r["peak"] else 0
         out.append({
             "finding": "One session re-paid for its own context",
-            "evidence": f"{str(r['session_id'])[:8]} ran {days} days over {int(r['calls']):,} calls "
+            "evidence": f"{str(r['session_id'])[:8]} ran {days} days "
+                        f"over {int(r['calls']):,} calls "
                         f"and billed {fmt_tokens(r['churn'])} of cache reads, "
                         f"{mult:,.0f}x its own peak window",
             "do this": "Split long-running work into fresh sessions. Context cost grows with "
@@ -1515,7 +1569,8 @@ def overview_layout():
         -- rows carrying the same requestId and the same usage, about 2.3 per call here, so
         -- summing turns inflated every figure on this chart by roughly 2x. Measured against
         -- ccusage on the same transcripts: turns gave 56.90 B, the deduped view gives 27.12 B.
-        SELECT COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project, COUNT(*) AS turns,
+        SELECT COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project,
+               COUNT(*) AS turns,
                SUM(a.total_resident) AS resident, SUM(a.output_tokens) AS out
         FROM api_calls a LEFT JOIN sessions s ON s.session_id = a.session_id
         GROUP BY project ORDER BY resident DESC LIMIT 15
@@ -1562,13 +1617,13 @@ def session_layout(session_id=None, scope="main", cohort=None):
     return html.Div([
         html.Div([
             html.Div([
-                html.Span("Budget, as a share of the window", style={"color": MUTED, "fontSize": "11.5px", "fontFamily": MONO}),
+                html.Span("Budget, as a share of the window", style=CONTROL_LABEL),
                 dcc.Slider(id="budget-pct", min=50, max=100, step=5, value=default_budget,
                            marks={v: f"{v}%" for v in (50, 60, 70, 80, 90, 100)},
                            tooltip={"placement": "bottom"}),
             ], style={"flex": "1", "minWidth": "260px"}),
             html.Div([
-                html.Span("Compare turns A and B", style={"color": MUTED, "fontSize": "11.5px", "fontFamily": MONO}),
+                html.Span("Compare turns A and B", style=CONTROL_LABEL),
                 dcc.RangeSlider(id="turn-range", min=1, max=n, step=1, value=[1, n],
                                 marks=marks, tooltip={"placement": "bottom"},
                                 allowCross=False),
@@ -1658,7 +1713,7 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
     # the token count alone and SAY SO in the confidence column rather than hiding the weaker
     # basis behind an identical-looking number.
     windows, confidences = [], []
-    for uuid, pre in zip(df["uuid"], df["pre_tokens"]):
+    for uuid, pre in zip(df["uuid"], df["pre_tokens"], strict=True):
         res = COMPACTION_WINDOWS.get(uuid) or {}
         if res.get("window"):
             windows.append(res["window"])
@@ -1676,7 +1731,8 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
         x=df["pre_tokens"], y=df["overshoot"], mode="markers",
         marker=dict(size=8, color=[DANGER if o < 0 else GOOD for o in df["overshoot"]],
                     line=dict(color=BORDER, width=1)),
-        text=[f"{p} | v{v} | {m}" for p, v, m in zip(df["project"], df["version"], df["model"])],
+        text=[f"{p} | v{v} | {m}" for p, v, m
+              in zip(df["project"], df["version"], df["model"], strict=True)],
         hovertemplate="%{text}<br>pre %{x:,.0f}<br>overshoot %{y:,.0f}<extra></extra>",
     ))
     fig.add_hline(y=0, line=dict(color=MUTED, width=1, dash="dash"))
@@ -1823,7 +1879,8 @@ def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None
 
     static_total = int(b["static_total"])
     window = int(b["window_size"] or 1000000)
-    scope_sql, scope_args = scoped(session_id, "all" if include_sidechain else "main", cohort=cohort)
+    scope_sql, scope_args = scoped(session_id, "all" if include_sidechain else "main",
+                                   cohort=cohort)
     turns = q(f"""SELECT ts, total_resident FROM api_calls
                   WHERE total_resident IS NOT NULL {scope_sql}
                   ORDER BY ts""", scope_args)
@@ -1901,7 +1958,8 @@ def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None
         # Turns older than every recorded baseline get no match. They are counted and reported
         # rather than quietly filled with the earliest value.
         pre_baseline = int(merged["static_total"].isna().sum())
-        merged["static_total"] = merged["static_total"].fillna(bl["static_total"].iloc[0]).astype(int)
+        merged["static_total"] = (merged["static_total"]
+                                  .fillna(bl["static_total"].iloc[0]).astype(int))
 
     x = list(range(1, len(merged) + 1))
     res = merged["total_resident"].astype(int)
@@ -2067,9 +2125,11 @@ def waste_layout(session_id=None, scope="main", cohort=None):
             stat_card("Re-read groups", f"{len(dup):,}",
                       sub=(f"same file, one session, {dup_min}+ reads" if read_tools
                            else "UNAVAILABLE: read-tool spec unreadable")),
-            stat_card("Re-reads beyond the first", f"{repeats:,}", color=DANGER if repeats else TEXT),
+            stat_card("Re-reads beyond the first", f"{repeats:,}",
+                      color=DANGER if repeats else TEXT),
             stat_card("KB in the repeats", f"{repeat_bytes/1024:,.1f}", sub="tool result bytes"),
-            stat_card("Tool calls recorded", f"{int(tools['calls'].sum()):,}" if not tools.empty else "0"),
+            stat_card("Tool calls recorded",
+                      f"{int(tools['calls'].sum()):,}" if not tools.empty else "0"),
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "18px"}),
 
         evidence_block(
@@ -2105,7 +2165,8 @@ def sources_layout(session_id=None, scope="main", cohort=None):
     _w, sid_args = scoped(session_id, "all", cohort=cohort)
     sid_where = ("WHERE 1=1 " + _w) if _w else ""
     sql = {}
-    sql["att"] = f"""SELECT type AS kind, SUM(n) AS occurrences, COUNT(DISTINCT session_id) AS sessions
+    sql["att"] = f"""SELECT type AS kind, SUM(n) AS occurrences,
+                       COUNT(DISTINCT session_id) AS sessions
                 FROM attachments {sid_where} GROUP BY type ORDER BY SUM(n) DESC"""
     att = q(sql["att"], sid_args)
     hw = _w
@@ -2195,7 +2256,8 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                          auto_compact_threshold, is_auto_compact_enabled, error
                   FROM probes ORDER BY id""")
     details = q("""SELECT probe_id, kind, COUNT(*) AS items, SUM(COALESCE(tokens,0)) AS tokens
-                   FROM probe_details GROUP BY probe_id, kind ORDER BY probe_id, SUM(COALESCE(tokens,0)) DESC""")
+                   FROM probe_details GROUP BY probe_id, kind
+                   ORDER BY probe_id, SUM(COALESCE(tokens,0)) DESC""")
     named = q("""SELECT probe_id, kind, name, COALESCE(tokens,0) AS tokens
                  FROM probe_details WHERE COALESCE(tokens,0) > 0
                  ORDER BY tokens DESC LIMIT 60""")
@@ -2878,7 +2940,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     # The scrubber's two handles. A and B are turn numbers, and the diff panel below the chart
     # reports what happened between them, so the marks are what tie the two together.
     if mark:
-        for label, pos in zip(("A", "B"), mark):
+        for label, pos in zip(("A", "B"), mark, strict=False):   # mark may hold fewer than two
             if pos and 1 <= pos <= len(x):
                 fig.add_vline(x=pos, line=dict(color=ACCENT, width=1, dash="dot"))
                 fig.add_annotation(x=pos, y=0, text=label, showarrow=False, yanchor="top",

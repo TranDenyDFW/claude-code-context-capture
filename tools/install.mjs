@@ -338,7 +338,7 @@ function cmdInstall(argv) {
   }
 
   const settings = readSettings();
-  const { next, changes } = applyWiring(settings, ROOT);
+  const { changes } = applyWiring(settings, ROOT);
 
   if (!changes.length && !adopted) { console.log('no changes: already converged'); return 0; }
   for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
@@ -366,7 +366,7 @@ function cmdUninstall(argv) {
   const purge = argv.includes('--purge');
   const settings = readSettings();
   const receipt = loadReceipt();
-  const { next, changes } = removeWiring(settings, ROOT, receipt);
+  const { changes } = removeWiring(settings, ROOT, receipt);
 
   if (!changes.length) console.log('nothing of ours found in settings');
   for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
@@ -411,7 +411,7 @@ function cmdReset(argv) {
   if (wantSettings) {
     const settings = readSettings();
     const cleared = removeWiring(settings, ROOT, loadReceipt()).next;
-    const { next, changes } = applyWiring(cleared, ROOT);
+    const { changes } = applyWiring(cleared, ROOT);
     for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
     if (!dry) { backupSettings(); writeSettingsAtomic((s) => applyWiring(removeWiring(s, ROOT, loadReceipt()).next, ROOT).next); saveReceipt({}); }
   }

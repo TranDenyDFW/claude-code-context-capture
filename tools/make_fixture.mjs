@@ -61,7 +61,6 @@ ensureProbeSchema(db);      // probes and its two child tables belong to probe.m
 const MODEL = 'claude-opus-5';
 const SMALL_MODEL = 'claude-haiku-4-5-20251001';
 const SECOND_MODEL = 'claude-sonnet-5';
-const SMALL_WINDOW = 200_000;
 const SMALL_COMPACT_AT = 167_000;   // 200000 - 20000 - 13000, the same formula the mirror fits
 const VERSION = '2.1.233';
 const WINDOW = 1_000_000;

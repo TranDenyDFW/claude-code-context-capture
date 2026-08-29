@@ -70,10 +70,11 @@ warnings.filterwarnings("ignore")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import app as m  # noqa: E402
 from dash import dash_table, dcc, html  # noqa: E402
 from dash._callback import GLOBAL_CALLBACK_LIST, GLOBAL_CALLBACK_MAP  # noqa: E402
 from dash.exceptions import PreventUpdate  # noqa: E402
+
+import app as m  # noqa: E402
 
 # Shape, not vocabulary. This listed nine unit suffixes and a reviewer walked "1.4s" through it in
 # under a minute; "ms", "MiB", "$", "e6" and a signed delta were all invisible for the same reason.
