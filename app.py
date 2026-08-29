@@ -26,7 +26,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html
 from dash.exceptions import PreventUpdate
-from dash.dash_table.Format import Format, Group
+from dash.dash_table.Format import Format, Group, Scheme
 from flask import request as _flask_request
 
 ROOT = Path(__file__).resolve().parent
@@ -1058,19 +1058,24 @@ def baseline_marks(fig, x_for_ts=None, ts_list=None):
     return drawn
 
 
-def numeric_columns(cols, numeric):
+def numeric_columns(cols, numeric, formats=None):
     """Column specs that keep numbers as numbers while still reading well.
 
     Mapping a token count through fmt_tokens produced "997.8k", a STRING. That sorted
     lexicographically, so 9 came after 80,000, and once these tables gained a CSV export it put
     formatted text in the file instead of values. Dash formats the display and leaves the
     underlying value numeric, which is what sorting and export need.
+
+    Every table in this app inherits export_format="csv" from TABLE_STYLE, so this applies to all
+    of them, not only the ones that also sort. `formats` overrides the default grouping for a
+    column that needs its own precision, such as a percentage.
     """
+    formats = formats or {}
     out = []
     for c in cols:
         if c in numeric:
             out.append({"name": c, "id": c, "type": "numeric",
-                        "format": Format(group=Group.yes)})
+                        "format": formats.get(c) or Format(group=Group.yes)})
         else:
             out.append({"name": c, "id": c})
     return out
@@ -1561,7 +1566,7 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             "project": r.project,
             "last active": str(r.last_ts or "")[:16].replace("T", " "),
             "turns": int(r.turns),
-            "peak": fmt_tokens(r.peak),
+            "peak": int(r.peak or 0),
             "compactions": int(r.compactions or 0),
         })
     breakdown = " · ".join(f"{k} {v:,}" for k, v in counts.items()) or "none"
@@ -1574,8 +1579,9 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
                  style=SECTION_NOTE),
         dash_table.DataTable(
             id="tbl-session",
-            columns=[{"name": c, "id": c} for c in
-                     ["section", "title", "project", "last active", "turns", "peak", "compactions"]],
+            columns=numeric_columns(
+                ["section", "title", "project", "last active", "turns", "peak", "compactions"],
+                {"turns", "peak", "compactions"}),
             data=rows,
             hidden_columns=["session_id"],
             page_size=16,
@@ -1640,7 +1646,6 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
 
     show = df.copy()
     show["ts"] = show["ts"].astype(str).str.slice(0, 19).str.replace("T", " ", regex=False)
-    show["survivors"] = show["survivors"].map(lambda n: str(n) if n else "-")
     cols = ["ts", "project", "model", "version", "trigger", "pre_tokens", "post_tokens",
             "dropped", "survivors", "fitted_window", "confidence", "threshold", "overshoot"]
 
@@ -1655,7 +1660,7 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
         ),
         dash_table.DataTable(
             id="tbl-compactions",
-            columns=numeric_columns(cols, {"pre_tokens", "post_tokens", "dropped",
+            columns=numeric_columns(cols, {"pre_tokens", "post_tokens", "dropped", "survivors",
                                            "fitted_window", "threshold", "overshoot"}),
             # uuid rides along in the data but is not a displayed column, so a click can be traced
             # back to the right compaction even after the user sorts or filters the table.
@@ -1813,8 +1818,8 @@ def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None
                                      "height": "100%"}))
         items = cell(b.get(count_for.get(key, ""), None)) if key in count_for else None
         rows.append({"category": BREAKDOWN_LABELS.get(key) or labels.get(key, key),
-                     "tokens": fmt_tokens(val), "percent": f"{pct:.1f}%",
-                     "items": f"{items:,}" if items is not None else ""})
+                     "tokens": int(val), "percent": round(pct, 1),
+                     "items": int(items) if items is not None else None})
 
     # Deferred tools are listed by the tooltip with no percentage, because they are not resident:
     # a deferred tool costs nothing until it loads. They are shown here for the same reason the
@@ -1824,8 +1829,8 @@ def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None
         val = cell(b.get(col))
         if not val:
             continue
-        rows.append({"category": labels.get(col, col), "tokens": fmt_tokens(val),
-                     "percent": "not resident", "items": ""})
+        rows.append({"category": f"{labels.get(col, col)} (not resident)",
+                     "tokens": int(val), "percent": None, "items": None})
 
     bar = html.Div(parts, style={"display": "flex", "width": "100%", "height": "16px",
                                  "borderRadius": "4px", "overflow": "hidden",
@@ -1902,7 +1907,9 @@ def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None
         bar,
         html.Div(style={"height": "14px"}),
         dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in ["category", "tokens", "percent", "items"]],
+            columns=numeric_columns(
+                ["category", "tokens", "percent", "items"], {"tokens", "percent", "items"},
+                {"percent": Format(precision=1, scheme=Scheme.fixed)}),
             data=rows, **TABLE_STYLE),
         html.Div(notes, style={"margin": "10px 0 0 0"}),
         html.Div(
@@ -1924,8 +1931,8 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
     rows = []
     for t in MATH["thresholds"]:
         rows.append({
-            "window": fmt_tokens(t["window"]), "warn at": fmt_tokens(t["warn"]),
-            "compact at": fmt_tokens(t["compact"]), "blocked at": fmt_tokens(t["blocked"]),
+            "window": int(t["window"]), "warn at": int(t["warn"]),
+            "compact at": int(t["compact"]), "blocked at": int(t["blocked"]),
         })
     return html.Div([
         html.Div([
@@ -1948,8 +1955,8 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
             html.Div("Thresholds for every window this build can produce",
                      style={"color": MUTED, "fontSize": "12px", "margin": "20px 0 8px 0"}),
             dash_table.DataTable(
-                columns=[{"name": c, "id": c} for c in
-                         ["window", "warn at", "compact at", "blocked at"]],
+                columns=numeric_columns(["window", "warn at", "compact at", "blocked at"],
+                                        {"window", "warn at", "compact at", "blocked at"}),
                 data=rows, **TABLE_STYLE,
             ),
         ]),
@@ -2468,7 +2475,6 @@ def _compaction_clicked(active_cell, rows):
     if not dropped.empty:
         d = dropped.copy()
         d["ts"] = d["ts"].astype(str).str.slice(11, 19)
-        d["chars"] = d["chars"].map(lambda n: f"{int(n):,}")
         total = compaction_dropped_count(uuid)
         shown = f"showing the {len(d)} largest of {total:,}" if total > len(d) else f"all {total:,}"
         out.append(html.Div([
@@ -2480,7 +2486,7 @@ def _compaction_clicked(active_cell, rows):
                 style={"color": MUTED, "fontSize": "11.5px", "margin": "14px 0 6px 0"},
             ),
             dash_table.DataTable(
-                columns=[{"name": c, "id": c} for c in ["ts", "role", "type", "chars", "preview"]],
+                columns=numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"}),
                 data=d.to_dict("records"), page_size=10,
                 style_table={"overflowX": "auto"}, **TABLE_STYLE,
             ),
@@ -2709,7 +2715,6 @@ def session_view(session_id, scope="main"):
     if not msgs.empty:
         m = msgs.copy()
         m["ts"] = m["ts"].astype(str).str.slice(11, 19)
-        m["chars"] = m["chars"].map(lambda n: f"{int(n):,}")
         # The query is capped, so len(m) is how many are shown, not how many exist. Saying
         # "400 messages" when 400 is the LIMIT reports the cap as if it were a measurement.
         total_msgs = int(q("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
@@ -2722,7 +2727,7 @@ def session_view(session_id, scope="main"):
                      style={"color": MUTED, "fontSize": "11.5px", "margin": "16px 0 6px 0"}),
             dash_table.DataTable(
                 id="tbl-messages",
-                columns=[{"name": c, "id": c} for c in ["ts", "role", "type", "chars", "preview"]],
+                columns=numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"}),
                 data=m[["ts", "role", "type", "chars", "preview", "uuid"]].to_dict("records"),
                 page_size=12, sort_action="native", filter_action="native",
                 style_table={"overflowX": "auto"},

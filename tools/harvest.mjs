@@ -308,14 +308,18 @@ function openDb(dbPath = DB_PATH) {
   mkdirSync(dirname(dbPath), { recursive: true });
   mkdirSync(RAW_DIR, { recursive: true });
   const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA journal_mode = WAL');
   // This store has THREE writers by design: a manual harvest, the SessionEnd and UserPromptSubmit
   // hooks that spawn their own, and the dashboard's refresh loop. SQLite's default busy timeout is
   // zero, so a concurrent writer does not wait, it fails immediately with SQLITE_BUSY. A --full
   // run died on "database is locked" after 1,500 files and 7.5 GB because a hook harvest started
   // while a prompt was submitted. Waiting is the correct behaviour for a capture tool: the loser
   // of a race should be slow, not absent.
+  //
+  // It is set BEFORE journal_mode, not after: switching journal mode takes an exclusive lock, so
+  // on a store still in rollback-journal mode that very statement is the first thing that can lose
+  // the race, and with the timeout set after it there is nothing yet telling it to wait.
   db.exec('PRAGMA busy_timeout = 15000');
+  db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA synchronous = NORMAL');
   const existing = db.prepare(
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='hook_events'").get();
