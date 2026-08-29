@@ -26,6 +26,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html
 from dash.exceptions import PreventUpdate
+from dash.dash_table.Format import Format, Group
 from flask import request as _flask_request
 
 ROOT = Path(__file__).resolve().parent
@@ -1057,6 +1058,24 @@ def baseline_marks(fig, x_for_ts=None, ts_list=None):
     return drawn
 
 
+def numeric_columns(cols, numeric):
+    """Column specs that keep numbers as numbers while still reading well.
+
+    Mapping a token count through fmt_tokens produced "997.8k", a STRING. That sorted
+    lexicographically, so 9 came after 80,000, and once these tables gained a CSV export it put
+    formatted text in the file instead of values. Dash formats the display and leaves the
+    underlying value numeric, which is what sorting and export need.
+    """
+    out = []
+    for c in cols:
+        if c in numeric:
+            out.append({"name": c, "id": c, "type": "numeric",
+                        "format": Format(group=Group.yes)})
+        else:
+            out.append({"name": c, "id": c})
+    return out
+
+
 def accordion(title: str, sub: str, children, open_by_default: bool = False):
     """A collapsible block. Native details/summary, so it needs no callback and no state.
 
@@ -1620,10 +1639,7 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
                       xaxis_title="tokens at compaction", yaxis_title="tokens past threshold")
 
     show = df.copy()
-    for c in ("pre_tokens", "post_tokens", "dropped", "threshold", "overshoot"):
-        show[c] = show[c].map(fmt_tokens)
-    show["ts"] = show["ts"].str.slice(0, 19).str.replace("T", " ", regex=False)
-    show["fitted_window"] = show["fitted_window"].map(fmt_tokens)
+    show["ts"] = show["ts"].astype(str).str.slice(0, 19).str.replace("T", " ", regex=False)
     show["survivors"] = show["survivors"].map(lambda n: str(n) if n else "-")
     cols = ["ts", "project", "model", "version", "trigger", "pre_tokens", "post_tokens",
             "dropped", "survivors", "fitted_window", "confidence", "threshold", "overshoot"]
@@ -1639,7 +1655,8 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
         ),
         dash_table.DataTable(
             id="tbl-compactions",
-            columns=[{"name": c, "id": c} for c in cols],
+            columns=numeric_columns(cols, {"pre_tokens", "post_tokens", "dropped",
+                                           "fitted_window", "threshold", "overshoot"}),
             # uuid rides along in the data but is not a displayed column, so a click can be traced
             # back to the right compaction even after the user sorts or filters the table.
             data=show[cols + ["uuid"]].to_dict("records"),
@@ -2594,11 +2611,22 @@ def session_view(session_id, scope="main"):
     # Dated calibrations, so a step in the fixed overhead reads as an event rather than a glitch.
     _ts_index = {v: i + 1 for i, v in enumerate(ts_list) if v}
 
+    _stamps = [str(v) for v in ts_list if v]
+    _first, _last = (min(_stamps), max(_stamps)) if _stamps else (None, None)
+
     def _x_for(ts):
-        if not ts_list:
+        """Turn index for a calibration, or None when it did not happen during this session.
+
+        The earlier version only guarded ONE end. A calibration LATER than the last turn matched
+        nothing and was correctly dropped, but one EARLIER than the first turn matched every turn,
+        so the nearest-at-or-after rule returned turn 1 and the marker was drawn clamped to the
+        left edge, implying a calibration happened at the start of a session that predated it. A
+        session with 44 turns over 17 minutes and no calibration inside it drew all three stacked
+        at x=1, and the count grew with every session, since it equalled the number of baselines
+        recorded before that session began.
+        """
+        if not _stamps or ts < _first or ts > _last:
             return None
-        # Nearest turn at or after the calibration. A calibration outside this session's span is
-        # not drawn at all, rather than clamped to an edge where it would imply it happened here.
         later = [i + 1 for i, v in enumerate(ts_list) if v and str(v) >= ts]
         return later[0] if later else None
 
@@ -2666,14 +2694,14 @@ def session_view(session_id, scope="main"):
 
     if not comps.empty:
         show = comps.copy()
-        for c in ("pre_tokens", "post_tokens", "cumulative_dropped_tokens"):
-            show[c] = show[c].map(fmt_tokens)
-        show["ts"] = show["ts"].str.slice(0, 19).str.replace("T", " ", regex=False)
+        show["ts"] = show["ts"].astype(str).str.slice(0, 19).str.replace("T", " ", regex=False)
         cols = ["ts", "trigger", "pre_tokens", "post_tokens", "cumulative_dropped_tokens",
                 "duration_ms", "version"]
         cards = html.Div([cards, html.Div(style={"height": "14px"}),
                           dash_table.DataTable(
-                              columns=[{"name": c, "id": c} for c in cols],
+                              columns=numeric_columns(cols, {"pre_tokens", "post_tokens",
+                                                             "cumulative_dropped_tokens",
+                                                             "duration_ms"}),
                               data=show[cols].to_dict("records"), **TABLE_STYLE)])
 
     # What was actually said. The chart shows the window filling; this shows what filled it.
