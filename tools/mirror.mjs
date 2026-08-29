@@ -29,6 +29,13 @@ const DB_PATH = resolveDb(ROOT);
 export { K, SMALL_WINDOW_MODELS, MODEL_DEFAULT_WINDOW, compactThreshold, level, usableWindow, reportedAutoCompactThreshold, resolveWindow, assess } from './mirror-core.mjs';
 import { K, compactThreshold, level, usableWindow, reportedAutoCompactThreshold, resolveWindow, assess } from './mirror-core.mjs';
 
+// Three writers share this store by design: a manual harvest, the SessionEnd and UserPromptSubmit
+// hooks, and the dashboard's refresh loop. SQLite's default busy timeout is ZERO, so a reader that
+// arrives mid-write fails outright with SQLITE_BUSY instead of waiting. That killed a --full
+// harvest at 7.5 GB and, separately, made segments.mjs throw "database is locked" while the app
+// was importing. A reader losing a race should be slow, not absent.
+const BUSY_TIMEOUT = 'PRAGMA busy_timeout = 15000';
+
 // ---------------------------------------------------------------------------
 // Validation against every compaction on record.
 // ---------------------------------------------------------------------------
@@ -76,6 +83,7 @@ function pct(arr, p) {
 
 function validate({ buffer = K.AUTOCOMPACT_BUFFER, quiet = false } = {}) {
   const db = new DatabaseSync(DB_PATH);
+  db.exec(BUSY_TIMEOUT);
   const rows = db.prepare(`
     SELECT c.uuid, c.ts, c.version, c.session_id, c.pre_tokens, c.post_tokens,
       (SELECT t.model FROM turns t WHERE t.session_id = c.session_id AND t.ts <= c.ts ORDER BY t.ts DESC LIMIT 1) AS model
