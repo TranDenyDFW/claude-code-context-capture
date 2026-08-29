@@ -182,6 +182,44 @@ def session_rows(ttl: float = 45.0) -> pd.DataFrame:
     return df
 
 
+_transcript_cache = {"ids": None, "at": 0.0}
+
+
+def transcript_ids(ttl: float = 45.0):
+    """Every session id that has a transcript under ~/.claude/projects, as a set.
+
+    Built with one scandir per project directory rather than a glob per session. The glob form
+    expanded its star into all 510 project directories and stat'ed the candidate inside each, so
+    checking 48 sessions cost 24,480 stat calls and 5.3 seconds, which was most of the time the
+    sessions query took. This costs one pass and answers every session from memory.
+
+    The ttl matches session_rows(), so a transcript written mid-render shows up a tick later rather
+    than never.
+    """
+    now = _time.time()
+    if _transcript_cache["ids"] is not None and now - _transcript_cache["at"] < ttl:
+        return _transcript_cache["ids"]
+    ids = set()
+    root = os.path.join(HOME, ".claude", "projects")
+    try:
+        projects = list(os.scandir(root))
+    except OSError:
+        projects = []
+    for project in projects:
+        if not project.is_dir():
+            continue
+        try:
+            for entry in os.scandir(project.path):
+                if entry.name.endswith(".jsonl"):
+                    ids.add(entry.name[: -len(".jsonl")])
+        except OSError:
+            continue          # a directory that vanished between the two scans is simply absent
+    _transcript_cache["ids"] = ids
+    _transcript_cache["at"] = now
+    return ids
+
+
+
 def _session_rows_uncached() -> pd.DataFrame:
     """Every session worth picking, with the name it goes by and the section it belongs to.
 
@@ -195,6 +233,9 @@ def _session_rows_uncached() -> pd.DataFrame:
                COALESCE(s.last_ts, MAX(t.ts))                AS last_ts,
                COUNT(*)                                      AS turns,
                MAX(t.total_resident)                         AS peak,
+               (SELECT x.total_resident FROM turns x
+                 WHERE x.session_id = t.session_id
+                 ORDER BY x.ts DESC LIMIT 1)                  AS current,
                (SELECT COUNT(*) FROM compactions c
                  WHERE c.session_id = t.session_id) AS compactions,
                (SELECT title FROM session_titles st WHERE st.session_id = t.session_id
@@ -203,7 +244,23 @@ def _session_rows_uncached() -> pd.DataFrame:
                (SELECT kind FROM session_titles st WHERE st.session_id = t.session_id
                  ORDER BY CASE st.kind WHEN 'custom' THEN 0 WHEN 'ai' THEN 1
                           ELSE 2 END LIMIT 1) AS title_kind
-        FROM turns t LEFT JOIN sessions s ON s.session_id = t.session_id
+        FROM turns t
+        LEFT JOIN sessions s ON s.session_id = t.session_id
+        -- Where the window sits NOW, which is what the header reports; peak is the high-water
+        -- mark. Showing only peak made the two disagree for one session with nothing saying which
+        -- was which, and the gap between them is what a compaction took out.
+        --
+        -- Read off `turns`, not off the api_calls view. That view groups per request id, so a
+        -- window function over it materialises every row and costs 22 seconds where the indexed
+        -- base table costs 0.1. The dedup that view exists for matters when SUMMING, because a
+        -- streamed message writes several rows sharing one request id; it does not matter for one
+        -- latest value, since those rows repeat total_resident.
+        --
+        -- That last sentence is checked rather than assumed. The first attempt compared the two
+        -- forms against the LIVE store and three sessions disagreed, which turned out to be the
+        -- three being written to while the comparison ran. On a frozen fixture they agree exactly,
+        -- and the fixture now contains streamed messages, so the comparison had something to
+        -- disagree about.
         GROUP BY t.session_id
         HAVING COUNT(*) >= 5
     """)
@@ -218,6 +275,14 @@ def _session_rows_uncached() -> pd.DataFrame:
         silently. A stale flag presented as live is worse than an absent one.
         """
         path = r.transcript_path
+        # The stored path is whatever file was harvested for this session LAST, and that can be a
+        # subagent transcript, or one written under a project slug the working directory has since
+        # moved away from. Either way it can be absent while the session itself is very much here,
+        # which filed the live session under "Deleted from this machine". Its own transcript is the
+        # thing that answers the question, so look for that first.
+        if isinstance(path, str) and path and not os.path.exists(path):
+            if r.session_id in transcript_ids():
+                path = None
         if isinstance(path, str) and path and not os.path.exists(path):
             # Absent because it was written on another machine, or absent because it was deleted
             # here. Those are different facts and must not share a label.
