@@ -220,6 +220,53 @@ def transcript_ids(ttl: float = 45.0):
 
 
 
+def _import_dates(session_ids) -> dict:
+    """When this store ingested each session's transcript, keyed by session id.
+
+    files.last_harvest_ts is the only ingest time recorded anywhere: `sessions` has first_ts and
+    last_ts, which are when the CONVERSATION ran on its own machine, not when it arrived here. For
+    a transcript that is no longer readable on this machine the last harvest of it is the import.
+    """
+    if not session_ids:
+        return {}
+    out = {}
+    for chunk in range(0, len(session_ids), 500):     # SQLITE_MAX_VARIABLE_NUMBER is 999
+        ids = list(session_ids)[chunk:chunk + 500]
+        rows = q(f"""
+            SELECT s.session_id, f.last_harvest_ts AS at
+              FROM sessions s
+              JOIN files f ON f.path = s.transcript_path
+             WHERE s.session_id IN ({','.join('?' * len(ids))})
+               AND f.last_harvest_ts IS NOT NULL
+        """, ids)
+        out.update(dict(zip(rows["session_id"], rows["at"], strict=True)))
+    return out
+
+
+def _title_or_name(title, section, imported_at) -> str:
+    """The stored title, or a name for a session that can never have one.
+
+    The name carries the ingest date only. It once carried the last-updated date too, which every
+    caller already shows beside it, and the duplication is what made five identical-looking rows
+    read as a naming collision when the labels differed by the minute all along.
+
+    Only imported sessions get the generated name. A local session with no title is a different
+    fact and must not be labelled "Imported", which would be a claim about where it came from
+    rather than a note that it is nameless.
+    """
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    if section == "Imported from another machine" and imported_at:
+        return f"Imported_{_ymd(imported_at)}"
+    return "(untitled)"
+
+
+def _ymd(ts) -> str:
+    """YYYYMMDD off an ISO timestamp, or 'unknown' if there is nothing to read."""
+    text = str(ts or "")[:10].replace("-", "")
+    return text if len(text) == 8 and text.isdigit() else "unknown"
+
+
 def _session_rows_uncached() -> pd.DataFrame:
     """Every session worth picking, with the name it goes by and the section it belongs to.
 
@@ -297,10 +344,17 @@ def _session_rows_uncached() -> pd.DataFrame:
     df["project"] = [project_label(c, s)
                      for c, s in zip(df["cwd"], df["project_slug"], strict=True)]
     # A session with no title of any kind says so, rather than showing an empty cell that reads
-    # like a rendering fault.
+    # like a rendering fault. An imported one gets a name instead, because it is not merely
+    # untitled, it is untitleable: every title in this store was read out of a transcript record by
+    # backfillTitles(), which walks the transcripts on THIS machine, and an imported session's
+    # transcript is on the other one. The absence that classifies it as imported is the same
+    # absence that puts it out of the titler's reach, so waiting for a later harvest to name it
+    # would be waiting forever.
+    imported_at = _import_dates(list(df["session_id"]))
     df["title"] = [
-        (t.strip() if isinstance(t, str) and t.strip() else "(untitled)")
-        for t in df["title"]
+        _title_or_name(t, section, imported_at.get(sid))
+        for t, section, sid
+        in zip(df["title"], df["section"], df["session_id"], strict=True)
     ]
     order = {"Projects": 0, "CLI and SDK": 1, "Imported from another machine": 2,
              "Deleted from this machine": 3}

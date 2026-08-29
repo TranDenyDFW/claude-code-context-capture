@@ -373,7 +373,10 @@ def context_bar(live) -> html.Div:
 
 
 def selector_options(cohort=None) -> list:
-    """Options for the global selector: the title first, because that is what it is called.
+    """Options for the global selector: the path first, then the title, then when it last ran.
+
+    Leading with the path puts the label in the same order as the sort, so a list scanned top to
+    bottom reads as one grouped by project rather than as an alphabetical jumble of titles.
 
     Narrowed to the cohort, so the picker cannot offer a session the current population excludes.
     """
@@ -390,14 +393,19 @@ def selector_options(cohort=None) -> list:
                   key=lambda r: (str(r.project).lower(), str(r.title).lower()))
     opts = []
     for r in rows:
-        # Both figures are labelled. They were a bare date and a bare token count, and neither said
-        # which of several plausible quantities it was: the date is the LAST UPDATE rather than the
-        # creation, and the number is the PEAK rather than where the window sits now. Both refresh
+        # The date is the LAST UPDATE, not the creation. It carried that word for a while, which
+        # was worth the width only until the question it answered had been asked once. It refreshes
         # on the 5s tick, bounded by the 45s cache behind session_rows().
-        when = str(r.last_ts or "")[:10]
+        #
+        # No peak here either. A high-water token count is not how anyone finds a conversation in a
+        # dropdown, and it was the widest field in the label; the All sessions table carries peak
+        # beside current, which is where comparing the two is the point.
+        # To the minute, not the day. Five imported sessions shared an ingest run, a project and a
+        # last day, so their whole labels were byte-identical and picking one was a coin flip. The
+        # day was never enough precision for any row; the generated names are just where it showed.
+        when = str(r.last_ts or "")[:16].replace("T", " ")
         opts.append({
-            "label": f"{r.title[:60]}  ·  {r.project}  ·  updated {when}  ·  "
-                     f"peak {fmt_tokens(r.peak)}",
+            "label": f"{r.project}  ·  {r.title[:60]}  ·  {when}",
             "value": r.session_id,
         })
     return opts
