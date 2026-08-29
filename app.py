@@ -167,17 +167,39 @@ def q(sql: str, params=()) -> pd.DataFrame:
 
 
 def overview_stats() -> dict:
-    row = q("""
-        SELECT (SELECT COUNT(*) FROM sessions)                       AS sessions,
-               (SELECT COUNT(*) FROM turns)                          AS turns,
-               (SELECT COUNT(*) FROM compactions)                    AS compactions,
-               (SELECT SUM(summary_uuid IS NULL) FROM compactions)   AS unpaired,
-               (SELECT COUNT(*) FROM files)                          AS files,
-               (SELECT SUM(bytes_read) FROM files)                   AS bytes,
-               (SELECT SUM(output_tokens) FROM api_calls)            AS out_tokens,
-               (SELECT MAX(total_resident) FROM turns)               AS peak
-    """).iloc[0]
-    return row.to_dict()
+    """Headline figures, each one tied to a stated population.
+
+    These cards used to mix populations silently. `turns` counted every transcript row, which
+    includes subagent work AND counts one streamed assistant message two to eight times, while
+    `output tokens` came from the deduped `api_calls` view and the Breakdown tab charted only
+    non-sidechain calls. Three different denominators on one dashboard, none of them labelled,
+    and the raw count sat under the words "deduped by uuid" - true of harvest-time uuid dedup,
+    and the exact misreading the README warns about under "Token numbers look about twice too
+    high". So the API-call count leads now, and the transcript row count is shown beside it as
+    what it is.
+
+    The api_calls figures come from ONE pass. Each subquery against that view is a full GROUP BY
+    over every turn, so asking it five separate questions would have cost five scans.
+    """
+    small = q("""
+        SELECT (SELECT COUNT(*) FROM sessions)                     AS sessions,
+               (SELECT COUNT(*) FROM turns)                        AS turn_rows,
+               (SELECT COUNT(*) FROM compactions)                  AS compactions,
+               (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
+               (SELECT COUNT(*) FROM files)                        AS files,
+               (SELECT SUM(bytes_read) FROM files)                 AS bytes
+    """).iloc[0].to_dict()
+    calls = q("""
+        SELECT COUNT(*)                                                     AS api_calls,
+               SUM(CASE WHEN COALESCE(is_sidechain,0)=0 THEN 1 ELSE 0 END)   AS main_calls,
+               SUM(COALESCE(output_tokens,0))                                AS out_tokens,
+               SUM(COALESCE(cache_read_input_tokens,0))                      AS cache_read,
+               SUM(COALESCE(input_tokens,0) + COALESCE(cache_creation_input_tokens,0)
+                   + COALESCE(cache_read_input_tokens,0) + COALESCE(output_tokens,0)) AS billed,
+               MAX(total_resident)                                           AS peak
+        FROM api_calls
+    """).iloc[0].to_dict()
+    return {**small, **calls}
 
 
 def session_options() -> list:
@@ -204,12 +226,41 @@ def session_options() -> list:
     return opts
 
 
-def session_turns(session_id: str) -> pd.DataFrame:
-    return q("""
+def session_turns(session_id: str, include_sidechain: bool = False) -> pd.DataFrame:
+    """Turn records for one session.
+
+    Sidechain is EXCLUDED by default, and that default is now stated on the page rather than
+    applied silently. Subagent work is 70% of the API calls in this store, so a chart that
+    quietly folded it in beside main-thread turns was answering a question nobody asked, while
+    a chart that quietly dropped it looked like the whole session.
+    """
+    where = "" if include_sidechain else "AND COALESCE(is_sidechain,0) = 0"
+    return q(f"""
         SELECT uuid, ts, model, input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
                output_tokens, thinking_tokens, total_resident, is_sidechain
-        FROM turns WHERE session_id = ? ORDER BY ts
+        FROM turns WHERE session_id = ? {where} ORDER BY ts
     """, (session_id,))
+
+
+SCOPE_OPTIONS = [
+    {"label": " main thread", "value": "main"},
+    {"label": " include subagents", "value": "all"},
+]
+
+
+def scope_radio(component_id: str, value: str = "main") -> dcc.RadioItems:
+    """The sidechain switch. One definition, so two tabs cannot offer different wording."""
+    # labelStyle, not style. Dash ships its own rule for `.dash-options-list label` that sets the
+    # colour to rgba(0,9,38,0.9), so a colour on the container is overridden and the labels render
+    # near-black on a near-black page: present in the DOM, invisible on screen. Caught by reading
+    # the computed style rather than by looking, because "I cannot see it" and "it is not there"
+    # look identical in a screenshot.
+    return dcc.RadioItems(
+        id=component_id, options=SCOPE_OPTIONS, value=value, inline=True,
+        style={"fontSize": "12px", "fontFamily": MONO},
+        labelStyle={"color": MUTED, "cursor": "pointer", "marginRight": "6px"},
+        inputStyle={"marginRight": "4px", "marginLeft": "12px", "cursor": "pointer"},
+    )
 
 
 def session_survivors(session_id: str) -> pd.DataFrame:
@@ -482,11 +533,41 @@ def fmt_tokens(n) -> str:
     if n is None or (isinstance(n, float) and pd.isna(n)):
         return "-"
     n = float(n)
+    # Billions became reachable once cache reads were totalled: this store has 31.4B of them, and
+    # without this tier that rendered as "31417.43M", which is a number nobody can read at a glance.
+    if n >= 1e9:
+        return f"{n/1e9:.2f}B".replace(".00B", "B")
     if n >= 1e6:
         return f"{n/1e6:.2f}M".replace(".00M", "M")
     if n >= 1000:
         return f"{n/1000:.1f}k".replace(".0k", "k")
     return f"{n:.0f}"
+
+
+def fmt_bytes(n) -> str:
+    """Bytes, said as bytes. Never converted to tokens.
+
+    The store holds exact API token counts per request and no token count per tool call, so a
+    bytes-to-tokens ratio here would dress an estimate as a measurement. The Waste tab already
+    refuses that conversion for the same reason.
+    """
+    if n is None or (isinstance(n, float) and pd.isna(n)):
+        return "-"
+    n = float(n)
+    for unit, size in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if n >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{n:.0f} B"
+
+
+# The two styles every tab's prose already uses inline. Named once so a new tab cannot drift into
+# its own heading size, which is how a dashboard stops looking like one product.
+SECTION_HEAD = {"color": TEXT, "fontSize": "14px", "fontWeight": "600", "margin": "18px 0 4px"}
+SECTION_NOTE = {"color": MUTED, "fontSize": "12px", "marginBottom": "8px", "maxWidth": "900px",
+                "lineHeight": "1.55"}
+CODE_BLOCK = {"background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
+              "padding": "12px 14px", "color": TEXT, "fontFamily": MONO, "fontSize": "12px",
+              "display": "inline-block"}
 
 
 def stat_card(label: str, value: str, color: str = TEXT, sub: str = "") -> html.Div:
@@ -590,13 +671,9 @@ app = Dash(__name__, title="Context capture", update_title=None,
            suppress_callback_exceptions=True)
 server = app.server
 
-TAB_IDS = ["tab-overview", "tab-session", "tab-compactions", "tab-breakdown", "tab-mirror", "tab-waste"]
-TAB_LABELS = ["Overview", "Session", "Compactions", "Breakdown", "Mirror", "Waste"]
-
-
-def tab_button(i: int, label: str, active: bool) -> html.Button:
+def tab_button(tab_id: str, label: str, active: bool) -> html.Button:
     return html.Button(
-        label, id=f"btn-{TAB_IDS[i]}", n_clicks=0,
+        label, id=f"btn-{tab_id}", n_clicks=0,
         style=tab_style(active),
     )
 
@@ -644,16 +721,29 @@ header = html.Div(
 # ---- Overview -------------------------------------------------------------
 def overview_layout():
     s = overview_stats()
+    api_calls = int(s["api_calls"] or 0)
+    main_calls = int(s["main_calls"] or 0)
+    sub_calls = api_calls - main_calls
+    billed = int(s["billed"] or 0)
+    cache_read = int(s["cache_read"] or 0)
+    cache_pct = (100.0 * cache_read / billed) if billed else 0.0
+    sub_pct = (100.0 * sub_calls / api_calls) if api_calls else 0.0
     cards = html.Div(
         [
             stat_card("sessions", f"{int(s['sessions']):,}"),
-            stat_card("turns", f"{int(s['turns']):,}", sub="deduped by uuid"),
+            stat_card("api calls", f"{api_calls:,}",
+                      sub=f"{int(s['turn_rows']):,} transcript rows behind them"),
+            stat_card("subagent share", f"{sub_pct:.0f}%",
+                      color=VIOLET,
+                      sub=f"{sub_calls:,} of {api_calls:,} calls are sidechain"),
+            stat_card("cache reads", f"{cache_pct:.1f}%", color=WARN,
+                      sub=f"{fmt_tokens(cache_read)} of {fmt_tokens(billed)} tokens billed"),
             stat_card("compactions", f"{int(s['compactions']):,}",
                       color=WARN, sub=f"{int(s['unpaired'] or 0)} unpaired"),
             stat_card("transcripts", f"{int(s['files']):,}",
                       sub=f"{(s['bytes'] or 0)/1073741824:.2f} GB"),
-            stat_card("peak resident", fmt_tokens(s["peak"]), color=VIOLET),
-            stat_card("output tokens", fmt_tokens(s["out_tokens"]), sub="all time"),
+            stat_card("peak resident", fmt_tokens(s["peak"]), color=VIOLET,
+                      sub="largest single API call"),
         ],
         style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "18px"},
     )
@@ -700,6 +790,7 @@ def session_layout():
                 style={"width": "640px", **FIELD},
                 className="c4x-dd",
             ),
+            scope_radio("session-scope"),
         ], style={"display": "flex", "alignItems": "center", "marginBottom": "14px"}),
         dcc.Graph(id="fig-session", figure=empty_fig("Pick a session above"),
                   config={"displayModeBar": False}),
@@ -839,6 +930,21 @@ def latest_baseline():
 
 
 def breakdown_layout():
+    """Shell. The body re-renders when the sidechain scope changes.
+
+    This tab charted only non-sidechain calls and never said so, which in this store means it was
+    showing under a third of the activity. The population is now a stated choice.
+    """
+    return html.Div([
+        html.Div([
+            html.Span("Population", style={"color": MUTED, "fontSize": "12px"}),
+            scope_radio("breakdown-scope"),
+        ], style={"display": "flex", "alignItems": "center", "marginBottom": "10px"}),
+        html.Div(breakdown_body(False), id="breakdown-body"),
+    ])
+
+
+def breakdown_body(include_sidechain: bool = False):
     b = latest_baseline()
     if not b:
         return html.Div([
@@ -874,9 +980,10 @@ def breakdown_layout():
 
     static_total = int(b["static_total"])
     window = int(b["window_size"] or 1000000)
-    turns = q("""SELECT ts, total_resident FROM api_calls
-                 WHERE total_resident IS NOT NULL AND COALESCE(is_sidechain,0) = 0
-                 ORDER BY ts""")
+    scope_sql = "" if include_sidechain else "AND COALESCE(is_sidechain,0) = 0"
+    turns = q(f"""SELECT ts, total_resident FROM api_calls
+                  WHERE total_resident IS NOT NULL {scope_sql}
+                  ORDER BY ts""")
     if turns.empty:
         return html.Div("No turns in the store yet. Run node tools/harvest.mjs.",
                         style={"color": MUTED})
@@ -969,7 +1076,12 @@ def breakdown_layout():
                       xaxis_title="API call", yaxis_title="tokens")
 
     applies = str(b["ts"])[:19].replace("T", " ")
-    notes = []
+    notes = [html.Div(
+        f"Charting {len(turns):,} API calls: "
+        + ("main thread and subagents." if include_sidechain
+           else "main thread only. Subagent calls are excluded, and in this store they are the "
+                "majority of all calls."),
+        style={"color": MUTED, "fontSize": "11.5px", "marginBottom": "8px"})]
     if spec_error:
         notes.append(html.Div(f"CATEGORY SPEC UNREADABLE: {spec_error}. Rows below may be "
                               f"missing categories this store can hold.",
@@ -1144,12 +1256,201 @@ def waste_layout():
     ])
 
 
+# ---- Sources --------------------------------------------------------------
+def sources_layout():
+    """What ENTERS the window, as opposed to what the window currently holds.
+
+    The Breakdown tab answers "what is in there now" and the context tooltip answers it live. This
+    answers the question neither can: what has been arriving, from where, over the whole history.
+    Three tables carry it and nothing read them until now - `attachments` (context injected by the
+    harness rather than typed by anyone), `hook_events` (the only per-tool byte accounting that
+    exists on the desktop entrypoint, where the status line does not run), and `record_types` (a
+    census of every record shape the transcripts contain).
+    """
+    att = q("""SELECT type AS kind, SUM(n) AS occurrences, COUNT(DISTINCT session_id) AS sessions
+               FROM attachments GROUP BY type ORDER BY SUM(n) DESC""")
+    hooks = q("""SELECT tool_name AS tool, COUNT(*) AS calls,
+                        SUM(COALESCE(tool_response_bytes,0)) AS response_bytes,
+                        SUM(COALESCE(tool_input_bytes,0))    AS input_bytes
+                 FROM hook_events WHERE tool_name IS NOT NULL
+                 GROUP BY tool_name ORDER BY SUM(COALESCE(tool_response_bytes,0)) DESC LIMIT 40""")
+    ev = q("""SELECT event, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions,
+                     MIN(captured_at) AS first_seen, MAX(captured_at) AS last_seen
+              FROM hook_events GROUP BY event ORDER BY COUNT(*) DESC""")
+    rec = q("SELECT type AS record_type, n FROM record_types ORDER BY n DESC")
+
+    if att.empty and ev.empty and rec.empty:
+        return html.Div("Nothing captured yet. Run node tools/harvest.mjs.",
+                        style={"color": MUTED})
+
+    total_inj = int(att["occurrences"].sum()) if not att.empty else 0
+    top = att.iloc[0]["kind"] if not att.empty else "n/a"
+    hook_bytes = int(hooks["response_bytes"].sum()) if not hooks.empty else 0
+
+    fig = go.Figure()
+    if not att.empty:
+        head = att.head(14).iloc[::-1]
+        fig.add_trace(go.Bar(x=head["occurrences"], y=head["kind"], orientation="h",
+                             marker_color=ACCENT))
+        fig.update_layout(title="Injected context by type, all sessions",
+                          title_font=dict(color=TEXT, size=13),
+                          xaxis_title="occurrences", yaxis_title="")
+
+    for frame in (att, hooks, ev, rec):
+        for col in ("occurrences", "calls", "response_bytes", "input_bytes", "n", "sessions"):
+            if col in frame.columns:
+                frame[col] = frame[col].fillna(0).astype(int).map(lambda v: f"{v:,}")
+
+    return html.Div([
+        html.Div([
+            stat_card("Injected records", f"{total_inj:,}", sub="harness-inserted, not typed"),
+            stat_card("Distinct kinds", f"{len(att):,}", sub=f"most common: {top}"),
+            stat_card("Hook-observed bytes", fmt_bytes(hook_bytes),
+                      sub="tool responses, desktop entrypoint"),
+            stat_card("Lifecycle events", f"{int(ev['n'].str.replace(',','').astype(int).sum()):,}"
+                      if not ev.empty else "0", sub="from the hook channel"),
+        ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"}),
+
+        html.Div("Context injected by the harness", style=SECTION_HEAD),
+        html.Div("Not typed by you and not returned by a tool: reminders, hook output, skill and "
+                 "agent listings, deferred-tool deltas. It occupies the same window as everything "
+                 "else, and no native view shows it historically.",
+                 style=SECTION_NOTE),
+        dcc.Graph(figure=dark_fig(fig, 360), config={"displayModeBar": False}),
+        dash_table.DataTable(
+            columns=[{"name": c, "id": c} for c in ["kind", "occurrences", "sessions"]],
+            data=att.to_dict("records"), page_size=12,
+            style_table={"overflowX": "auto"}, **TABLE_STYLE),
+
+        html.Div("Tool response size, measured by the hooks", style=SECTION_HEAD),
+        html.Div("The transcripts carry tool results, but the hook channel is the only place that "
+                 "records their size on the entrypoint where the status line never runs. Bytes, "
+                 "not tokens: the store has exact token counts per request, never per tool call.",
+                 style=SECTION_NOTE),
+        dash_table.DataTable(
+            columns=[{"name": c, "id": c} for c in ["tool", "calls", "response_bytes", "input_bytes"]],
+            data=hooks.to_dict("records"), page_size=10,
+            style_table={"overflowX": "auto"}, **TABLE_STYLE),
+
+        html.Div("Lifecycle events, and the record census", style=SECTION_HEAD),
+        html.Div([
+            html.Div(dash_table.DataTable(
+                columns=[{"name": c, "id": c} for c in ["event", "n", "sessions", "first_seen", "last_seen"]],
+                data=ev.to_dict("records"), page_size=8,
+                style_table={"overflowX": "auto"}, **TABLE_STYLE), style={"flex": "1.4"}),
+            html.Div(dash_table.DataTable(
+                columns=[{"name": c, "id": c} for c in ["record_type", "n"]],
+                data=rec.to_dict("records"), page_size=8,
+                style_table={"overflowX": "auto"}, **TABLE_STYLE), style={"flex": "1"}),
+        ], style={"display": "flex", "gap": "14px", "alignItems": "flex-start"}),
+    ])
+
+
+# ---- Probes ---------------------------------------------------------------
+def probes_layout():
+    """What the control protocol returns, and what the app's own refresh loop costs.
+
+    tools/probe.mjs asks a spawned Claude Code session for its context breakdown over the control
+    protocol. That is the only route to a per-ITEM cost - which skills, which MCP tools - and the
+    result has lived only in SQL. It is also a research result in its own right: the same probe on
+    a different build returns a different vocabulary, which is why the rows are shown per probe
+    rather than merged into one number.
+    """
+    probes = q("""SELECT id, ts, ok, model, total_tokens, percentage,
+                         auto_compact_threshold, is_auto_compact_enabled, error
+                  FROM probes ORDER BY id""")
+    details = q("""SELECT probe_id, kind, COUNT(*) AS items, SUM(COALESCE(tokens,0)) AS tokens
+                   FROM probe_details GROUP BY probe_id, kind ORDER BY probe_id, SUM(COALESCE(tokens,0)) DESC""")
+    named = q("""SELECT probe_id, kind, name, COALESCE(tokens,0) AS tokens
+                 FROM probe_details WHERE COALESCE(tokens,0) > 0
+                 ORDER BY tokens DESC LIMIT 60""")
+    runs = q("""SELECT COUNT(*) AS runs,
+                       SUM(CASE WHEN files_read = 0 THEN 1 ELSE 0 END) AS empty_runs,
+                       SUM(COALESCE(files_read,0)) AS files_read,
+                       ROUND(AVG(COALESCE(ms,0)), 1) AS avg_ms,
+                       MAX(ts) AS last_run
+                FROM harvest_runs""")
+
+    if probes.empty:
+        body = [html.Div("No probe has been run against this store.", style={"color": MUTED}),
+                html.Pre("node tools/probe.mjs", style=CODE_BLOCK)]
+    else:
+        body = [
+            html.Div("Probe runs", style=SECTION_HEAD),
+            html.Div("Each row is one spawned session answering the control protocol. A spawned "
+                     "CLI session is NOT configured like the desktop app, so these numbers "
+                     "describe the probe, not your live work. That difference is the finding.",
+                     style=SECTION_NOTE),
+            dash_table.DataTable(
+                columns=[{"name": c, "id": c} for c in
+                         ["id", "ts", "ok", "model", "total_tokens", "auto_compact_threshold"]],
+                data=probes.astype(object).where(probes.notna(), "").to_dict("records"),
+                **TABLE_STYLE),
+            html.Div("Per-category items and cost", style=SECTION_HEAD),
+            html.Div("A count with zero tokens means the channel named the items but priced none "
+                     "of them, which is exactly what makes the per-item cost unrecoverable from "
+                     "this route alone.", style=SECTION_NOTE),
+            dash_table.DataTable(
+                columns=[{"name": c, "id": c} for c in ["probe_id", "kind", "items", "tokens"]],
+                data=details.to_dict("records"), page_size=12,
+                style_table={"overflowX": "auto"}, **TABLE_STYLE),
+        ]
+        if not named.empty:
+            body += [
+                html.Div("The items that carry a price", style=SECTION_HEAD),
+                dash_table.DataTable(
+                    columns=[{"name": c, "id": c} for c in ["probe_id", "kind", "name", "tokens"]],
+                    data=named.to_dict("records"), page_size=12,
+                    style_table={"overflowX": "auto"}, **TABLE_STYLE),
+            ]
+
+    r = runs.iloc[0] if not runs.empty else None
+    cards = []
+    if r is not None and r["runs"]:
+        empty_pct = 100.0 * int(r["empty_runs"] or 0) / int(r["runs"])
+        cards = [
+            stat_card("Harvest runs", f"{int(r['runs']):,}", sub="incremental, all time"),
+            stat_card("Read nothing", f"{empty_pct:.0f}%",
+                      color=WARN if empty_pct > 40 else TEXT,
+                      sub=f"{int(r['empty_runs'] or 0):,} runs found no new bytes"),
+            stat_card("Files read", f"{int(r['files_read'] or 0):,}", sub="across all runs"),
+            stat_card("Avg duration", f"{float(r['avg_ms'] or 0):.0f} ms", sub="per run"),
+        ]
+
+    return html.Div([
+        html.Div(cards, style={"display": "flex", "gap": "12px", "flexWrap": "wrap"}),
+        html.Div("The refresh loop, measured", style=SECTION_HEAD),
+        html.Div("Most harvests find nothing, because the dashboard polls on a timer while the "
+                 "hooks already harvest on SessionEnd and UserPromptSubmit. A high percentage "
+                 "here is not an error, it is the cost of the tick being shorter than the work.",
+                 style=SECTION_NOTE),
+    ] + body)
+
+
+# ONE registry: id, label, and the function that renders the pane.
+#
+# This used to be TAB_IDS and TAB_LABELS, two lists that had to stay index-aligned, plus the count
+# 6 written out in four more places (the pane Divs, two range(6) calls in the callback, and the
+# style list). Adding a tab meant editing six things in step, and nothing checked that they agreed.
+# That is the same defect class as every SYNC finding in this store's own audit, so it went first.
+TABS = [
+    ("tab-overview", "Overview", overview_layout),
+    ("tab-session", "Session", session_layout),
+    ("tab-compactions", "Compactions", compactions_layout),
+    ("tab-breakdown", "Breakdown", breakdown_layout),
+    ("tab-sources", "Sources", sources_layout),
+    ("tab-probes", "Probes", probes_layout),
+    ("tab-mirror", "Mirror", mirror_layout),
+    ("tab-waste", "Waste", waste_layout),
+]
+TAB_IDS = [t[0] for t in TABS]
+
 # Every tab is rendered up front and toggled by display, so no interactive component is
 # created inside a callback. That sidesteps the pattern-matched-id trap entirely.
 app.layout = html.Div(
     [
         header,
-        html.Div([tab_button(i, lbl, i == 0) for i, lbl in enumerate(TAB_LABELS)],
+        html.Div([tab_button(tid, lbl, i == 0) for i, (tid, lbl, _) in enumerate(TABS)],
                  style={"display": "flex", "gap": "2px", "padding": "0 14px",
                         "borderBottom": f"1px solid {BORDER}", "background": BG}),
         dcc.Store(id="active-tab", data=0),
@@ -1158,12 +1459,9 @@ app.layout = html.Div(
         dcc.Interval(id="tick", interval=5000, n_intervals=0),
         html.Div(
             [
-                html.Div(overview_layout(), id="pane-0"),
-                html.Div(session_layout(), id="pane-1", style={"display": "none"}),
-                html.Div(compactions_layout(), id="pane-2", style={"display": "none"}),
-                html.Div(breakdown_layout(), id="pane-3", style={"display": "none"}),
-                html.Div(mirror_layout(), id="pane-4", style={"display": "none"}),
-                html.Div(waste_layout(), id="pane-5", style={"display": "none"}),
+                html.Div(fn(), id=f"pane-{i}",
+                         style={} if i == 0 else {"display": "none"})
+                for i, (_, _, fn) in enumerate(TABS)
             ],
             style={"padding": "20px"},
         ),
@@ -1177,7 +1475,7 @@ app.layout = html.Div(
 # Callbacks
 # ---------------------------------------------------------------------------
 @callback(
-    [Output(f"pane-{i}", "style") for i in range(6)]
+    [Output(f"pane-{i}", "style") for i in range(len(TABS))]
     + [Output(f"btn-{t}", "style") for t in TAB_IDS]
     + [Output("active-tab", "data")],
     [Input(f"btn-{t}", "n_clicks") for t in TAB_IDS],
@@ -1189,9 +1487,18 @@ def _switch_tab(*args):
     current = args[-1]
     which = ctx.triggered_id
     idx = TAB_IDS.index(which.replace("btn-", "")) if which else current
-    panes = [{"display": "block"} if i == idx else {"display": "none"} for i in range(6)]
-    tabs = [tab_style(i == idx) for i in range(6)]
+    panes = [{"display": "block"} if i == idx else {"display": "none"} for i in range(len(TABS))]
+    tabs = [tab_style(i == idx) for i in range(len(TABS))]
     return panes + tabs + [idx]
+
+
+@callback(
+    Output("breakdown-body", "children"),
+    Input("breakdown-scope", "value"),
+    prevent_initial_call=True,
+)
+def _breakdown_scope(scope):
+    return breakdown_body(scope == "all")
 
 
 @callback(
@@ -1309,14 +1616,17 @@ def _message_clicked(active_cell, rows):
     Output("fig-session", "figure"),
     Output("session-summary", "children"),
     Input("dd-session", "value"),
+    Input("session-scope", "value"),
     prevent_initial_call=True,
 )
-def _session_selected(session_id):
+def _session_selected(session_id, scope):
     if not session_id:
         return empty_fig("Pick a session above"), ""
-    turns = session_turns(session_id)
+    include_sidechain = (scope == "all")
+    turns = session_turns(session_id, include_sidechain)
     if turns.empty:
-        return empty_fig("No turns recorded for that session"), ""
+        return (empty_fig("No turns recorded for that session"
+                          + ("" if include_sidechain else " on the main thread")), "")
     comps = session_compactions(session_id)
 
     x = list(range(1, len(turns) + 1))
@@ -1331,6 +1641,19 @@ def _session_selected(session_id):
         line=dict(color=VIOLET, width=1, dash="dot"),
         hovertemplate="turn %{x}<br>%{y:,.0f} cache read<extra></extra>",
     ))
+    # Cumulative churn on its own axis. Per-call cache read tracks the resident line and says
+    # little on its own; the running total is what shows the session re-paying for the same
+    # context, turn after turn, and it is the largest single cost in this store.
+    fig.add_trace(go.Scatter(
+        x=x, y=turns["cache_read_input_tokens"].fillna(0).cumsum(), mode="lines",
+        name="cache read, cumulative", yaxis="y2",
+        line=dict(color=WARN, width=1.5),
+        hovertemplate="turn %{x}<br>%{y:,.0f} re-read so far<extra></extra>",
+    ))
+    fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False,
+                                  title="cumulative cache read",
+                                  title_font=dict(color=WARN, size=10),
+                                  tickfont=dict(color=WARN, size=9)))
 
     peak = float(turns["total_resident"].max())
 
@@ -1416,10 +1739,21 @@ def _session_selected(session_id):
     win, conf = session_window(session_id)
     latest_sub = f"{latest / win * 100:.0f}% of {fmt_tokens(win)}" if win else "window unresolved"
 
+    # Cache-read churn. Resident says how big the context IS; this says how many times it was
+    # PAID FOR. Every request re-bills the whole resident window as a cache read, so a long
+    # session pays for the same tokens once per turn that follows them. The multiple is the
+    # honest way to say it: total cache read divided by the largest window ever resident.
+    cache_total = int(turns["cache_read_input_tokens"].fillna(0).sum())
+    rebill = (cache_total / peak) if peak else 0.0
+
     cards = html.Div([
         stat_card("current", fmt_tokens(latest), color=ACCENT, sub=latest_sub),
         stat_card("peak resident", fmt_tokens(peak), color=VIOLET, sub="high-water mark"),
-        stat_card("turns", f"{len(turns):,}"),
+        stat_card("cache re-reads", fmt_tokens(cache_total), color=WARN,
+                  sub=f"{rebill:,.0f}x the peak window, re-billed"),
+        stat_card("rows", f"{len(turns):,}",
+                  sub="transcript rows, subagents included" if include_sidechain
+                      else "transcript rows, main thread"),
         stat_card("output", fmt_tokens(total_out), sub=f"{fmt_tokens(think)} thinking"),
         stat_card("compactions", str(len(comps)), color=DANGER if len(comps) else TEXT),
         stat_card("models", ", ".join(real_models(turns["model"])[:2]) or "-"),
