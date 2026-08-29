@@ -12,9 +12,9 @@ and still called itself a sweep of every table.
 
 So coverage is measured rather than asserted, in five ways that each caught something:
 
-  every ENTRY POINT is exercised          a table reaches a person only through a tab render or a
-                                          callback, so running all of them is what makes the rest
-                                          of the coverage claim mean anything
+  every ENTRY POINT is exercised          every callback DASH REGISTERS, not every function
+                                          carrying a decorator spelled `callback`, plus the layout,
+                                          which needs no callback at all
   every construction site is reached      a site the run never builds is a failure, not an omission
   every call that can reach one is taken  evidence_block builds one table from eight callers, so a
                                           reached position proves one caller ran, not all of them
@@ -29,11 +29,22 @@ same line and the audit reported both as covered.
 The entry-point gate is what closes the family of evasions the call graph cannot see. Edges are
 matched by NAME, so a builder invoked through `_EB = evidence_block`, a dict of handlers, `getattr`
 or a call inside a class body is not an edge, and a table built in an unexercised callback rendered
-under AUDIT PASS. Resolving names better only moves that line. Running every door does not: if every
-callback and every tab render has been executed, every table that can ever render has been built,
-and the remaining gates cover it.
+under AUDIT PASS. Resolving names better only moves that line, because the next spelling is always
+available. Running every door does not.
 
-What it still does NOT check: a branch inside a function that this run's session, cohort and
+Which doors, though, was wrong the first time this was written, and the correction is the point.
+It said a table reaches a person only through a tab render or a callback return, and enumerated
+callbacks by looking for the `@callback` decorator in the source. Both halves failed to a reviewer
+in minutes: `app.layout` renders on first paint with no callback at all, and its tables are built at
+IMPORT, before this audit is watching, so they are neither constructed nor walked; and a callback
+registered as `_register = app.callback(...)` then `@_register` is dispatched by Dash and invisible
+to a scan looking for a name. So the entry points come from Dash's own registry, which is what Dash
+dispatches from, and the layout is walked separately. A DataTable found in the layout that this
+audit never saw constructed is reported, because its rows can be read and nothing else about it can.
+
+What it still does NOT check: a clientside callback, which is JavaScript and can set a table's data
+with no Python involved; it is reported as unauditable rather than counted as covered. And a branch
+inside a function that this run's session, cohort and
 compaction never take. Inputs are picked to be awkward rather than typical, which is a choice, not
 a proof. And `_tick` runs with `refresh_store` stubbed out, because the real one spawns a harvest
 that writes to a 943 MB store: the rendering half runs, the harvest half does not.
@@ -60,6 +71,7 @@ sys.path.insert(0, ROOT)
 
 import app as m  # noqa: E402
 from dash import dash_table, dcc, html  # noqa: E402
+from dash._callback import GLOBAL_CALLBACK_LIST, GLOBAL_CALLBACK_MAP  # noqa: E402
 from dash.exceptions import PreventUpdate  # noqa: E402
 
 # Shape, not vocabulary. This listed nine unit suffixes and a reviewer walked "1.4s" through it in
@@ -74,7 +86,15 @@ NUMERIC_LOOKING = re.compile(r"^[-+$]?[\d,]+(\.\d+)?(e[-+]?\d+)?\s*[A-Za-z%$/]{0
 PLACEHOLDER = {"-", "--", "n/a", "N/A", "none", "unknown"}
 
 # A version is "2.0.14" and a timestamp is "10:32:07". Both hold digits, neither is a quantity.
+# Short values, so only their names can exempt them.
 TEXT_BY_NATURE = {"version", "ts", "last active", "session_id", "uuid"}
+
+# Prose is exempted by MEASUREMENT rather than by name. A reviewer found the numeric rule firing on
+# `tbl-messages.preview = '1'`, a message whose whole text is the character 1: 385 previews in the
+# store match the pattern and the shipped run reported none only because of which session it picked.
+# A column holding a value this long is prose, and a lone digit in it is prose too. A column that
+# really did stringify its numbers has no long values at all, so this cannot hide the defect.
+PROSE_MIN_LENGTH = 40
 
 # _render_tab catches a failing pane and renders the exception rather than raising, which is right
 # for a dashboard and would let this audit call a broken tab a success.
@@ -141,9 +161,11 @@ def findings(label, node, walked=None):
         by_content = {col for row in rows for col, val in row.items()
                       if isinstance(val, (int, float)) and not isinstance(val, bool)}
         numeric = declared | by_content
+        prose = {col for row in rows for col, val in row.items()
+                 if isinstance(val, str) and len(val) > PROSE_MIN_LENGTH}
         for row in rows:
             for col, val in row.items():
-                if col in TEXT_BY_NATURE or not isinstance(val, str):
+                if col in TEXT_BY_NATURE or col in prose or not isinstance(val, str):
                     continue
                 text = val.strip()
                 if text and NUMERIC_LOOKING.match(text):
@@ -228,13 +250,12 @@ def table_sites(module=None):
     tree = ast.parse(open(os.path.join(ROOT, "app.py"), encoding="utf-8").read())
     sites, edges, entries, opaque = [], {}, {}, []
 
-    for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for decorator in node.decorator_list:
-            func = decorator.func if isinstance(decorator, ast.Call) else decorator
-            if getattr(func, "id", getattr(func, "attr", None)) == "callback":
-                entries[node.name] = node.lineno
+    # Line numbers for the message come from the source; the SET of entry points comes from Dash's
+    # registry, because a decorator can be renamed and the source scan would not know it.
+    lines = {node.name: node.lineno for node in tree.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for name in registered_callbacks()[0]:
+        entries[name] = lines.get(name, 0)
 
     def walk(node, fn):
         for child in ast.iter_child_nodes(node):
@@ -332,6 +353,42 @@ def coverage_errors(built, chain, constructed, walked, sites, calls,
         errors.append(f"a DataTable (id {missed}) was constructed but never walked, "
                       f"so its rows were never inspected")
     return errors
+
+
+def registered_callbacks():
+    """Every callback Dash will actually dispatch, from Dash's own registry.
+
+    Not from the `@callback` decorator name in the source. A reviewer registered one as
+    `_register = app.callback(...)` then `@_register`, which the AST scan did not recognise as an
+    entry point, and the audit passed while that callback returned a stringified table over
+    /_dash-update-component. The registry is what Dash dispatches from, so it is the only complete
+    answer to "what entry points exist".
+
+    Returns the Python callbacks by name, and separately the clientside ones, which have no Python
+    function to run and so cannot be audited here at all.
+    """
+    python, clientside = {}, []
+    for entry in GLOBAL_CALLBACK_LIST:
+        if entry.get("clientside_function") is not None:
+            clientside.append(str(entry.get("output")))
+    for key, entry in GLOBAL_CALLBACK_MAP.items():
+        func = entry.get("callback")
+        name = getattr(getattr(func, "__wrapped__", func), "__name__", None)
+        if name:
+            python[name] = key
+    return python, clientside
+
+
+def layout_of(module):
+    """The app's own layout, whatever form it is stored in.
+
+    A reviewer put a table straight into `app.layout` through an alias and got AUDIT PASS: it is
+    built at IMPORT, before the recorder opens, and nothing ever walked the layout. Two premises
+    were wrong at once, that a table reaches a person only through a tab render or a callback
+    return, and that everything a person can see is constructed while this audit is watching.
+    """
+    layout = getattr(getattr(module, "app", None), "layout", None)
+    return layout() if callable(layout) else layout
 
 
 def render_failed(node):
@@ -473,6 +530,25 @@ def main():
         recorder.__exit__(None, None, None)
         m.refresh_store = real_refresh
 
+    # A clientside callback is JavaScript. It can set a table's data with no Python involved, and
+    # nothing in this process can see it, so it is reported rather than silently uncovered.
+    for output in registered_callbacks()[1]:
+        errors.append(f"a clientside callback writes {output}, which is JavaScript and cannot be "
+                      f"audited from Python: whatever it puts in a table is unchecked here")
+
+    # The layout renders on first paint without any callback, and it was built at import, so its
+    # tables are not in `constructed` and cannot be. Walking it is the only way to read those rows.
+    layout = layout_of(m)
+    layout_tables = []
+    tables_in(layout, layout_tables)
+    hits += findings("app.layout", layout, walked)
+    for table in layout_tables:
+        if id(table) not in constructed:
+            tid = getattr(table, "id", None) or "(anonymous)"
+            errors.append(f"app.layout holds a DataTable ({tid}) built before this audit was "
+                          f"watching, at import, so no coverage gate here can see how it was made. "
+                          f"Its rows were read; nothing else about it was.")
+
     sites, calls, entries, opaque = table_sites(m)
     errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries, exercised,
                               opaque)
@@ -499,8 +575,8 @@ def main():
         print(f"  ERROR  {err}")
 
     site_positions = {position for _, position in sites}
-    print(f"  {len(entries)} callbacks defined, {len(set(entries) & exercised)} exercised "
-          f"(_tick with refresh_store stubbed, since the real one writes)")
+    print(f"  {len(entries)} callbacks registered with Dash, {len(set(entries) & exercised)} "
+          f"exercised (_tick with refresh_store stubbed, since the real one writes)")
     print(f"  {len(sites)} DataTable sites across {len({f for f, _ in sites})} functions, "
           f"{len(built & site_positions)} reached")
     print(f"  {len(calls)} calls that can reach a table, "
@@ -632,11 +708,24 @@ def self_test():
           {c for _k, _l, _t, c, _v in suffixed} == {"d", "r", "c", "e", "g"},
           f"{sorted({c for _k, _l, _t, c, _v in suffixed})} of d r c e g")
 
-    # And must stay quiet on columns that hold digits without holding quantities.
+    # Columns that hold digits without holding quantities. The values are chosen so the REGEX
+    # matches and only the name exempts them: with "2.0.14" and "10:32:07" the pattern rejected
+    # both on its own, so this check stayed green with TEXT_BY_NATURE emptied and was testing
+    # nothing.
     clean = findings("clean", html.Div(dash_table.DataTable(
         columns=[{"name": "version", "id": "version"}, {"name": "ts", "id": "ts"}],
-        data=[{"version": "2.0.14", "ts": "10:32:07"}])))
-    check("no false positive on version and ts", not clean, f"{clean}")
+        data=[{"version": "2", "ts": "10"}])))
+    check("exempt by name, not by pattern", not clean and NUMERIC_LOOKING.match("2"), f"{clean}")
+
+    # Prose, exempted by measurement. A message whose entire text is "1" is not a stringified
+    # number, and 385 of them are in this store.
+    prose = findings("prose", html.Div(dash_table.DataTable(
+        columns=[{"name": "preview", "id": "preview"}],
+        data=[{"preview": "1"}, {"preview": "x" * (PROSE_MIN_LENGTH + 1)}])))
+    short = findings("short", html.Div(dash_table.DataTable(
+        columns=[{"name": "preview", "id": "preview"}], data=[{"preview": "1"}])))
+    check("prose exempted, short columns still checked", not prose and bool(short),
+          f"{len(prose)} in a column with prose, {len(short)} in one without")
 
     ok = all(results)
     print(f"SELF-TEST {'PASS' if ok else 'FAIL'} ({len(results)} checks)")
