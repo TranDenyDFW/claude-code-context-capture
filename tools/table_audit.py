@@ -196,8 +196,22 @@ def findings(label, node, walked=None):
     for table in tables:
         tid = getattr(table, "id", None) or "(anonymous)"
         rows = getattr(table, "data", None) or []
-        declared = {c["id"] for c in (getattr(table, "columns", None) or [])
-                    if c.get("type") == "numeric"}
+        specs = getattr(table, "columns", None) or []
+        # Column specs, before any cell is read. dash_table renders `name` as a React child, so a
+        # non-string there is not a formatting nit: React throws error #31, unmounts the tree, and
+        # every component in the app remounts at its default. That is what a helper wrapping
+        # already-wrapped specs did here, and every existing check looked at `data` instead.
+        for spec in specs:
+            if not isinstance(spec, dict):
+                out.append(("column-spec", label, tid, "(spec)", repr(spec)[:80]))
+                continue
+            for key in ("name", "id"):
+                value = spec.get(key)
+                if not isinstance(value, str):
+                    out.append(("column-spec", label, tid, key, repr(value)[:80]))
+        declared = {c["id"] for c in specs
+                    if isinstance(c, dict) and isinstance(c.get("id"), str)
+                    and c.get("type") == "numeric"}
         # A column is numeric BY CONTENT if any row holds a real number in it. Declared type is not
         # enough: only numeric_columns() sets it, so five of this app's thirteen tables declare
         # nothing and a placeholder in one of them was invisible to a rule that asked for the type.
@@ -796,6 +810,22 @@ def self_test():
     check("walks a bare list", len(listed) == 1, f"{len(listed)} table found in a list")
 
     # The three shapes the detectors claim.
+    spec_column = {"name": "tool", "id": "tool"}
+    malformed = findings("malformed", html.Div(dash_table.DataTable(
+        columns=[{"name": spec_column, "id": spec_column}], data=[{"tool": "Read"}])))
+    spec_hits = [f for f in malformed if f[0] == "column-spec"]
+    check("a column spec nested inside a column spec is caught, since dash_table renders name "
+          "as a React child and a dict there throws React #31",
+          bool(spec_hits), f"{len(spec_hits)} finding(s): {sorted(f[3] for f in spec_hits)}")
+    check("and it names both offending keys, not just the first",
+          {f[3] for f in spec_hits} == {"name", "id"},
+          "name and id are both reported")
+    clean = [f for f in findings("fine", html.Div(dash_table.DataTable(
+        columns=[{"name": "tool", "id": "tool"}], data=[{"tool": "Read"}])))
+        if f[0] == "column-spec"]
+    check("a well-formed spec raises nothing, so the gate is not simply always on",
+          not clean, f"{len(clean)} finding(s) on a good table")
+
     shapes = findings("shapes", html.Div(dash_table.DataTable(
         columns=[{"name": "n", "id": "n", "type": "numeric"}, {"name": "u", "id": "u"}],
         data=[{"n": "1,234", "u": 7}, {"n": "-", "u": ""}])))
