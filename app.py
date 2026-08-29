@@ -3018,10 +3018,15 @@ def _mirror(tokens, window):
 # The route below stays because this environment requires local web apps to expose a shutdown path.
 # It is deliberately undocumented: no button, no README, no docstring. Removing the affordance is
 # the point; removing the mechanism would break a requirement I cannot verify from here.
-@server.route("/__shutdown__", methods=["POST", "GET"])
+# POST only. It used to accept GET, and nothing in the UI calls it at all, since the Quit button
+# was removed on purpose. Binding to 127.0.0.1 does not protect a GET route: the browser is on
+# loopback too, so any page the user visited could stop the capture dashboard with
+# <img src="http://127.0.0.1:8056/__shutdown__">. A form post cannot be made cross-origin without
+# the user's involvement, and a script can still call it.
+@server.route("/__shutdown__", methods=["POST"])
 def _shutdown_route():
-    reason = (_flask_request.args.get("reason")
-              or _flask_request.form.get("reason")
+    reason = (_flask_request.form.get("reason")
+              or _flask_request.args.get("reason")
               or "user hit /__shutdown__")
     _hardened_shutdown(reason)
     return (
