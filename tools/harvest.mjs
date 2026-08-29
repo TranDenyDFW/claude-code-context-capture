@@ -304,7 +304,10 @@ export function messageKind(d) {
   return typeof d?.type === 'string' ? d.type : 'unknown';
 }
 
-function openDb(dbPath = DB_PATH) {
+// Exported so tools/make_fixture.mjs can build a synthetic store through the SAME schema and
+// pragmas the real one uses. A fixture with its own copy of the schema drifts from this file
+// and then CI passes against a database shaped like nothing the app will ever open.
+export function openDb(dbPath = DB_PATH) {
   mkdirSync(dirname(dbPath), { recursive: true });
   mkdirSync(RAW_DIR, { recursive: true });
   const db = new DatabaseSync(dbPath);
