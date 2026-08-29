@@ -51,15 +51,80 @@ CREATE TABLE IF NOT EXISTS probe_categories (
   probe_id INTEGER, name TEXT, tokens INTEGER, color TEXT, is_deferred INTEGER
 );
 CREATE TABLE IF NOT EXISTS probe_details (
-  probe_id INTEGER, kind TEXT, name TEXT, extra TEXT, tokens INTEGER
+  probe_id INTEGER, kind TEXT, name TEXT, extra TEXT, tokens INTEGER, loaded INTEGER
+);
+-- The message half of the window, which the tooltip breaks down and nothing else records. Stored
+-- as name/token rows rather than columns so a category added upstream lands without a migration.
+CREATE TABLE IF NOT EXISTS probe_message_breakdown (
+  probe_id INTEGER, name TEXT, tokens INTEGER
 );
 `;
+
+/**
+ * Every per-item row a usage payload carries, flattened.
+ *
+ * Pure, so the self-test can check it against a payload without a database, and so `store()` and
+ * `--backfill` cannot drift into reading the same payload two different ways.
+ *
+ * `loaded` exists because an MCP tool that is not loaded reports 0 tokens. Without the flag a
+ * reader cannot tell "measured as free" from "not measured", and every deferred tool looked like
+ * the former.
+ */
+export function detailRows(u) {
+  const out = [];
+  for (const m of u?.memoryFiles ?? []) {
+    out.push({ kind: 'memoryFile', name: m.path ?? null, extra: m.type ?? null,
+               tokens: m.tokens ?? null, loaded: null });
+  }
+  for (const m of u?.mcpTools ?? []) {
+    out.push({ kind: 'mcpTool', name: m.name ?? null, extra: m.serverName ?? null,
+               tokens: m.tokens ?? null,
+               loaded: m.isLoaded == null ? null : (m.isLoaded ? 1 : 0) });
+  }
+  for (const a of u?.agents ?? []) {
+    out.push({ kind: 'agent', name: a.agentType ?? null, extra: a.source ?? null,
+               tokens: a.tokens ?? null, loaded: null });
+  }
+  for (const sk of u?.skills?.skillFrontmatter ?? []) {
+    out.push({ kind: 'skill', name: sk.name ?? null, extra: sk.source ?? null,
+               tokens: sk.tokens ?? null, loaded: null });
+  }
+  // The two lists inside messageBreakdown. These are the only per-item rows about what the
+  // CONVERSATION put in the window rather than what the configuration did.
+  for (const t of u?.messageBreakdown?.toolCallsByType ?? []) {
+    out.push({ kind: 'toolCallType', name: t.name ?? null, extra: null,
+               tokens: t.tokens ?? null, loaded: null });
+  }
+  for (const a of u?.messageBreakdown?.attachmentsByType ?? []) {
+    out.push({ kind: 'attachment', name: a.name ?? null, extra: null,
+               tokens: a.tokens ?? null, loaded: null });
+  }
+  return out;
+}
+
+/**
+ * The scalar totals inside messageBreakdown, as name/token rows.
+ *
+ * Read by iterating the object rather than naming the seven keys, so a category added upstream is
+ * stored instead of silently dropped, which is exactly how this whole object came to be missing.
+ */
+export function messageRows(u) {
+  const mb = u?.messageBreakdown;
+  if (!mb || typeof mb !== 'object') return [];
+  return Object.entries(mb)
+    .filter(([, v]) => typeof v === 'number' && Number.isFinite(v))
+    .map(([name, tokens]) => ({ name, tokens }));
+}
 
 export function ensureProbeSchema(db) {
   // probes, probe_categories and probe_details are this tool's tables. Exported so a fixture can
   // create them exactly as a real probe run does, rather than carrying a second CREATE TABLE that
   // silently diverges from this one.
   db.exec(SCHEMA);
+  // A store written before probe_details grew `loaded` still has the old shape. Add it rather
+  // than failing, the same way harvest.mjs widens its own tables.
+  const cols = db.prepare('PRAGMA table_info(probe_details)').all().map((c) => c.name);
+  if (!cols.includes('loaded')) db.exec('ALTER TABLE probe_details ADD COLUMN loaded INTEGER');
 }
 
 export function frames() {
@@ -111,11 +176,10 @@ function store(result, stderrText) {
   if (u) {
     const cat = db.prepare('INSERT INTO probe_categories (probe_id,name,tokens,color,is_deferred) VALUES (?,?,?,?,?)');
     for (const c of u.categories ?? []) cat.run(id, c.name ?? null, c.tokens ?? null, c.color ?? null, c.isDeferred ? 1 : 0);
-    const det = db.prepare('INSERT INTO probe_details (probe_id,kind,name,extra,tokens) VALUES (?,?,?,?,?)');
-    for (const m of u.memoryFiles ?? []) det.run(id, 'memoryFile', m.path ?? null, m.type ?? null, m.tokens ?? null);
-    for (const m of u.mcpTools ?? []) det.run(id, 'mcpTool', m.name ?? null, m.serverName ?? null, m.tokens ?? null);
-    for (const a of u.agents ?? []) det.run(id, 'agent', a.agentType ?? null, a.source ?? null, a.tokens ?? null);
-    for (const s of u.skills?.skillFrontmatter ?? []) det.run(id, 'skill', s.name ?? null, s.source ?? null, s.tokens ?? null);
+    const det = db.prepare('INSERT INTO probe_details (probe_id,kind,name,extra,tokens,loaded) VALUES (?,?,?,?,?,?)');
+    for (const r of detailRows(u)) det.run(id, r.kind, r.name, r.extra, r.tokens, r.loaded);
+    const msg = db.prepare('INSERT INTO probe_message_breakdown (probe_id,name,tokens) VALUES (?,?,?)');
+    for (const r of messageRows(u)) msg.run(id, r.name, r.tokens);
   }
   db.close();
   return id;
@@ -164,6 +228,60 @@ async function runProbe() {
   return result.ok ? 0 : 1;
 }
 
+/**
+ * Recover isLoaded and messageBreakdown for probes already in the store.
+ *
+ * The payload was kept verbatim in probes.raw_json, so nothing needs re-probing: a probe spawns a
+ * Claude Code session, and re-running one to recover a field that is already on disk would be
+ * absurd. Only ever inserts what is absent and updates `loaded` in place. It never deletes, so
+ * running it twice cannot lose a reading, and it reports per probe what it did rather than a
+ * single total that hides a probe it could not read.
+ */
+export function backfill(dbPath = DB_PATH) {
+  const db = new DatabaseSync(dbPath);
+  db.exec(BUSY_TIMEOUT);
+  ensureProbeSchema(db);
+  const probes = db.prepare('SELECT id, ts, raw_json FROM probes ORDER BY id').all();
+  const report = [];
+  const insDetail = db.prepare(
+    'INSERT INTO probe_details (probe_id,kind,name,extra,tokens,loaded) VALUES (?,?,?,?,?,?)');
+  const insMsg = db.prepare(
+    'INSERT INTO probe_message_breakdown (probe_id,name,tokens) VALUES (?,?,?)');
+  const setLoaded = db.prepare(
+    'UPDATE probe_details SET loaded = ? WHERE probe_id = ? AND kind = ? AND name = ?');
+
+  for (const p of probes) {
+    if (!p.raw_json) { report.push({ probe: p.id, skipped: 'no raw_json stored' }); continue; }
+    let u;
+    try { u = JSON.parse(p.raw_json); }
+    catch (e) { report.push({ probe: p.id, skipped: `raw_json unparseable: ${e.message}` }); continue; }
+
+    let loadedSet = 0, detailsAdded = 0, msgAdded = 0;
+    for (const r of detailRows(u)) {
+      if (r.kind === 'mcpTool' && r.loaded != null) {
+        loadedSet += setLoaded.run(r.loaded, p.id, 'mcpTool', r.name).changes;
+      }
+      // Kinds the old ingest never wrote at all. Guarded per row so a partial backfill cannot
+      // double-insert on a second run.
+      if (r.kind === 'toolCallType' || r.kind === 'attachment') {
+        const seen = db.prepare(
+          'SELECT COUNT(*) n FROM probe_details WHERE probe_id=? AND kind=? AND name IS ?')
+          .get(p.id, r.kind, r.name).n;
+        if (!seen) { insDetail.run(p.id, r.kind, r.name, r.extra, r.tokens, r.loaded); detailsAdded++; }
+      }
+    }
+    for (const r of messageRows(u)) {
+      const seen = db.prepare(
+        'SELECT COUNT(*) n FROM probe_message_breakdown WHERE probe_id=? AND name=?')
+        .get(p.id, r.name).n;
+      if (!seen) { insMsg.run(p.id, r.name, r.tokens); msgAdded++; }
+    }
+    report.push({ probe: p.id, ts: p.ts, loadedSet, detailsAdded, msgAdded });
+  }
+  db.close();
+  return report;
+}
+
 function selfTest() {
   const checks = [];
   const add = (n, ok, d = '') => checks.push([n, ok, d]);
@@ -205,6 +323,45 @@ function selfTest() {
     extractUsage(altered).usage.maxTokens === 200000 && okRes.usage.maxTokens === 1000000);
   add('empty input cannot yield success (gate can fail)', extractUsage([]).ok === false);
 
+  // The two readers that recover what the old ingest dropped. A payload shaped like the real
+  // one, with the fields that were being lost.
+  const payload = {
+    memoryFiles: [{ path: 'C:\\CLAUDE.md', type: 'User', tokens: 11700 }],
+    mcpTools: [{ name: 'mcp__a__x', serverName: 'a', tokens: 0, isLoaded: false },
+               { name: 'mcp__b__y', serverName: 'b', tokens: 640, isLoaded: true }],
+    agents: [{ agentType: 'Explore', source: 'built-in', tokens: 120 }],
+    skills: { skillFrontmatter: [{ name: 'cli-toolkit', source: 'userSettings', tokens: 523 }] },
+    messageBreakdown: {
+      attachmentTokens: 5212, userMessageTokens: 0, unattributedTokens: 7,
+      toolCallsByType: [{ name: 'Read', tokens: 900 }],
+      attachmentsByType: [{ name: 'hook_success', tokens: 4000 }],
+    },
+  };
+  const rows = detailRows(payload);
+  const byKind = (k) => rows.filter((r) => r.kind === k);
+  add('every per-item kind is read, including the two the old ingest never wrote',
+    new Set(rows.map((r) => r.kind)).size === 6, [...new Set(rows.map((r) => r.kind))].join(','));
+  add('an unloaded MCP tool is recorded as unloaded, not as measured-zero',
+    byKind('mcpTool')[0].loaded === 0 && byKind('mcpTool')[0].tokens === 0);
+  add('and a loaded one is marked loaded', byKind('mcpTool')[1].loaded === 1);
+  add('a tool with no isLoaded field stays null rather than guessing',
+    detailRows({ mcpTools: [{ name: 'n', serverName: 's', tokens: 1 }] })[0].loaded === null);
+  add('attachments by type are kept, which is where the hook cost shows up',
+    byKind('attachment')[0].name === 'hook_success' && byKind('attachment')[0].tokens === 4000);
+
+  const msg = messageRows(payload);
+  add('message breakdown scalars are read by iteration, so a new upstream key is not dropped',
+    msg.length === 3 && msg.some((r) => r.name === 'unattributedTokens' && r.tokens === 7),
+    msg.map((r) => r.name).join(','));
+  add('and its arrays are not mistaken for scalars',
+    !msg.some((r) => r.name === 'toolCallsByType' || r.name === 'attachmentsByType'));
+  add('a payload with no messageBreakdown yields nothing rather than throwing',
+    messageRows({}).length === 0 && detailRows({}).length === 0);
+  // Negative control: these must read the payload, not return something canned.
+  add('a different payload yields a different result (gate can fail)',
+    messageRows({ messageBreakdown: { attachmentTokens: 1 } })[0].tokens === 1
+    && msg.find((r) => r.name === 'attachmentTokens').tokens === 5212);
+
   let bad = 0;
   for (const [n, ok, d] of checks) { if (!ok) bad++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${ok ? '' : '  [' + d + ']'}`); }
   console.log(bad === 0 ? `SELF-TEST PASS (${checks.length} checks)` : `SELF-TEST FAIL (${bad}/${checks.length} failed)`);
@@ -225,6 +382,13 @@ const IS_ENTRY = (() => {
 const argv = process.argv.slice(2);
 if (!IS_ENTRY) { /* imported for its exports: do nothing */ }
 else if (argv.includes('--self-test')) process.exit(selfTest());
+else if (argv.includes('--backfill')) {
+  const report = backfill();
+  console.log(JSON.stringify(report, null, 2));
+  const unread = report.filter((r) => r.skipped);
+  if (unread.length) console.error(`probe: ${unread.length} probe(s) could not be backfilled`);
+  process.exit(unread.length ? 1 : 0);
+}
 else if (argv.includes('--dry-run')) {
   console.log(JSON.stringify({ command: CLAUDE, args: argsFor(), stdin_frames: frames(), timeout_ms: TIMEOUT_MS, db: DB_PATH }, null, 2));
   process.exit(0);

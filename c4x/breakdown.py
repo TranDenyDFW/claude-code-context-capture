@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 from dash.dash_table.Format import Format, Scheme
 
+from c4x.probe_detail import probe_detail_blocks
 from c4x.store import ROOT, q, scoped
 from c4x.theme import (
     ACCENT,
@@ -275,4 +276,8 @@ def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None
             style={"color": MUTED, "fontSize": "11.5px", "margin": "12px 0 14px 0",
                    "maxWidth": "900px", "lineHeight": "1.55"}),
         dcc.Graph(figure=dark_fig(fig, 420), config={"displayModeBar": False}),
+        # The categories above are DERIVED from a baseline. Everything below is a direct reading,
+        # and it is the only place this store can say WHICH skill or WHICH tool the tokens went to.
+        html.Div(style={"height": "22px"}),
+        html.Div(probe_detail_blocks(b)),
     ])

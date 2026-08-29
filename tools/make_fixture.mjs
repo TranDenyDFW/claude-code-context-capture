@@ -259,7 +259,40 @@ const insertProbe = db.prepare(`
 const insertCategory = db.prepare(
   'INSERT INTO probe_categories (probe_id, name, tokens, color, is_deferred) VALUES (?, ?, ?, ?, ?)');
 const insertDetail = db.prepare(
-  'INSERT INTO probe_details (probe_id, kind, name, extra, tokens) VALUES (?, ?, ?, ?, ?)');
+  `INSERT INTO probe_details (probe_id, kind, name, extra, tokens, loaded)
+   VALUES (?, ?, ?, ?, ?, ?)`);
+const insertMessageRow = db.prepare(
+  'INSERT INTO probe_message_breakdown (probe_id, name, tokens) VALUES (?, ?, ?)');
+
+// The kinds a real probe actually emits. The fixture used to write 'tool', which the app queries
+// for nowhere, so every detail table except skills was empty in CI and the audit had nothing to
+// walk. Each row here is shaped like its real counterpart, including an MCP tool that is present
+// but NOT loaded, which is the case whose 0 tokens means "deferred" rather than "free".
+const DETAILS = [
+  ['skill', 'fixture-skill-alpha', 'userSettings', 523, null],
+  ['skill', 'fixture-skill-beta', 'built-in', 382, null],
+  ['skill', 'fixture-skill-gamma', 'plugin', 194, null],
+  ['mcpTool', 'mcp__fixture__search', 'fixture-server', 640, 1],
+  ['mcpTool', 'mcp__fixture__fetch', 'fixture-server', 0, 0],
+  ['mcpTool', 'mcp__other__list', 'other-server', 0, 0],
+  ['agent', 'fixture-agent', 'plugin', 120, null],
+  ['memoryFile', 'C:\\fixture\\CLAUDE.md', 'User', 11_700, null],
+  ['attachment', 'hook_success', null, 4_000, null],
+  ['attachment', 'hook_additional_context', null, 1_018, null],
+  ['toolCallType', 'Read', null, 900, null],
+];
+
+// The message half of the window. Real probes carry these seven; a fixture that omitted them left
+// the "what the messages are made of" table unbuildable.
+const MESSAGE_BREAKDOWN = [
+  ['attachmentTokens', 5_018],
+  ['toolCallTokens', 900],
+  ['toolResultTokens', 0],
+  ['assistantMessageTokens', 0],
+  ['userMessageTokens', 0],
+  ['redirectedContextTokens', 0],
+  ['unattributedTokens', 7],
+];
 
 const CATEGORIES = [
   ['System prompt', 3_100, '#4493f8', 0],
@@ -276,10 +309,10 @@ for (const probeId of [1, 2]) {
   for (const [name, tokens, color, deferred] of CATEGORIES) {
     insertCategory.run(probeId, name, tokens, color, deferred);
   }
-  for (let i = 0; i < 6; i++) {
-    insertDetail.run(probeId, i % 2 === 0 ? 'tool' : 'skill', `fixture-item-${i}`,
-                     'synthetic', 400 + i * 250);
+  for (const [kind, name, extra, tokens, loaded] of DETAILS) {
+    insertDetail.run(probeId, kind, name, extra, tokens, loaded);
   }
+  for (const [name, tokens] of MESSAGE_BREAKDOWN) insertMessageRow.run(probeId, name, tokens);
 }
 
 const counts = {};
@@ -301,6 +334,17 @@ const maxReReads = db.prepare(`
   SELECT COALESCE(MAX(n), 0) AS n FROM (
     SELECT COUNT(*) AS n FROM tool_calls WHERE target IS NOT NULL
      GROUP BY session_id, target)`).get().n;
+// Read before the handle closes: the checks below run after it, and a query there throws
+// "database is not open" rather than failing the check it was meant to make.
+const probeKinds = new Set(
+  db.prepare('SELECT DISTINCT kind FROM probe_details').all().map((r) => r.kind)).size;
+const deferredMcp = db.prepare(
+  "SELECT COUNT(*) n FROM probe_details WHERE kind='mcpTool' AND loaded=0 AND tokens=0").get().n;
+const loadedMcp = db.prepare(
+  "SELECT COUNT(*) n FROM probe_details WHERE kind='mcpTool' AND loaded=1 AND tokens>0").get().n;
+const messageRowCount = db.prepare(
+  'SELECT COUNT(*) n FROM probe_message_breakdown').get().n;
+
 db.close();
 
 if (!SELF_TEST) {
@@ -324,6 +368,16 @@ if (!SELF_TEST) {
     ['a file read 3+ times in one session, for the re-read table', maxReReads >= 3],
     ['a baseline, so the derived breakdown has something to subtract', counts.context_baselines > 0],
     ['probe rows, or the Probes tab raises', counts.probes > 0 && counts.probe_details > 0],
+    // The Breakdown tab builds one table per detail kind. A fixture missing a kind does not fail
+    // loudly; it just renders one table fewer, and the audit walks one table fewer, silently.
+    ['every probe detail kind a real probe emits is present',
+     probeKinds === new Set(DETAILS.map((d) => d[0])).size],
+    ['an MCP tool that is present but not loaded, whose 0 tokens means deferred',
+     deferredMcp > 0],
+    ['and one that is loaded and costs something, so the two cannot be confused',
+     loadedMcp > 0],
+    ['a message breakdown, which is the only record of what the conversation half holds',
+     messageRowCount > 0],
     ['attachments, hook events and a record census, or the Sources tab returns before its tables',
      counts.attachments > 0 && counts.hook_events > 0 && counts.record_types > 0],
     // The invariant the whole api_calls view exists for. This used to assert the OPPOSITE, that
