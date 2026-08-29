@@ -20,19 +20,25 @@ So coverage is measured rather than asserted, in four ways that each caught some
   everything built was also walked        a table built and never inspected is not audited, however
                                           green the coverage number looks
 
-What it does NOT check, found by a reviewer who got eight wrong passes out of an earlier version
-and is worth believing about this one:
+What it does NOT check. A reviewer produced EIGHT wrong passes against an earlier version of this
+file, six of them with a real stringified table rendering. TWO of those eight are closed. Six are
+not, and they share one root: a builder invoked by a name the static scan cannot resolve.
 
-  a callee the static scan cannot resolve. Edges are built from BARE NAMES, so a builder invoked
-  through an alias, `getattr`, a dict of handlers, or from inside a class body is not an edge and
-  its callers are not demanded. The construction still has to happen at a predicted line, so a real
-  table cannot hide there silently, but a caller can.
+  a callee the static scan cannot resolve. Edges come from BARE NAMES, so `_EB = evidence_block`
+  then `_EB(...)`, a dict of handlers, `getattr`, or a call from inside a class body is not an edge,
+  and its callers are never demanded. A real table DOES hide here: build one in a callback this
+  audit never invokes, and the construction line is still satisfied by the other callers that do
+  run, while the table itself is never constructed during the audit and so never walked. That is
+  the shape to expect a fourth escape from.
 
-  two calls that share one physical line. Coverage is line-granular, so a taken call covers an
-  untaken one beside it.
+  two calls, or two constructions, that share one physical line. Coverage is line-granular, so a
+  taken call covers an untaken one beside it.
 
   a branch inside a table-building function that this run's session, cohort and compaction never
   take. The inputs are picked to be awkward rather than typical, which is a choice, not a proof.
+
+Closed of the eight: a table in a prop that is not `children` (it renders, and was read as nothing),
+and a numeric shape outside the unit list the regex used to carry.
 
 An unreached call site is reported as an error even when the path is genuinely defensive and this
 store cannot trigger it. Give the audit an input that takes the branch. Do not delete the gate.
