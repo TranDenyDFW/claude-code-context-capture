@@ -1283,16 +1283,13 @@ def compare_layout(session_id=None, scope="main", cohort=None):
 
 
 def compare_table(a_label, a, b_label, b) -> html.Div:
-    """Render two metric dicts side by side, with the delta and its direction."""
-    def show(key, kind, val):
-        if kind == "tokens":
-            return fmt_tokens(val)
-        if kind == "bytes":
-            return fmt_bytes(val)
-        if kind == "multiple":
-            return f"{val:,.0f}x"
-        return f"{int(val):,}"
+    """Render two metric dicts side by side, with the delta and its direction.
 
+    Each row carries its own unit, which is why the unit is a column rather than a suffix glued
+    onto the value. A and B used to hold "18.83B", "51.5 MB" and "1,291", so the arms of a research
+    comparison were display text: they sorted lexicographically and the CSV export, which is the
+    point of the tab, received the labels instead of the numbers.
+    """
     same_size = a.get("sessions") == b.get("sessions")
     rows = []
     for key, label, kind, worse, per_unit in COMPARE_ROWS:
@@ -1302,16 +1299,18 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
         comparable = per_unit or same_size
         if av and bv:
             ratio = bv / av if av else 0
-            delta = f"{ratio:,.2f}x"
             # Only claim better or worse where the metric has a direction AND the ratio means
             # something. A total is 100x larger because one arm holds 100x the sessions, which is
             # a fact about the populations, not about how they behaved.
             if worse and comparable and abs(ratio - 1) >= 0.05:
-                delta += "  B worse" if (ratio > 1) == (worse == "higher") else "  B better"
+                verdict = "B worse" if (ratio > 1) == (worse == "higher") else "B better"
+            else:
+                verdict = ""
         else:
-            delta = "one arm has none"
-        rows.append({"metric": label, "A": show(key, kind, av), "B": show(key, kind, bv),
-                     "B vs A": delta,
+            ratio, verdict = None, "one arm has none"
+        rows.append({"metric": label, "unit": kind,
+                     "A": round(av, 1), "B": round(bv, 1),
+                     "B vs A": None if ratio is None else round(ratio, 2), "verdict": verdict,
                      "basis": "per unit" if per_unit else "total, scales with population"})
     return html.Div([
         html.Div([
@@ -1323,20 +1322,23 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
                      style={"flex": "1"}),
         ], style={"display": "flex", "gap": "16px", "marginBottom": "10px"}),
         dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in ["metric", "A", "B", "B vs A", "basis"]],
+            columns=numeric_columns(
+                ["metric", "unit", "A", "B", "B vs A", "verdict", "basis"],
+                {"A", "B", "B vs A"},
+                {"B vs A": Format(precision=2, scheme=Scheme.fixed)}),
             data=rows,
             export_format="csv",
             export_headers="display",
             style_data_conditional=[
                 {"if": {"row_index": "odd"}, "backgroundColor": "#12171e"},
-                {"if": {"filter_query": '{B vs A} contains "worse"', "column_id": "B vs A"},
-                 "color": DANGER},
-                {"if": {"filter_query": '{B vs A} contains "better"', "column_id": "B vs A"},
-                 "color": GOOD},
+                {"if": {"filter_query": '{verdict} contains "worse"'}, "color": DANGER},
+                {"if": {"filter_query": '{verdict} contains "better"'}, "color": GOOD},
             ],
             style_cell=TABLE_STYLE["style_cell"], style_header=TABLE_STYLE["style_header"],
             style_table={"overflowX": "auto"}),
-        html.Div("Only rows where a bigger number is unambiguously worse are marked, and only "
+        html.Div("Values are raw, in the unit each row names, so the export carries numbers "
+                 "rather than labels. Only rows where a bigger number is unambiguously worse are "
+                 "marked, and only "
                  "where the comparison means something. Peak resident and output tokens carry no "
                  "direction, since a longer session is not a worse one. Rows marked \"total\" "
                  "scale with how many sessions each arm holds, so when the arms are different "
