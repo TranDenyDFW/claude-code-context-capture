@@ -22,7 +22,7 @@
 import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { K, assess } from './mirror-core.mjs';
+import { assess } from './mirror-core.mjs';
 
 const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 // Production capture path. Tests and benchmarks MUST redirect via C4X_STATUSLINE_OUT so they

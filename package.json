@@ -1,0 +1,29 @@
+{
+  "name": "c4x",
+  "version": "0.1.0",
+  "description": "Capture the Claude Code context window into a local SQLite store, and read it back",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node tools/run_tests.mjs",
+    "test:node": "node tools/run_tests.mjs --node-only",
+    "fixture": "node tools/make_fixture.mjs",
+    "harvest": "node tools/harvest.mjs",
+    "install-hooks": "node tools/install.mjs install",
+    "uninstall-hooks": "node tools/install.mjs uninstall",
+    "app": "python app.py"
+  },
+  "comments": {
+    "no-dependencies": [
+      "This file exists for `engines` and script aliases. It is NOT a place to add packages.",
+      "Every tool here runs on Node built-ins alone, node:sqlite included, which is why installing",
+      "this extension pulls nothing and why there is no lockfile to audit. That is a property worth",
+      "keeping deliberately rather than losing to the first convenient dependency.",
+      "The Python side is requirements.txt, and it covers the dashboard only."
+    ]
+  }
+}

@@ -21,7 +21,7 @@
 //   node probe.mjs --self-test     parser checks only, spawns nothing
 
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';

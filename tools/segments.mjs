@@ -26,7 +26,6 @@
 //   node segments.mjs --self-test
 
 import { DatabaseSync } from 'node:sqlite';
-import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { K, SMALL_WINDOW_MODELS, resolveWindow, reportedAutoCompactThreshold } from './mirror-core.mjs';
 import { rootFrom, resolveDb } from './paths.mjs';
@@ -184,7 +183,8 @@ export function audit(opts = {}) {
     'SELECT DISTINCT session_id FROM compactions WHERE pre_tokens IS NOT NULL'
   ).all().map((r) => r.session_id);
 
-  let checked = 0, violations = [], byConfidence = {}, carryoverTurns = 0;
+  let checked = 0, carryoverTurns = 0;
+  const violations = [], byConfidence = {};
   for (const sid of sessions) {
     const rows = d.prepare(
       'SELECT ts, model, total_resident, is_sidechain FROM turns WHERE session_id = ? ORDER BY ts'
@@ -304,7 +304,7 @@ function selfTest() {
   try {
     real = audit({ quiet: true });
     mutant = audit({ quiet: true, forceRawMax: 200000 });
-  } catch (e) { /* store may be absent */ }
+  } catch { /* store may be absent */ }
   if (real && mutant) {
     add('the real audit finds no impossible window', real.violations === 0, JSON.stringify(real.worst?.[0] || {}));
     add('pinning the ceiling to 200k makes the audit FAIL (gate can fail)',

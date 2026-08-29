@@ -35,10 +35,10 @@ for w in windows:
     t = m.THRESHOLDS[w]
     expected += [(t["warn"], t["compact"]), (t["compact"], t["blocked"]), (t["blocked"], w)]
 drawn = sorted((r.y0, r.y1) for r in rects)
+verdict = "match" if drawn == sorted(expected) else f"{drawn[:3]} vs {sorted(expected)[:3]}"
 check("bands are the published thresholds",
       drawn == sorted(expected),
-      f"{len(rects)} rects over {len(windows)} resolved segment(s); "
-      f"{'match' if drawn == sorted(expected) else str(drawn[:3]) + ' vs ' + str(sorted(expected)[:3])}")
+      f"{len(rects)} rects over {len(windows)} resolved segment(s); {verdict}")
 
 # 2. The budget line is that share of the window, and the headroom it states is the real one.
 budget = 80
@@ -105,7 +105,8 @@ check("a collapsed range says so", "Move the two handles" in text, text[:60])
 # the high-water mark guarantees it, where a fixed pair of turns gave a rise and never tested this.
 peak_at = int(turns["total_resident"].astype(float).idxmax()) + 1
 lo, hi = peak_at, len(turns)
-drop = int(turns["total_resident"].iloc[hi - 1] or 0) - int(turns["total_resident"].iloc[lo - 1] or 0)
+drop = (int(turns["total_resident"].iloc[hi - 1] or 0)
+        - int(turns["total_resident"].iloc[lo - 1] or 0))
 if lo >= hi or drop >= 0:
     check("the delta carries its sign in the text", False,
           "no falling range exists in this session, so this check could not run, "

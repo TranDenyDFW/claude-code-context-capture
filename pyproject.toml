@@ -1,0 +1,31 @@
+# The Python side is the dashboard and its checks. The capture tools are Node and need nothing
+# from pip. Dependencies stay in requirements.txt, which is what the README and CI install; this
+# file carries the tool configuration.
+
+[tool.ruff]
+line-length = 100          # what app.py and the checks are already written to
+target-version = "py311"
+extend-exclude = ["tmp", "data", ".md"]
+
+[tool.ruff.lint]
+# Beyond the defaults: bugbear for real mistakes, comprehensions and pyupgrade for consistency,
+# isort so import order stops being a matter of opinion.
+select = ["E", "F", "W", "B", "C4", "UP", "I"]
+
+ignore = [
+  # A Dash callback is registered by its decorator and never called by name, so the usual "unused"
+  # signals do not apply to this codebase the way they would elsewhere.
+  "B008",
+
+  # dict(color=..., size=...) is how Plotly's own documentation writes every figure argument, and 44
+  # of the 47 sites this fires on are exactly that. Rewriting them to brace literals would make the
+  # code LESS conventional for the library it calls, and fix nothing. Excluded deliberately, with
+  # the count, rather than left to be rediscovered as noise and switched off wholesale later.
+  "C408",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The audit imports app.py after inserting the repo root on sys.path, which has to happen before
+# the import and therefore cannot satisfy E402.
+"tools/table_audit.py" = ["E402"]
+"tools/session_checks.py" = ["E402"]
