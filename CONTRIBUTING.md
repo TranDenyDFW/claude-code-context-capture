@@ -70,7 +70,8 @@ recorded in the module docstring, along with what it still does not check.
 
 `app.py` is the composition root: the Dash instance, the layout, the `TABS` registry and every
 callback. Everything else is in `c4x/`, layered so nothing imports upward: `theme` (how it looks),
-`store` (what it reads), `panels` (shared builders), `tabs` (one function per tab).
+`store` (what it reads), `panels` (shared builders), `breakdown` (the derived category split),
+and `tabs/`, one module per tab.
 
 Moving code between them is safe as long as `python tools/table_audit.py` still reports the same
 number of construction sites. It reads the whole package, taken from the import graph rather than a
