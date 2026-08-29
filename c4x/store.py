@@ -478,6 +478,21 @@ MATH = load_math()
 THRESHOLDS = {t["window"]: t for t in MATH["thresholds"]}
 
 
+COMPACTION_WINDOWS = load_compaction_windows()
+
+
+def fit_window(pre_tokens: int):
+    """Pick the candidate window whose compact threshold is the largest at or below pre_tokens."""
+    best = None
+    for t in sorted(MATH["thresholds"], key=lambda x: -x["compact"]):
+        if pre_tokens >= t["compact"]:
+            best = t
+            break
+    if best is None:
+        best = min(MATH["thresholds"], key=lambda x: x["compact"])
+    return best["window"], pre_tokens - best["compact"]
+
+
 def session_window(session_id: str, ttl: float = 60.0):
     """The window a session is actually running, resolved from evidence and cached.
 
