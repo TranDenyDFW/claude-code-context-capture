@@ -28,7 +28,7 @@
 // Every report accepts --db (or C4X_DB) so it can run against a copy.
 
 import { existsSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -41,7 +41,6 @@ import { rootFrom, resolveDb } from './paths.mjs';
 const BUSY_TIMEOUT = 'PRAGMA busy_timeout = 15000';
 
 const ROOT = rootFrom(import.meta.url);
-const DEFAULT_DB = join(ROOT, 'data', 'context.db');
 
 const resolveDbArg = (argv = process.argv.slice(2)) => resolveDb(ROOT, argv);
 

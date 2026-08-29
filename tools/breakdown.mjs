@@ -98,6 +98,14 @@ CREATE INDEX IF NOT EXISTS context_baselines_ts ON context_baselines(ts);
  * fields is the normal case rather than a broken one. Returns what it added so the caller can say
  * so out loud instead of migrating in silence.
  */
+export function ensureBaselineSchema(db) {
+  // The table lives here rather than in harvest's schema, because baselines are this tool's
+  // output. Exported so a fixture builder can create it the same way a real run does, instead of
+  // pasting a second copy of the CREATE TABLE that would drift the moment a field is added.
+  db.exec(SCHEMA);
+  return ensureColumns(db);
+}
+
 export function ensureColumns(db) {
   const have = new Set(db.prepare('PRAGMA table_info(context_baselines)').all().map((r) => r.name));
   const added = ALL_COLS.filter((c) => !have.has(c));
@@ -325,7 +333,7 @@ function selfTest() {
 
     // The silent-NULL regression: every field handed in must come back out of the table.
     const row = baselines(db2)[0];
-    const missing = Object.keys(full.stored).filter((c) => row[c] !== full.stored[c]);
+    const missing = Object.keys(full.stored).filter((col) => row[col] !== full.stored[col]);
     add('every calibrated field survives the INSERT, none stored as NULL', missing.length === 0, missing.join(','));
     add('the schema carries every field in the spec',
       FIELDS.every((f) => f.col in row), FIELDS.filter((f) => !(f.col in row)).map((f) => f.col).join(','));
@@ -338,7 +346,7 @@ function selfTest() {
     // that the derivation is internally consistent, which is the claim this tool actually makes.
     add('messages is resident minus the fixed overhead', s2.messages === 201800 - 59600, String(s2.messages));
     add('the resident rows plus messages reconstruct the total',
-      Object.values(s2.categories).reduce((a, b) => a + b, 0) + s2.messages === 201800);
+      Object.values(s2.categories).reduce((sum, n) => sum + n, 0) + s2.messages === 201800);
     db2.close();
   }
 
@@ -374,13 +382,14 @@ function selfTest() {
   {
     const bare = new DatabaseSync(':memory:');
     bare.exec(SCHEMA);
-    let threw = false, got = null;
+    let raised = false, got = null;
     try {
       got = bare.prepare('SELECT total_resident FROM api_calls LIMIT 1').get();
     } catch (e) {
-      threw = /no such table|no such view/i.test(e.message);
+      raised = /no such table|no such view/i.test(e.message);
     }
-    add('a never-harvested store genuinely lacks api_calls (gate can fail)', threw && got === null);
+    add('a never-harvested store genuinely lacks api_calls (gate can fail)',
+        raised && got === null);
     bare.close();
   }
 

@@ -21,7 +21,7 @@
 //   node probe.mjs --self-test     parser checks only, spawns nothing
 
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS probe_details (
   probe_id INTEGER, kind TEXT, name TEXT, extra TEXT, tokens INTEGER
 );
 `;
+
+export function ensureProbeSchema(db) {
+  // probes, probe_categories and probe_details are this tool's tables. Exported so a fixture can
+  // create them exactly as a real probe run does, rather than carrying a second CREATE TABLE that
+  // silently diverges from this one.
+  db.exec(SCHEMA);
+}
 
 export function frames() {
   return [

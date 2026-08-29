@@ -1,0 +1,55 @@
+name: tests
+
+# Runs the whole suite, not a subset.
+#
+# The obstacle was that data/ is gitignored, for good reason: it holds verbatim conversations. Three
+# checks read a store, and two node self-tests each carry one store-dependent check that correctly
+# FAILS rather than skips when there is none. So CI builds a synthetic store first, and the runner
+# says out loud when anything did not execute rather than printing a total that implies otherwise.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24: every tool opens the store through the built-in node:sqlite, which earlier majors
+      # shipped behind an experimental flag.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ruff
+
+      # Synthetic, and it says so in every row it writes. Nothing here came from a conversation.
+      - name: Build the fixture store
+        run: node tools/make_fixture.mjs
+
+      # Linters before the suite: a lint failure is cheap to read, and a green suite over code
+      # nobody linted is how the two drift apart.
+      - name: Lint the Python side
+        run: python -m ruff check app.py tools/
+
+      - name: Lint the node tools
+        run: npx --yes eslint .
+
+      - name: Run the suite
+        run: node tools/run_tests.mjs
+
+      # The fixture is a database of made-up rows, but it is still a database that looks like the
+      # real one. Nothing should carry it out of the job.
+      - name: Confirm no store is left behind
+        if: always()
+        run: rm -f data/context.db data/context.db-wal data/context.db-shm

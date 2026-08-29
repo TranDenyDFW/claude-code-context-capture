@@ -89,10 +89,10 @@ def self_test():
     for name, ok, detail in checks:
         if not ok:
             bad += 1
-        print('%s  %s%s' % ('PASS' if ok else 'FAIL', name,
+        print('{}  {}{}'.format('PASS' if ok else 'FAIL', name,
                             '' if ok else '  [' + detail + ']'))
-    print('SELF-TEST PASS (%d checks)' % len(checks) if bad == 0
-          else 'SELF-TEST FAIL (%d/%d failed)' % (bad, len(checks)))
+    print(f'SELF-TEST PASS ({len(checks)} checks)' if bad == 0
+          else f'SELF-TEST FAIL ({bad}/{len(checks)} failed)')
     return 0 if bad == 0 else 1
 
 
@@ -136,8 +136,8 @@ def run_arm():
                 break
             time.sleep(0.25)
         if not trusted:
-            print('trust dialog never appeared within %ds '
-                  '(already trusted, or a different first screen)' % TRUST_WAIT)
+            print(f'trust dialog never appeared within {TRUST_WAIT}s '
+                  '(already trusted, or a different first screen)')
 
         settle_until = time.time() + SETTLE_WAIT
         while time.time() < settle_until and time.time() - started < HARD_DEADLINE:
@@ -159,13 +159,13 @@ def run_arm():
         time.sleep(1)
         alive = subprocess.run(
             ['powershell', '-NoProfile', '-Command',
-             "(Get-Process -Id %d -ErrorAction SilentlyContinue) -ne $null" % child_pid],
+             f"(Get-Process -Id {child_pid} -ErrorAction SilentlyContinue) -ne $null"],
             capture_output=True, encoding='utf8')
         print('child still alive after kill:', alive.stdout.strip())
 
     plain = strip_ansi(''.join(chunks))
     print('=== last screen text ===')
-    for line in [l.rstrip() for l in plain.replace('\r\n', '\n').split('\n')][-25:]:
+    for line in [row.rstrip() for row in plain.replace('\r\n', '\n').split('\n')][-25:]:
         if line.strip():
             print('  ' + line[:126])
 
@@ -173,7 +173,7 @@ def run_arm():
     print('capture file exists AFTER:', os.path.exists(CAPTURE))
     if os.path.exists(CAPTURE):
         with open(CAPTURE, encoding='utf-8') as fh:
-            rows = [l for l in fh if l.strip()]
+            rows = [row for row in fh if row.strip()]
         print('rows written:', len(rows))
         print('first row:', rows[0][:300] if rows else '(none)')
         return 0
