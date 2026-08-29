@@ -53,7 +53,8 @@ going back as far as your transcripts do.
 | `c4x/theme.py` | colours, shared styles, the two formatters, the small shared builders |
 | `c4x/store.py` | every read, the scoping and cohort rules, the window math they depend on |
 | `c4x/panels.py` | the panels several tabs share: evidence blocks, the compare table, the turn diff |
-| `c4x/tabs.py` | one function per tab |
+| `c4x/breakdown.py` | deriving the category split, and the two helpers other tabs borrow |
+| `c4x/tabs/` | one module per tab, ten of them, with no edges between them |
 
 They layer strictly: theme and store know nothing of each other, panels sits above both, tabs above
 all three, and app.py above everything. Nothing imports upward, so there are no cycles to unpick.

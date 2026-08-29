@@ -10,6 +10,8 @@ import warnings
 warnings.filterwarnings("ignore")
 sys.path.insert(0, ".")
 import app as m  # noqa: E402
+import c4x.panels as panels  # noqa: E402
+import c4x.store as store  # noqa: E402
 
 failures = []
 
@@ -28,7 +30,7 @@ n = len(turns)
 # 1. Bands sit at the thresholds the mirror publishes, per segment, and nowhere else.
 fig, _ = m.session_view(session_id, "main", 80, (1, n), with_cards=False)
 rects = [sh for sh in fig.layout.shapes if sh.type == "rect"]
-segs = m.segments_for(session_id).get("segments", [])
+segs = store.segments_for(session_id).get("segments", [])
 windows = [s["window"] for s in segs if s.get("window")]
 expected = []
 for w in windows:
@@ -68,7 +70,7 @@ check("A and B are marked at the chosen turns",
 a, b = 2, min(n, 40)
 ts_a = str(turns["ts"].iloc[a - 1])
 ts_b = str(turns["ts"].iloc[b - 1])
-spend, tools, targets_df, said = m.turn_diff(session_id, "main", ts_a, ts_b)
+spend, tools, targets_df, said = panels.turn_diff(session_id, "main", ts_a, ts_b)
 mine = m.q("""SELECT COUNT(*) AS calls, COALESCE(SUM(output_tokens),0) AS output,
                      COALESCE(SUM(cache_read_input_tokens),0) AS cache_read
                 FROM api_calls
@@ -92,7 +94,7 @@ check("diff tool totals match independent SQL",
       f"{int(mine_tools['n'])} / {int(mine_tools['b'])}")
 
 # 5. The range is exclusive of A and inclusive of B, which is what makes the parts add up.
-one = m.turn_diff(session_id, "main", ts_a, ts_a)[0].iloc[0]
+one = panels.turn_diff(session_id, "main", ts_a, ts_a)[0].iloc[0]
 check("an empty range reports nothing", int(one["calls"]) == 0, f"{int(one['calls'])} calls")
 
 # 6. A degenerate range explains itself instead of rendering an empty panel.
