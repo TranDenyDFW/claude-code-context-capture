@@ -1057,6 +1057,169 @@ def project_totals_fig() -> go.Figure:
     return fig
 
 
+def selection_metrics(session_id=None, cohort=None, scope="main") -> dict:
+    """The numbers that describe any selection, session or cohort, from one query shape.
+
+    Both sides of a comparison go through this, so the two arms cannot be measured differently.
+    Matching the arms is the whole point: a difference produced by asking two different questions
+    is not a finding.
+    """
+    w, args = scoped(session_id, scope, cohort=cohort)
+    row = q(f"""
+        SELECT COUNT(*)                                      AS calls,
+               COUNT(DISTINCT session_id)                     AS sessions,
+               SUM(COALESCE(cache_read_input_tokens,0))       AS cache_read,
+               SUM(COALESCE(cache_creation_input_tokens,0))   AS cache_creation,
+               SUM(COALESCE(output_tokens,0))                 AS output,
+               SUM(COALESCE(thinking_tokens,0))               AS thinking,
+               MAX(total_resident)                            AS peak,
+               AVG(total_resident)                            AS mean_resident,
+               MIN(ts)                                        AS first_ts,
+               MAX(ts)                                        AS last_ts
+        FROM api_calls WHERE 1=1 {w}
+    """, args).iloc[0].to_dict()
+    cw, cargs = scoped(session_id, "all", alias="c", cohort=cohort)
+    comp = q(f"SELECT COUNT(*) AS n FROM compactions c WHERE 1=1 {cw}", cargs).iloc[0]["n"]
+    tw, targs = scoped(session_id, scope, cohort=cohort)
+    tools = q(f"""SELECT COUNT(*) AS n, SUM(COALESCE(result_bytes,0)) AS bytes
+                  FROM tool_calls WHERE 1=1 {tw}""", targs).iloc[0].to_dict()
+    calls = int(row["calls"] or 0)
+    peak = int(row["peak"] or 0)
+    cache = int(row["cache_read"] or 0)
+    return {
+        "sessions": int(row["sessions"] or 0),
+        "calls": calls,
+        "cache_read": cache,
+        "rebill_multiple": (cache / peak) if peak else 0.0,
+        "cache_per_call": (cache / calls) if calls else 0.0,
+        "cache_creation": int(row["cache_creation"] or 0),
+        "output": int(row["output"] or 0),
+        "thinking": int(row["thinking"] or 0),
+        "peak": peak,
+        "mean_resident": float(row["mean_resident"] or 0),
+        "compactions": int(comp or 0),
+        "tool_calls": int(tools["n"] or 0),
+        "tool_bytes": int(tools["bytes"] or 0),
+        "first_ts": str(row["first_ts"] or "")[:19].replace("T", " "),
+        "last_ts": str(row["last_ts"] or "")[:19].replace("T", " "),
+    }
+
+
+# How each metric is rendered, and whether a bigger number is worse. Declared once so the compare
+# table cannot label one row "worse" by one rule and another by a different one.
+# key, label, format, which direction is worse, and whether the figure is size-independent.
+#
+# That last flag is the one that stops the table lying by arithmetic. Comparing 3 sessions against
+# 303 makes almost every total 100x larger on one side, and that ratio says nothing except that one
+# population is bigger. Only the per-unit rows compare arms of different sizes honestly, so they
+# are the ones marked comparable and the totals are labelled as scaling with population.
+COMPARE_ROWS = [
+    ("sessions", "sessions", "count", None, False),
+    ("calls", "API calls", "count", None, False),
+    ("cache_read", "cache re-reads", "tokens", "higher", False),
+    ("rebill_multiple", "re-billed, as a multiple of peak", "multiple", "higher", True),
+    ("cache_per_call", "cache read per call", "tokens", "higher", True),
+    ("peak", "peak resident", "tokens", None, True),
+    ("mean_resident", "mean resident", "tokens", "higher", True),
+    ("output", "output tokens", "tokens", None, False),
+    ("thinking", "thinking tokens", "tokens", None, False),
+    ("compactions", "compactions", "count", "higher", False),
+    ("tool_calls", "tool calls", "count", None, False),
+    ("tool_bytes", "tool result bytes", "bytes", "higher", False),
+]
+
+
+def compare_layout(session_id=None, scope="main", cohort=None):
+    """Two selections, measured identically, with the differences named.
+
+    Comparison is what makes this a research tool rather than an inspector: a number on its own
+    invites a story, and the only question that constrains a story is "compared to what".
+
+    Arm A is the header selection. Arm B is chosen here. Both are measured by the same function
+    with the same scope, so a difference cannot be an artefact of asking two different questions.
+    """
+    return html.Div([
+        html.Div("Arm A is the header selection. Pick arm B here. Both arms are measured by the "
+                 "same function with the same population rules, so a difference between them "
+                 "cannot come from having asked two different questions.", style=SECTION_NOTE),
+        html.Div([
+            html.Span("Compare against", style={"color": MUTED, "fontSize": "12px",
+                                                "marginRight": "8px"}),
+            dcc.Dropdown(id="cmp-kind", value="cohort", clearable=False,
+                         options=[{"label": " a population", "value": "cohort"},
+                                  {"label": " a single session", "value": "session"}],
+                         style={"width": "200px", **FIELD}, className="c4x-dd"),
+            dcc.Dropdown(id="cmp-target", options=[], value=None, optionHeight=44,
+                         placeholder="Choose what to compare against",
+                         style={"width": "460px", **FIELD}, className="c4x-dd"),
+        ], style={"display": "flex", "alignItems": "center", "gap": "6px",
+                  "marginBottom": "12px"}),
+        html.Div(id="cmp-out"),
+    ])
+
+
+def compare_table(a_label, a, b_label, b) -> html.Div:
+    """Render two metric dicts side by side, with the delta and its direction."""
+    def show(key, kind, val):
+        if kind == "tokens":
+            return fmt_tokens(val)
+        if kind == "bytes":
+            return fmt_bytes(val)
+        if kind == "multiple":
+            return f"{val:,.0f}x"
+        return f"{int(val):,}"
+
+    same_size = a.get("sessions") == b.get("sessions")
+    rows = []
+    for key, label, kind, worse, per_unit in COMPARE_ROWS:
+        av, bv = a.get(key, 0), b.get(key, 0)
+        if not av and not bv:
+            continue
+        comparable = per_unit or same_size
+        if av and bv:
+            ratio = bv / av if av else 0
+            delta = f"{ratio:,.2f}x"
+            # Only claim better or worse where the metric has a direction AND the ratio means
+            # something. A total is 100x larger because one arm holds 100x the sessions, which is
+            # a fact about the populations, not about how they behaved.
+            if worse and comparable and abs(ratio - 1) >= 0.05:
+                delta += "  B worse" if (ratio > 1) == (worse == "higher") else "  B better"
+        else:
+            delta = "one arm has none"
+        rows.append({"metric": label, "A": show(key, kind, av), "B": show(key, kind, bv),
+                     "B vs A": delta,
+                     "basis": "per unit" if per_unit else "total, scales with population"})
+    return html.Div([
+        html.Div([
+            html.Div([html.Div("A", style={"color": ACCENT, "fontWeight": 700, "fontFamily": MONO}),
+                      html.Div(a_label, style={"color": MUTED, "fontSize": "11px"})],
+                     style={"flex": "1"}),
+            html.Div([html.Div("B", style={"color": VIOLET, "fontWeight": 700, "fontFamily": MONO}),
+                      html.Div(b_label, style={"color": MUTED, "fontSize": "11px"})],
+                     style={"flex": "1"}),
+        ], style={"display": "flex", "gap": "16px", "marginBottom": "10px"}),
+        dash_table.DataTable(
+            columns=[{"name": c, "id": c} for c in ["metric", "A", "B", "B vs A", "basis"]],
+            data=rows,
+            style_data_conditional=[
+                {"if": {"row_index": "odd"}, "backgroundColor": "#12171e"},
+                {"if": {"filter_query": '{B vs A} contains "worse"', "column_id": "B vs A"},
+                 "color": DANGER},
+                {"if": {"filter_query": '{B vs A} contains "better"', "column_id": "B vs A"},
+                 "color": GOOD},
+            ],
+            style_cell=TABLE_STYLE["style_cell"], style_header=TABLE_STYLE["style_header"],
+            style_table={"overflowX": "auto"}),
+        html.Div("Only rows where a bigger number is unambiguously worse are marked, and only "
+                 "where the comparison means something. Peak resident and output tokens carry no "
+                 "direction, since a longer session is not a worse one. Rows marked \"total\" "
+                 "scale with how many sessions each arm holds, so when the arms are different "
+                 "sizes their ratio describes the populations rather than the behaviour; the "
+                 "per-unit rows are the ones that compare unequal arms honestly.",
+                 style=SECTION_NOTE),
+    ])
+
+
 def decisions() -> list:
     """Findings that name an action, computed from this store.
 
@@ -1963,6 +2126,7 @@ TABS = [
     ("tab-sources", "Sources", sources_layout),
     ("tab-probes", "Probes", probes_layout),
     ("tab-waste", "Waste", waste_layout),
+    ("tab-compare", "Compare", compare_layout),
     ("tab-mirror", "Mirror", mirror_layout),
 ]
 TAB_IDS = [t[0] for t in TABS]
@@ -2042,7 +2206,10 @@ def _render_tab(idx, session_id, scope, cohort):
                                                             "whiteSpace": "pre-wrap"}),
         ])
     # Say which population the page is describing, every time, on every tab.
-    if tab_id == "tab-summary":
+    # Summary states its own scope in its first line; Compare labels each arm itself and takes the
+    # header selection as arm A, so the generic "not affected by the selection" banner would be a
+    # false statement on it.
+    if tab_id in ("tab-summary", "tab-compare"):
         banner = None
     elif tab_id in SELECTION_SCOPED:
         banner = html.Div(f"Describing {population_label(session_id, cohort, scope or 'main')}.",
@@ -2064,6 +2231,42 @@ def _selector_options(cohort, _n):
     so a 5s tick does not rebuild a 300-row option list forever.
     """
     return selector_options(cohort)
+
+
+@callback(
+    Output("cmp-target", "options"),
+    Input("cmp-kind", "value"),
+    Input("sel-cohort", "value"),
+)
+def _cmp_targets(kind, cohort):
+    """Arm B's choices. Sessions are NOT narrowed to arm A's cohort: comparing a project against
+    a different project is the point, and narrowing would make that impossible."""
+    return cohort_options() if kind == "cohort" else selector_options(None)
+
+
+@callback(
+    Output("cmp-out", "children"),
+    Input("cmp-kind", "value"),
+    Input("cmp-target", "value"),
+    Input("sel-session", "value"),
+    Input("sel-cohort", "value"),
+    Input("session-scope", "value"),
+)
+def _cmp_render(kind, target, session_id, cohort, scope):
+    if not target:
+        return html.Div("Pick something to compare against.", style=SECTION_NOTE)
+    scope = scope or "main"
+    a = selection_metrics(session_id, cohort, scope)
+    a_label = population_label(session_id, cohort, scope)
+    if kind == "cohort":
+        b = selection_metrics(None, target, scope)
+        b_label = population_label(None, target, scope)
+    else:
+        b = selection_metrics(target, None, scope)
+        b_label = population_label(target, None, scope)
+    if not a["calls"] and not b["calls"]:
+        return html.Div("Neither arm has any API calls under this scope.", style=SECTION_NOTE)
+    return compare_table(a_label, a, b_label, b)
 
 
 @callback(
