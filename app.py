@@ -16,7 +16,6 @@ Stop: Ctrl+C. There is no in-app quit: closing this viewer must not look like st
 import html as _html
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import threading as _threading
@@ -26,9 +25,78 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html
-from dash.dash_table.Format import Format, Group, Scheme
+from dash.dash_table.Format import Format, Scheme
 from dash.exceptions import PreventUpdate
 from flask import request as _flask_request
+
+from c4x.panels import (  # noqa: F401 - re-exported for the tabs
+    COMPARE_ROWS,
+    baseline_marks,
+    compare_table,
+    evidence_block,
+    selection_metrics,
+    sql_preview,
+    stored_text_note,
+    text_panel,
+    turn_diff,
+    turn_diff_panel,
+)
+from c4x.store import (  # noqa: F401 - re-exported for the tabs
+    COHORT_ALL,
+    HOME_DIR,
+    MATH,
+    SYNTHETIC_MODELS,
+    THRESHOLDS,
+    all_compactions,
+    cohort_options,
+    cohort_sessions,
+    compaction_dropped,
+    compaction_dropped_count,
+    compaction_summary_text,
+    load_compaction_windows,
+    load_math,
+    message_text,
+    overview_stats,
+    population_label,
+    predict,
+    project_label,
+    q,
+    real_models,
+    scoped,
+    segments_for,
+    session_compactions,
+    session_messages,
+    session_rows,
+    session_survivors,
+    session_turns,
+    session_window,
+)
+from c4x.theme import (  # noqa: F401 - re-exported for the tabs
+    ACCENT,
+    BG,
+    BORDER,
+    CODE_BLOCK,
+    CONTROL_LABEL,
+    DANGER,
+    FIELD,
+    GOOD,
+    MONO,
+    MUTED,
+    PANEL,
+    SECTION_HEAD,
+    SECTION_NOTE,
+    TABLE_STYLE,
+    TEXT,
+    VIOLET,
+    WARN,
+    accordion,
+    dark_fig,
+    empty_fig,
+    fmt_bytes,
+    fmt_tokens,
+    numeric_columns,
+    stat_card,
+)
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "data" / "context.db"
@@ -46,41 +114,8 @@ def _port_from_argv(argv, fallback):
 PORT = _port_from_argv(sys.argv, int(os.environ.get("C4X_PORT", "8056")))
 DEBUG = os.environ.get("C4X_DEBUG") == "1"  # off by default: debug rotates JS chunk hashes
 
-# ---------------------------------------------------------------------------
-# Dark palette. Every surface sets its colors explicitly; nothing inherits.
-# ---------------------------------------------------------------------------
-BG = "#0d1117"
-PANEL = "#161b22"
-BORDER = "#30363d"
-TEXT = "#e6edf3"
-MUTED = "#8b949e"
-ACCENT = "#1f6feb"
-GOOD = "#3fb950"
-WARN = "#d29922"
-DANGER = "#f85149"
-VIOLET = "#a371f7"
-MONO = "ui-monospace, SFMono-Regular, Consolas, monospace"
 
-# Form controls get an explicit background AND text color, or they render dark on dark.
-FIELD = {"backgroundColor": "#ffffff", "color": "#10141a", "border": f"1px solid {BORDER}"}
 
-# Export lives here rather than on each table, because it belongs to every one of them: a figure
-# nobody can take away and check is a dashboard number, not a research one. Every table that
-# spreads TABLE_STYLE gets a CSV button; the tables that set style_cell explicitly (evidence_block,
-# the compare table) already ask for it directly.
-TABLE_STYLE = dict(
-    export_format="csv",
-    export_headers="display",
-    style_cell={
-        "backgroundColor": PANEL, "color": TEXT, "border": f"1px solid {BORDER}",
-        "fontFamily": MONO, "fontSize": "12px", "padding": "6px 10px", "textAlign": "left",
-    },
-    style_header={
-        "backgroundColor": "#21262d", "color": TEXT, "fontWeight": "700",
-        "border": f"1px solid {BORDER}", "fontFamily": MONO, "fontSize": "11.5px",
-    },
-    style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#12171e"}],
-)
 
 
 # ---------------------------------------------------------------------------
@@ -108,237 +143,28 @@ def _hardened_shutdown(reason: str) -> None:
     _threading.Thread(target=_do_kill, daemon=True).start()
 
 
-# ---------------------------------------------------------------------------
-# Single source of truth for the math: read it out of the JS module.
-# ---------------------------------------------------------------------------
-def _node_json(script: str):
-    """Run a node snippet that prints JSON, return the parsed value."""
-    proc = subprocess.run(
-        ["node", "-e", script], capture_output=True, text=True, cwd=str(ROOT), timeout=60,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"node exited {proc.returncode}: {proc.stderr.strip()[:400]}")
-    out = proc.stdout.strip()
-    if not out:
-        raise RuntimeError(f"node produced no stdout. stderr: {proc.stderr.strip()[:400]}")
-    return json.loads(out)
 
 
-def load_math():
-    """Constants and thresholds, straight from tools/mirror-core.mjs.
-
-    A Windows absolute path is not a legal import specifier, so the path is converted to a
-    file:// URL before import.
-    """
-    core = (ROOT / "tools" / "mirror-core.mjs").as_uri()
-    script = (
-        f"import({json.dumps(core)}).then(m => {{"
-        "  const ws = [200000, 500000, 967000, 1000000];"
-        "  console.log(JSON.stringify({"
-        "    K: m.K,"
-        "    thresholds: ws.map(w => ({"
-        "      window: w,"
-        "      compact: m.reportedAutoCompactThreshold(w),"
-        "      warn: m.reportedAutoCompactThreshold(w) - m.K.WARN_OFFSET,"
-        "      blocked: w - m.K.COMPACT_BUFFER"
-        "    }))"
-        "  }));"
-        "}).catch(e => { console.error(e.message); process.exit(1); });"
-    )
-    return _node_json(script)
 
 
-def _node_json_argv(args, timeout=120):
-    """Run a node script that prints JSON on stdout, return the parsed value."""
-    proc = subprocess.run(["node", *args], capture_output=True, text=True,
-                          cwd=str(ROOT), timeout=timeout)
-    if proc.returncode != 0:
-        raise RuntimeError(f"node {args[0]} exited {proc.returncode}: {proc.stderr.strip()[:400]}")
-    if not proc.stdout.strip():
-        raise RuntimeError(
-            f"node {args[0]} produced no stdout. stderr: {proc.stderr.strip()[:400]}")
-    return json.loads(proc.stdout)
 
 
-def predict(tokens: int, window: int):
-    """Ask tools/mirror.mjs, so the answer is the validated implementation's answer."""
-    proc = subprocess.run(
-        ["node", str(ROOT / "tools" / "mirror.mjs"),
-         "--predict", str(int(tokens)), "--window", str(int(window))],
-        capture_output=True, text=True, cwd=str(ROOT), timeout=60,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"mirror.mjs exited {proc.returncode}: {proc.stderr.strip()[:300]}")
-    return json.loads(proc.stdout)
 
 
-# ---------------------------------------------------------------------------
-# Data access. Read-only; the app never writes to the store.
-# ---------------------------------------------------------------------------
-def q(sql: str, params=()) -> pd.DataFrame:
-    if not DB_PATH.exists():
-        raise FileNotFoundError(
-            f"No store at {DB_PATH}. Run `node tools/harvest.mjs` first."
-        )
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    try:
-        return pd.read_sql_query(sql, con, params=params)
-    finally:
-        con.close()
 
 
-def overview_stats() -> dict:
-    """Headline figures, each one tied to a stated population.
-
-    These cards used to mix populations silently. `turns` counted every transcript row, which
-    includes subagent work AND counts one streamed assistant message two to eight times, while
-    `output tokens` came from the deduped `api_calls` view and the Breakdown tab charted only
-    non-sidechain calls. Three different denominators on one dashboard, none of them labelled,
-    and the raw count sat under the words "deduped by uuid" - true of harvest-time uuid dedup,
-    and the exact misreading the README warns about under "Token numbers look about twice too
-    high". So the API-call count leads now, and the transcript row count is shown beside it as
-    what it is.
-
-    The api_calls figures come from ONE pass. Each subquery against that view is a full GROUP BY
-    over every turn, so asking it five separate questions would have cost five scans.
-    """
-    small = q("""
-        SELECT (SELECT COUNT(*) FROM sessions)                     AS sessions,
-               (SELECT COUNT(*) FROM turns)                        AS turn_rows,
-               (SELECT COUNT(*) FROM compactions)                  AS compactions,
-               (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
-               (SELECT COUNT(*) FROM files)                        AS files,
-               (SELECT SUM(bytes_read) FROM files)                 AS bytes
-    """).iloc[0].to_dict()
-    calls = q("""
-        SELECT COUNT(*)                                                     AS api_calls,
-               SUM(CASE WHEN COALESCE(is_sidechain,0)=0 THEN 1 ELSE 0 END)   AS main_calls,
-               SUM(COALESCE(output_tokens,0))                                AS out_tokens,
-               SUM(COALESCE(cache_read_input_tokens,0))                      AS cache_read,
-               SUM(COALESCE(input_tokens,0) + COALESCE(cache_creation_input_tokens,0)
-                   + COALESCE(cache_read_input_tokens,0) + COALESCE(output_tokens,0)) AS billed,
-               MAX(total_resident)                                           AS peak
-        FROM api_calls
-    """).iloc[0].to_dict()
-    return {**small, **calls}
 
 
-HOME_DIR = str(Path.home())
 
 
-def project_label(cwd, slug) -> str:
-    """What to CALL a project.
-
-    `project_slug` is a filesystem-safe encoding of the working directory, not a name: `P--Books`,
-    `C--Users-Administrator`. It was being printed straight into the picker. It is also lossy and
-    ambiguous, so this is not a decoding problem: `subagents` is not a path at all, it is the folder
-    subagent transcripts are written to, and in this store it maps to 30 different working
-    directories. `cwd` holds the real path for 1,320 of 1,323 sessions, so the real path wins and
-    the slug is only ever a last resort for the 3 that have none.
-    """
-    if isinstance(cwd, str) and cwd.strip():
-        return cwd.strip()
-    if isinstance(slug, str) and slug.strip():
-        return f"{slug.strip()} (no working directory recorded)"
-    return "(unknown)"
 
 
-_rows_cache = {"at": 0.0, "df": None}
 
 
-def session_rows(ttl: float = 45.0) -> pd.DataFrame:
-    """Cached wrapper. The uncached query is a GROUP BY over every turn in the store.
-
-    scoped() calls this on every query once cohorts exist, so without a cache a single page render
-    would run that aggregate a dozen times. The ttl is short enough that a live session appears
-    within a tick or two and long enough that one render costs one query.
-    """
-    now = _time.time()
-    if _rows_cache["df"] is not None and now - _rows_cache["at"] < ttl:
-        return _rows_cache["df"]
-    df = _session_rows_uncached()
-    _rows_cache["at"] = now
-    _rows_cache["df"] = df
-    return df
 
 
-def _session_rows_uncached() -> pd.DataFrame:
-    """Every session worth picking, with the name it goes by and the section it belongs to.
-
-    Ordered the way the desktop sidebar orders: section, then project, then most recently active
-    first. The old picker sorted 1,323 sessions by peak tokens, which interleaved every project and
-    made the list unreadable.
-    """
-    df = q("""
-        SELECT t.session_id,
-               s.cwd, s.project_slug, s.entrypoint, s.transcript_path,
-               COALESCE(s.last_ts, MAX(t.ts))                AS last_ts,
-               COUNT(*)                                      AS turns,
-               MAX(t.total_resident)                         AS peak,
-               (SELECT COUNT(*) FROM compactions c
-                 WHERE c.session_id = t.session_id) AS compactions,
-               (SELECT title FROM session_titles st WHERE st.session_id = t.session_id
-                 ORDER BY CASE st.kind WHEN 'custom' THEN 0 WHEN 'ai' THEN 1
-                          ELSE 2 END LIMIT 1) AS title,
-               (SELECT kind FROM session_titles st WHERE st.session_id = t.session_id
-                 ORDER BY CASE st.kind WHEN 'custom' THEN 0 WHEN 'ai' THEN 1
-                          ELSE 2 END LIMIT 1) AS title_kind
-        FROM turns t LEFT JOIN sessions s ON s.session_id = t.session_id
-        GROUP BY t.session_id
-        HAVING COUNT(*) >= 5
-    """)
-    if df.empty:
-        return df
-
-    def classify(r):
-        """Which section a session belongs to. Every test is answerable from disk.
-
-        No Archived section: that flag lives in the desktop app's IndexedDB, not in the transcripts
-        and not in any readable file, so it cannot be shown without a snapshot that would go stale
-        silently. A stale flag presented as live is worse than an absent one.
-        """
-        path = r.transcript_path
-        if isinstance(path, str) and path and not os.path.exists(path):
-            # Absent because it was written on another machine, or absent because it was deleted
-            # here. Those are different facts and must not share a label.
-            elsewhere = HOME_DIR.lower() not in path.replace("/", "\\").lower()
-            return ("Imported from another machine" if elsewhere
-                    else "Deleted from this machine")
-        if isinstance(r.entrypoint, str) and r.entrypoint and r.entrypoint != "claude-desktop":
-            return "CLI and SDK"
-        return "Projects"
-
-    df["section"] = df.apply(classify, axis=1)
-    df["project"] = [project_label(c, s)
-                     for c, s in zip(df["cwd"], df["project_slug"], strict=True)]
-    # A session with no title of any kind says so, rather than showing an empty cell that reads
-    # like a rendering fault.
-    df["title"] = [
-        (t.strip() if isinstance(t, str) and t.strip() else "(untitled)")
-        for t in df["title"]
-    ]
-    order = {"Projects": 0, "CLI and SDK": 1, "Imported from another machine": 2,
-             "Deleted from this machine": 3}
-    df["_sec"] = df["section"].map(order).fillna(9)
-    df = df.sort_values(["_sec", "project", "last_ts"],
-                        ascending=[True, True, False], kind="mergesort")
-    return df.drop(columns=["_sec"])
 
 
-def session_turns(session_id: str, include_sidechain: bool = False) -> pd.DataFrame:
-    """Turn records for one session.
-
-    Sidechain is EXCLUDED by default, and that default is now stated on the page rather than
-    applied silently. Subagent work is 70% of the API calls in this store, so a chart that
-    quietly folded it in beside main-thread turns was answering a question nobody asked, while
-    a chart that quietly dropped it looked like the whole session.
-    """
-    where = "" if include_sidechain else "AND COALESCE(is_sidechain,0) = 0"
-    return q(f"""
-        SELECT uuid, ts, model, input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-               output_tokens, thinking_tokens, total_resident, is_sidechain
-        FROM turns WHERE session_id = ? {where} ORDER BY ts
-    """, (session_id,))
 
 
 SCOPE_OPTIONS = [
@@ -370,219 +196,36 @@ def scope_radio(component_id: str, value: str = "main") -> dcc.RadioItems:
     )
 
 
-def session_survivors(session_id: str) -> pd.DataFrame:
-    """Turns that lived through a compaction in this session.
-
-    Only assistant turns can be matched, since those are the only uuids the store holds. The
-    survivor set also names user and attachment records, which stay unmatched by design.
-    """
-    return q("""
-        SELECT v.compaction_uuid, v.kind, v.uuid, t.ts, t.total_resident
-        FROM compaction_survivors v
-        JOIN compactions c ON c.uuid = v.compaction_uuid
-        LEFT JOIN turns t ON t.uuid = v.uuid
-        WHERE c.session_id = ?
-    """, (session_id,))
 
 
-def session_compactions(session_id: str) -> pd.DataFrame:
-    return q("""
-        SELECT ts, trigger, pre_tokens, post_tokens, cumulative_dropped_tokens,
-               duration_ms, version, summary_chars
-        FROM compactions WHERE session_id = ? ORDER BY ts
-    """, (session_id,))
 
 
-COHORT_ALL = "__all__"
 
 
-def cohort_options() -> list:
-    """The populations worth asking a question about.
-
-    A single session answers "what happened here". A cohort answers "what is true of this kind of
-    work", which is the question a research tool exists for: every session in a project, everything
-    that ran outside the desktop app, everything imported from another machine.
-
-    Built from the same frame the picker uses, so a cohort can never contain a session the picker
-    does not list, and the counts shown here are the counts a tab will describe.
-    """
-    df = session_rows()
-    opts = [{"label": f"All sessions ({len(df):,})", "value": COHORT_ALL}]
-    if df.empty:
-        return opts
-    for sec, n in df["section"].value_counts().items():
-        opts.append({"label": f"Section: {sec} ({n:,})", "value": f"section::{sec}"})
-    for proj, n in df["project"].value_counts().head(40).items():
-        opts.append({"label": f"Project: {proj} ({n:,})", "value": f"project::{proj}"})
-    return opts
 
 
-def cohort_sessions(cohort) -> list:
-    """Resolve a cohort to the session ids it contains. Empty list means 'no restriction'."""
-    if not cohort or cohort == COHORT_ALL:
-        return []
-    df = session_rows()
-    if df.empty:
-        return []
-    kind, _, value = str(cohort).partition("::")
-    col = {"section": "section", "project": "project"}.get(kind)
-    if not col:
-        return []
-    return list(df.loc[df[col] == value, "session_id"])
 
 
-def population_label(session_id, cohort, scope) -> str:
-    """One sentence naming exactly what is being described, for the page to print.
-
-    Every aggregate states its population. That is not decoration: the complaint that started this
-    restructure was not knowing whether a number covered everything, the newest thing, or the thing
-    selected, and a count with no denominator is how that happens.
-    """
-    side = "subagents included" if scope == "all" else "main thread only"
-    if session_id:
-        return f"1 session, {side}"
-    ids = cohort_sessions(cohort)
-    if ids:
-        kind, _, value = str(cohort).partition("::")
-        return f"{len(ids):,} sessions in {kind} {value}, {side}"
-    return f"the whole store, every session, {side}"
 
 
-def scoped(session_id, scope="main", alias="", cohort=None):
-    """SQL fragment and params for the header selection.
-
-    Returned as a pair rather than interpolated by each caller, so a tab cannot accidentally scope
-    on a different column or forget the sidechain filter. `alias` is the table alias, empty for an
-    unaliased FROM.
-
-    A single session wins over a cohort: picking one session while a cohort is set means "this one",
-    not "this one and everything like it". The cohort still narrows the picker, so the two stay
-    consistent.
-    """
-    a = f"{alias}." if alias else ""
-    bits, args = [], []
-    if session_id:
-        bits.append(f"AND {a}session_id = ?")
-        args.append(session_id)
-    else:
-        ids = cohort_sessions(cohort)
-        if ids:
-            bits.append(f"AND {a}session_id IN ({','.join('?' * len(ids))})")
-            args.extend(ids)
-    if scope != "all":
-        bits.append(f"AND COALESCE({a}is_sidechain,0) = 0")
-    return " ".join(bits), tuple(args)
 
 
-def all_compactions(session_id=None, cohort=None) -> pd.DataFrame:
-    # scope="all": a compaction is a property of the session, not of one thread inside it, so the
-    # sidechain filter does not apply to this table.
-    where, args = scoped(session_id, "all", alias="c", cohort=cohort)
-    return q(f"""
-        SELECT c.uuid, c.ts, c.trigger, c.version,
-               COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project,
-               c.pre_tokens, c.post_tokens, c.cumulative_dropped_tokens AS dropped,
-               c.duration_ms,
-               (SELECT t.model FROM turns t
-                 WHERE t.session_id = c.session_id AND t.ts <= c.ts
-                 ORDER BY t.ts DESC LIMIT 1) AS model,
-               (SELECT COUNT(*) FROM compaction_survivors v
-                 WHERE v.compaction_uuid = c.uuid) AS survivors
-        FROM compactions c LEFT JOIN sessions s ON s.session_id = c.session_id
-        WHERE c.pre_tokens IS NOT NULL {where}
-        ORDER BY c.pre_tokens DESC
-    """, args)
 
 
-def compaction_summary_text(compaction_uuid: str) -> pd.DataFrame:
-    """The summary a compaction produced, as prose.
-
-    Until the messages table existed this was only ever a character count, so the page could tell
-    you 14,115 chars had replaced 981k tokens without showing you a word of it.
-    """
-    return q(
-        """
-        SELECT m.text, m.chars, m.ts
-        FROM compactions c JOIN messages m ON m.uuid = c.summary_uuid
-        WHERE c.uuid = ?
-        """,
-        (compaction_uuid,),
-    )
 
 
-def compaction_dropped(compaction_uuid: str, limit: int = 300) -> pd.DataFrame:
-    """Messages from before a compaction that are absent from its survivor list.
-
-    A LOWER BOUND in both directions, and labelled as one in the UI. Survivor uuids that the store
-    holds no message for cannot be matched, and a message with no readable text was never stored,
-    so this lists what can be shown to have gone rather than everything that went.
-    """
-    return q(
-        """
-        SELECT m.uuid, m.ts, m.role, m.type, m.chars,
-               substr(replace(replace(m.text, char(10), ' '), char(13), ' '), 1, 220) AS preview
-        FROM compactions c
-        JOIN messages m ON m.session_id = c.session_id AND m.ts < c.ts
-        WHERE c.uuid = ?
-          AND m.uuid NOT IN (SELECT uuid FROM compaction_survivors WHERE compaction_uuid = c.uuid)
-          AND m.uuid <> COALESCE(c.summary_uuid, '')
-        ORDER BY m.chars DESC
-        LIMIT ?
-        """,
-        (compaction_uuid, limit),
-    )
 
 
-def compaction_dropped_count(compaction_uuid: str) -> int:
-    """How many dropped messages EXIST, as opposed to how many the table shows.
-
-    compaction_dropped() caps its result, and reporting the capped length as the count states the
-    limit as though it were a finding.
-    """
-    df = q(
-        """
-        SELECT COUNT(*) AS n
-        FROM compactions c
-        JOIN messages m ON m.session_id = c.session_id AND m.ts < c.ts
-        WHERE c.uuid = ?
-          AND m.uuid NOT IN (SELECT uuid FROM compaction_survivors WHERE compaction_uuid = c.uuid)
-          AND m.uuid <> COALESCE(c.summary_uuid, '')
-        """,
-        (compaction_uuid,),
-    )
-    return int(df.iloc[0]["n"]) if not df.empty else 0
 
 
-def session_messages(session_id: str, limit: int = 400) -> pd.DataFrame:
-    return q(
-        """
-        SELECT uuid, ts, role, type, chars,
-               substr(replace(replace(text, char(10), ' '), char(13), ' '), 1, 220) AS preview
-        FROM messages WHERE session_id = ? ORDER BY ts LIMIT ?
-        """,
-        (session_id, limit),
-    )
 
 
-def message_text(uuid: str) -> pd.DataFrame:
-    return q("SELECT text, chars, ts, role, type FROM messages WHERE uuid = ?", (uuid,))
 
 
-def load_compaction_windows():
-    """Window per compaction, resolved by model segment in one node pass.
-
-    The window is a property of the model in use, not of the session, so a session that switched
-    models has more than one. Resolved once at startup rather than per row.
-    """
-    return _node_json_argv([str(ROOT / "tools" / "segments.mjs"), "--windows-for-compactions"])
 
 
-def segments_for(session_id: str):
-    return _node_json_argv([str(ROOT / "tools" / "segments.mjs"), "--session", session_id])
 
 
-MATH = load_math()
-THRESHOLDS = {t["window"]: t for t in MATH["thresholds"]}
 COMPACTION_WINDOWS = load_compaction_windows()
 
 
@@ -644,29 +287,6 @@ def refresh_store(min_interval: float = 4.0) -> None:
 _window_cache: dict = {}
 
 
-def session_window(session_id: str, ttl: float = 60.0):
-    """The window a session is actually running, resolved from evidence and cached.
-
-    A model-name lookup is not sufficient: claude-opus-5 is listed in SMALL_WINDOW_MODELS, yet
-    this build demonstrably runs it at 1M, and the proof is the session's own compaction and peak.
-    tools/segments.mjs already performs that reasoning, so it is asked rather than reimplemented -
-    once per session per ttl, to keep a node spawn off the per-tick path.
-    """
-    hit = _window_cache.get(session_id)
-    now = _time.time()
-    if hit and now - hit[0] < ttl:
-        return hit[1], hit[2]
-    window, confidence = None, "unresolved"
-    try:
-        info = segments_for(session_id)
-        segs = [s for s in info.get("segments", []) if s.get("window")]
-        if segs:
-            window = segs[-1]["window"]
-            confidence = segs[-1].get("confidence") or "segment"
-    except Exception:                               # noqa: BLE001 - unresolved is a valid answer
-        pass
-    _window_cache[session_id] = (now, window, confidence)
-    return window, confidence
 
 
 def live_context(session_id: str = None):
@@ -710,79 +330,16 @@ def live_context(session_id: str = None):
     return out
 
 
-# Pseudo-models that appear in the transcript but are not models anyone ran. Printing <synthetic>
-# beside claude-opus-5 in a MODELS card invites the reader to think they used two. segments.mjs
-# already treats it as not-a-model-switch; this is the display half of the same rule.
-SYNTHETIC_MODELS = {"<synthetic>", "synthetic", "", None}
 
 
-def real_models(values) -> list:
-    seen = []
-    for m in values:
-        if m in SYNTHETIC_MODELS or (isinstance(m, float) and pd.isna(m)):
-            continue
-        if m not in seen:
-            seen.append(m)
-    return sorted(seen)
 
 
-# ---------------------------------------------------------------------------
-# Presentation helpers
-# ---------------------------------------------------------------------------
-def fmt_tokens(n) -> str:
-    if n is None or (isinstance(n, float) and pd.isna(n)):
-        return "-"
-    n = float(n)
-    # Billions became reachable once cache reads were totalled: this store has 31.4B of them, and
-    # without this tier that rendered as "31417.43M", which is a number nobody can read at a glance.
-    if n >= 1e9:
-        return f"{n/1e9:.2f}B".replace(".00B", "B")
-    if n >= 1e6:
-        return f"{n/1e6:.2f}M".replace(".00M", "M")
-    if n >= 1000:
-        return f"{n/1000:.1f}k".replace(".0k", "k")
-    return f"{n:.0f}"
 
 
-def fmt_bytes(n) -> str:
-    """Bytes, said as bytes. Never converted to tokens.
-
-    The store holds exact API token counts per request and no token count per tool call, so a
-    bytes-to-tokens ratio here would dress an estimate as a measurement. The Waste tab already
-    refuses that conversion for the same reason.
-    """
-    if n is None or (isinstance(n, float) and pd.isna(n)):
-        return "-"
-    n = float(n)
-    for unit, size in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
-        if n >= size:
-            return f"{n / size:.1f} {unit}"
-    return f"{n:.0f} B"
 
 
-# The two styles every tab's prose already uses inline. Named once so a new tab cannot drift into
-# its own heading size, which is how a dashboard stops looking like one product.
-SECTION_HEAD = {"color": TEXT, "fontSize": "14px", "fontWeight": "600", "margin": "18px 0 4px"}
-CONTROL_LABEL = {"color": MUTED, "fontSize": "11.5px", "fontFamily": MONO}
-SECTION_NOTE = {"color": MUTED, "fontSize": "12px", "marginBottom": "8px", "maxWidth": "900px",
-                "lineHeight": "1.55"}
-CODE_BLOCK = {"background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
-              "padding": "12px 14px", "color": TEXT, "fontFamily": MONO, "fontSize": "12px",
-              "display": "inline-block"}
 
 
-def stat_card(label: str, value: str, color: str = TEXT, sub: str = "") -> html.Div:
-    return html.Div(
-        [
-            html.Div(label, style={"color": MUTED, "fontSize": "11px",
-                                   "textTransform": "uppercase", "letterSpacing": "0.06em"}),
-            html.Div(value, style={"color": color, "fontSize": "26px",
-                                   "fontWeight": 700, "fontFamily": MONO, "marginTop": "4px"}),
-            html.Div(sub, style={"color": MUTED, "fontSize": "11px", "marginTop": "2px"}),
-        ],
-        style={"background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
-               "padding": "14px 16px", "minWidth": "150px", "flex": "1"},
-    )
 
 
 def context_bar(live) -> html.Div:
@@ -839,19 +396,6 @@ def context_bar(live) -> html.Div:
     )
 
 
-def dark_fig(fig: go.Figure, height: int = 420) -> go.Figure:
-    """Plotly does not follow the page theme. Every color is set here."""
-    fig.update_layout(
-        paper_bgcolor=BG, plot_bgcolor=PANEL, font=dict(color=TEXT, family=MONO, size=11),
-        height=height, margin=dict(l=60, r=24, t=40, b=48),
-        legend=dict(bgcolor=PANEL, bordercolor=BORDER, borderwidth=1, font=dict(color=TEXT)),
-        hoverlabel=dict(bgcolor=PANEL, font=dict(color=TEXT, family=MONO), bordercolor=BORDER),
-    )
-    fig.update_xaxes(gridcolor=BORDER, zerolinecolor=BORDER, linecolor=BORDER,
-                     tickfont=dict(color=MUTED), title_font=dict(color=MUTED))
-    fig.update_yaxes(gridcolor=BORDER, zerolinecolor=BORDER, linecolor=BORDER,
-                     tickfont=dict(color=MUTED), title_font=dict(color=MUTED))
-    return fig
 
 
 def selector_options(cohort=None) -> list:
@@ -905,36 +449,10 @@ def quick_view(session_id, scope="main"):
     return html.Div([html.Div(bits, style={"marginBottom": "2px"}), context_bar(live)])
 
 
-def empty_fig(msg: str) -> go.Figure:
-    fig = go.Figure()
-    fig.add_annotation(text=msg, showarrow=False, font=dict(color=MUTED, size=13, family=MONO))
-    fig.update_xaxes(visible=False)
-    fig.update_yaxes(visible=False)
-    return dark_fig(fig, height=300)
 
 
-_text_note_cache = {"at": 0.0, "note": None}
 
 
-def stored_text_note(ttl: float = 300.0) -> str:
-    """One line naming what the store holds, with the scale, for the header.
-
-    Cached the way the rest of this file caches, because the header is rebuilt by every callback and
-    a COUNT over messages on each of those would be a self-inflicted cost on the page that exists to
-    show what things cost.
-    """
-    now = _time.time()
-    if _text_note_cache["note"] is not None and now - _text_note_cache["at"] < ttl:
-        return _text_note_cache["note"]
-    try:
-        row = q("SELECT COUNT(*) AS n, COALESCE(SUM(chars), 0) AS chars FROM messages").iloc[0]
-        note = (f"this store keeps the TEXT of {int(row['n']):,} records "
-                f"({fmt_bytes(int(row['chars']))} of it), not just their sizes")
-    except Exception:                               # noqa: BLE001 - a header must always render
-        note = "this store keeps the text of your conversations, not just their sizes"
-    _text_note_cache["at"] = now
-    _text_note_cache["note"] = note
-    return note
 
 
 # ---------------------------------------------------------------------------
@@ -1024,141 +542,14 @@ header = html.Div(
 )
 
 
-# ---- Overview -------------------------------------------------------------
-def sql_preview(sql: str, params=()) -> str:
-    """The query as run, with its bound values listed rather than interpolated.
-
-    Not substituted into the string: showing `session_id = 'abc'` would suggest the query was built
-    that way, and someone copying it would learn the wrong lesson about how this app talks to
-    SQLite. The parameters are listed beneath instead, in bind order.
-    """
-    text = "\n".join(line.rstrip() for line in str(sql).strip().splitlines() if line.strip())
-    if not params:
-        return text
-    shown = list(params)
-    # A cohort binds one id per session and there can be 300 of them. The count is the useful part.
-    if len(shown) > 8:
-        head = ", ".join(repr(p) for p in shown[:6])
-        return f"{text}\n\n-- {len(shown)} bound parameters, first 6:\n-- {head}, ..."
-    return f"{text}\n\n-- bound parameters, in order:\n-- " + ", ".join(repr(p) for p in shown)
 
 
-def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size: int = 12,
-                   note: str = None, style_data_conditional=None):
-    """A table, the query that produced it, and a way to take the rows away.
-
-    Every figure on this page should be reproducible by someone who does not have this app open.
-    That is the difference between a dashboard number and a research one, and it is how this repo
-    already treats evidence everywhere else: a claim carries the command that proves it.
-
-    The row count is stated on the table itself, so a filtered or truncated view can never be read
-    as the whole population.
-    """
-    if df is None or (hasattr(df, "empty") and df.empty):
-        return html.Div([
-            html.Div(title, style=SECTION_HEAD),
-            html.Div("No rows.", style=SECTION_NOTE),
-            accordion("The query that returned nothing", "reproduce it yourself",
-                      html.Pre(sql_preview(sql, params),
-                               style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
-        ])
-    records = df.to_dict("records") if hasattr(df, "to_dict") else list(df)
-    cols = columns or list(df.columns if hasattr(df, "columns") else records[0].keys())
-    truncated = (" (table shows the first page; export gives every row)"
-                 if len(records) > page_size else "")
-    return html.Div([
-        html.Div(title, style=SECTION_HEAD),
-        html.Div(f"{len(records):,} rows.{truncated}" + (f" {note}" if note else ""),
-                 style=SECTION_NOTE),
-        dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in cols],
-            data=records,
-            page_size=page_size,
-            sort_action="native",
-            filter_action="native",
-            export_format="csv",
-            export_headers="display",
-            style_table={"overflowX": "auto"},
-            style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
-            style_data_conditional=(style_data_conditional or
-                                    [{"if": {"row_index": "odd"}, "backgroundColor": "#12171e"}]),
-            style_cell=TABLE_STYLE["style_cell"],
-            style_header=TABLE_STYLE["style_header"],
-        ),
-        accordion("The query behind this table", "copy it, or export the rows above",
-                  html.Pre(sql_preview(sql, params),
-                           style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
-    ])
 
 
-def baseline_marks(fig, x_for_ts=None, ts_list=None):
-    """Mark every recorded calibration on a time chart.
-
-    A configuration's fixed overhead moves when an MCP server or a skill is added, and the store
-    dates every observation of it. Without these the reader sees a step in the data and has no way
-    to know whether something changed or something broke. With them it is an event with a date.
-
-    Charts here are indexed by turn number rather than by time, so a timestamp has to be mapped to
-    the nearest turn; where that cannot be done the mark is omitted rather than placed at a guess.
-    """
-    try:
-        bl = q("SELECT ts, static_total, source FROM context_baselines ORDER BY ts")
-    except Exception:
-        return 0
-    if bl.empty or not ts_list:
-        return 0
-    drawn = 0
-    for r in bl.itertuples():
-        pos = x_for_ts(str(r.ts)) if x_for_ts else None
-        if not pos:
-            continue
-        fig.add_vline(x=pos, line=dict(color=GOOD, width=1, dash="dot"))
-        fig.add_annotation(x=pos, yref="paper", y=1.02, showarrow=False,
-                           text=f"calibrated {fmt_tokens(r.static_total)}",
-                           font=dict(color=GOOD, size=9, family=MONO), xanchor="left")
-        drawn += 1
-    return drawn
 
 
-def numeric_columns(cols, numeric, formats=None):
-    """Column specs that keep numbers as numbers while still reading well.
-
-    Mapping a token count through fmt_tokens produced "997.8k", a STRING. That sorted
-    lexicographically, so 9 came after 80,000, and once these tables gained a CSV export it put
-    formatted text in the file instead of values. Dash formats the display and leaves the
-    underlying value numeric, which is what sorting and export need.
-
-    Every table in this app inherits export_format="csv" from TABLE_STYLE, so this applies to all
-    of them, not only the ones that also sort. `formats` overrides the default grouping for a
-    column that needs its own precision, such as a percentage.
-    """
-    formats = formats or {}
-    out = []
-    for c in cols:
-        if c in numeric:
-            out.append({"name": c, "id": c, "type": "numeric",
-                        "format": formats.get(c) or Format(group=Group.yes)})
-        else:
-            out.append({"name": c, "id": c})
-    return out
 
 
-def accordion(title: str, sub: str, children, open_by_default: bool = False):
-    """A collapsible block. Native details/summary, so it needs no callback and no state.
-
-    Every store-wide number lives inside one of these on the Summary tab. That is the whole point
-    of the restructure: a figure that describes the entire store is never rendered beside a figure
-    that describes one session, where a reader has to guess which is which.
-    """
-    return html.Details([
-        html.Summary([
-            html.Span(title, style={"color": TEXT, "fontSize": "13px", "fontWeight": 600}),
-            html.Span(f"  {sub}", style={"color": MUTED, "fontSize": "11px", "marginLeft": "8px"}),
-        ], style={"cursor": "pointer", "padding": "8px 10px", "background": PANEL,
-                  "border": f"1px solid {BORDER}", "borderRadius": "6px",
-                  "fontFamily": MONO, "listStyle": "none"}),
-        html.Div(children, style={"padding": "12px 10px 4px 10px"}),
-    ], open=open_by_default, style={"marginBottom": "8px"})
 
 
 def summary_layout(session_id=None, scope="main", cohort=None):
@@ -1246,76 +637,8 @@ def project_totals_fig() -> go.Figure:
     return fig
 
 
-def selection_metrics(session_id=None, cohort=None, scope="main") -> dict:
-    """The numbers that describe any selection, session or cohort, from one query shape.
-
-    Both sides of a comparison go through this, so the two arms cannot be measured differently.
-    Matching the arms is the whole point: a difference produced by asking two different questions
-    is not a finding.
-    """
-    w, args = scoped(session_id, scope, cohort=cohort)
-    row = q(f"""
-        SELECT COUNT(*)                                      AS calls,
-               COUNT(DISTINCT session_id)                     AS sessions,
-               SUM(COALESCE(cache_read_input_tokens,0))       AS cache_read,
-               SUM(COALESCE(cache_creation_input_tokens,0))   AS cache_creation,
-               SUM(COALESCE(output_tokens,0))                 AS output,
-               SUM(COALESCE(thinking_tokens,0))               AS thinking,
-               MAX(total_resident)                            AS peak,
-               AVG(total_resident)                            AS mean_resident,
-               MIN(ts)                                        AS first_ts,
-               MAX(ts)                                        AS last_ts
-        FROM api_calls WHERE 1=1 {w}
-    """, args).iloc[0].to_dict()
-    cw, cargs = scoped(session_id, "all", alias="c", cohort=cohort)
-    comp = q(f"SELECT COUNT(*) AS n FROM compactions c WHERE 1=1 {cw}", cargs).iloc[0]["n"]
-    tw, targs = scoped(session_id, scope, cohort=cohort)
-    tools = q(f"""SELECT COUNT(*) AS n, SUM(COALESCE(result_bytes,0)) AS bytes
-                  FROM tool_calls WHERE 1=1 {tw}""", targs).iloc[0].to_dict()
-    calls = int(row["calls"] or 0)
-    peak = int(row["peak"] or 0)
-    cache = int(row["cache_read"] or 0)
-    return {
-        "sessions": int(row["sessions"] or 0),
-        "calls": calls,
-        "cache_read": cache,
-        "rebill_multiple": (cache / peak) if peak else 0.0,
-        "cache_per_call": (cache / calls) if calls else 0.0,
-        "cache_creation": int(row["cache_creation"] or 0),
-        "output": int(row["output"] or 0),
-        "thinking": int(row["thinking"] or 0),
-        "peak": peak,
-        "mean_resident": float(row["mean_resident"] or 0),
-        "compactions": int(comp or 0),
-        "tool_calls": int(tools["n"] or 0),
-        "tool_bytes": int(tools["bytes"] or 0),
-        "first_ts": str(row["first_ts"] or "")[:19].replace("T", " "),
-        "last_ts": str(row["last_ts"] or "")[:19].replace("T", " "),
-    }
 
 
-# How each metric is rendered, and whether a bigger number is worse. Declared once so the compare
-# table cannot label one row "worse" by one rule and another by a different one.
-# key, label, format, which direction is worse, and whether the figure is size-independent.
-#
-# That last flag is the one that stops the table lying by arithmetic. Comparing 3 sessions against
-# 303 makes almost every total 100x larger on one side, and that ratio says nothing except that one
-# population is bigger. Only the per-unit rows compare arms of different sizes honestly, so they
-# are the ones marked comparable and the totals are labelled as scaling with population.
-COMPARE_ROWS = [
-    ("sessions", "sessions", "count", None, False),
-    ("calls", "API calls", "count", None, False),
-    ("cache_read", "cache re-reads", "tokens", "higher", False),
-    ("rebill_multiple", "re-billed, as a multiple of peak", "multiple", "higher", True),
-    ("cache_per_call", "cache read per call", "tokens", "higher", True),
-    ("peak", "peak resident", "tokens", None, True),
-    ("mean_resident", "mean resident", "tokens", "higher", True),
-    ("output", "output tokens", "tokens", None, False),
-    ("thinking", "thinking tokens", "tokens", None, False),
-    ("compactions", "compactions", "count", "higher", False),
-    ("tool_calls", "tool calls", "count", None, False),
-    ("tool_bytes", "tool result bytes", "bytes", "higher", False),
-]
 
 
 def compare_layout(session_id=None, scope="main", cohort=None):
@@ -1347,70 +670,6 @@ def compare_layout(session_id=None, scope="main", cohort=None):
     ])
 
 
-def compare_table(a_label, a, b_label, b) -> html.Div:
-    """Render two metric dicts side by side, with the delta and its direction.
-
-    Each row carries its own unit, which is why the unit is a column rather than a suffix glued
-    onto the value. A and B used to hold "18.83B", "51.5 MB" and "1,291", so the arms of a research
-    comparison were display text: they sorted lexicographically and the CSV export, which is the
-    point of the tab, received the labels instead of the numbers.
-    """
-    same_size = a.get("sessions") == b.get("sessions")
-    rows = []
-    for key, label, kind, worse, per_unit in COMPARE_ROWS:
-        av, bv = a.get(key, 0), b.get(key, 0)
-        if not av and not bv:
-            continue
-        comparable = per_unit or same_size
-        if av and bv:
-            ratio = bv / av if av else 0
-            # Only claim better or worse where the metric has a direction AND the ratio means
-            # something. A total is 100x larger because one arm holds 100x the sessions, which is
-            # a fact about the populations, not about how they behaved.
-            if worse and comparable and abs(ratio - 1) >= 0.05:
-                verdict = "B worse" if (ratio > 1) == (worse == "higher") else "B better"
-            else:
-                verdict = ""
-        else:
-            ratio, verdict = None, "one arm has none"
-        rows.append({"metric": label, "unit": kind,
-                     "A": round(av, 1), "B": round(bv, 1),
-                     "B vs A": None if ratio is None else round(ratio, 2), "verdict": verdict,
-                     "basis": "per unit" if per_unit else "total, scales with population"})
-    return html.Div([
-        html.Div([
-            html.Div([html.Div("A", style={"color": ACCENT, "fontWeight": 700, "fontFamily": MONO}),
-                      html.Div(a_label, style={"color": MUTED, "fontSize": "11px"})],
-                     style={"flex": "1"}),
-            html.Div([html.Div("B", style={"color": VIOLET, "fontWeight": 700, "fontFamily": MONO}),
-                      html.Div(b_label, style={"color": MUTED, "fontSize": "11px"})],
-                     style={"flex": "1"}),
-        ], style={"display": "flex", "gap": "16px", "marginBottom": "10px"}),
-        dash_table.DataTable(
-            columns=numeric_columns(
-                ["metric", "unit", "A", "B", "B vs A", "verdict", "basis"],
-                {"A", "B", "B vs A"},
-                {"B vs A": Format(precision=2, scheme=Scheme.fixed)}),
-            data=rows,
-            export_format="csv",
-            export_headers="display",
-            style_data_conditional=[
-                {"if": {"row_index": "odd"}, "backgroundColor": "#12171e"},
-                {"if": {"filter_query": '{verdict} contains "worse"'}, "color": DANGER},
-                {"if": {"filter_query": '{verdict} contains "better"'}, "color": GOOD},
-            ],
-            style_cell=TABLE_STYLE["style_cell"], style_header=TABLE_STYLE["style_header"],
-            style_table={"overflowX": "auto"}),
-        html.Div("Values are raw, in the unit each row names, so the export carries numbers "
-                 "rather than labels. Only rows where a bigger number is unambiguously worse are "
-                 "marked, and only "
-                 "where the comparison means something. Peak resident and output tokens carry no "
-                 "direction, since a longer session is not a worse one. Rows marked \"total\" "
-                 "scale with how many sessions each arm holds, so when the arms are different "
-                 "sizes their ratio describes the populations rather than the behaviour; the "
-                 "per-unit rows are the ones that compare unequal arms honestly.",
-                 style=SECTION_NOTE),
-    ])
 
 
 def decisions() -> list:
@@ -2529,18 +1788,6 @@ def _tick(_n, session_id=None, scope="main"):
                         style={"color": DANGER, "fontSize": "11px", "fontFamily": MONO})
 
 
-def text_panel(title: str, body: str, colour: str = TEXT) -> html.Div:
-    """A scrollable block of real text. Pre-wrapped, because this is prose, not a data grid."""
-    return html.Div([
-        html.Div(title, style={"color": colour, "fontSize": "12px", "fontWeight": 700,
-                               "marginBottom": "6px", "fontFamily": MONO}),
-        html.Pre(body, style={
-            "whiteSpace": "pre-wrap", "wordBreak": "break-word", "margin": 0,
-            "maxHeight": "420px", "overflowY": "auto", "background": PANEL,
-            "border": f"1px solid {BORDER}", "borderRadius": "8px", "padding": "12px 14px",
-            "color": TEXT, "fontSize": "12px", "fontFamily": MONO, "lineHeight": "1.5",
-        }),
-    ])
 
 
 @callback(
@@ -2703,113 +1950,8 @@ def budget_line(fig, segs, ts_list, n_turns, budget_pct, latest):
     return headroom
 
 
-def turn_diff(session_id, scope, ts_a, ts_b):
-    """What entered the window between two turns, and what it cost.
-
-    The question the rest of this tab could not answer. A resident line says the context grew; it
-    does not say what grew it, and the answer is almost always a specific tool result or a specific
-    file, which is the thing a reader can act on. Everything here is between the two timestamps,
-    exclusive of A and inclusive of B, so the numbers add up to the delta shown beside them.
-    """
-    w, args = scoped(session_id, scope)
-    span = (ts_a, ts_b)
-
-    spend = q(f"""SELECT COUNT(*) AS calls,
-                         COALESCE(SUM(output_tokens), 0) AS output,
-                         COALESCE(SUM(thinking_tokens), 0) AS thinking,
-                         COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read,
-                         COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_write
-                    FROM api_calls WHERE ts > ? AND ts <= ? {w}""",
-              (*span, *args))
-
-    tools = q(f"""SELECT tool_name AS tool,
-                         COUNT(*) AS calls,
-                         COALESCE(SUM(result_bytes), 0) AS result_bytes,
-                         COALESCE(SUM(input_bytes), 0) AS input_bytes,
-                         SUM(CASE WHEN is_error THEN 1 ELSE 0 END) AS errors
-                    FROM tool_calls WHERE ts > ? AND ts <= ? {w}
-                   GROUP BY tool ORDER BY result_bytes DESC LIMIT 40""",
-                (*span, *args))
-
-    targets = q(f"""SELECT target, tool_name AS tool, COUNT(*) AS reads,
-                           COALESCE(SUM(result_bytes), 0) AS result_bytes
-                      FROM tool_calls
-                     WHERE ts > ? AND ts <= ? AND target IS NOT NULL AND target != '' {w}
-                     GROUP BY target, tool ORDER BY result_bytes DESC LIMIT 40""",
-                  (*span, *args))
-
-    said = q(f"""SELECT role, type, COUNT(*) AS messages,
-                        COALESCE(SUM(chars), 0) AS chars
-                   FROM messages WHERE ts > ? AND ts <= ? {w}
-                  GROUP BY role, type ORDER BY chars DESC""",
-              (*span, *args))
-    return spend, tools, targets, said
 
 
-def turn_diff_panel(session_id, scope, turns, a, b):
-    """Render the diff between turns a and b, with the SQL that produced each table."""
-    if turns.empty or not a or not b or a >= b:
-        return html.Div("Move the two handles apart to compare a range of turns.",
-                        style=SECTION_NOTE)
-    a = max(1, min(a, len(turns)))
-    b = max(1, min(b, len(turns)))
-    ts_a = str(turns["ts"].iloc[a - 1])
-    ts_b = str(turns["ts"].iloc[b - 1])
-    resident_a = int(turns["total_resident"].iloc[a - 1] or 0)
-    resident_b = int(turns["total_resident"].iloc[b - 1] or 0)
-    delta = resident_b - resident_a
-
-    spend, tools, targets, said = turn_diff(session_id, scope, ts_a, ts_b)
-    row = spend.iloc[0] if not spend.empty else None
-
-    # The unexplained remainder is stated rather than hidden. Resident growth is not the sum of the
-    # tool results in the range: a compaction can drop context inside it, and the store holds no
-    # size for every record. A panel that implied the parts added up would be inviting a wrong
-    # conclusion, which is the same defect as a number with no context.
-    accounted = int(tools["result_bytes"].sum()) if not tools.empty else 0
-
-    cards = html.Div([
-        stat_card("turns", f"{a} to {b}", sub=f"{b - a} turns"),
-        stat_card("resident at A", fmt_tokens(resident_a)),
-        stat_card("resident at B", fmt_tokens(resident_b), color=ACCENT),
-        stat_card("delta", ("+" if delta >= 0 else "-") + fmt_tokens(abs(delta)),
-                  color=DANGER if delta > 0 else GOOD,
-                  sub="a drop means a compaction fired in the range"),
-        stat_card("re-read in range", fmt_tokens(int(row["cache_read"]) if row is not None else 0),
-                  color=WARN, sub=f"{int(row['calls']) if row is not None else 0} API calls"),
-        stat_card("output", fmt_tokens(int(row["output"]) if row is not None else 0),
-                  sub=f"{fmt_tokens(int(row['thinking']) if row is not None else 0)} thinking"),
-        stat_card("tool results", fmt_bytes(accounted),
-                  sub="bytes returned, not tokens: no conversion is recorded"),
-    ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
-
-    blocks = [
-        html.Div(f"Between turn {a} ({ts_a[:19]}) and turn {b} ({ts_b[:19]})", style=SECTION_HEAD),
-        cards,
-    ]
-    if not tools.empty:
-        blocks.append(evidence_block(
-            "tools called in this range", tools,
-            "SELECT tool_name, COUNT(*), SUM(result_bytes), SUM(input_bytes), SUM(is_error) "
-            "FROM tool_calls WHERE ts > ? AND ts <= ? GROUP BY tool_name",
-            (ts_a, ts_b),
-            columns=numeric_columns(list(tools.columns),
-                                    {"calls", "result_bytes", "input_bytes", "errors"})))
-    if not targets.empty:
-        blocks.append(evidence_block(
-            "what was read, largest first", targets,
-            "SELECT target, tool_name, COUNT(*), SUM(result_bytes) FROM tool_calls "
-            "WHERE ts > ? AND ts <= ? AND target IS NOT NULL GROUP BY target, tool_name",
-            (ts_a, ts_b),
-            columns=numeric_columns(list(targets.columns), {"reads", "result_bytes"})))
-    if not said.empty:
-        blocks.append(evidence_block(
-            "what was said", said,
-            "SELECT role, type, COUNT(*), SUM(chars) FROM messages "
-            "WHERE ts > ? AND ts <= ? GROUP BY role, type",
-            (ts_a, ts_b),
-            columns=numeric_columns(list(said.columns), {"messages", "chars"})))
-    return html.Div(blocks)
 
 
 def session_view(session_id, scope="main", budget_pct=None, mark=None, with_cards=True):
