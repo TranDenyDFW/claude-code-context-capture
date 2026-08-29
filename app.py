@@ -25,6 +25,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, dash_table, dcc, html
+from dash.exceptions import PreventUpdate
 from flask import request as _flask_request
 
 ROOT = Path(__file__).resolve().parent
@@ -202,28 +203,82 @@ def overview_stats() -> dict:
     return {**small, **calls}
 
 
-def session_options() -> list:
+HOME_DIR = str(Path.home())
+
+
+def project_label(cwd, slug) -> str:
+    """What to CALL a project.
+
+    `project_slug` is a filesystem-safe encoding of the working directory, not a name: `P--Books`,
+    `C--Users-Administrator`. It was being printed straight into the picker. It is also lossy and
+    ambiguous, so this is not a decoding problem: `subagents` is not a path at all, it is the folder
+    subagent transcripts are written to, and in this store it maps to 30 different working
+    directories. `cwd` holds the real path for 1,320 of 1,323 sessions, so the real path wins and
+    the slug is only ever a last resort for the 3 that have none.
+    """
+    if isinstance(cwd, str) and cwd.strip():
+        return cwd.strip()
+    if isinstance(slug, str) and slug.strip():
+        return f"{slug.strip()} (no working directory recorded)"
+    return "(unknown)"
+
+
+def session_rows() -> pd.DataFrame:
+    """Every session worth picking, with the name it goes by and the section it belongs to.
+
+    Ordered the way the desktop sidebar orders: section, then project, then most recently active
+    first. The old picker sorted 1,323 sessions by peak tokens, which interleaved every project and
+    made the list unreadable.
+    """
     df = q("""
         SELECT t.session_id,
-               COALESCE(s.project_slug, '?')                 AS project,
+               s.cwd, s.project_slug, s.entrypoint, s.transcript_path,
+               COALESCE(s.last_ts, MAX(t.ts))                AS last_ts,
                COUNT(*)                                      AS turns,
                MAX(t.total_resident)                         AS peak,
-               MIN(t.ts)                                     AS started,
-               (SELECT COUNT(*) FROM compactions c WHERE c.session_id = t.session_id) AS compactions
+               (SELECT COUNT(*) FROM compactions c WHERE c.session_id = t.session_id) AS compactions,
+               (SELECT title FROM session_titles st WHERE st.session_id = t.session_id
+                 ORDER BY CASE st.kind WHEN 'custom' THEN 0 WHEN 'ai' THEN 1 ELSE 2 END LIMIT 1) AS title,
+               (SELECT kind FROM session_titles st WHERE st.session_id = t.session_id
+                 ORDER BY CASE st.kind WHEN 'custom' THEN 0 WHEN 'ai' THEN 1 ELSE 2 END LIMIT 1) AS title_kind
         FROM turns t LEFT JOIN sessions s ON s.session_id = t.session_id
         GROUP BY t.session_id
         HAVING COUNT(*) >= 5
-        ORDER BY peak DESC
     """)
-    opts = []
-    for r in df.itertuples():
-        started = (r.started or "")[:10]
-        mark = f" | {r.compactions} compaction(s)" if r.compactions else ""
-        opts.append({
-            "label": f"{r.project} | {started} | {r.turns} turns | peak {r.peak/1000:.0f}k{mark}",
-            "value": r.session_id,
-        })
-    return opts
+    if df.empty:
+        return df
+
+    def classify(r):
+        """Which section a session belongs to. Every test is answerable from disk.
+
+        No Archived section: that flag lives in the desktop app's IndexedDB, not in the transcripts
+        and not in any readable file, so it cannot be shown without a snapshot that would go stale
+        silently. A stale flag presented as live is worse than an absent one.
+        """
+        path = r.transcript_path
+        if isinstance(path, str) and path and not os.path.exists(path):
+            # Absent because it was written on another machine, or absent because it was deleted
+            # here. Those are different facts and must not share a label.
+            return ("Imported from another machine" if HOME_DIR.lower() not in path.replace("/", "\\").lower()
+                    else "Deleted from this machine")
+        if isinstance(r.entrypoint, str) and r.entrypoint and r.entrypoint != "claude-desktop":
+            return "CLI and SDK"
+        return "Projects"
+
+    df["section"] = df.apply(classify, axis=1)
+    df["project"] = [project_label(c, s) for c, s in zip(df["cwd"], df["project_slug"])]
+    # A session with no title of any kind says so, rather than showing an empty cell that reads
+    # like a rendering fault.
+    df["title"] = [
+        (t.strip() if isinstance(t, str) and t.strip() else "(untitled)")
+        for t in df["title"]
+    ]
+    order = {"Projects": 0, "CLI and SDK": 1, "Imported from another machine": 2,
+             "Deleted from this machine": 3}
+    df["_sec"] = df["section"].map(order).fillna(9)
+    df = df.sort_values(["_sec", "project", "last_ts"],
+                        ascending=[True, True, False], kind="mergesort")
+    return df.drop(columns=["_sec"])
 
 
 def session_turns(session_id: str, include_sidechain: bool = False) -> pd.DataFrame:
@@ -294,9 +349,27 @@ def session_compactions(session_id: str) -> pd.DataFrame:
     """, (session_id,))
 
 
-def all_compactions() -> pd.DataFrame:
-    return q("""
-        SELECT c.uuid, c.ts, COALESCE(s.project_slug,'?') AS project, c.trigger, c.version,
+def scoped(session_id, scope="main", alias=""):
+    """SQL fragment and params for the header selection.
+
+    Returned as a pair rather than interpolated by each caller, so a tab cannot accidentally scope
+    on a different column or forget the sidechain filter. `alias` is the table alias, empty for an
+    unaliased FROM.
+    """
+    a = f"{alias}." if alias else ""
+    bits, args = [], []
+    if session_id:
+        bits.append(f"AND {a}session_id = ?")
+        args.append(session_id)
+    if scope != "all":
+        bits.append(f"AND COALESCE({a}is_sidechain,0) = 0")
+    return " ".join(bits), tuple(args)
+
+
+def all_compactions(session_id=None) -> pd.DataFrame:
+    where, args = ("AND c.session_id = ?", (session_id,)) if session_id else ("", ())
+    return q(f"""
+        SELECT c.uuid, c.ts, COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project, c.trigger, c.version,
                c.pre_tokens, c.post_tokens, c.cumulative_dropped_tokens AS dropped,
                c.duration_ms,
                (SELECT t.model FROM turns t
@@ -305,9 +378,9 @@ def all_compactions() -> pd.DataFrame:
                (SELECT COUNT(*) FROM compaction_survivors v
                  WHERE v.compaction_uuid = c.uuid) AS survivors
         FROM compactions c LEFT JOIN sessions s ON s.session_id = c.session_id
-        WHERE c.pre_tokens IS NOT NULL
+        WHERE c.pre_tokens IS NOT NULL {where}
         ORDER BY c.pre_tokens DESC
-    """)
+    """, args)
 
 
 def compaction_summary_text(compaction_uuid: str) -> pd.DataFrame:
@@ -484,19 +557,26 @@ def session_window(session_id: str, ttl: float = 60.0):
     return window, confidence
 
 
-def live_context():
-    """The newest API call in the store, expressed the way the desktop expresses it.
+def live_context(session_id: str = None):
+    """The newest API call, expressed the way the desktop expresses it.
 
     Reads api_calls rather than turns: a streamed assistant message is several turn rows sharing
     one request id, so the newest turn row is not necessarily the newest call.
+
+    With a session_id it describes THAT session; without one it describes the newest call in the
+    store. Which of those a reader is looking at used to be unstated, and that ambiguity is the
+    whole reason for the selector: a header that silently switched between "the latest thing that
+    happened anywhere" and "the thing you are looking at" is two different numbers in one place.
     """
+    where = "AND session_id = ?" if session_id else ""
+    args = (session_id,) if session_id else ()
     df = q(
-        """
+        f"""
         SELECT session_id, ts, model, total_resident
         FROM api_calls
-        WHERE total_resident IS NOT NULL AND COALESCE(is_sidechain, 0) = 0
+        WHERE total_resident IS NOT NULL AND COALESCE(is_sidechain, 0) = 0 {where}
         ORDER BY ts DESC LIMIT 1
-        """
+        """, args
     )
     if df.empty:
         return None
@@ -661,6 +741,50 @@ def dark_fig(fig: go.Figure, height: int = 420) -> go.Figure:
     return fig
 
 
+def selector_options() -> list:
+    """Options for the global selector: the title first, because that is what it is called."""
+    df = session_rows()
+    if df.empty:
+        return []
+    opts = []
+    for r in df.itertuples():
+        when = str(r.last_ts or "")[:10]
+        opts.append({
+            "label": f"{r.title[:60]}  ·  {r.project}  ·  {when}  ·  {fmt_tokens(r.peak)}",
+            "value": r.session_id,
+        })
+    return opts
+
+
+def quick_view(session_id, scope="main"):
+    """The header readout for whatever is selected.
+
+    Named for what it describes. With nothing selected it says so and reports the newest call in
+    the store, labelled as such; it never presents a store-wide number as though it described a
+    selection.
+    """
+    live = live_context(session_id)
+    if not live:
+        return html.Div("no data for this selection", style={"color": MUTED, "fontSize": "11px",
+                                                             "fontFamily": MONO})
+    scope_note = "main thread" if scope != "all" else "subagents included"
+    which = "selected session" if session_id else "newest call in the store, nothing selected"
+    bits = [html.Span(which, style={"color": MUTED, "fontSize": "10px", "fontFamily": MONO,
+                                    "marginRight": "10px"})]
+    if session_id:
+        qw, qargs = scoped(session_id, scope)
+        churn = q(f"""SELECT SUM(COALESCE(cache_read_input_tokens,0)) AS churn,
+                             COUNT(*) AS calls, MAX(total_resident) AS peak
+                      FROM api_calls WHERE 1=1 {qw}""", qargs)
+        if not churn.empty and churn.iloc[0]["calls"]:
+            r = churn.iloc[0]
+            mult = (r["churn"] / r["peak"]) if r["peak"] else 0
+            bits.append(html.Span(
+                f"{int(r['calls']):,} calls · re-read {fmt_tokens(r['churn'])} ({mult:,.0f}x peak) · {scope_note}",
+                style={"color": MUTED, "fontSize": "10px", "fontFamily": MONO}))
+    return html.Div([html.Div(bits, style={"marginBottom": "2px"}), context_bar(live)])
+
+
 def empty_fig(msg: str) -> go.Figure:
     fig = go.Figure()
     fig.add_annotation(text=msg, showarrow=False, font=dict(color=MUTED, size=13, family=MONO))
@@ -709,10 +833,20 @@ header = html.Div(
         ),
         html.Div(
             [
-                # The live reading, in the one place that is visible from every tab. The constants
-                # that used to sit here are documented on the Mirror tab, which is where someone
-                # goes to read them; this is where someone goes to see where they stand.
-                html.Div(id="live-context", children=context_bar(None)),
+                # The selector lives here, above the tabs, because it governs every one of them.
+                # The header used to show "the latest call anywhere in the store" with no label,
+                # while the tabs below showed a mix of store-wide totals and per-session numbers.
+                # Nothing said which was which. One selection, stated, drives the whole page.
+                html.Div([
+                    dcc.Dropdown(
+                        id="sel-session", options=[], value=None, optionHeight=44,
+                        placeholder="Select a session, or search by title, project or date",
+                        style={"width": "560px", **FIELD}, className="c4x-dd",
+                    ),
+                    scope_radio("session-scope"),
+                ], style={"display": "flex", "alignItems": "center", "gap": "6px",
+                          "marginRight": "16px"}),
+                html.Div(id="live-context", children=quick_view(None)),
                 # There was a Quit button here. It is gone on purpose: a capture tool with a
                 # one-click off switch produces a store that looks complete while silently missing
                 # whatever happened after someone pressed it. Stop the server with Ctrl+C; stop
@@ -727,6 +861,227 @@ header = html.Div(
 
 
 # ---- Overview -------------------------------------------------------------
+def accordion(title: str, sub: str, children, open_by_default: bool = False):
+    """A collapsible block. Native details/summary, so it needs no callback and no state.
+
+    Every store-wide number lives inside one of these on the Summary tab. That is the whole point
+    of the restructure: a figure that describes the entire store is never rendered beside a figure
+    that describes one session, where a reader has to guess which is which.
+    """
+    return html.Details([
+        html.Summary([
+            html.Span(title, style={"color": TEXT, "fontSize": "13px", "fontWeight": 600}),
+            html.Span(f"  {sub}", style={"color": MUTED, "fontSize": "11px", "marginLeft": "8px"}),
+        ], style={"cursor": "pointer", "padding": "8px 10px", "background": PANEL,
+                  "border": f"1px solid {BORDER}", "borderRadius": "6px",
+                  "fontFamily": MONO, "listStyle": "none"}),
+        html.Div(children, style={"padding": "12px 10px 4px 10px"}),
+    ], open=open_by_default, style={"marginBottom": "8px"})
+
+
+def summary_layout(session_id=None, scope="main"):
+    """Store-wide values, all of them, and nothing per-selection.
+
+    This tab answers "what is in the store". Every other tab answers "what about this selection".
+    Keeping those apart is the restructure: the old Overview mixed lifetime totals, the newest call
+    anywhere, and per-session figures with nothing labelling the difference.
+    """
+    s = overview_stats()
+    api_calls = int(s["api_calls"] or 0)
+    main_calls = int(s["main_calls"] or 0)
+    sub_calls = api_calls - main_calls
+    billed = int(s["billed"] or 0)
+    cache_read = int(s["cache_read"] or 0)
+    rows = decisions()
+
+    totals = [
+        ("sessions", f"{int(s['sessions']):,}", "in the store"),
+        ("API calls", f"{api_calls:,}", f"{int(s['turn_rows']):,} transcript rows behind them"),
+        ("subagent share", f"{(100.0 * sub_calls / api_calls) if api_calls else 0:.0f}%",
+         f"{sub_calls:,} of {api_calls:,} are sidechain"),
+        ("cache reads", f"{(100.0 * cache_read / billed) if billed else 0:.1f}%",
+         f"{fmt_tokens(cache_read)} of {fmt_tokens(billed)} billed"),
+        ("compactions", f"{int(s['compactions']):,}", f"{int(s['unpaired'] or 0)} unpaired"),
+        ("transcripts", f"{int(s['files']):,}", f"{(s['bytes'] or 0) / 1073741824:.2f} GB"),
+        ("peak resident", fmt_tokens(s["peak"]), "largest single API call, any session"),
+    ]
+
+    return html.Div([
+        html.Div("Everything on this tab describes the WHOLE store, every session, all time. "
+                 "The header selection changes nothing here. Every other tab describes only the "
+                 "selection.", style={**SECTION_NOTE, "color": WARN}),
+
+        accordion("What to do about it", f"{len(rows)} finding(s), each with an action",
+                  dash_table.DataTable(
+                      columns=[{"name": c, "id": c} for c in ["finding", "evidence", "do this"]],
+                      data=rows,
+                      style_cell_conditional=[
+                          {"if": {"column_id": "finding"}, "minWidth": "200px", "maxWidth": "240px",
+                           "whiteSpace": "normal"},
+                          {"if": {"column_id": "evidence"}, "minWidth": "300px", "maxWidth": "420px",
+                           "whiteSpace": "normal"},
+                          {"if": {"column_id": "do this"}, "minWidth": "300px", "whiteSpace": "normal"},
+                      ],
+                      style_table={"overflowX": "auto"}, **TABLE_STYLE)
+                  if rows else html.Div("Nothing to act on from this store yet.", style=SECTION_NOTE),
+                  open_by_default=True),
+
+        accordion("Store totals", "lifetime counts, no action implied",
+                  html.Div([stat_card(l, v, sub=sub) for l, v, sub in totals],
+                           style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})),
+
+        accordion("Where the tokens went", "cumulative resident by project, top 15",
+                  dcc.Graph(figure=dark_fig(project_totals_fig(), 420),
+                            config={"displayModeBar": False})),
+    ])
+
+
+def project_totals_fig() -> go.Figure:
+    """Cumulative resident tokens by real project path.
+
+    Grouped by cwd, not by project_slug. The slug `subagents` is not a project: it is the folder
+    subagent transcripts are written to, and it maps to 30 different working directories in this
+    store, so charting it as one bar credited every subagent run in every project to a single
+    invented project and made it the largest bar on the page.
+    """
+    top = q("""
+        SELECT COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project,
+               SUM(a.total_resident) AS resident
+        FROM api_calls a LEFT JOIN sessions s ON s.session_id = a.session_id
+        GROUP BY project ORDER BY resident DESC LIMIT 15
+    """)
+    fig = go.Figure(go.Bar(
+        x=top["resident"], y=top["project"], orientation="h",
+        marker=dict(color=ACCENT, line=dict(color=BORDER, width=1)),
+        hovertemplate="%{y}<br>%{x:,.0f} resident tokens<extra></extra>",
+    ))
+    fig.update_layout(title="Cumulative resident tokens by working directory (top 15)",
+                      title_font=dict(color=TEXT, size=13))
+    fig.update_yaxes(autorange="reversed")
+    return fig
+
+
+def decisions() -> list:
+    """Findings that name an action, computed from this store.
+
+    The test applied to every row, from Few's dashboard rule: what decision does this support? If
+    the answer is "it is interesting" or "we have the data", it does not belong here. The page this
+    replaced was seven lifetime totals - sessions, API calls, transcripts, compactions, peak
+    resident, subagent share, cache-read share - and not one of them changed what anybody did next.
+
+    Each row carries the measurement AND the action, because a number with no action is the thing
+    being removed, and an action with no number is an opinion.
+    """
+    out = []
+
+    # 1. The largest lever in this store by a wide margin. Every request re-bills the whole
+    #    resident window as a cache read, so a session that runs for days pays for its context
+    #    once per turn that follows it. The fix is not a smaller context, it is a shorter session.
+    top = q("""
+        SELECT session_id, SUM(COALESCE(cache_read_input_tokens,0)) AS churn,
+               MAX(total_resident) AS peak, COUNT(*) AS calls,
+               MIN(ts) AS first_ts, MAX(ts) AS last_ts
+        FROM api_calls GROUP BY session_id ORDER BY churn DESC LIMIT 1
+    """)
+    if not top.empty and (top.iloc[0]["churn"] or 0) > 0:
+        r = top.iloc[0]
+        days = 0
+        try:
+            days = (pd.to_datetime(r["last_ts"], format="mixed", utc=True)
+                    - pd.to_datetime(r["first_ts"], format="mixed", utc=True)).days
+        except Exception:
+            days = 0
+        mult = (r["churn"] / r["peak"]) if r["peak"] else 0
+        out.append({
+            "finding": "One session re-paid for its own context",
+            "evidence": f"{str(r['session_id'])[:8]} ran {days} days over {int(r['calls']):,} calls "
+                        f"and billed {fmt_tokens(r['churn'])} of cache reads, "
+                        f"{mult:,.0f}x its own peak window",
+            "do this": "Split long-running work into fresh sessions. Context cost grows with "
+                       "turns resident, not with what you asked for.",
+        })
+
+    # 2. A file read N times in one session is billed on every request after each read.
+    dup = q("""
+        SELECT target, session_id, COUNT(*) AS reads, SUM(COALESCE(result_bytes,0)) AS bytes
+        FROM tool_calls
+        WHERE tool_name IN ('Read','NotebookRead') AND target IS NOT NULL
+        GROUP BY session_id, target ORDER BY reads DESC LIMIT 1
+    """)
+    if not dup.empty and int(dup.iloc[0]["reads"]) > 2:
+        r = dup.iloc[0]
+        extra = int(r["reads"]) - 1
+        out.append({
+            "finding": "The same file was read over and over inside one session",
+            "evidence": f"{str(r['target']).split(chr(92))[-1].split('/')[-1]} read "
+                        f"{int(r['reads']):,} times in {str(r['session_id'])[:8]}, "
+                        f"{extra:,} of them repeats, {fmt_bytes(r['bytes'])} of results",
+            "do this": "Grep for the line you need instead of re-reading the file, or delegate the "
+                       "reading to a subagent so the content never enters this window.",
+        })
+
+    # 3. An MCP server's schema is resident whether or not you call it.
+    srv = q("""
+        SELECT server_name AS server, COUNT(*) AS calls, MAX(ts) AS last_call
+        FROM tool_calls WHERE server_name IS NOT NULL
+        GROUP BY server_name ORDER BY calls ASC LIMIT 3
+    """)
+    if not srv.empty:
+        names = ", ".join(f"{r.server} ({int(r.calls)})" for r in srv.itertuples())
+        out.append({
+            "finding": "MCP servers are loaded on every session and barely called",
+            "evidence": f"least used: {names}",
+            "do this": "Remove the ones you do not use from your MCP config. Their tool schemas "
+                       "occupy the window from session start whether or not you call them.",
+        })
+
+    # 4. Fixed overhead is paid at the start of every session, before anything is asked.
+    b = latest_baseline()
+    if b:
+        static = int(b["static_total"] or 0)
+        mem = int(b.get("memory_files") or 0)
+        skl = int(b.get("skills") or 0)
+        if static:
+            out.append({
+                "finding": "Fixed overhead is resident before you type anything",
+                "evidence": f"{fmt_tokens(static)} every session, of which "
+                            f"{fmt_tokens(mem)} is memory files and {fmt_tokens(skl)} is skills",
+                "do this": "Trim CLAUDE.md and unload skills you are not using. This is paid on "
+                           "the first request of every session and never freed.",
+            })
+
+    # 5. Compactions are recoverable but lossy, and a session that compacts repeatedly is a
+    #    session doing too much in one window.
+    # COALESCE(dropped, 0) would say "dropped 0", which reads as "discarded nothing". 104 of the
+    # 138 compactions in this store never recorded the figure at all, so the honest report counts
+    # the missing ones rather than summing them as zero.
+    comp = q("""
+        SELECT session_id, COUNT(*) AS n,
+               SUM(cumulative_dropped_tokens) AS dropped,
+               SUM(cumulative_dropped_tokens IS NULL) AS unrecorded
+        FROM compactions GROUP BY session_id ORDER BY n DESC LIMIT 1
+    """)
+    if not comp.empty and int(comp.iloc[0]["n"]) > 1:
+        r = comp.iloc[0]
+        n = int(r["n"])
+        unrec = int(r["unrecorded"] or 0)
+        if unrec >= n:
+            dropped_txt = "the tokens it discarded were never recorded by any of them"
+        elif unrec:
+            dropped_txt = (f"dropping {fmt_tokens(r['dropped'])} across the "
+                           f"{n - unrec} that recorded it, {unrec} did not")
+        else:
+            dropped_txt = f"dropping {fmt_tokens(r['dropped'])} cumulatively"
+        out.append({
+            "finding": "One session compacted repeatedly",
+            "evidence": f"{str(r['session_id'])[:8]} compacted {n} times, {dropped_txt}",
+            "do this": "Check the Compactions tab for what it discarded, then split that work "
+                       "across sessions so the window is not repeatedly rebuilt.",
+        })
+
+    return out
+
+
 def overview_layout():
     s = overview_stats()
     api_calls = int(s["api_calls"] or 0)
@@ -761,7 +1116,7 @@ def overview_layout():
         -- rows carrying the same requestId and the same usage, about 2.3 per call here, so
         -- summing turns inflated every figure on this chart by roughly 2x. Measured against
         -- ccusage on the same transcripts: turns gave 56.90 B, the deduped view gives 27.12 B.
-        SELECT COALESCE(s.project_slug,'?') AS project, COUNT(*) AS turns,
+        SELECT COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project, COUNT(*) AS turns,
                SUM(a.total_resident) AS resident, SUM(a.output_tokens) AS out
         FROM api_calls a LEFT JOIN sessions s ON s.session_id = a.session_id
         GROUP BY project ORDER BY resident DESC LIMIT 15
@@ -787,28 +1142,83 @@ def overview_layout():
 
 
 # ---- Session --------------------------------------------------------------
-def session_layout():
+def session_layout(session_id=None, scope="main"):
+    """One session, in detail. Scoped entirely by the header selection."""
+    if not session_id:
+        return html.Div([
+            html.Div("No session selected", style=SECTION_HEAD),
+            html.Div("Pick one in the header, or browse them on the All sessions tab. Every tab "
+                     "except Summary describes the selection, so nothing here is a store-wide "
+                     "number in disguise.", style=SECTION_NOTE),
+        ])
+    fig, cards = session_view(session_id, scope)
     return html.Div([
-        html.Div([
-            html.Span("Session", style={"color": MUTED, "fontSize": "12px",
-                                        "marginRight": "10px"}),
-            dcc.Dropdown(
-                id="dd-session", options=session_options(), value=None,
-                placeholder="Search by project, date, size...",
-                style={"width": "640px", **FIELD},
-                className="c4x-dd",
-            ),
-            scope_radio("session-scope"),
-        ], style={"display": "flex", "alignItems": "center", "marginBottom": "14px"}),
-        dcc.Graph(id="fig-session", figure=empty_fig("Pick a session above"),
-                  config={"displayModeBar": False}),
-        html.Div(id="session-summary", style={"marginTop": "10px"}),
+        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+        html.Div(cards, style={"marginTop": "10px"}),
+    ])
+
+
+def sessions_table_layout(session_id=None, scope="main"):
+    """Browse every session. Selecting a row sets the header selection.
+
+    A table rather than a long dropdown: 1,323 sessions sorted by peak tokens interleaved every
+    project and could not be scanned. Sorted by section, then project, then most recently active,
+    which is the order the desktop sidebar uses.
+    """
+    df = session_rows()
+    counts = df["section"].value_counts().to_dict() if not df.empty else {}
+    rows = []
+    for r in df.itertuples():
+        rows.append({
+            "session_id": r.session_id,
+            "section": r.section,
+            "title": r.title,
+            "project": r.project,
+            "last active": str(r.last_ts or "")[:16].replace("T", " "),
+            "turns": int(r.turns),
+            "peak": fmt_tokens(r.peak),
+            "compactions": int(r.compactions or 0),
+        })
+    breakdown = " · ".join(f"{k} {v:,}" for k, v in counts.items()) or "none"
+    return html.Div([
+        html.Div(f"{len(rows):,} sessions with 5 or more turns. {breakdown}.", style=SECTION_NOTE),
+        html.Div("Click a row to make it the header selection. Sections come from disk: the "
+                 "working directory, the entrypoint, and whether the transcript still exists. "
+                 "There is no Archived section because that flag is not stored on disk, only in "
+                 "the desktop app's own database, so it could only be shown by going stale.",
+                 style=SECTION_NOTE),
+        dash_table.DataTable(
+            id="tbl-session",
+            columns=[{"name": c, "id": c} for c in
+                     ["section", "title", "project", "last active", "turns", "peak", "compactions"]],
+            data=rows,
+            hidden_columns=["session_id"],
+            page_size=16,
+            sort_action="native",
+            filter_action="native",
+            row_selectable="single",
+            cell_selectable=False,
+            style_table={"overflowX": "auto"},
+            style_cell_conditional=[
+                {"if": {"column_id": "title"}, "minWidth": "240px", "maxWidth": "360px",
+                 "whiteSpace": "normal"},
+                {"if": {"column_id": "project"}, "minWidth": "200px", "maxWidth": "320px",
+                 "whiteSpace": "normal"},
+            ],
+            style_data_conditional=[
+                {"if": {"row_index": "odd"}, "backgroundColor": "#12171e"},
+                {"if": {"filter_query": '{section} != "Projects"'}, "color": MUTED},
+            ],
+            style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
+            style_cell=TABLE_STYLE["style_cell"],
+            style_header=TABLE_STYLE["style_header"],
+        ),
     ])
 
 
 # ---- Compactions ----------------------------------------------------------
-def compactions_layout():
-    df = all_compactions()
+def compactions_layout(session_id=None, scope="main"):
+    df = all_compactions(session_id)
     # Window comes from the model segment the compaction sits in. Where segmentation cannot
     # resolve one (no non-sidechain turns recorded around the event), fall back to fitting from
     # the token count alone and SAY SO in the confidence column rather than hiding the weaker
@@ -937,22 +1347,16 @@ def latest_baseline():
     return None if df.empty else df.iloc[0].to_dict()
 
 
-def breakdown_layout():
+def breakdown_layout(session_id=None, scope="main"):
     """Shell. The body re-renders when the sidechain scope changes.
 
     This tab charted only non-sidechain calls and never said so, which in this store means it was
     showing under a third of the activity. The population is now a stated choice.
     """
-    return html.Div([
-        html.Div([
-            html.Span("Population", style={"color": MUTED, "fontSize": "12px"}),
-            scope_radio("breakdown-scope"),
-        ], style={"display": "flex", "alignItems": "center", "marginBottom": "10px"}),
-        html.Div(breakdown_body(False), id="breakdown-body"),
-    ])
+    return html.Div(breakdown_body(scope == "all", session_id), id="breakdown-body")
 
 
-def breakdown_body(include_sidechain: bool = False):
+def breakdown_body(include_sidechain: bool = False, session_id=None):
     b = latest_baseline()
     if not b:
         return html.Div([
@@ -988,10 +1392,10 @@ def breakdown_body(include_sidechain: bool = False):
 
     static_total = int(b["static_total"])
     window = int(b["window_size"] or 1000000)
-    scope_sql = "" if include_sidechain else "AND COALESCE(is_sidechain,0) = 0"
+    scope_sql, scope_args = scoped(session_id, "all" if include_sidechain else "main")
     turns = q(f"""SELECT ts, total_resident FROM api_calls
                   WHERE total_resident IS NOT NULL {scope_sql}
-                  ORDER BY ts""")
+                  ORDER BY ts""", scope_args)
     if turns.empty:
         return html.Div("No turns in the store yet. Run node tools/harvest.mjs.",
                         style={"color": MUTED})
@@ -1131,7 +1535,7 @@ def breakdown_body(include_sidechain: bool = False):
 
 
 # ---- Mirror ---------------------------------------------------------------
-def mirror_layout():
+def mirror_layout(session_id=None, scope="main"):
     rows = []
     for t in MATH["thresholds"]:
         rows.append({
@@ -1176,7 +1580,7 @@ def mirror_layout():
     ])
 
 
-def waste_layout():
+def waste_layout(session_id=None, scope="main"):
     """Context paid for twice, or paid for and never used.
 
     Reads the same tool_calls table tools/waste.mjs reports from, so the tab and the CLI cannot
@@ -1188,6 +1592,7 @@ def waste_layout():
     # for speed, but the definition lives in one place: these were two literals under a docstring
     # asserting they could not disagree, which asserted it rather than ensuring it.
     spec, spec_err = tool_spec("waste.mjs", "--spec")
+    wsid = "AND session_id = ?" if session_id else ""
     if spec:
         read_tools, dup_min = spec["read_tools"], int(spec["duplicate_min"])
     else:
@@ -1198,22 +1603,25 @@ def waste_layout():
                    SUM(COALESCE(result_bytes,0)) bytes,
                    COUNT(DISTINCT input_sha1) variants
             FROM tool_calls
-            WHERE tool_name IN ({placeholders}) AND target IS NOT NULL
+            WHERE tool_name IN ({placeholders}) AND target IS NOT NULL {wsid}
             GROUP BY session_id, target HAVING reads >= ?
             ORDER BY reads DESC LIMIT 200""",
-        tuple(read_tools) + (dup_min,),
+        tuple(read_tools) + ((session_id,) if session_id else ()) + (dup_min,),
     ) if read_tools else pd.DataFrame()
     srv = q(
         """SELECT server_name AS server, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes, MAX(ts) last_call
-           FROM tool_calls WHERE server_name IS NOT NULL
-           GROUP BY server_name ORDER BY calls ASC"""
+           FROM tool_calls WHERE server_name IS NOT NULL """ + wsid + """
+           GROUP BY server_name ORDER BY calls ASC""",
+        (session_id,) if session_id else (),
     )
     tools = q(
         """SELECT tool_name AS tool, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes,
                   SUM(COALESCE(is_error,0)) errors
-           FROM tool_calls GROUP BY tool_name ORDER BY calls DESC LIMIT 40"""
+           FROM tool_calls WHERE 1=1 """ + wsid + """
+           GROUP BY tool_name ORDER BY calls DESC LIMIT 40""",
+        (session_id,) if session_id else (),
     )
 
     if dup.empty:
@@ -1265,7 +1673,7 @@ def waste_layout():
 
 
 # ---- Sources --------------------------------------------------------------
-def sources_layout():
+def sources_layout(session_id=None, scope="main"):
     """What ENTERS the window, as opposed to what the window currently holds.
 
     The Breakdown tab answers "what is in there now" and the context tooltip answers it live. This
@@ -1275,16 +1683,19 @@ def sources_layout():
     exists on the desktop entrypoint, where the status line does not run), and `record_types` (a
     census of every record shape the transcripts contain).
     """
-    att = q("""SELECT type AS kind, SUM(n) AS occurrences, COUNT(DISTINCT session_id) AS sessions
-               FROM attachments GROUP BY type ORDER BY SUM(n) DESC""")
-    hooks = q("""SELECT tool_name AS tool, COUNT(*) AS calls,
-                        SUM(COALESCE(tool_response_bytes,0)) AS response_bytes,
-                        SUM(COALESCE(tool_input_bytes,0))    AS input_bytes
-                 FROM hook_events WHERE tool_name IS NOT NULL
-                 GROUP BY tool_name ORDER BY SUM(COALESCE(tool_response_bytes,0)) DESC LIMIT 40""")
-    ev = q("""SELECT event, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions,
-                     MIN(captured_at) AS first_seen, MAX(captured_at) AS last_seen
-              FROM hook_events GROUP BY event ORDER BY COUNT(*) DESC""")
+    sid_where, sid_args = ("WHERE session_id = ?", (session_id,)) if session_id else ("", ())
+    att = q(f"""SELECT type AS kind, SUM(n) AS occurrences, COUNT(DISTINCT session_id) AS sessions
+                FROM attachments {sid_where} GROUP BY type ORDER BY SUM(n) DESC""", sid_args)
+    hw = "AND session_id = ?" if session_id else ""
+    hooks = q(f"""SELECT tool_name AS tool, COUNT(*) AS calls,
+                         SUM(COALESCE(tool_response_bytes,0)) AS response_bytes,
+                         SUM(COALESCE(tool_input_bytes,0))    AS input_bytes
+                  FROM hook_events WHERE tool_name IS NOT NULL {hw}
+                  GROUP BY tool_name ORDER BY SUM(COALESCE(tool_response_bytes,0)) DESC LIMIT 40""",
+              (session_id,) if session_id else ())
+    ev = q(f"""SELECT event, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions,
+                      MIN(captured_at) AS first_seen, MAX(captured_at) AS last_seen
+               FROM hook_events {sid_where} GROUP BY event ORDER BY COUNT(*) DESC""", sid_args)
     rec = q("SELECT type AS record_type, n FROM record_types ORDER BY n DESC")
 
     if att.empty and ev.empty and rec.empty:
@@ -1355,7 +1766,7 @@ def sources_layout():
 
 
 # ---- Probes ---------------------------------------------------------------
-def probes_layout():
+def probes_layout(session_id=None, scope="main"):
     """What the control protocol returns, and what the app's own refresh loop costs.
 
     tools/probe.mjs asks a spawned Claude Code session for its context breakdown over the control
@@ -1442,19 +1853,33 @@ def probes_layout():
 # style list). Adding a tab meant editing six things in step, and nothing checked that they agreed.
 # That is the same defect class as every SYNC finding in this store's own audit, so it went first.
 TABS = [
-    ("tab-overview", "Overview", overview_layout),
+    ("tab-summary", "Summary", summary_layout),
+    ("tab-sessions", "All sessions", sessions_table_layout),
     ("tab-session", "Session", session_layout),
     ("tab-compactions", "Compactions", compactions_layout),
     ("tab-breakdown", "Breakdown", breakdown_layout),
     ("tab-sources", "Sources", sources_layout),
     ("tab-probes", "Probes", probes_layout),
-    ("tab-mirror", "Mirror", mirror_layout),
     ("tab-waste", "Waste", waste_layout),
+    ("tab-mirror", "Mirror", mirror_layout),
 ]
 TAB_IDS = [t[0] for t in TABS]
 
-# Every tab is rendered up front and toggled by display, so no interactive component is
-# created inside a callback. That sidesteps the pattern-matched-id trap entirely.
+# Summary is store-wide. Everything after it describes the header selection, and each tab says so
+# on the page rather than leaving the reader to work it out.
+SELECTION_SCOPED = {"tab-session", "tab-compactions", "tab-breakdown", "tab-sources",
+                    "tab-waste"}
+# Probes describes 3 control-protocol runs that belong to no session, and Mirror is a
+# calculator over published constants. Labelling either as scoped would be the same false
+# statement this restructure removed.
+
+# Panes are rendered ON DEMAND, not up front.
+#
+# Building all of them at import took 56.7 seconds against this store, and every one of them was
+# rebuilt whether or not it was ever looked at. Rendering only the active tab also makes the
+# selection work at all: a pane built once at import cannot describe a session chosen later.
+# Components created inside a callback are safe here because the ids are static and the app is
+# constructed with suppress_callback_exceptions.
 app.layout = html.Div(
     [
         header,
@@ -1462,17 +1887,10 @@ app.layout = html.Div(
                  style={"display": "flex", "gap": "2px", "padding": "0 14px",
                         "borderBottom": f"1px solid {BORDER}", "background": BG}),
         dcc.Store(id="active-tab", data=0),
-        # Drives the live mirror. 5s is well under how fast a context window moves, and the
+        # Drives the header readout. 5s is well under how fast a context window moves, and the
         # harvest behind it is rate-limited and lock-guarded, so a slow tick cannot pile up.
         dcc.Interval(id="tick", interval=5000, n_intervals=0),
-        html.Div(
-            [
-                html.Div(fn(), id=f"pane-{i}",
-                         style={} if i == 0 else {"display": "none"})
-                for i, (_, _, fn) in enumerate(TABS)
-            ],
-            style={"padding": "20px"},
-        ),
+        dcc.Loading(html.Div(id="tab-content"), type="dot", color=ACCENT),
     ],
     style={"background": BG, "color": TEXT, "minHeight": "100vh",
            "fontFamily": "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"},
@@ -1483,9 +1901,7 @@ app.layout = html.Div(
 # Callbacks
 # ---------------------------------------------------------------------------
 @callback(
-    [Output(f"pane-{i}", "style") for i in range(len(TABS))]
-    + [Output(f"btn-{t}", "style") for t in TAB_IDS]
-    + [Output("active-tab", "data")],
+    [Output(f"btn-{t}", "style") for t in TAB_IDS] + [Output("active-tab", "data")],
     [Input(f"btn-{t}", "n_clicks") for t in TAB_IDS],
     State("active-tab", "data"),
     prevent_initial_call=True,
@@ -1495,25 +1911,87 @@ def _switch_tab(*args):
     current = args[-1]
     which = ctx.triggered_id
     idx = TAB_IDS.index(which.replace("btn-", "")) if which else current
-    panes = [{"display": "block"} if i == idx else {"display": "none"} for i in range(len(TABS))]
-    tabs = [tab_style(i == idx) for i in range(len(TABS))]
-    return panes + tabs + [idx]
+    return [tab_style(i == idx) for i in range(len(TABS))] + [idx]
 
 
 @callback(
-    Output("breakdown-body", "children"),
-    Input("breakdown-scope", "value"),
+    Output("tab-content", "children"),
+    Input("active-tab", "data"),
+    Input("sel-session", "value"),
+    Input("session-scope", "value"),
+)
+def _render_tab(idx, session_id, scope):
+    """Render ONE pane, for the current selection.
+
+    Re-runs when the tab changes or the selection changes, which is what makes every tab describe
+    the same thing at the same time. A pane built once at import could not do that.
+    """
+    i = int(idx or 0)
+    if not (0 <= i < len(TABS)):
+        i = 0
+    tab_id, label, fn = TABS[i]
+    try:
+        body = fn(session_id, scope or "main")
+    except Exception as exc:                        # noqa: BLE001 - a failed tab must say so
+        return html.Div([
+            html.Div(f"{label} could not be rendered", style={**SECTION_HEAD, "color": DANGER}),
+            html.Pre(f"{type(exc).__name__}: {exc}", style={**CODE_BLOCK, "color": DANGER,
+                                                            "whiteSpace": "pre-wrap"}),
+        ])
+    # Say which population the page is describing, every time, on every tab.
+    if tab_id == "tab-summary":
+        banner = None
+    elif tab_id in SELECTION_SCOPED and not session_id:
+        banner = html.Div("No session selected. This tab describes one session; pick one in the "
+                          "header.", style={**SECTION_NOTE, "color": WARN})
+    elif tab_id in SELECTION_SCOPED:
+        banner = html.Div(f"Describing the selected session only, "
+                          f"{'subagents included' if scope == 'all' else 'main thread only'}.",
+                          style=SECTION_NOTE)
+    else:
+        banner = html.Div("Store-wide. Not affected by the header selection.", style=SECTION_NOTE)
+    return html.Div([banner, body] if banner is not None else body)
+
+
+@callback(
+    Output("sel-session", "options"),
+    Input("tick", "n_intervals"),
+    State("sel-session", "options"),
+)
+def _selector_options(_n, existing):
+    """Populate the selector once, then leave it alone.
+
+    Built here rather than at import so the first paint is not blocked by the query, and guarded
+    so a 5s tick does not rebuild a 300-row option list forever.
+    """
+    if existing:
+        raise PreventUpdate
+    return selector_options()
+
+
+@callback(
+    Output("sel-session", "value"),
+    Input("tbl-session", "selected_rows"),
+    State("tbl-session", "data"),
     prevent_initial_call=True,
 )
-def _breakdown_scope(scope):
-    return breakdown_body(scope == "all")
+def _pick_from_table(selected_rows, table_data):
+    """The browse table sets the header selection, so there is only ever one selection."""
+    if not selected_rows or not table_data:
+        raise PreventUpdate
+    i = selected_rows[0]
+    if not (0 <= i < len(table_data)):
+        raise PreventUpdate
+    return table_data[i].get("session_id")
 
 
 @callback(
     Output("live-context", "children"),
     Input("tick", "n_intervals"),
+    Input("sel-session", "value"),
+    Input("session-scope", "value"),
 )
-def _tick(_n):
+def _tick(_n, session_id=None, scope="main"):
     """Harvest, then re-render the live reading.
 
     Ordered deliberately: refresh first, read second, so the number rendered is the one just
@@ -1521,7 +1999,7 @@ def _tick(_n):
     """
     refresh_store()
     try:
-        return context_bar(live_context())
+        return quick_view(session_id, scope or "main")
     except Exception as exc:                        # noqa: BLE001 - never blank the header
         return html.Div(f"context unavailable: {str(exc)[:80]}",
                         style={"color": DANGER, "fontSize": "11px", "fontFamily": MONO})
@@ -1620,16 +2098,15 @@ def _message_clicked(active_cell, rows):
         str(r["text"]), ACCENT)
 
 
-@callback(
-    Output("fig-session", "figure"),
-    Output("session-summary", "children"),
-    Input("dd-session", "value"),
-    Input("session-scope", "value"),
-    prevent_initial_call=True,
-)
-def _session_selected(session_id, scope):
+def session_view(session_id, scope="main"):
+    """Everything the Session tab shows, for ONE selection.
+
+    This was a callback bound to a picker that lived on the tab. The picker is now in the header
+    and governs every tab, so this is a plain function the renderer calls: the tab has no state of
+    its own to disagree with the header about.
+    """
     if not session_id:
-        return empty_fig("Pick a session above"), ""
+        return empty_fig("Select a session in the header"), ""
     include_sidechain = (scope == "all")
     turns = session_turns(session_id, include_sidechain)
     if turns.empty:
@@ -1751,8 +2228,18 @@ def _session_selected(session_id, scope):
     # PAID FOR. Every request re-bills the whole resident window as a cache read, so a long
     # session pays for the same tokens once per turn that follows them. The multiple is the
     # honest way to say it: total cache read divided by the largest window ever resident.
-    cache_total = int(turns["cache_read_input_tokens"].fillna(0).sum())
-    rebill = (cache_total / peak) if peak else 0.0
+    # From api_calls, NOT from the turn rows above. A streamed assistant message is written as
+    # several turn rows sharing one request id and carrying the same usage, so summing the frame
+    # this chart is drawn from overcounted this session's re-reads by 1.96x, 852M against 434M.
+    # That is the exact defect the api_calls view exists for, and it put two different figures for
+    # one quantity on one screen: the header said 682M while this card said 852M.
+    cw, cargs = scoped(session_id, scope)
+    cdf = q(f"""SELECT SUM(COALESCE(cache_read_input_tokens,0)) AS churn,
+                       MAX(total_resident) AS peak
+                FROM api_calls WHERE 1=1 {cw}""", cargs)
+    cache_total = int(cdf.iloc[0]["churn"] or 0) if not cdf.empty else 0
+    churn_peak = int(cdf.iloc[0]["peak"] or 0) if not cdf.empty else 0
+    rebill = (cache_total / churn_peak) if churn_peak else 0.0
 
     cards = html.Div([
         stat_card("current", fmt_tokens(latest), color=ACCENT, sub=latest_sub),
