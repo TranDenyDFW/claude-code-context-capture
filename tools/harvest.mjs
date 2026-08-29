@@ -750,11 +750,15 @@ export function backfillSurvivors(dbPath = DB_PATH, { quiet = false } = {}) {
 
 function stats() {
   if (!existsSync(DB_PATH)) { console.error('no store yet at ' + DB_PATH); return 1; }
-  const db = new DatabaseSync(DB_PATH);
-  // Apply the schema before reading. --stats used to open the store raw, so a store written by an
-  // older build was missing the api_calls view and --stats died with "no such table" rather than
-  // creating it. The schema is all IF NOT EXISTS, so this is a no-op on an up-to-date store.
-  db.exec(SCHEMA);
+  // openDb rather than a second connection of its own. This opened the real store read-write and
+  // ran DDL with NO busy timeout, while every other on-disk connection in the repo had one, so
+  // --stats was the one command that still died outright against a concurrent hook harvest. It was
+  // missed because the earlier sweep patched one call site per FILE instead of every call site.
+  //
+  // openDb applies the schema too, which is what this needed anyway: --stats used to open the
+  // store raw, so a store written by an older build was missing the api_calls view and --stats
+  // died with "no such table" rather than creating it.
+  const db = openDb(DB_PATH);
   const q = (s) => db.prepare(s).all();
   const out = {
     db: DB_PATH,
