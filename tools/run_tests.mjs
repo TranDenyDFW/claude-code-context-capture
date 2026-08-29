@@ -14,7 +14,7 @@
 //      could not run is a FAILURE, never a warning, so they are reported as SKIPPED with the reason
 //      and the run says so in its summary rather than printing a total that implies full coverage.
 //
-// Usage: node tools/run_tests.mjs [--node-only]
+// Usage: node tools/run_tests.mjs [--node-only] [--self-test]
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
@@ -24,13 +24,6 @@ import { fileURLToPath } from 'node:url';
 const SELF = fileURLToPath(import.meta.url);
 const ROOT = dirname(dirname(SELF));
 const NODE_ONLY = process.argv.includes('--node-only');
-
-// Files with no self-test, and the reason. Anything NOT listed here is required to have one, so
-// adding a tool without checks fails this runner instead of slipping through.
-const EXEMPT = new Map([
-  ['tools/mirror-core.mjs', 'pure math, no I/O; covered by mirror.mjs --self-test and --validate'],
-  ['tools/paths.mjs', 'path constants only, nothing to exercise'],
-]);
 
 const CHECKS = /\((\d+) checks\)/;
 
@@ -49,6 +42,44 @@ function nodeTargets() {
     }
   }
   return out.sort();
+}
+
+// Each entry names the string a SUCCESSFUL run must print. Exit 0 is not enough: a stub that
+// exits 0 and prints nothing passed every one of these until a reviewer tried it, and the total
+// quietly dropped by fourteen while the run still said PASS.
+const PY = [
+  ['tools/table_audit.py', ['--self-test'], 'gate self-test', 'SELF-TEST PASS'],
+  ['tools/table_audit.py', [], 'audit of the live app', 'AUDIT PASS'],
+  ['tools/session_checks.py', [], 'Session tab features against the store', 'FEATURE CHECKS PASS'],
+];
+
+// Files with no self-test, and the reason. Anything NOT listed here is required to have one, so
+// adding a tool without checks fails this runner instead of slipping through.
+const EXEMPT = new Map([
+  ['tools/mirror-core.mjs', 'pure math, no I/O; covered by mirror.mjs --self-test and --validate'],
+  ['tools/paths.mjs', 'path constants only, nothing to exercise'],
+]);
+
+// This runner answers --self-test WITHOUT scanning, for two reasons. Every tool here carries checks
+// and the one that runs them should not be the exception. And it stops a COPY of this file under
+// another name from recursing: excluding itself by resolved path protects the original, not a
+// duplicate, and a duplicate that ignored the flag would fork until something killed it.
+if (process.argv.includes('--self-test')) {
+  const cases = [
+    ['skips itself by resolved path, not by filename', nodeTargets().every((r) => join(ROOT, r) !== SELF)],
+    ['every exempt entry carries a reason', [...EXEMPT.values()].every((v) => v && v.length > 10)],
+    ['the check-count pattern matches a real self-test line', CHECKS.test('SELF-TEST PASS (77 checks)')],
+    ['and does not match a line with no count', !CHECKS.test('SELF-TEST PASS')],
+    ['every python entry declares the marker its success must print',
+     PY.every(([, , , marker]) => typeof marker === 'string' && marker.length > 0)],
+  ];
+  let bad = 0;
+  for (const [what, ok] of cases) {
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${what}`);
+    if (!ok) bad++;
+  }
+  console.log(`SELF-TEST ${bad ? 'FAIL' : 'PASS'} (${cases.length} checks)`);
+  process.exit(bad ? 1 : 0);
 }
 
 const results = [];
@@ -87,13 +118,16 @@ for (const rel of nodeTargets()) {
 // Python. Store-dependent, so it is skipped rather than failed when the store is absent, and the
 // skip is reported loudly enough that nobody reads the total as full coverage.
 const store = join(ROOT, 'data', 'context.db');
-const PY = [
-  ['tools/table_audit.py', ['--self-test'], 'gate self-test'],
-  ['tools/table_audit.py', [], 'audit of the live app'],
-  ['tools/session_checks.py', [], 'Session tab features against the store'],
-];
-if (!NODE_ONLY) {
+if (NODE_ONLY) {
+  // Named rather than silent: without this the run printed "0 skipped" and an unqualified PASS
+  // while every dashboard check sat out.
   for (const [rel, args, what] of PY) {
+    skipped++;
+    results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
+                   note: `--node-only was passed, so this did not run (${what})` });
+  }
+} else {
+  for (const [rel, args, what, marker] of PY) {
     if (!existsSync(store)) {
       skipped++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
@@ -108,6 +142,12 @@ if (!NODE_ONLY) {
       failed++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
                      note: run.signal ? `killed after 300s (${run.signal})` : `exit ${run.status}`,
+                     tail: text.trim().split('\n').slice(-2).join(' | ') });
+    } else if (!text.includes(marker)) {
+      // Exit 0 with the marker absent means it did not do what it claims to do.
+      failed++;
+      results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
+                     note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
                      tail: text.trim().split('\n').slice(-2).join(' | ') });
     } else {
       if (match) total += Number(match[1]);
