@@ -70,10 +70,11 @@ warnings.filterwarnings("ignore")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import app as m  # noqa: E402
 from dash import dash_table, dcc, html  # noqa: E402
 from dash._callback import GLOBAL_CALLBACK_LIST, GLOBAL_CALLBACK_MAP  # noqa: E402
 from dash.exceptions import PreventUpdate  # noqa: E402
+
+import app as m  # noqa: E402
 
 # Shape, not vocabulary. This listed nine unit suffixes and a reviewer walked "1.4s" through it in
 # under a minute; "ms", "MiB", "$", "e6" and a signed delta were all invisible for the same reason.
@@ -100,6 +101,47 @@ PROSE_MIN_LENGTH = 40
 # _render_tab catches a failing pane and renders the exception rather than raising, which is right
 # for a dashboard and would let this audit call a broken tab a success.
 RENDER_FAILED = "could not be rendered"
+
+
+def app_files():
+    """Every source file the app is made of, taken from the IMPORT GRAPH.
+
+    Not a hardcoded list of names. This audit used to say "app.py" in seven places, so splitting
+    that file into modules would have left the static scan looking at whatever remained, reporting
+    fewer construction sites, and passing. Asking sys.modules which files the app actually imported
+    cannot go stale when someone adds a module.
+
+    tools/ is excluded: those are the CLI tools, and this audit is about the dashboard.
+    """
+    root = os.path.realpath(ROOT)
+    tools = os.path.join(root, "tools")
+    found = {}
+    for module in list(sys.modules.values()):
+        path = getattr(module, "__file__", None)
+        if not path or not path.endswith(".py"):
+            continue
+        real = os.path.realpath(path)
+        if real.startswith(root) and not real.startswith(tools):
+            found[real] = os.path.relpath(real, root).replace(os.sep, "/")
+    return found
+
+
+# Recomputed rather than snapshotted. A module imported inside a function is not in sys.modules
+# when this file is first imported, and a set fixed at that moment cannot see it.
+APP_FILES = app_files()
+
+
+def refresh_app_files():
+    """Re-read the import graph. Returns the names that were not there before."""
+    global APP_FILES
+    before = set(APP_FILES.values())
+    APP_FILES = app_files()
+    return sorted(set(APP_FILES.values()) - before)
+
+
+def owning_file(frame):
+    """The repo-relative name of the app file a frame belongs to, or None."""
+    return APP_FILES.get(os.path.realpath(frame.f_code.co_filename))
 
 
 def tables_in(node, out, seen=None):
@@ -224,8 +266,10 @@ def recording_construction(built, chain, constructed, builders=(), module=None):
         constructed[id(self)] = self
         frame, innermost = sys._getframe(1), True
         while frame is not None:
-            if os.path.basename(frame.f_code.co_filename) == "app.py":
-                (built if innermost else chain).add(code_position(frame))
+            name = owning_file(frame)
+            if name:
+                line, col = code_position(frame)
+                (built if innermost else chain).add((name, line, col))
                 innermost = False
             frame = frame.f_back
         return original(self, *args, **kwargs)
@@ -234,8 +278,10 @@ def recording_construction(built, chain, constructed, builders=(), module=None):
         @functools.wraps(func)
         def entered(*args, **kwargs):
             frame = sys._getframe(1)
-            if os.path.basename(frame.f_code.co_filename) == "app.py":
-                chain.add(code_position(frame))
+            name = owning_file(frame)
+            if name:
+                line, col = code_position(frame)
+                chain.add((name, line, col))
             return func(*args, **kwargs)
         return entered
 
@@ -269,15 +315,24 @@ def table_sites(module=None):
     cannot cover either, because a call on a branch nothing takes is invisible to every dynamic
     observation as well.
     """
-    tree = ast.parse(open(os.path.join(ROOT, "app.py"), encoding="utf-8").read())
     sites, edges, entries, opaque = [], {}, {}, []
+    for real, name in sorted(APP_FILES.items(), key=lambda kv: kv[1]):
+        scan_one(real, name, sites, edges, entries, opaque, module)
+    calls, opaque_calls = finish_scan(sites, edges, opaque, module)
+    return sites, calls, entries, opaque_calls
+
+
+def scan_one(real, name, sites, edges, entries, opaque, module):
+    """Scan ONE app file, appending to the shared collections."""
+    tree = ast.parse(open(real, encoding="utf-8").read())
 
     # Line numbers for the message come from the source; the SET of entry points comes from Dash's
     # registry, because a decorator can be renamed and the source scan would not know it.
     lines = {node.name: node.lineno for node in tree.body
              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    for name in registered_callbacks()[0]:
-        entries[name] = lines.get(name, 0)
+    for callback_name in registered_callbacks()[0]:
+        if callback_name in lines:
+            entries[callback_name] = f"{name}:{lines[callback_name]}"
 
     def walk(node, fn):
         for child in ast.iter_child_nodes(node):
@@ -285,7 +340,7 @@ def table_sites(module=None):
                     if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and child.col_offset == 0 else fn)
             if isinstance(child, ast.Call):
-                position = (child.lineno, child.col_offset)
+                position = (name, child.lineno, child.col_offset)
                 if isinstance(child.func, ast.Attribute) and child.func.attr == "DataTable":
                     sites.append((here, position))
                 # A call whose callee this scan cannot name at all: a dict of handlers, the result
@@ -304,6 +359,13 @@ def table_sites(module=None):
 
     walk(tree, None)
 
+
+def finish_scan(sites, edges, opaque, module):
+    """Close over the call graph ACROSS files, then list the calls that can reach a table.
+
+    Run once over everything rather than per file: a helper defined in one module and called from
+    another is exactly what splitting app.py creates, and a per-file closure would miss it.
+    """
     builders = {fn for fn, _ in sites if fn}
     growing = True
     while growing:
@@ -314,16 +376,16 @@ def table_sites(module=None):
                 growing = True
 
     if module is not None:
-        objects = {id(getattr(module, name, None)) for name in builders}
+        objects = {id(getattr(module, attr, None)) for attr in builders}
         objects.discard(id(None))
-        for name in dir(module):
-            if id(getattr(module, name, None)) in objects:
-                builders.add(name)
+        for attr in dir(module):
+            if id(getattr(module, attr, None)) in objects:
+                builders.add(attr)
 
     calls = [(caller, callee, position)
              for caller, called in edges.items()
              for callee, position in called if callee in builders]
-    return sites, calls, entries, opaque
+    return calls, opaque
 
 
 def coverage_errors(built, chain, constructed, walked, sites, calls,
@@ -338,34 +400,39 @@ def coverage_errors(built, chain, constructed, walked, sites, calls,
     errors = []
     site_positions = {position for _, position in sites}
 
-    for fn, (lineno, col) in (opaque or []):
-        errors.append(f"app.py:{lineno}:{col} in {fn}() calls something this scan cannot name, so "
+    def at(position):
+        """file:line:col, so a message points somewhere once the app is more than one file."""
+        where, lineno, col = position
+        return f"{where}:{lineno}:{col}"
+
+    for fn, position in (opaque or []):
+        errors.append(f"{at(position)} in {fn}() calls something this scan cannot name, so "
                       f"whether it builds a table is unknowable from the source. Two evasions "
                       f"survived here. If the call is legitimate, teach this audit to observe that "
                       f"line executing. Do not delete the gate.")
 
-    for name, lineno in sorted((entries or {}).items(), key=lambda kv: kv[1]):
+    for name, where in sorted((entries or {}).items(), key=lambda kv: str(kv[1])):
         if name not in (exercised or set()):
-            errors.append(f"app.py:{lineno} defines the callback {name}(), which this audit never "
+            errors.append(f"{where} defines the callback {name}(), which this audit never "
                           f"runs, so anything it builds is invisible to every other gate here")
 
-    for fn, (lineno, col) in sites:
-        if (lineno, col) not in built:
-            errors.append(f"app.py:{lineno}:{col} builds a DataTable inside {fn}(), "
+    for fn, position in sites:
+        if position not in built:
+            errors.append(f"{at(position)} builds a DataTable inside {fn}(), "
                           f"which this audit never reached")
 
     # A shared builder reached through one caller says nothing about its other callers, and
     # evidence_block has eight.
     reached = set(built) | set(chain)
-    for caller, callee, (lineno, col) in calls:
-        if (lineno, col) not in reached:
-            errors.append(f"app.py:{lineno}:{col} in {caller}() calls {callee}(), which can build "
+    for caller, callee, position in calls:
+        if position not in reached:
+            errors.append(f"{at(position)} in {caller}() calls {callee}(), which can build "
                           f"a table, and this audit never takes that path")
 
     # A construction the static scan did not predict means the scan is blind to how it was written:
     # an alias or a wrapper rather than dash_table.DataTable spelled out.
-    for lineno, col in sorted(set(built) - site_positions):
-        errors.append(f"app.py:{lineno}:{col} constructed a DataTable that the static scan "
+    for position in sorted(set(built) - site_positions):
+        errors.append(f"{at(position)} constructed a DataTable that the static scan "
                       f"did not find")
 
     # A table built but not walked is a table not audited, which is how a callback returning a bare
@@ -485,8 +552,10 @@ def main():
         errors.append("no compaction with dropped rows, so the detail table was never audited")
     message_uuid = m.q("SELECT uuid FROM messages ORDER BY rowid DESC LIMIT 1").iloc[0]["uuid"]
 
-    sites, calls, entries, opaque = table_sites(m)
-    builders = {callee for _caller, callee, _position in calls}
+    # An early scan, only to learn WHICH functions to wrap before exercising begins. The
+    # authoritative scan happens afterwards, once every module the app touches has been imported.
+    _sites, early_calls, _entries, _opaque = table_sites(m)
+    builders = {callee for _caller, callee, _position in early_calls}
 
     # _tick spawns a harvest that WRITES to the store. The rendering half is what can build a table,
     # so it runs and the harvest does not. Stated here and in the output rather than left implied.
@@ -578,6 +647,14 @@ def main():
                           f"watching, at import, so no coverage gate here can see how it was made. "
                           f"Its rows were read; nothing else about it was.")
 
+    # Now that everything has run, re-read the import graph and scan for real. A module imported
+    # inside a function only exists by this point.
+    late = refresh_app_files()
+    for name in late:
+        errors.append(f"{name} became part of the app only while it ran, so the first scan could "
+                      f"not see it. Import it at module level, or this audit is reading a "
+                      f"different set of files than the one that executed.")
+    sites, calls, entries, opaque = table_sites(m)
     errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries, exercised,
                               opaque)
 
@@ -636,7 +713,7 @@ def self_test():
     # A call whose callee the scan cannot name. This is what closes the last two evasions, which
     # both hid an unresolvable callee on a branch no input takes, where nothing dynamic sees them.
     unnameable = coverage_errors(set(), set(), {}, set(), [], [], {}, set(),
-                                 [("f", (10, 4))])
+                                 [("f", ("app.py", 10, 4))])
     check("a callee that cannot be named",
           len(unnameable) == 1 and "cannot name" in unnameable[0],
           f"{len(unnameable)} reported for one opaque call")
@@ -652,7 +729,8 @@ def self_test():
     # dash_table.DataTable(...). Compiled under the filename app.py so the recorder attributes it
     # there, at a position no site occupies.
     built, chain, constructed = set(), set(), {}
-    code = compile("\n" * 4999 + "ALIAS(columns=[], data=[])\n", "app.py", "exec")
+    app_file = next(real for real, name in APP_FILES.items() if name == "app.py")
+    code = compile("\n" * 4999 + "ALIAS(columns=[], data=[])\n", app_file, "exec")
     with recording_construction(built, chain, constructed):
         exec(code, {"ALIAS": dash_table.DataTable})
     stray = coverage_errors(built, chain, constructed, set(constructed), sites, [], {}, set())
@@ -663,8 +741,9 @@ def self_test():
 
     # Two calls on ONE line, one taken and one not. The gate compared line numbers and reported
     # both as covered.
-    same_line = coverage_errors({(10, 4)}, set(), {}, set(), [],
-                                [("f", "g", (10, 4)), ("f", "h", (10, 20))], {}, set())
+    same_line = coverage_errors({("app.py", 10, 4)}, set(), {}, set(), [],
+                                [("f", "g", ("app.py", 10, 4)),
+                                 ("f", "h", ("app.py", 10, 20))], {}, set())
     same_line = [e for e in same_line if "never takes that path" in e]
     check("untaken call beside a taken one",
           len(same_line) == 1 and "10:20" in same_line[0],

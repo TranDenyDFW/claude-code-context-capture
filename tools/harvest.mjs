@@ -304,7 +304,10 @@ export function messageKind(d) {
   return typeof d?.type === 'string' ? d.type : 'unknown';
 }
 
-function openDb(dbPath = DB_PATH) {
+// Exported so tools/make_fixture.mjs can build a synthetic store through the SAME schema and
+// pragmas the real one uses. A fixture with its own copy of the schema drifts from this file
+// and then CI passes against a database shaped like nothing the app will ever open.
+export function openDb(dbPath = DB_PATH) {
   mkdirSync(dirname(dbPath), { recursive: true });
   mkdirSync(RAW_DIR, { recursive: true });
   const db = new DatabaseSync(dbPath);
@@ -361,7 +364,7 @@ async function backfillTitles(dbPath = DB_PATH) {
   for (const path of files) {
     scanned++;
     let text;
-    try { text = readFileSync(path, 'utf8'); } catch (e) { skipped++; continue; }
+    try { text = readFileSync(path, 'utf8'); } catch { skipped++; continue; }
     let lineNo = 0;
     for (const line of text.split('\n')) {
       lineNo++;
@@ -664,7 +667,7 @@ async function run({ full }) {
 
   const unpaired = h.stats.compactions - h.stats.paired;
   const ms = Date.now() - t0;
-  const events = ingestEvents(db, join(RAW_DIR, 'events.ndjson'));
+  ingestEvents(db, join(RAW_DIR, 'events.ndjson'));   // called for its writes
   db.prepare(`INSERT INTO harvest_runs (ts,mode,files_seen,files_read,rewrites,lines,mb,turns,compactions,unpaired,ms)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(new Date().toISOString(), full ? 'full' : 'incremental',
     h.stats.filesSeen, h.stats.filesRead, h.stats.rewrites, h.stats.lines,
@@ -888,7 +891,14 @@ async function selfTest() {
       const hq = new Harvest(t);
       await hq.file(tf, true);
     } finally {
-      if (prev === undefined) delete process.env.C4X_NO_TEXT; else process.env.C4X_NO_TEXT = prev;
+      // Nothing else runs between the await and this restore: the self-test is sequential and
+      // is the only writer of this variable. The rule fires on any member assignment after an
+      // await, which cannot be avoided here without moving the env handling out of the block
+      // that owns it.
+      /* eslint-disable require-atomic-updates */
+      if (prev === undefined) delete process.env.C4X_NO_TEXT;
+      else process.env.C4X_NO_TEXT = prev;
+      /* eslint-enable require-atomic-updates */
     }
     const n = t.prepare('SELECT COUNT(*) n FROM messages').get().n;
     checks.push(['the removed C4X_NO_TEXT opt-out no longer suppresses capture (gate can fail)', n > 0]);
@@ -962,9 +972,9 @@ async function selfTest() {
   // ingest assumed ai-title used `title` and would have stored nothing for all 681 of them,
   // silently, which is why each field name is asserted against a record shaped like the real one.
   {
-    const tf = join(tmp, 'projects', 'P--titles', 'sess.jsonl');
-    mkdirSync(dirname(tf), { recursive: true });
-    writeFileSync(tf, [
+    const titlesFile = join(tmp, 'projects', 'P--titles', 'sess.jsonl');
+    mkdirSync(dirname(titlesFile), { recursive: true });
+    writeFileSync(titlesFile, [
       JSON.stringify({ type: 'last-prompt', lastPrompt: 'do the thing please', sessionId: 'T1' }),
       JSON.stringify({ type: 'ai-title', aiTitle: 'Doing the thing', sessionId: 'T1' }),
       JSON.stringify({ type: 'custom-title', customTitle: 'My name for it', sessionId: 'T1' }),
@@ -972,7 +982,7 @@ async function selfTest() {
       JSON.stringify({ type: 'custom-title', customTitle: 'no session id here' }),
     ].join('\n') + '\n');
     const th = new Harvest(db);
-    await th.file(tf, true);
+    await th.file(titlesFile, true);
     const got = Object.fromEntries(
       db.prepare('SELECT kind, title FROM session_titles WHERE session_id = ?').all('T1')
         .map((r) => [r.kind, r.title]));
@@ -985,7 +995,7 @@ async function selfTest() {
     checks.push(['a title with no session id is dropped rather than keyed to null',
       db.prepare("SELECT COUNT(*) n FROM session_titles WHERE session_id IS NULL OR session_id = ''").get().n === 0]);
     const before = db.prepare('SELECT COUNT(*) n FROM session_titles').get().n;
-    await new Harvest(db).file(tf, true);
+    await new Harvest(db).file(titlesFile, true);
     checks.push(['re-reading the same titles adds no rows (gate can fail)',
       db.prepare('SELECT COUNT(*) n FROM session_titles').get().n === before]);
     checks.push(['every title record type this build knows has a field mapping',

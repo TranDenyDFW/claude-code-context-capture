@@ -10,6 +10,8 @@ import warnings
 warnings.filterwarnings("ignore")
 sys.path.insert(0, ".")
 import app as m  # noqa: E402
+import c4x.panels as panels  # noqa: E402
+import c4x.store as store  # noqa: E402
 
 failures = []
 
@@ -28,17 +30,17 @@ n = len(turns)
 # 1. Bands sit at the thresholds the mirror publishes, per segment, and nowhere else.
 fig, _ = m.session_view(session_id, "main", 80, (1, n), with_cards=False)
 rects = [sh for sh in fig.layout.shapes if sh.type == "rect"]
-segs = m.segments_for(session_id).get("segments", [])
+segs = store.segments_for(session_id).get("segments", [])
 windows = [s["window"] for s in segs if s.get("window")]
 expected = []
 for w in windows:
     t = m.THRESHOLDS[w]
     expected += [(t["warn"], t["compact"]), (t["compact"], t["blocked"]), (t["blocked"], w)]
 drawn = sorted((r.y0, r.y1) for r in rects)
+verdict = "match" if drawn == sorted(expected) else f"{drawn[:3]} vs {sorted(expected)[:3]}"
 check("bands are the published thresholds",
       drawn == sorted(expected),
-      f"{len(rects)} rects over {len(windows)} resolved segment(s); "
-      f"{'match' if drawn == sorted(expected) else str(drawn[:3]) + ' vs ' + str(sorted(expected)[:3])}")
+      f"{len(rects)} rects over {len(windows)} resolved segment(s); {verdict}")
 
 # 2. The budget line is that share of the window, and the headroom it states is the real one.
 budget = 80
@@ -68,7 +70,7 @@ check("A and B are marked at the chosen turns",
 a, b = 2, min(n, 40)
 ts_a = str(turns["ts"].iloc[a - 1])
 ts_b = str(turns["ts"].iloc[b - 1])
-spend, tools, targets_df, said = m.turn_diff(session_id, "main", ts_a, ts_b)
+spend, tools, targets_df, said = panels.turn_diff(session_id, "main", ts_a, ts_b)
 mine = m.q("""SELECT COUNT(*) AS calls, COALESCE(SUM(output_tokens),0) AS output,
                      COALESCE(SUM(cache_read_input_tokens),0) AS cache_read
                 FROM api_calls
@@ -92,7 +94,7 @@ check("diff tool totals match independent SQL",
       f"{int(mine_tools['n'])} / {int(mine_tools['b'])}")
 
 # 5. The range is exclusive of A and inclusive of B, which is what makes the parts add up.
-one = m.turn_diff(session_id, "main", ts_a, ts_a)[0].iloc[0]
+one = panels.turn_diff(session_id, "main", ts_a, ts_a)[0].iloc[0]
 check("an empty range reports nothing", int(one["calls"]) == 0, f"{int(one['calls'])} calls")
 
 # 6. A degenerate range explains itself instead of rendering an empty panel.
@@ -105,7 +107,8 @@ check("a collapsed range says so", "Move the two handles" in text, text[:60])
 # the high-water mark guarantees it, where a fixed pair of turns gave a rise and never tested this.
 peak_at = int(turns["total_resident"].astype(float).idxmax()) + 1
 lo, hi = peak_at, len(turns)
-drop = int(turns["total_resident"].iloc[hi - 1] or 0) - int(turns["total_resident"].iloc[lo - 1] or 0)
+drop = (int(turns["total_resident"].iloc[hi - 1] or 0)
+        - int(turns["total_resident"].iloc[lo - 1] or 0))
 if lo >= hi or drop >= 0:
     check("the delta carries its sign in the text", False,
           "no falling range exists in this session, so this check could not run, "
