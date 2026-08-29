@@ -30,6 +30,7 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             "last active": str(r.last_ts or "")[:16].replace("T", " "),
             "turns": int(r.turns),
             "peak": int(r.peak or 0),
+            "current": int(r.current or 0),
             "compactions": int(r.compactions or 0),
         })
     breakdown = " · ".join(f"{k} {v:,}" for k, v in counts.items()) or "none"
@@ -43,8 +44,9 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
         dash_table.DataTable(
             id="tbl-session",
             columns=numeric_columns(
-                ["section", "title", "project", "last active", "turns", "peak", "compactions"],
-                {"turns", "peak", "compactions"}),
+                ["section", "title", "project", "last active", "turns", "current", "peak",
+                 "compactions"],
+                {"turns", "current", "peak", "compactions"}),
             data=rows,
             hidden_columns=["session_id"],
             page_size=16,
