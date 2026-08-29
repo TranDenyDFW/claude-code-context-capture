@@ -34,6 +34,12 @@ import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { rootFrom, resolveDb } from './paths.mjs';
 
+// Three writers share this store by design: a manual harvest, the SessionEnd and UserPromptSubmit
+// hooks, and the dashboard's refresh loop. SQLite's default busy timeout is ZERO, so a reader that
+// arrives mid-write fails outright with SQLITE_BUSY instead of waiting. A reader losing a race
+// should be slow, not absent.
+const BUSY_TIMEOUT = 'PRAGMA busy_timeout = 15000';
+
 const ROOT = rootFrom(import.meta.url);
 const DEFAULT_DB = join(ROOT, 'data', 'context.db');
 
@@ -51,7 +57,9 @@ function open(dbPath) {
     console.error(`no store at ${dbPath}. Run: node tools/harvest.mjs`);
     process.exit(2);
   }
-  return new DatabaseSync(`file:${dbPath.replace(/\\/g, '/')}?mode=ro`, { readOnly: true });
+  const d = new DatabaseSync(`file:${dbPath.replace(/\\/g, '/')}?mode=ro`, { readOnly: true });
+  d.exec(BUSY_TIMEOUT);
+  return d;
 }
 
 // What counts as a read, and how many reads make a re-read worth reporting. The dashboard runs

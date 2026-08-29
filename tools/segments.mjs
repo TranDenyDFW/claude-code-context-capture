@@ -31,6 +31,13 @@ import { pathToFileURL } from 'node:url';
 import { K, SMALL_WINDOW_MODELS, resolveWindow, reportedAutoCompactThreshold } from './mirror-core.mjs';
 import { rootFrom, resolveDb } from './paths.mjs';
 
+// Three writers share this store by design: a manual harvest, the SessionEnd and UserPromptSubmit
+// hooks, and the dashboard's refresh loop. SQLite's default busy timeout is ZERO, so a reader that
+// arrives mid-write fails outright with SQLITE_BUSY instead of waiting. That killed a --full
+// harvest at 7.5 GB and, separately, made segments.mjs throw "database is locked" while the app
+// was importing. A reader losing a race should be slow, not absent.
+const BUSY_TIMEOUT = 'PRAGMA busy_timeout = 15000';
+
 const ROOT = rootFrom(import.meta.url);
 const DB_PATH = resolveDb(ROOT);
 
@@ -127,7 +134,11 @@ export function windowForSegment(segment, compactions = [], opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-function db() { return new DatabaseSync(`file:${DB_PATH}?mode=ro`, { readOnly: true }); }
+function db() {
+  const d = new DatabaseSync(`file:${DB_PATH}?mode=ro`, { readOnly: true });
+  d.exec(BUSY_TIMEOUT);
+  return d;
+}
 
 export function loadSession(sessionId) {
   const d = db();

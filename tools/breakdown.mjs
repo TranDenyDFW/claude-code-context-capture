@@ -33,6 +33,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 import { rootFrom, resolveDb } from './paths.mjs';
 
+// Three writers share this store by design: a manual harvest, the SessionEnd and UserPromptSubmit
+// hooks, and the dashboard's refresh loop. SQLite's default busy timeout is ZERO, so a reader that
+// arrives mid-write fails outright with SQLITE_BUSY instead of waiting. That killed a --full
+// harvest at 7.5 GB and, separately, made segments.mjs throw "database is locked" while the app
+// was importing. A reader losing a race should be slow, not absent.
+const BUSY_TIMEOUT = 'PRAGMA busy_timeout = 15000';
+
 const ROOT = rootFrom(import.meta.url);
 const DB_PATH = resolveDb(ROOT, process.argv.slice(2));
 
@@ -150,6 +157,7 @@ export function baselineFor(rows, ts) {
 
 function open(dbPath = DB_PATH) {
   const db = new DatabaseSync(dbPath);
+  db.exec(BUSY_TIMEOUT);
   db.exec(SCHEMA);
   // A store written before the deferred and item-count fields existed is ordinary, not broken.
   const added = ensureColumns(db);
