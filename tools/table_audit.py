@@ -60,6 +60,7 @@ Run: python tools/table_audit.py              audits the app
 import ast
 import contextlib
 import dis
+import functools
 import os
 import re
 import sys
@@ -198,7 +199,7 @@ def code_position(frame):
 
 
 @contextlib.contextmanager
-def recording_construction(built, chain, constructed):
+def recording_construction(built, chain, constructed, builders=(), module=None):
     """Record where every DataTable constructed while this is open was built, and by whom.
 
     Reachability by observation, not by name. The first attempt tracked which functions the audit
@@ -208,8 +209,13 @@ def recording_construction(built, chain, constructed):
     `built` collects construction positions, `chain` every caller position above them, and
     `constructed` maps the id of every table made to the table itself, so one built and never walked
     can be told from one never built.
+
+    `builders` are the functions that can reach a table. Each is wrapped so that ENTERING it records
+    the position it was called from, which is what makes the caller gate answerable: a call that
+    runs and builds nothing is still a call that ran.
     """
     original = dash_table.DataTable.__init__
+    wrapped = {}
 
     def spy(self, *args, **kwargs):
         # Keyed by id, but the object is held: id() is unique only among LIVE objects, and a table
@@ -224,11 +230,27 @@ def recording_construction(built, chain, constructed):
             frame = frame.f_back
         return original(self, *args, **kwargs)
 
+    def watch(func):
+        @functools.wraps(func)
+        def entered(*args, **kwargs):
+            frame = sys._getframe(1)
+            if os.path.basename(frame.f_code.co_filename) == "app.py":
+                chain.add(code_position(frame))
+            return func(*args, **kwargs)
+        return entered
+
     dash_table.DataTable.__init__ = spy
+    for name in builders:
+        target = getattr(module, name, None) if module is not None else None
+        if callable(target):
+            wrapped[name] = target
+            setattr(module, name, watch(target))
     try:
         yield
     finally:
         dash_table.DataTable.__init__ = original
+        for name, target in wrapped.items():
+            setattr(module, name, target)
 
 
 def table_sites(module=None):
@@ -463,6 +485,9 @@ def main():
         errors.append("no compaction with dropped rows, so the detail table was never audited")
     message_uuid = m.q("SELECT uuid FROM messages ORDER BY rowid DESC LIMIT 1").iloc[0]["uuid"]
 
+    sites, calls, entries, opaque = table_sites(m)
+    builders = {callee for _caller, callee, _position in calls}
+
     # _tick spawns a harvest that WRITES to the store. The rendering half is what can build a table,
     # so it runs and the harvest does not. Stated here and in the output rather than left implied.
     real_refresh, m.refresh_store = m.refresh_store, lambda *a, **k: None
@@ -470,7 +495,7 @@ def main():
     from dash._callback_context import context_value
     from dash._utils import AttributeDict
 
-    recorder = recording_construction(built, chain, constructed)
+    recorder = recording_construction(built, chain, constructed, builders, m)
     recorder.__enter__()
     try:
         cases = [("no selection", None, None),
@@ -507,6 +532,10 @@ def main():
                  hits, walked)
         exercise("_mirror", errors, exercised, lambda: m._mirror(850000, 1000000),
                  hits, walked)
+        # The whole session as the compared range, so the diff panel builds all three of its
+        # tables. A degenerate range returns a prompt instead, and would leave them unbuilt.
+        exercise("_session_controls", errors, exercised,
+                 lambda: m._session_controls(80, [1, 10 ** 6], session_id, "main"), hits, walked)
         exercise("_message_clicked", errors, exercised,
                  lambda: m._message_clicked({"row": 0}, [{"uuid": message_uuid}]), hits, walked)
 
@@ -549,7 +578,6 @@ def main():
                           f"watching, at import, so no coverage gate here can see how it was made. "
                           f"Its rows were read; nothing else about it was.")
 
-    sites, calls, entries, opaque = table_sites(m)
     errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries, exercised,
                               opaque)
 
