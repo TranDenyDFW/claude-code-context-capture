@@ -99,6 +99,12 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
         ])
     records = df.to_dict("records") if hasattr(df, "to_dict") else list(df)
     cols = columns or list(df.columns if hasattr(df, "columns") else records[0].keys())
+    # A caller may hand over plain names OR ready-made specs from numeric_columns(). Wrapping a
+    # spec again put a dict in `name`, dash_table rendered it as a React child, and React threw
+    # error #31 and remounted the whole page: every component fell back to its default, which for
+    # the header picker is no selection. It looked like a broken selection rather than a broken
+    # table, and it cost an afternoon. Accept both shapes instead of trusting the caller.
+    cols = [c if isinstance(c, dict) else {"name": c, "id": c} for c in cols]
     truncated = (" (table shows the first page; export gives every row)"
                  if len(records) > page_size else "")
     return html.Div([
@@ -106,7 +112,7 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
         html.Div(f"{len(records):,} rows.{truncated}" + (f" {note}" if note else ""),
                  style=SECTION_NOTE),
         dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in cols],
+            columns=cols,
             data=records,
             page_size=page_size,
             sort_action="native",
