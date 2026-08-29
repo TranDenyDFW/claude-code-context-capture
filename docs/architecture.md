@@ -20,7 +20,7 @@ flowchart LR
     DB[("data/context.db<br/>SQLite, WAL")]
 
     subgraph read["read, never write"]
-        APP[app.py<br/>Dash, 127.0.0.1]
+        APP["app.py + c4x/<br/>Dash, 127.0.0.1"]
         MIR[mirror.mjs<br/>window math]
         SEG[segments.mjs<br/>model segments]
         WST[waste.mjs<br/>re-reads]
@@ -45,7 +45,20 @@ tool that can fail a tool call is worse than one that misses a row.
 transcript and reads only what was appended, so a re-run is cheap and the first run is retroactive,
 going back as far as your transcripts do.
 
-**Read** never writes. `app.py` opens the store read-only. The window math lives in
+**Read** never writes. The dashboard opens the store read-only, and is five files:
+
+| file | holds |
+|---|---|
+| `app.py` | the Dash instance, the header and layout, the `TABS` registry, every callback, the live mirror |
+| `c4x/theme.py` | colours, shared styles, the two formatters, the small shared builders |
+| `c4x/store.py` | every read, the scoping and cohort rules, the window math they depend on |
+| `c4x/panels.py` | the panels several tabs share: evidence blocks, the compare table, the turn diff |
+| `c4x/tabs.py` | one function per tab |
+
+They layer strictly: theme and store know nothing of each other, panels sits above both, tabs above
+all three, and app.py above everything. Nothing imports upward, so there are no cycles to unpick.
+
+`app.py` opens the store read-only. The window math lives in
 `mirror-core.mjs` as pure functions with no I/O, and `app.py` reads its constants out of that module
 at startup rather than keeping a second copy, so the dashboard and the CLI cannot disagree about
 what a threshold is.

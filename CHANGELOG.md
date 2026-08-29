@@ -26,6 +26,11 @@ someone who did not write it.
   text of your conversations. The README said so already; the page a person actually looks at did
   not.
 
+- **The dashboard is a package.** `app.py` was 3124 lines and is now 995, with `c4x/theme.py`,
+  `c4x/store.py`, `c4x/panels.py` and `c4x/tabs.py` beside it. `tools/table_audit.py` was taught to
+  read the whole package first, because it named `app.py` in seven places and splitting the file
+  under it would have left the static scan reporting fewer construction sites and passing.
+
 ### Fixed
 
 - **`/__shutdown__` accepted GET.** Binding to `127.0.0.1` is no defence, because the browser is on
