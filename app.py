@@ -223,7 +223,26 @@ def project_label(cwd, slug) -> str:
     return "(unknown)"
 
 
-def session_rows() -> pd.DataFrame:
+_rows_cache = {"at": 0.0, "df": None}
+
+
+def session_rows(ttl: float = 45.0) -> pd.DataFrame:
+    """Cached wrapper. The uncached query is a GROUP BY over every turn in the store.
+
+    scoped() calls this on every query once cohorts exist, so without a cache a single page render
+    would run that aggregate a dozen times. The ttl is short enough that a live session appears
+    within a tick or two and long enough that one render costs one query.
+    """
+    now = _time.time()
+    if _rows_cache["df"] is not None and now - _rows_cache["at"] < ttl:
+        return _rows_cache["df"]
+    df = _session_rows_uncached()
+    _rows_cache["at"] = now
+    _rows_cache["df"] = df
+    return df
+
+
+def _session_rows_uncached() -> pd.DataFrame:
     """Every session worth picking, with the name it goes by and the section it belongs to.
 
     Ordered the way the desktop sidebar orders: section, then project, then most recently active
@@ -349,25 +368,91 @@ def session_compactions(session_id: str) -> pd.DataFrame:
     """, (session_id,))
 
 
-def scoped(session_id, scope="main", alias=""):
+COHORT_ALL = "__all__"
+
+
+def cohort_options() -> list:
+    """The populations worth asking a question about.
+
+    A single session answers "what happened here". A cohort answers "what is true of this kind of
+    work", which is the question a research tool exists for: every session in a project, everything
+    that ran outside the desktop app, everything imported from another machine.
+
+    Built from the same frame the picker uses, so a cohort can never contain a session the picker
+    does not list, and the counts shown here are the counts a tab will describe.
+    """
+    df = session_rows()
+    opts = [{"label": f"All sessions ({len(df):,})", "value": COHORT_ALL}]
+    if df.empty:
+        return opts
+    for sec, n in df["section"].value_counts().items():
+        opts.append({"label": f"Section: {sec} ({n:,})", "value": f"section::{sec}"})
+    for proj, n in df["project"].value_counts().head(40).items():
+        opts.append({"label": f"Project: {proj} ({n:,})", "value": f"project::{proj}"})
+    return opts
+
+
+def cohort_sessions(cohort) -> list:
+    """Resolve a cohort to the session ids it contains. Empty list means 'no restriction'."""
+    if not cohort or cohort == COHORT_ALL:
+        return []
+    df = session_rows()
+    if df.empty:
+        return []
+    kind, _, value = str(cohort).partition("::")
+    col = {"section": "section", "project": "project"}.get(kind)
+    if not col:
+        return []
+    return list(df.loc[df[col] == value, "session_id"])
+
+
+def population_label(session_id, cohort, scope) -> str:
+    """One sentence naming exactly what is being described, for the page to print.
+
+    Every aggregate states its population. That is not decoration: the complaint that started this
+    restructure was not knowing whether a number covered everything, the newest thing, or the thing
+    selected, and a count with no denominator is how that happens.
+    """
+    side = "subagents included" if scope == "all" else "main thread only"
+    if session_id:
+        return f"1 session, {side}"
+    ids = cohort_sessions(cohort)
+    if ids:
+        kind, _, value = str(cohort).partition("::")
+        return f"{len(ids):,} sessions in {kind} {value}, {side}"
+    return f"the whole store, every session, {side}"
+
+
+def scoped(session_id, scope="main", alias="", cohort=None):
     """SQL fragment and params for the header selection.
 
     Returned as a pair rather than interpolated by each caller, so a tab cannot accidentally scope
     on a different column or forget the sidechain filter. `alias` is the table alias, empty for an
     unaliased FROM.
+
+    A single session wins over a cohort: picking one session while a cohort is set means "this one",
+    not "this one and everything like it". The cohort still narrows the picker, so the two stay
+    consistent.
     """
     a = f"{alias}." if alias else ""
     bits, args = [], []
     if session_id:
         bits.append(f"AND {a}session_id = ?")
         args.append(session_id)
+    else:
+        ids = cohort_sessions(cohort)
+        if ids:
+            bits.append(f"AND {a}session_id IN ({','.join('?' * len(ids))})")
+            args.extend(ids)
     if scope != "all":
         bits.append(f"AND COALESCE({a}is_sidechain,0) = 0")
     return " ".join(bits), tuple(args)
 
 
-def all_compactions(session_id=None) -> pd.DataFrame:
-    where, args = ("AND c.session_id = ?", (session_id,)) if session_id else ("", ())
+def all_compactions(session_id=None, cohort=None) -> pd.DataFrame:
+    # scope="all": a compaction is a property of the session, not of one thread inside it, so the
+    # sidechain filter does not apply to this table.
+    where, args = scoped(session_id, "all", alias="c", cohort=cohort)
     return q(f"""
         SELECT c.uuid, c.ts, COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project, c.trigger, c.version,
                c.pre_tokens, c.post_tokens, c.cumulative_dropped_tokens AS dropped,
@@ -741,9 +826,15 @@ def dark_fig(fig: go.Figure, height: int = 420) -> go.Figure:
     return fig
 
 
-def selector_options() -> list:
-    """Options for the global selector: the title first, because that is what it is called."""
+def selector_options(cohort=None) -> list:
+    """Options for the global selector: the title first, because that is what it is called.
+
+    Narrowed to the cohort, so the picker cannot offer a session the current population excludes.
+    """
     df = session_rows()
+    ids = cohort_sessions(cohort)
+    if ids:
+        df = df[df["session_id"].isin(ids)]
     if df.empty:
         return []
     opts = []
@@ -839,9 +930,14 @@ header = html.Div(
                 # Nothing said which was which. One selection, stated, drives the whole page.
                 html.Div([
                     dcc.Dropdown(
+                        id="sel-cohort", options=[], value=COHORT_ALL, clearable=False,
+                        placeholder="Population",
+                        style={"width": "260px", **FIELD}, className="c4x-dd",
+                    ),
+                    dcc.Dropdown(
                         id="sel-session", options=[], value=None, optionHeight=44,
-                        placeholder="Select a session, or search by title, project or date",
-                        style={"width": "560px", **FIELD}, className="c4x-dd",
+                        placeholder="All sessions in the population, or pick one",
+                        style={"width": "420px", **FIELD}, className="c4x-dd",
                     ),
                     scope_radio("session-scope"),
                 ], style={"display": "flex", "alignItems": "center", "gap": "6px",
@@ -879,7 +975,7 @@ def accordion(title: str, sub: str, children, open_by_default: bool = False):
     ], open=open_by_default, style={"marginBottom": "8px"})
 
 
-def summary_layout(session_id=None, scope="main"):
+def summary_layout(session_id=None, scope="main", cohort=None):
     """Store-wide values, all of them, and nothing per-selection.
 
     This tab answers "what is in the store". Every other tab answers "what about this selection".
@@ -1142,14 +1238,16 @@ def overview_layout():
 
 
 # ---- Session --------------------------------------------------------------
-def session_layout(session_id=None, scope="main"):
+def session_layout(session_id=None, scope="main", cohort=None):
     """One session, in detail. Scoped entirely by the header selection."""
     if not session_id:
+        n = len(cohort_sessions(cohort))
+        extra = (f" The population is {n:,} sessions; this tab charts one at a time."
+                 if n else "")
         return html.Div([
             html.Div("No session selected", style=SECTION_HEAD),
-            html.Div("Pick one in the header, or browse them on the All sessions tab. Every tab "
-                     "except Summary describes the selection, so nothing here is a store-wide "
-                     "number in disguise.", style=SECTION_NOTE),
+            html.Div("Pick one in the header, or browse them on the All sessions tab." + extra,
+                     style=SECTION_NOTE),
         ])
     fig, cards = session_view(session_id, scope)
     return html.Div([
@@ -1158,7 +1256,7 @@ def session_layout(session_id=None, scope="main"):
     ])
 
 
-def sessions_table_layout(session_id=None, scope="main"):
+def sessions_table_layout(session_id=None, scope="main", cohort=None):
     """Browse every session. Selecting a row sets the header selection.
 
     A table rather than a long dropdown: 1,323 sessions sorted by peak tokens interleaved every
@@ -1166,6 +1264,9 @@ def sessions_table_layout(session_id=None, scope="main"):
     which is the order the desktop sidebar uses.
     """
     df = session_rows()
+    ids = cohort_sessions(cohort)
+    if ids:
+        df = df[df["session_id"].isin(ids)]
     counts = df["section"].value_counts().to_dict() if not df.empty else {}
     rows = []
     for r in df.itertuples():
@@ -1217,8 +1318,8 @@ def sessions_table_layout(session_id=None, scope="main"):
 
 
 # ---- Compactions ----------------------------------------------------------
-def compactions_layout(session_id=None, scope="main"):
-    df = all_compactions(session_id)
+def compactions_layout(session_id=None, scope="main", cohort=None):
+    df = all_compactions(session_id, cohort)
     # Window comes from the model segment the compaction sits in. Where segmentation cannot
     # resolve one (no non-sidechain turns recorded around the event), fall back to fitting from
     # the token count alone and SAY SO in the confidence column rather than hiding the weaker
@@ -1347,16 +1448,16 @@ def latest_baseline():
     return None if df.empty else df.iloc[0].to_dict()
 
 
-def breakdown_layout(session_id=None, scope="main"):
+def breakdown_layout(session_id=None, scope="main", cohort=None):
     """Shell. The body re-renders when the sidechain scope changes.
 
     This tab charted only non-sidechain calls and never said so, which in this store means it was
     showing under a third of the activity. The population is now a stated choice.
     """
-    return html.Div(breakdown_body(scope == "all", session_id), id="breakdown-body")
+    return html.Div(breakdown_body(scope == "all", session_id, cohort), id="breakdown-body")
 
 
-def breakdown_body(include_sidechain: bool = False, session_id=None):
+def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None):
     b = latest_baseline()
     if not b:
         return html.Div([
@@ -1392,7 +1493,7 @@ def breakdown_body(include_sidechain: bool = False, session_id=None):
 
     static_total = int(b["static_total"])
     window = int(b["window_size"] or 1000000)
-    scope_sql, scope_args = scoped(session_id, "all" if include_sidechain else "main")
+    scope_sql, scope_args = scoped(session_id, "all" if include_sidechain else "main", cohort=cohort)
     turns = q(f"""SELECT ts, total_resident FROM api_calls
                   WHERE total_resident IS NOT NULL {scope_sql}
                   ORDER BY ts""", scope_args)
@@ -1535,7 +1636,7 @@ def breakdown_body(include_sidechain: bool = False, session_id=None):
 
 
 # ---- Mirror ---------------------------------------------------------------
-def mirror_layout(session_id=None, scope="main"):
+def mirror_layout(session_id=None, scope="main", cohort=None):
     rows = []
     for t in MATH["thresholds"]:
         rows.append({
@@ -1580,7 +1681,7 @@ def mirror_layout(session_id=None, scope="main"):
     ])
 
 
-def waste_layout(session_id=None, scope="main"):
+def waste_layout(session_id=None, scope="main", cohort=None):
     """Context paid for twice, or paid for and never used.
 
     Reads the same tool_calls table tools/waste.mjs reports from, so the tab and the CLI cannot
@@ -1592,7 +1693,7 @@ def waste_layout(session_id=None, scope="main"):
     # for speed, but the definition lives in one place: these were two literals under a docstring
     # asserting they could not disagree, which asserted it rather than ensuring it.
     spec, spec_err = tool_spec("waste.mjs", "--spec")
-    wsid = "AND session_id = ?" if session_id else ""
+    wsid, wargs = scoped(session_id, "all", cohort=cohort)
     if spec:
         read_tools, dup_min = spec["read_tools"], int(spec["duplicate_min"])
     else:
@@ -1606,14 +1707,14 @@ def waste_layout(session_id=None, scope="main"):
             WHERE tool_name IN ({placeholders}) AND target IS NOT NULL {wsid}
             GROUP BY session_id, target HAVING reads >= ?
             ORDER BY reads DESC LIMIT 200""",
-        tuple(read_tools) + ((session_id,) if session_id else ()) + (dup_min,),
+        tuple(read_tools) + wargs + (dup_min,),
     ) if read_tools else pd.DataFrame()
     srv = q(
         """SELECT server_name AS server, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes, MAX(ts) last_call
            FROM tool_calls WHERE server_name IS NOT NULL """ + wsid + """
            GROUP BY server_name ORDER BY calls ASC""",
-        (session_id,) if session_id else (),
+        wargs,
     )
     tools = q(
         """SELECT tool_name AS tool, COUNT(*) calls,
@@ -1621,7 +1722,7 @@ def waste_layout(session_id=None, scope="main"):
                   SUM(COALESCE(is_error,0)) errors
            FROM tool_calls WHERE 1=1 """ + wsid + """
            GROUP BY tool_name ORDER BY calls DESC LIMIT 40""",
-        (session_id,) if session_id else (),
+        wargs,
     )
 
     if dup.empty:
@@ -1673,7 +1774,7 @@ def waste_layout(session_id=None, scope="main"):
 
 
 # ---- Sources --------------------------------------------------------------
-def sources_layout(session_id=None, scope="main"):
+def sources_layout(session_id=None, scope="main", cohort=None):
     """What ENTERS the window, as opposed to what the window currently holds.
 
     The Breakdown tab answers "what is in there now" and the context tooltip answers it live. This
@@ -1683,16 +1784,17 @@ def sources_layout(session_id=None, scope="main"):
     exists on the desktop entrypoint, where the status line does not run), and `record_types` (a
     census of every record shape the transcripts contain).
     """
-    sid_where, sid_args = ("WHERE session_id = ?", (session_id,)) if session_id else ("", ())
+    _w, sid_args = scoped(session_id, "all", cohort=cohort)
+    sid_where = ("WHERE 1=1 " + _w) if _w else ""
     att = q(f"""SELECT type AS kind, SUM(n) AS occurrences, COUNT(DISTINCT session_id) AS sessions
                 FROM attachments {sid_where} GROUP BY type ORDER BY SUM(n) DESC""", sid_args)
-    hw = "AND session_id = ?" if session_id else ""
+    hw = _w
     hooks = q(f"""SELECT tool_name AS tool, COUNT(*) AS calls,
                          SUM(COALESCE(tool_response_bytes,0)) AS response_bytes,
                          SUM(COALESCE(tool_input_bytes,0))    AS input_bytes
                   FROM hook_events WHERE tool_name IS NOT NULL {hw}
                   GROUP BY tool_name ORDER BY SUM(COALESCE(tool_response_bytes,0)) DESC LIMIT 40""",
-              (session_id,) if session_id else ())
+              sid_args)
     ev = q(f"""SELECT event, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions,
                       MIN(captured_at) AS first_seen, MAX(captured_at) AS last_seen
                FROM hook_events {sid_where} GROUP BY event ORDER BY COUNT(*) DESC""", sid_args)
@@ -1766,7 +1868,7 @@ def sources_layout(session_id=None, scope="main"):
 
 
 # ---- Probes ---------------------------------------------------------------
-def probes_layout(session_id=None, scope="main"):
+def probes_layout(session_id=None, scope="main", cohort=None):
     """What the control protocol returns, and what the app's own refresh loop costs.
 
     tools/probe.mjs asks a spawned Claude Code session for its context breakdown over the control
@@ -1919,8 +2021,9 @@ def _switch_tab(*args):
     Input("active-tab", "data"),
     Input("sel-session", "value"),
     Input("session-scope", "value"),
+    Input("sel-cohort", "value"),
 )
-def _render_tab(idx, session_id, scope):
+def _render_tab(idx, session_id, scope, cohort):
     """Render ONE pane, for the current selection.
 
     Re-runs when the tab changes or the selection changes, which is what makes every tab describe
@@ -1931,7 +2034,7 @@ def _render_tab(idx, session_id, scope):
         i = 0
     tab_id, label, fn = TABS[i]
     try:
-        body = fn(session_id, scope or "main")
+        body = fn(session_id, scope or "main", cohort)
     except Exception as exc:                        # noqa: BLE001 - a failed tab must say so
         return html.Div([
             html.Div(f"{label} could not be rendered", style={**SECTION_HEAD, "color": DANGER}),
@@ -1941,12 +2044,8 @@ def _render_tab(idx, session_id, scope):
     # Say which population the page is describing, every time, on every tab.
     if tab_id == "tab-summary":
         banner = None
-    elif tab_id in SELECTION_SCOPED and not session_id:
-        banner = html.Div("No session selected. This tab describes one session; pick one in the "
-                          "header.", style={**SECTION_NOTE, "color": WARN})
     elif tab_id in SELECTION_SCOPED:
-        banner = html.Div(f"Describing the selected session only, "
-                          f"{'subagents included' if scope == 'all' else 'main thread only'}.",
+        banner = html.Div(f"Describing {population_label(session_id, cohort, scope or 'main')}.",
                           style=SECTION_NOTE)
     else:
         banner = html.Div("Store-wide. Not affected by the header selection.", style=SECTION_NOTE)
@@ -1955,18 +2054,27 @@ def _render_tab(idx, session_id, scope):
 
 @callback(
     Output("sel-session", "options"),
+    Input("sel-cohort", "value"),
     Input("tick", "n_intervals"),
-    State("sel-session", "options"),
 )
-def _selector_options(_n, existing):
+def _selector_options(cohort, _n):
     """Populate the selector once, then leave it alone.
 
     Built here rather than at import so the first paint is not blocked by the query, and guarded
     so a 5s tick does not rebuild a 300-row option list forever.
     """
+    return selector_options(cohort)
+
+
+@callback(
+    Output("sel-cohort", "options"),
+    Input("tick", "n_intervals"),
+    State("sel-cohort", "options"),
+)
+def _cohort_options(_n, existing):
     if existing:
         raise PreventUpdate
-    return selector_options()
+    return cohort_options()
 
 
 @callback(
