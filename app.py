@@ -250,11 +250,19 @@ SCOPE_OPTIONS = [
 
 def scope_radio(component_id: str, value: str = "main") -> dcc.RadioItems:
     """The sidechain switch. One definition, so two tabs cannot offer different wording."""
-    # labelStyle, not style. Dash ships its own rule for `.dash-options-list label` that sets the
-    # colour to rgba(0,9,38,0.9), so a colour on the container is overridden and the labels render
-    # near-black on a near-black page: present in the DOM, invisible on screen. Caught by reading
-    # the computed style rather than by looking, because "I cannot see it" and "it is not there"
-    # look identical in a screenshot.
+    # labelStyle, not style. Dash gives the `<label>` its own colour, rgba(0,9,38,0.9), which beats
+    # a colour inherited from the container, so the option text rendered near-black on a near-black
+    # page: present in the DOM, invisible on screen. Caught by reading the computed style rather
+    # than by looking, because "I cannot see it" and "it is not there" look identical in a
+    # screenshot.
+    #
+    # Where the fix actually lands, checked in a live browser rather than assumed: `labelStyle` is
+    # applied to the child `span.dash-options-list-option-text`, which is the element holding the
+    # text. The `<label>` itself still computes to rgba(0,9,38,0.9); the span computes to MUTED on
+    # the page background, about 6.2:1. So this does not override Dash's rule, it paints the
+    # element inside it, and a future Dash that moves the text out of that span would break it
+    # silently. An earlier version of this comment named `.dash-options-list label` as the thing
+    # being overridden, which was wrong about the mechanism while right about the remedy.
     return dcc.RadioItems(
         id=component_id, options=SCOPE_OPTIONS, value=value, inline=True,
         style={"fontSize": "12px", "fontFamily": MONO},
