@@ -98,6 +98,14 @@ CREATE INDEX IF NOT EXISTS context_baselines_ts ON context_baselines(ts);
  * fields is the normal case rather than a broken one. Returns what it added so the caller can say
  * so out loud instead of migrating in silence.
  */
+export function ensureBaselineSchema(db) {
+  // The table lives here rather than in harvest's schema, because baselines are this tool's
+  // output. Exported so a fixture builder can create it the same way a real run does, instead of
+  // pasting a second copy of the CREATE TABLE that would drift the moment a field is added.
+  db.exec(SCHEMA);
+  return ensureColumns(db);
+}
+
 export function ensureColumns(db) {
   const have = new Set(db.prepare('PRAGMA table_info(context_baselines)').all().map((r) => r.name));
   const added = ALL_COLS.filter((c) => !have.has(c));

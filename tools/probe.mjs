@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS probe_details (
 );
 `;
 
+export function ensureProbeSchema(db) {
+  // probes, probe_categories and probe_details are this tool's tables. Exported so a fixture can
+  // create them exactly as a real probe run does, rather than carrying a second CREATE TABLE that
+  // silently diverges from this one.
+  db.exec(SCHEMA);
+}
+
 export function frames() {
   return [
     { type: 'control_request', request_id: 'c4x-1', request: { subtype: 'initialize' } },
