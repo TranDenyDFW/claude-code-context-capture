@@ -7,38 +7,36 @@ export_format="csv" from TABLE_STYLE, so the CSV receives display text rather th
 the whole point of offering an export.
 
 This audit exists because the fix kept being applied to whichever columns someone happened to look
-at. Three rounds: two columns, then eleven, then a thirteenth site in a callback that the second
-round's own sweep could not reach and still called itself a sweep of every table.
+at. Two columns, then eleven, then a thirteenth site in a callback the second sweep could not reach
+and still called itself a sweep of every table.
 
-So coverage is measured rather than asserted, in four ways that each caught something:
+So coverage is measured rather than asserted, in five ways that each caught something:
 
+  every ENTRY POINT is exercised          a table reaches a person only through a tab render or a
+                                          callback, so running all of them is what makes the rest
+                                          of the coverage claim mean anything
   every construction site is reached      a site the run never builds is a failure, not an omission
   every call that can reach one is taken  evidence_block builds one table from eight callers, so a
-                                          reached LINE proves one caller ran, not all of them
-  nothing is built that was not predicted  an alias or a wrapper defeats the static scan, and this
+                                          reached position proves one caller ran, not all of them
+  nothing is built that was not predicted an alias or a wrapper defeats the static scan, and this
                                           is what says so
   everything built was also walked        a table built and never inspected is not audited, however
                                           green the coverage number looks
 
-What it does NOT check. A reviewer produced EIGHT wrong passes against an earlier version of this
-file, six of them with a real stringified table rendering. TWO of those eight are closed. Six are
-not, and they share one root: a builder invoked by a name the static scan cannot resolve.
+Positions are (line, column), not lines. A reviewer put an untaken call beside a taken one on the
+same line and the audit reported both as covered.
 
-  a callee the static scan cannot resolve. Edges come from BARE NAMES, so `_EB = evidence_block`
-  then `_EB(...)`, a dict of handlers, `getattr`, or a call from inside a class body is not an edge,
-  and its callers are never demanded. A real table DOES hide here: build one in a callback this
-  audit never invokes, and the construction line is still satisfied by the other callers that do
-  run, while the table itself is never constructed during the audit and so never walked. That is
-  the shape to expect a fourth escape from.
+The entry-point gate is what closes the family of evasions the call graph cannot see. Edges are
+matched by NAME, so a builder invoked through `_EB = evidence_block`, a dict of handlers, `getattr`
+or a call inside a class body is not an edge, and a table built in an unexercised callback rendered
+under AUDIT PASS. Resolving names better only moves that line. Running every door does not: if every
+callback and every tab render has been executed, every table that can ever render has been built,
+and the remaining gates cover it.
 
-  two calls, or two constructions, that share one physical line. Coverage is line-granular, so a
-  taken call covers an untaken one beside it.
-
-  a branch inside a table-building function that this run's session, cohort and compaction never
-  take. The inputs are picked to be awkward rather than typical, which is a choice, not a proof.
-
-Closed of the eight: a table in a prop that is not `children` (it renders, and was read as nothing),
-and a numeric shape outside the unit list the regex used to carry.
+What it still does NOT check: a branch inside a function that this run's session, cohort and
+compaction never take. Inputs are picked to be awkward rather than typical, which is a choice, not
+a proof. And `_tick` runs with `refresh_store` stubbed out, because the real one spawns a harvest
+that writes to a 943 MB store: the rendering half runs, the harvest half does not.
 
 An unreached call site is reported as an error even when the path is genuinely defensive and this
 store cannot trigger it. Give the audit an input that takes the branch. Do not delete the gate.
@@ -50,10 +48,10 @@ Run: python tools/table_audit.py              audits the app
 """
 import ast
 import contextlib
+import dis
 import os
 import re
 import sys
-import traceback
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -62,6 +60,7 @@ sys.path.insert(0, ROOT)
 
 import app as m  # noqa: E402
 from dash import dash_table, dcc, html  # noqa: E402
+from dash.exceptions import PreventUpdate  # noqa: E402
 
 # Shape, not vocabulary. This listed nine unit suffixes and a reviewer walked "1.4s" through it in
 # under a minute; "ms", "MiB", "$", "e6" and a signed delta were all invisible for the same reason.
@@ -76,6 +75,10 @@ PLACEHOLDER = {"-", "--", "n/a", "N/A", "none", "unknown"}
 
 # A version is "2.0.14" and a timestamp is "10:32:07". Both hold digits, neither is a quantity.
 TEXT_BY_NATURE = {"version", "ts", "last active", "session_id", "uuid"}
+
+# _render_tab catches a failing pane and renders the exception rather than raising, which is right
+# for a dashboard and would let this audit call a broken tab a success.
+RENDER_FAILED = "could not be rendered"
 
 
 def tables_in(node, out, seen=None):
@@ -152,33 +155,51 @@ def findings(label, node, walked=None):
     return out
 
 
+def code_position(frame):
+    """The (line, column) a frame is currently executing, matching what ast reports for that call.
+
+    `traceback.extract_stack()` leaves `colno` as None here, so the position comes from the code
+    object's own instruction table. Columns matter: an untaken call placed beside a taken one on
+    the same line was reported as covered by a gate that compared line numbers.
+    """
+    try:
+        instructions = dis.get_instructions(frame.f_code, show_caches=True)
+    except TypeError:                                # show_caches went away again
+        instructions = dis.get_instructions(frame.f_code)
+    for instruction in instructions:
+        if instruction.offset == frame.f_lasti:
+            position = instruction.positions
+            if position and position.lineno is not None:
+                return (position.lineno, position.col_offset)
+            break
+    return (frame.f_lineno, None)
+
+
 @contextlib.contextmanager
 def recording_construction(built, chain, constructed):
-    """Record the app.py line of every DataTable actually constructed while this is open.
+    """Record where every DataTable constructed while this is open was built, and by whom.
 
     Reachability by observation, not by name. The first attempt tracked which functions the audit
     called, which reported evidence_block() and breakdown_body() as unreached when both are helpers
     a tab layout calls: the audit had rendered their tables and still failed itself.
 
-    `built` collects construction sites, `chain` every caller line above them, and `constructed`
-    maps the id of every table made to the table itself, so one built and never walked can be told
-    from one never built.
+    `built` collects construction positions, `chain` every caller position above them, and
+    `constructed` maps the id of every table made to the table itself, so one built and never walked
+    can be told from one never built.
     """
     original = dash_table.DataTable.__init__
 
     def spy(self, *args, **kwargs):
-        # Keyed by id, but the object is held: id() is unique only among LIVE objects, and a
-        # table built and dropped freed its address for the next one, which made two constructions
-        # look like one and put this gate to sleep on exactly the case it exists for.
+        # Keyed by id, but the object is held: id() is unique only among LIVE objects, and a table
+        # built and dropped freed its address for the next one, which made two constructions look
+        # like one and put that gate to sleep on exactly the case it exists for.
         constructed[id(self)] = self
-        # The construction site is the innermost app.py frame; every app.py frame above it is a
-        # link in the chain that reached it, and those are what prove a CALLER was exercised
-        # rather than merely a line.
-        first = True
-        for frame in reversed(traceback.extract_stack()):
-            if os.path.basename(frame.filename) == "app.py":
-                built.add(frame.lineno) if first else chain.add(frame.lineno)
-                first = False
+        frame, innermost = sys._getframe(1), True
+        while frame is not None:
+            if os.path.basename(frame.f_code.co_filename) == "app.py":
+                (built if innermost else chain).add(code_position(frame))
+                innermost = False
+            frame = frame.f_back
         return original(self, *args, **kwargs)
 
     dash_table.DataTable.__init__ = spy
@@ -188,16 +209,32 @@ def recording_construction(built, chain, constructed):
         dash_table.DataTable.__init__ = original
 
 
-def table_sites():
-    """Static picture of app.py: where tables are built, and every call that can reach one.
+def table_sites(module=None):
+    """Static picture of app.py: where tables are built, what can reach one, and every entry point.
 
-    Two returns. `sites` is each DataTable construction site with its enclosing top-level function.
-    `calls` is every call site of a function that can build a table, directly or through anything it
-    calls, which is what makes coverage a question about CALLERS rather than lines. evidence_block
-    builds one table from eight callers, so reaching its line proves only that one of the eight ran.
+    Four returns. `sites` is each DataTable construction position with its enclosing top-level
+    function. `calls` is every call position of a function that can build a table, directly or
+    through anything it calls, which makes coverage a question about CALLERS rather than positions,
+    because evidence_block builds one table from eight of them. `entries` is every callback, which
+    is the set that has to be exercised for any of the rest to mean anything.
+
+    Given the live module, a module-level alias of a builder resolves to the same object and counts
+    as the builder. That is a courtesy, not the defence: a local alias, a dict of handlers or a
+    getattr still resolves to nothing here, which is why the entry-point gate exists. `opaque` is
+    the set of calls whose callee cannot be named at all, which is the residue the entry-point gate
+    cannot cover either, because a call on a branch nothing takes is invisible to every dynamic
+    observation as well.
     """
     tree = ast.parse(open(os.path.join(ROOT, "app.py"), encoding="utf-8").read())
-    sites, edges = [], {}
+    sites, edges, entries, opaque = [], {}, {}, []
+
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            func = decorator.func if isinstance(decorator, ast.Call) else decorator
+            if getattr(func, "id", getattr(func, "attr", None)) == "callback":
+                entries[node.name] = node.lineno
 
     def walk(node, fn):
         for child in ast.iter_child_nodes(node):
@@ -205,13 +242,21 @@ def table_sites():
                     if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and child.col_offset == 0 else fn)
             if isinstance(child, ast.Call):
+                position = (child.lineno, child.col_offset)
                 if isinstance(child.func, ast.Attribute) and child.func.attr == "DataTable":
-                    sites.append((here, child.lineno))
-                # Bare names only. app.py calls its own functions unqualified, and matching
-                # `.attr` too meant any method sharing a builder's name became a call site the
-                # audit demanded be taken, which it never could be.
+                    sites.append((here, position))
+                # A call whose callee this scan cannot name at all: a dict of handlers, the result
+                # of another call, `getattr`. Those are the two evasions that survived everything
+                # else, and they survived on an unexecuted branch, where nothing dynamic can see
+                # them either. app.py contains none, so the gate is silent until someone writes one.
+                if (isinstance(child.func, (ast.Subscript, ast.Call))
+                        or (isinstance(child.func, ast.Name) and child.func.id == "getattr")):
+                    opaque.append((here, position))
+                # Bare names only. app.py calls its own functions unqualified, and matching `.attr`
+                # too meant any method sharing a builder's name became a call site the audit
+                # demanded be taken, which it never could be.
                 if isinstance(child.func, ast.Name) and here:
-                    edges.setdefault(here, []).append((child.func.id, child.lineno))
+                    edges.setdefault(here, []).append((child.func.id, position))
             walk(child, here)
 
     walk(tree, None)
@@ -225,14 +270,22 @@ def table_sites():
                 builders.add(caller)
                 growing = True
 
-    calls = [(caller, callee, lineno)
+    if module is not None:
+        objects = {id(getattr(module, name, None)) for name in builders}
+        objects.discard(id(None))
+        for name in dir(module):
+            if id(getattr(module, name, None)) in objects:
+                builders.add(name)
+
+    calls = [(caller, callee, position)
              for caller, called in edges.items()
-             for callee, lineno in called if callee in builders]
-    return sites, calls
+             for callee, position in called if callee in builders]
+    return sites, calls, entries, opaque
 
 
-def coverage_errors(built, chain, constructed, walked, sites, calls):
-    """The four coverage gates. One definition, called by the audit and by its own self-test.
+def coverage_errors(built, chain, constructed, walked, sites, calls,
+                    entries=None, exercised=None, opaque=None):
+    """The five coverage gates. One definition, called by the audit and by its own self-test.
 
     They were written twice once, and a reviewer deleted a gate out of the audit while the
     self-test, which restated the same rule inline, stayed green over a run that then printed
@@ -240,28 +293,40 @@ def coverage_errors(built, chain, constructed, walked, sites, calls):
     checking the subject.
     """
     errors = []
-    site_lines = {lineno for _, lineno in sites}
+    site_positions = {position for _, position in sites}
 
-    for fn, lineno in sites:
-        if lineno not in built:
-            errors.append(f"app.py:{lineno} builds a DataTable inside {fn}(), "
+    for fn, (lineno, col) in (opaque or []):
+        errors.append(f"app.py:{lineno}:{col} in {fn}() calls something this scan cannot name, so "
+                      f"whether it builds a table is unknowable from the source. Two evasions "
+                      f"survived here. If the call is legitimate, teach this audit to observe that "
+                      f"line executing. Do not delete the gate.")
+
+    for name, lineno in sorted((entries or {}).items(), key=lambda kv: kv[1]):
+        if name not in (exercised or set()):
+            errors.append(f"app.py:{lineno} defines the callback {name}(), which this audit never "
+                          f"runs, so anything it builds is invisible to every other gate here")
+
+    for fn, (lineno, col) in sites:
+        if (lineno, col) not in built:
+            errors.append(f"app.py:{lineno}:{col} builds a DataTable inside {fn}(), "
                           f"which this audit never reached")
 
     # A shared builder reached through one caller says nothing about its other callers, and
     # evidence_block has eight.
-    reached = built | chain
-    for caller, callee, lineno in calls:
-        if lineno not in reached:
-            errors.append(f"app.py:{lineno} in {caller}() calls {callee}(), which can build a "
-                          f"table, and this audit never takes that path")
+    reached = set(built) | set(chain)
+    for caller, callee, (lineno, col) in calls:
+        if (lineno, col) not in reached:
+            errors.append(f"app.py:{lineno}:{col} in {caller}() calls {callee}(), which can build "
+                          f"a table, and this audit never takes that path")
 
     # A construction the static scan did not predict means the scan is blind to how it was written:
     # an alias or a wrapper rather than dash_table.DataTable spelled out.
-    for lineno in sorted(built - site_lines):
-        errors.append(f"app.py:{lineno} constructed a DataTable that the static scan did not find")
+    for lineno, col in sorted(set(built) - site_positions):
+        errors.append(f"app.py:{lineno}:{col} constructed a DataTable that the static scan "
+                      f"did not find")
 
     # A table built but not walked is a table not audited, which is how a callback returning a bare
-    # list slips through: the line is reached, the rows are never read. By identity, because a
+    # list slips through: the position is reached, the rows are never read. By identity, because a
     # count let one component walked twice pay for one never walked at all.
     for missed in sorted(set(constructed) - set(walked)):
         errors.append(f"a DataTable (id {missed}) was constructed but never walked, "
@@ -269,32 +334,69 @@ def coverage_errors(built, chain, constructed, walked, sites, calls):
     return errors
 
 
+def render_failed(node):
+    """True if _render_tab swallowed an exception into a panel instead of raising it."""
+    found = []
+
+    def walk(item, depth=0):
+        if found or depth > 40:
+            return
+        if isinstance(item, str):
+            if RENDER_FAILED in item:
+                found.append(item)
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child, depth + 1)
+            return
+        children = getattr(item, "children", None)
+        if children is not None:
+            walk(children, depth + 1)
+
+    walk(node)
+    return bool(found)
+
+
+def exercise(name, errors, exercised, call, hits=None, walked=None):
+    """Run one entry point, record that it really ran, and INSPECT whatever it returned.
+
+    Inspecting the return is not optional. _message_clicked was being run and its output thrown
+    away, so a table it built was caught only by the built-but-not-walked gate, one step removed
+    from the rows nobody had read. Every door is opened and everything behind it is looked at.
+
+    PreventUpdate counts as exercised: refusing to update is a legitimate outcome and the function
+    was entered. Anything else raising is an error, because an entry point this audit cannot run is
+    an entry point whose tables are invisible to every other gate.
+    """
+    try:
+        result = call()
+    except PreventUpdate:
+        exercised.add(name)
+        return None
+    except Exception as exc:                        # noqa: BLE001 - the point is to report it
+        errors.append(f"{name}() raised {type(exc).__name__}: {exc}")
+        return None
+    exercised.add(name)
+    if hits is not None:
+        hits += findings(f"callback / {name}", result, walked)
+    return result
+
+
 def main():
-    hits, errors = [], []
+    hits, errors, exercised = [], [], set()
     built, chain, constructed, walked = set(), set(), {}, set()
 
     session_id = m.q("""SELECT session_id FROM compactions GROUP BY 1
                         ORDER BY COUNT(*) DESC LIMIT 1""").iloc[0]["session_id"]
+    other = m.q("""SELECT session_id FROM api_calls WHERE session_id != ?
+                   GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1""",
+                (session_id,)).iloc[0]["session_id"]
     cohorts = [o["value"] for o in m.cohort_options()
                if str(o["value"]).startswith("section::")]
-    cases = [("no selection", (None, "main", None)),
-             ("one session", (session_id, "main", None)),
-             ("a cohort", (None, "main", cohorts[0] if cohorts else None))]
+    cohort = cohorts[0] if cohorts else None
+    if cohort is None:
+        errors.append("no section cohort exists, so every cohort case below is untested")
 
-    recorder = recording_construction(built, chain, constructed)
-    recorder.__enter__()
-
-    for tab_id, _label, layout in m.TABS:
-        for case, args in cases:
-            try:
-                hits += findings(f"{tab_id} / {case}", layout(*args), walked)
-            except Exception as exc:
-                errors.append(f"{tab_id} / {case}: {type(exc).__name__}: {exc}")
-
-    # Tables built inside a callback are unreachable from the tab walk, so each is called directly.
-    #
-    # Pick a compaction that HAS dropped rows. The first version of this audit took whichever came
-    # first, got an empty set, never built the table, and reported one defect fewer than existed.
     uuid = None
     for _, row in m.q("SELECT uuid FROM compactions ORDER BY rowid DESC LIMIT 40").iterrows():
         if not m.compaction_dropped(row["uuid"]).empty:
@@ -302,33 +404,78 @@ def main():
             break
     if uuid is None:
         errors.append("no compaction with dropped rows, so the detail table was never audited")
-    else:
-        hits += findings("callback / compaction detail",
-                         m._compaction_clicked({"row": 0}, [{"uuid": uuid}]), walked)
+    message_uuid = m.q("SELECT uuid FROM messages ORDER BY rowid DESC LIMIT 1").iloc[0]["uuid"]
 
-    # The compare table is built by a callback too, and it is driven through that callback rather
-    # than by calling compare_table directly: calling the builder proves the builder works and says
-    # nothing about the path that delivers it. Both branches are taken, because a comparison against
-    # a cohort and one against a single session assemble their arms differently, and the unequal-arm
-    # rows only appear in the first.
-    other = m.q("""SELECT session_id FROM api_calls WHERE session_id != ?
-                   GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1""",
-                (session_id,)).iloc[0]["session_id"]
-    arms = [("session", other, "callback / compare, session against session")]
-    if cohorts:
-        arms.insert(0, ("cohort", cohorts[0], "callback / compare, session against cohort"))
-    else:
-        errors.append("no cohort available, so the cohort arm of compare was never audited")
-    for kind, target, label in arms:
-        hits += findings(label, m._cmp_render(kind, target, session_id, None, "main"), walked)
+    # _tick spawns a harvest that WRITES to the store. The rendering half is what can build a table,
+    # so it runs and the harvest does not. Stated here and in the output rather than left implied.
+    real_refresh, m.refresh_store = m.refresh_store, lambda *a, **k: None
 
-    recorder.__exit__(None, None, None)
+    from dash._callback_context import context_value
+    from dash._utils import AttributeDict
 
-    # Reachability, observed rather than claimed.
-    sites, calls = table_sites()
-    site_lines = {lineno for _, lineno in sites}
-    reached_calls = built | chain
-    errors += coverage_errors(built, chain, constructed, walked, sites, calls)
+    recorder = recording_construction(built, chain, constructed)
+    recorder.__enter__()
+    try:
+        cases = [("no selection", None, None),
+                 ("one session", session_id, None),
+                 ("a cohort", None, cohort)]
+        for index, (tab_id, _label, _fn) in enumerate(m.TABS):
+            for case, sid, coh in cases:
+                pane = exercise("_render_tab", errors, exercised,
+                                lambda i=index, s=sid, c=coh: m._render_tab(i, s, "main", c))
+                if pane is None:
+                    continue
+                if render_failed(pane):
+                    errors.append(f"{tab_id} / {case} rendered an exception panel, which "
+                                  f"_render_tab produces instead of raising")
+                hits += findings(f"{tab_id} / {case}", pane, walked)
+
+        context_value.set(AttributeDict(
+            triggered_inputs=[{"prop_id": f"btn-{m.TABS[-1][0]}.n_clicks"}]))
+        exercise("_switch_tab", errors, exercised, lambda: m._switch_tab(*([1] * len(m.TABS)), 0),
+                 hits, walked)
+        context_value.set(AttributeDict(triggered_inputs=[]))
+
+        exercise("_selector_options", errors, exercised, lambda: m._selector_options(cohort, 0),
+                 hits, walked)
+        exercise("_cohort_options", errors, exercised, lambda: m._cohort_options(0, None),
+                 hits, walked)
+        exercise("_cohort_options", errors, exercised, lambda: m._cohort_options(0, [{"a": 1}]),
+                 hits, walked)
+        exercise("_pick_from_table", errors, exercised,
+                 lambda: m._pick_from_table([0], [{"session_id": session_id}]), hits, walked)
+        exercise("_pick_from_table", errors, exercised, lambda: m._pick_from_table([], []),
+                 hits, walked)
+        exercise("_tick", errors, exercised, lambda: m._tick(0, session_id, "main"),
+                 hits, walked)
+        exercise("_mirror", errors, exercised, lambda: m._mirror(850000, 1000000),
+                 hits, walked)
+        exercise("_message_clicked", errors, exercised,
+                 lambda: m._message_clicked({"row": 0}, [{"uuid": message_uuid}]), hits, walked)
+
+        if uuid is not None:
+            exercise("_compaction_clicked", errors, exercised,
+                     lambda: m._compaction_clicked({"row": 0}, [{"uuid": uuid}]), hits, walked)
+
+        # Both arms of compare, driven through the callback rather than by calling the builder:
+        # calling the builder proves the builder works and says nothing about the path that
+        # delivers it. A session against a cohort and a session against a session assemble their
+        # arms differently, and the unequal-arm rows only appear in the first.
+        for kind, target in [("cohort", cohort), ("session", other)]:
+            if target is None:
+                continue
+            exercise("_cmp_targets", errors, exercised, lambda k=kind: m._cmp_targets(k, cohort),
+                     hits, walked)
+            exercise("_cmp_render", errors, exercised,
+                     lambda k=kind, t=target: m._cmp_render(k, t, session_id, None, "main"),
+                     hits, walked)
+    finally:
+        recorder.__exit__(None, None, None)
+        m.refresh_store = real_refresh
+
+    sites, calls, entries, opaque = table_sites(m)
+    errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries, exercised,
+                              opaque)
 
     # The audit must be able to fail, or a clean run means nothing. Every shape it claims to catch
     # is fed to it: a formatted number, a dash placeholder in a declared numeric column, and an
@@ -351,12 +498,15 @@ def main():
     for err in errors:
         print(f"  ERROR  {err}")
 
+    site_positions = {position for _, position in sites}
+    print(f"  {len(entries)} callbacks defined, {len(set(entries) & exercised)} exercised "
+          f"(_tick with refresh_store stubbed, since the real one writes)")
     print(f"  {len(sites)} DataTable sites across {len({f for f, _ in sites})} functions, "
-          f"{len(built & site_lines)} reached")
+          f"{len(built & site_positions)} reached")
     print(f"  {len(calls)} calls that can reach a table, "
-          f"{len([1 for _, _, ln in calls if ln in reached_calls])} taken")
-    print(f"  {len(constructed)} tables constructed, "
-          f"{len(set(constructed) & walked)} walked")
+          f"{len([1 for _, _, p in calls if p in (built | chain)])} taken")
+    print(f"  {len(opaque)} calls whose callee cannot be named from the source")
+    print(f"  {len(constructed)} tables constructed, {len(set(constructed) & walked)} walked")
     print(f"  columns holding a number as text: {len(seen)}")
     print(f"  known-bad fixture fully detected: {fixture_ok}  {sorted(fixture_kinds)}")
 
@@ -377,22 +527,46 @@ def self_test():
         results.append(fired)
         print(f"  {'FIRES ' if fired else 'SILENT'}  {name}: {detail}")
 
+    sites, calls, entries, _opaque = table_sites(m)
+
+    # A call whose callee the scan cannot name. This is what closes the last two evasions, which
+    # both hid an unresolvable callee on a branch no input takes, where nothing dynamic sees them.
+    unnameable = coverage_errors(set(), set(), {}, set(), [], [], {}, set(),
+                                 [("f", (10, 4))])
+    check("a callee that cannot be named",
+          len(unnameable) == 1 and "cannot name" in unnameable[0],
+          f"{len(unnameable)} reported for one opaque call")
+
+    # An entry point that was never run. This is the gate that closes the whole family of evasions
+    # the call graph cannot see, because a table built in an unexercised callback rendered under
+    # AUDIT PASS no matter how the builder was named.
+    missing = coverage_errors(set(), set(), {}, set(), [], [], entries, set())
+    check("unexercised entry point", len(missing) == len(entries),
+          f"{len(missing)} of {len(entries)} callbacks reported when none is run")
+
     # A construction the static scan cannot see, because it was not written as
     # dash_table.DataTable(...). Compiled under the filename app.py so the recorder attributes it
-    # there, at a line no site occupies.
+    # there, at a position no site occupies.
     built, chain, constructed = set(), set(), {}
     code = compile("\n" * 4999 + "ALIAS(columns=[], data=[])\n", "app.py", "exec")
     with recording_construction(built, chain, constructed):
         exec(code, {"ALIAS": dash_table.DataTable})
-    sites, calls = table_sites()
-    stray_errors = coverage_errors(built, chain, constructed, set(constructed), sites, [])
-    
-    check("stray construction line",
-          any("static scan did not find" in e for e in stray_errors),
-          f"recorded app.py:{sorted(built - {ln for _, ln in sites})}, "
+    stray = coverage_errors(built, chain, constructed, set(constructed), sites, [], {}, set())
+    check("stray construction position",
+          any("static scan did not find" in e for e in stray),
+          f"recorded app.py:{sorted(built - {p for _, p in sites})}, "
           f"which the static scan does not list")
 
-    # A table built and then dropped. The line is reached, the rows are never read. Note the
+    # Two calls on ONE line, one taken and one not. The gate compared line numbers and reported
+    # both as covered.
+    same_line = coverage_errors({(10, 4)}, set(), {}, set(), [],
+                                [("f", "g", (10, 4)), ("f", "h", (10, 20))], {}, set())
+    same_line = [e for e in same_line if "never takes that path" in e]
+    check("untaken call beside a taken one",
+          len(same_line) == 1 and "10:20" in same_line[0],
+          f"{len(same_line)} of 2 calls on line 10 reported as untaken")
+
+    # A table built and then dropped. The position is reached, the rows are never read. Note the
     # decoy: a second table walked TWICE, which the old count-based gate let pay for the missing
     # one, so this case also pins the move from counting to identity.
     built, chain, constructed = set(), set(), {}
@@ -401,26 +575,37 @@ def self_test():
         dash_table.DataTable(columns=[{"name": "n", "id": "n"}], data=[{"n": "997.8k"}])
         decoy = dash_table.DataTable(columns=[], data=[])
         findings("walked twice", html.Div([decoy, decoy]), walked)
-    dropped = coverage_errors(built, chain, constructed, walked, [], [])
+    dropped = coverage_errors(built, chain, constructed, walked, [], [], {}, set())
     check("constructed but not walked",
           any("never walked" in e for e in dropped),
           f"{len(constructed)} constructed, {len(set(constructed) & walked)} walked, "
           f"and a count would have matched")
 
-    # The caller gate, run through the same function the audit uses rather than restated here.
-    # compare_table is delivered only through _cmp_render, so an audit that called the builder
-    # directly would leave that call site untaken.
-    cmp_calls = [ln for _c, callee, ln in calls if callee == "compare_table"]
-    untaken = coverage_errors(set(), set(), {}, set(), [], calls)
+    # The caller gate and the site gate, both through the same function the audit uses rather than
+    # restated here.
+    cmp_calls = [p for _c, callee, p in calls if callee == "compare_table"]
+    untaken = coverage_errors(set(), set(), {}, set(), [], calls, {}, set())
     check("caller path is tracked",
           bool(cmp_calls) and len(untaken) == len(calls),
           f"{len(calls)} call sites can reach a table; compare_table is called at {cmp_calls}, "
           f"and none-taken yields {len(untaken)} errors")
 
-    # An unreached construction site, through the same function.
-    unreached = coverage_errors(set(), set(), {}, set(), sites, [])
+    unreached = coverage_errors(set(), set(), {}, set(), sites, [], {}, set())
     check("unreached site", len(unreached) == len(sites),
           f"{len(unreached)} of {len(sites)} sites reported when none is reached")
+
+    # A pane that raised. _render_tab renders the exception rather than raising it, so an audit
+    # driving tabs through it would otherwise call a broken tab a success.
+    check("a rendered exception panel is not a success",
+          render_failed(html.Div([html.Div("Waste could not be rendered"), html.Pre("KeyError")])),
+          "the panel _render_tab builds for a failing tab is detected")
+
+    # A table in a prop that renders but is not children.
+    spun = []
+    tables_in(dcc.Loading(children=[], custom_spinner=dash_table.DataTable(
+        columns=[{"name": "n", "id": "n"}], data=[{"n": "997.8k"}])), spun)
+    check("walks a prop that is not children", len(spun) == 1,
+          f"{len(spun)} table found in custom_spinner")
 
     # A bare list is a legal component tree and must be walked, not counted as nothing.
     listed = []
@@ -435,14 +620,6 @@ def self_test():
     check("detects all three shapes",
           kinds == {("stringified", "n"), ("placeholder", "n"), ("placeholder", "u")},
           f"{sorted(kinds)}")
-
-    # A table in a prop that renders but is not children. This was a wrong AUDIT PASS with the
-    # table on screen: the construction line counted as reached and the rows were never read.
-    spun = []
-    tables_in(dcc.Loading(children=[], custom_spinner=dash_table.DataTable(
-        columns=[{"name": "n", "id": "n"}], data=[{"n": "997.8k"}])), spun)
-    check("walks a prop that is not children", len(spun) == 1,
-          f"{len(spun)} table found in custom_spinner")
 
     # Shapes outside the nine-unit whitelist this used to carry. A reviewer walked "1.4s" past it
     # in under a minute, so this is the check that catches the regex being narrowed back to a
