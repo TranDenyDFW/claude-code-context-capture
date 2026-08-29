@@ -3023,6 +3023,15 @@ def _mirror(tokens, window):
 # loopback too, so any page the user visited could stop the capture dashboard with
 # <img src="http://127.0.0.1:8056/__shutdown__">. A form post cannot be made cross-origin without
 # the user's involvement, and a script can still call it.
+@server.route("/__shutdown__", methods=["GET"])
+def _shutdown_get():
+    # Without this, a GET falls through to Dash's catch-all route and gets 200 with the app's own
+    # HTML, which reads as though the request was accepted. The process was never going to stop,
+    # but a status code that says the opposite of what happened is its own defect.
+    return ("Use POST. This route stops the capture dashboard, and a GET route can be triggered by "
+            "any page your browser visits.", 405)
+
+
 @server.route("/__shutdown__", methods=["POST"])
 def _shutdown_route():
     reason = (_flask_request.form.get("reason")
