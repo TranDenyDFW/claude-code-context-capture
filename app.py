@@ -51,7 +51,13 @@ MONO = "ui-monospace, SFMono-Regular, Consolas, monospace"
 # Form controls get an explicit background AND text color, or they render dark on dark.
 FIELD = {"backgroundColor": "#ffffff", "color": "#10141a", "border": f"1px solid {BORDER}"}
 
+# Export lives here rather than on each table, because it belongs to every one of them: a figure
+# nobody can take away and check is a dashboard number, not a research one. Every table that
+# spreads TABLE_STYLE gets a CSV button; the tables that set style_cell explicitly (evidence_block,
+# the compare table) already ask for it directly.
 TABLE_STYLE = dict(
+    export_format="csv",
+    export_headers="display",
     style_cell={
         "backgroundColor": PANEL, "color": TEXT, "border": f"1px solid {BORDER}",
         "fontFamily": MONO, "fontSize": "12px", "padding": "6px 10px", "textAlign": "left",
@@ -957,6 +963,100 @@ header = html.Div(
 
 
 # ---- Overview -------------------------------------------------------------
+def sql_preview(sql: str, params=()) -> str:
+    """The query as run, with its bound values listed rather than interpolated.
+
+    Not substituted into the string: showing `session_id = 'abc'` would suggest the query was built
+    that way, and someone copying it would learn the wrong lesson about how this app talks to
+    SQLite. The parameters are listed beneath instead, in bind order.
+    """
+    text = "\n".join(line.rstrip() for line in str(sql).strip().splitlines() if line.strip())
+    if not params:
+        return text
+    shown = list(params)
+    # A cohort binds one id per session and there can be 300 of them. The count is the useful part.
+    if len(shown) > 8:
+        head = ", ".join(repr(p) for p in shown[:6])
+        return f"{text}\n\n-- {len(shown)} bound parameters, first 6:\n-- {head}, ..."
+    return f"{text}\n\n-- bound parameters, in order:\n-- " + ", ".join(repr(p) for p in shown)
+
+
+def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size: int = 12,
+                   note: str = None, style_data_conditional=None):
+    """A table, the query that produced it, and a way to take the rows away.
+
+    Every figure on this page should be reproducible by someone who does not have this app open.
+    That is the difference between a dashboard number and a research one, and it is how this repo
+    already treats evidence everywhere else: a claim carries the command that proves it.
+
+    The row count is stated on the table itself, so a filtered or truncated view can never be read
+    as the whole population.
+    """
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return html.Div([
+            html.Div(title, style=SECTION_HEAD),
+            html.Div("No rows.", style=SECTION_NOTE),
+            accordion("The query that returned nothing", "reproduce it yourself",
+                      html.Pre(sql_preview(sql, params),
+                               style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
+        ])
+    records = df.to_dict("records") if hasattr(df, "to_dict") else list(df)
+    cols = columns or [c for c in (df.columns if hasattr(df, "columns") else records[0].keys())]
+    truncated = " (table shows the first page; export gives every row)" if len(records) > page_size else ""
+    return html.Div([
+        html.Div(title, style=SECTION_HEAD),
+        html.Div(f"{len(records):,} rows.{truncated}" + (f" {note}" if note else ""),
+                 style=SECTION_NOTE),
+        dash_table.DataTable(
+            columns=[{"name": c, "id": c} for c in cols],
+            data=records,
+            page_size=page_size,
+            sort_action="native",
+            filter_action="native",
+            export_format="csv",
+            export_headers="display",
+            style_table={"overflowX": "auto"},
+            style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
+            style_data_conditional=(style_data_conditional or
+                                    [{"if": {"row_index": "odd"}, "backgroundColor": "#12171e"}]),
+            style_cell=TABLE_STYLE["style_cell"],
+            style_header=TABLE_STYLE["style_header"],
+        ),
+        accordion("The query behind this table", "copy it, or export the rows above",
+                  html.Pre(sql_preview(sql, params),
+                           style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
+    ])
+
+
+def baseline_marks(fig, x_for_ts=None, ts_list=None):
+    """Mark every recorded calibration on a time chart.
+
+    A configuration's fixed overhead moves when an MCP server or a skill is added, and the store
+    dates every observation of it. Without these the reader sees a step in the data and has no way
+    to know whether something changed or something broke. With them it is an event with a date.
+
+    Charts here are indexed by turn number rather than by time, so a timestamp has to be mapped to
+    the nearest turn; where that cannot be done the mark is omitted rather than placed at a guess.
+    """
+    try:
+        bl = q("SELECT ts, static_total, source FROM context_baselines ORDER BY ts")
+    except Exception:
+        return 0
+    if bl.empty or not ts_list:
+        return 0
+    drawn = 0
+    for r in bl.itertuples():
+        pos = x_for_ts(str(r.ts)) if x_for_ts else None
+        if not pos:
+            continue
+        fig.add_vline(x=pos, line=dict(color=GOOD, width=1, dash="dot"))
+        fig.add_annotation(x=pos, yref="paper", y=1.02, showarrow=False,
+                           text=f"calibrated {fmt_tokens(r.static_total)}",
+                           font=dict(color=GOOD, size=9, family=MONO), xanchor="left")
+        drawn += 1
+    return drawn
+
+
 def accordion(title: str, sub: str, children, open_by_default: bool = False):
     """A collapsible block. Native details/summary, so it needs no callback and no state.
 
@@ -1201,6 +1301,8 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
         dash_table.DataTable(
             columns=[{"name": c, "id": c} for c in ["metric", "A", "B", "B vs A", "basis"]],
             data=rows,
+            export_format="csv",
+            export_headers="display",
             style_data_conditional=[
                 {"if": {"row_index": "odd"}, "backgroundColor": "#12171e"},
                 {"if": {"filter_query": '{B vs A} contains "worse"', "column_id": "B vs A"},
@@ -1462,6 +1564,8 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             filter_action="native",
             row_selectable="single",
             cell_selectable=False,
+            export_format="csv",
+            export_headers="display",
             style_table={"overflowX": "auto"},
             style_cell_conditional=[
                 {"if": {"column_id": "title"}, "minWidth": "240px", "maxWidth": "360px",
@@ -1862,31 +1966,26 @@ def waste_layout(session_id=None, scope="main", cohort=None):
     else:
         read_tools, dup_min = [], 3
     placeholders = ",".join("?" for _ in read_tools)
-    dup = q(
-        f"""SELECT session_id, target, COUNT(*) reads,
+    sql_dup = f"""SELECT session_id, target, COUNT(*) reads,
                    SUM(COALESCE(result_bytes,0)) bytes,
                    COUNT(DISTINCT input_sha1) variants
             FROM tool_calls
             WHERE tool_name IN ({placeholders}) AND target IS NOT NULL {wsid}
             GROUP BY session_id, target HAVING reads >= ?
-            ORDER BY reads DESC LIMIT 200""",
-        tuple(read_tools) + wargs + (dup_min,),
-    ) if read_tools else pd.DataFrame()
-    srv = q(
-        """SELECT server_name AS server, COUNT(*) calls,
+            ORDER BY reads DESC LIMIT 200"""
+    dup_args = tuple(read_tools) + wargs + (dup_min,)
+    dup = q(sql_dup, dup_args) if read_tools else pd.DataFrame()
+    sql_srv = """SELECT server_name AS server, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes, MAX(ts) last_call
            FROM tool_calls WHERE server_name IS NOT NULL """ + wsid + """
-           GROUP BY server_name ORDER BY calls ASC""",
-        wargs,
-    )
-    tools = q(
-        """SELECT tool_name AS tool, COUNT(*) calls,
+           GROUP BY server_name ORDER BY calls ASC"""
+    srv = q(sql_srv, wargs)
+    sql_tools = """SELECT tool_name AS tool, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes,
                   SUM(COALESCE(is_error,0)) errors
            FROM tool_calls WHERE 1=1 """ + wsid + """
-           GROUP BY tool_name ORDER BY calls DESC LIMIT 40""",
-        wargs,
-    )
+           GROUP BY tool_name ORDER BY calls DESC LIMIT 40"""
+    tools = q(sql_tools, wargs)
 
     if dup.empty:
         repeats, repeat_bytes = 0, 0
@@ -1908,31 +2007,22 @@ def waste_layout(session_id=None, scope="main", cohort=None):
             stat_card("Tool calls recorded", f"{int(tools['calls'].sum()):,}" if not tools.empty else "0"),
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "18px"}),
 
-        html.Div("Files read repeatedly inside one session", style={"color": TEXT, "fontSize": "14px", "fontWeight": "600", "margin": "18px 0 4px"}),
-        html.Div("Every re-read is re-billed on every later request in that session, so the cost "
-                 "is the read multiplied by the turns that follow it.",
-                 style={"color": MUTED, "fontSize": "12px", "marginBottom": "8px"}),
-        dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in ["reads", "bytes", "variants", "session_id", "target"]],
-            data=dup.to_dict("records"), page_size=15,
-            style_table={"overflowX": "auto"}, **TABLE_STYLE),
+        evidence_block(
+            "Files read repeatedly inside one session", dup, sql_dup, dup_args,
+            columns=["reads", "bytes", "variants", "session_id", "target"],
+            note="Every re-read is re-billed on every later request in that session, so the cost "
+                 "is the read multiplied by the turns that follow it."),
 
-        html.Div("MCP servers by invocation count", style={"color": TEXT, "fontSize": "14px", "fontWeight": "600", "margin": "18px 0 4px"}),
-        html.Div("Invocation count alone is a PROXY for cost. The measured price of a server is "
-                 "the sum of its tools' schema bytes, which tools/otel-ingest.mjs puts in the store "
-                 "and tools/waste.mjs --servers reports. This tab shows invocations only; run the "
-                 "CLI for measured schema cost.",
-                 style={"color": MUTED, "fontSize": "12px", "marginBottom": "8px"}),
-        dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in ["server", "calls", "bytes", "last_call"]],
-            data=srv.to_dict("records"), page_size=10,
-            style_table={"overflowX": "auto"}, **TABLE_STYLE),
+        evidence_block(
+            "MCP servers by invocation count", srv, sql_srv, wargs,
+            columns=["server", "calls", "bytes", "last_call"],
+            note="Invocation count alone is a PROXY for cost. The measured price of a server is "
+                 "the sum of its tools' schema bytes, which tools/otel-ingest.mjs puts in the "
+                 "store and tools/waste.mjs --servers reports. This is invocations only."),
 
-        html.Div("Tool invocations", style={"color": TEXT, "fontSize": "14px", "fontWeight": "600", "margin": "18px 0 4px"}),
-        dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in ["tool", "calls", "bytes", "errors"]],
-            data=tools.to_dict("records"), page_size=12,
-            style_table={"overflowX": "auto"}, **TABLE_STYLE),
+        evidence_block(
+            "Tool invocations", tools, sql_tools, wargs,
+            columns=["tool", "calls", "bytes", "errors"]),
     ])
 
 
@@ -1949,19 +2039,23 @@ def sources_layout(session_id=None, scope="main", cohort=None):
     """
     _w, sid_args = scoped(session_id, "all", cohort=cohort)
     sid_where = ("WHERE 1=1 " + _w) if _w else ""
-    att = q(f"""SELECT type AS kind, SUM(n) AS occurrences, COUNT(DISTINCT session_id) AS sessions
-                FROM attachments {sid_where} GROUP BY type ORDER BY SUM(n) DESC""", sid_args)
+    sql = {}
+    sql["att"] = f"""SELECT type AS kind, SUM(n) AS occurrences, COUNT(DISTINCT session_id) AS sessions
+                FROM attachments {sid_where} GROUP BY type ORDER BY SUM(n) DESC"""
+    att = q(sql["att"], sid_args)
     hw = _w
-    hooks = q(f"""SELECT tool_name AS tool, COUNT(*) AS calls,
+    sql["hooks"] = f"""SELECT tool_name AS tool, COUNT(*) AS calls,
                          SUM(COALESCE(tool_response_bytes,0)) AS response_bytes,
                          SUM(COALESCE(tool_input_bytes,0))    AS input_bytes
                   FROM hook_events WHERE tool_name IS NOT NULL {hw}
-                  GROUP BY tool_name ORDER BY SUM(COALESCE(tool_response_bytes,0)) DESC LIMIT 40""",
-              sid_args)
-    ev = q(f"""SELECT event, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions,
+                  GROUP BY tool_name ORDER BY SUM(COALESCE(tool_response_bytes,0)) DESC LIMIT 40"""
+    hooks = q(sql["hooks"], sid_args)
+    sql["ev"] = f"""SELECT event, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions,
                       MIN(captured_at) AS first_seen, MAX(captured_at) AS last_seen
-               FROM hook_events {sid_where} GROUP BY event ORDER BY COUNT(*) DESC""", sid_args)
-    rec = q("SELECT type AS record_type, n FROM record_types ORDER BY n DESC")
+               FROM hook_events {sid_where} GROUP BY event ORDER BY COUNT(*) DESC"""
+    ev = q(sql["ev"], sid_args)
+    sql["rec"] = "SELECT type AS record_type, n FROM record_types ORDER BY n DESC"
+    rec = q(sql["rec"])
 
     if att.empty and ev.empty and rec.empty:
         return html.Div("Nothing captured yet. Run node tools/harvest.mjs.",
@@ -1980,10 +2074,13 @@ def sources_layout(session_id=None, scope="main", cohort=None):
                           title_font=dict(color=TEXT, size=13),
                           xaxis_title="occurrences", yaxis_title="")
 
+    # Numbers stay numbers. Comma-formatting them into strings here made the table sort
+    # lexicographically (so 9 came after 80,000) and put quoted text in the CSV export, which is
+    # the opposite of what an exportable evidence table is for.
     for frame in (att, hooks, ev, rec):
         for col in ("occurrences", "calls", "response_bytes", "input_bytes", "n", "sessions"):
             if col in frame.columns:
-                frame[col] = frame[col].fillna(0).astype(int).map(lambda v: f"{v:,}")
+                frame[col] = frame[col].fillna(0).astype(int)
 
     return html.Div([
         html.Div([
@@ -1991,8 +2088,10 @@ def sources_layout(session_id=None, scope="main", cohort=None):
             stat_card("Distinct kinds", f"{len(att):,}", sub=f"most common: {top}"),
             stat_card("Hook-observed bytes", fmt_bytes(hook_bytes),
                       sub="tool responses, desktop entrypoint"),
-            stat_card("Lifecycle events", f"{int(ev['n'].str.replace(',','').astype(int).sum()):,}"
-                      if not ev.empty else "0", sub="from the hook channel"),
+            # ev['n'] is an int column now. It was being un-comma'd back into a number here,
+            # which only worked while the display formatting was mutating the frame in place.
+            stat_card("Lifecycle events", f"{int(ev['n'].sum()):,}" if not ev.empty else "0",
+                      sub="from the hook channel"),
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"}),
 
         html.Div("Context injected by the harness", style=SECTION_HEAD),
@@ -2001,31 +2100,18 @@ def sources_layout(session_id=None, scope="main", cohort=None):
                  "else, and no native view shows it historically.",
                  style=SECTION_NOTE),
         dcc.Graph(figure=dark_fig(fig, 360), config={"displayModeBar": False}),
-        dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in ["kind", "occurrences", "sessions"]],
-            data=att.to_dict("records"), page_size=12,
-            style_table={"overflowX": "auto"}, **TABLE_STYLE),
+        evidence_block("Injected context by type", att, sql["att"], sid_args),
 
-        html.Div("Tool response size, measured by the hooks", style=SECTION_HEAD),
-        html.Div("The transcripts carry tool results, but the hook channel is the only place that "
-                 "records their size on the entrypoint where the status line never runs. Bytes, "
-                 "not tokens: the store has exact token counts per request, never per tool call.",
-                 style=SECTION_NOTE),
-        dash_table.DataTable(
-            columns=[{"name": c, "id": c} for c in ["tool", "calls", "response_bytes", "input_bytes"]],
-            data=hooks.to_dict("records"), page_size=10,
-            style_table={"overflowX": "auto"}, **TABLE_STYLE),
+        evidence_block(
+            "Tool response size, measured by the hooks", hooks, sql["hooks"], sid_args,
+            note="Bytes, not tokens: the store has exact token counts per request and never per "
+                 "tool call, so a ratio here would dress an estimate as a measurement."),
 
-        html.Div("Lifecycle events, and the record census", style=SECTION_HEAD),
         html.Div([
-            html.Div(dash_table.DataTable(
-                columns=[{"name": c, "id": c} for c in ["event", "n", "sessions", "first_seen", "last_seen"]],
-                data=ev.to_dict("records"), page_size=8,
-                style_table={"overflowX": "auto"}, **TABLE_STYLE), style={"flex": "1.4"}),
-            html.Div(dash_table.DataTable(
-                columns=[{"name": c, "id": c} for c in ["record_type", "n"]],
-                data=rec.to_dict("records"), page_size=8,
-                style_table={"overflowX": "auto"}, **TABLE_STYLE), style={"flex": "1"}),
+            html.Div(evidence_block("Lifecycle events", ev, sql["ev"], sid_args, page_size=8),
+                     style={"flex": "1.4"}),
+            html.Div(evidence_block("Transcript record census", rec, sql["rec"], (), page_size=8),
+                     style={"flex": "1"}),
         ], style={"display": "flex", "gap": "14px", "alignItems": "flex-start"}),
     ])
 
@@ -2504,6 +2590,19 @@ def session_view(session_id, scope="main"):
                             f"peak {fmt_tokens(peak)}{comp_note}",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="turn", yaxis_title="tokens")
+
+    # Dated calibrations, so a step in the fixed overhead reads as an event rather than a glitch.
+    _ts_index = {v: i + 1 for i, v in enumerate(ts_list) if v}
+
+    def _x_for(ts):
+        if not ts_list:
+            return None
+        # Nearest turn at or after the calibration. A calibration outside this session's span is
+        # not drawn at all, rather than clamped to an edge where it would imply it happened here.
+        later = [i + 1 for i, v in enumerate(ts_list) if v and str(v) >= ts]
+        return later[0] if later else None
+
+    baseline_marks(fig, _x_for, ts_list)
 
     # Mark the turns that survived a compaction. Unmatched survivor uuids are user or attachment
     # records the store does not hold, so the marked set is a lower bound and is labelled as one.
