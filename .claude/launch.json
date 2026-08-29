@@ -4,8 +4,20 @@
     {
       "name": "context-capture",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["app.py"],
+      "runtimeArgs": [
+        "app.py"
+      ],
       "port": 8056
+    },
+    {
+      "name": "context-capture-c4x",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "app.py",
+        "--port",
+        "8057"
+      ],
+      "port": 8057
     }
   ]
 }

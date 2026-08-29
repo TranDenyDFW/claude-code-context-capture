@@ -17,6 +17,7 @@ import html as _html
 import json
 import os
 import sqlite3
+import sys
 import subprocess
 import threading as _threading
 import time as _time
@@ -31,7 +32,18 @@ from flask import request as _flask_request
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "data" / "context.db"
-PORT = int(os.environ.get("C4X_PORT", "8056"))
+# --port beats C4X_PORT beats the default. Overridable because a fixed port is not a fixed port:
+# the sibling repo runs the same app, Windows permits a second bind on an address already in use
+# rather than refusing it, and two servers then answer on one port with no error anywhere.
+def _port_from_argv(argv, fallback):
+    if "--port" in argv:
+        i = argv.index("--port")
+        if i + 1 < len(argv) and argv[i + 1].isdigit():
+            return int(argv[i + 1])
+    return fallback
+
+
+PORT = _port_from_argv(sys.argv, int(os.environ.get("C4X_PORT", "8056")))
 DEBUG = os.environ.get("C4X_DEBUG") == "1"  # off by default: debug rotates JS chunk hashes
 
 # ---------------------------------------------------------------------------
@@ -1540,10 +1552,37 @@ def session_layout(session_id=None, scope="main", cohort=None):
             html.Div("Pick one in the header, or browse them on the All sessions tab." + extra,
                      style=SECTION_NOTE),
         ])
-    fig, cards = session_view(session_id, scope)
+    turns = session_turns(session_id, include_sidechain=(scope != "main"))
+    n = max(len(turns), 1)
+    default_budget = 80
+    marks = {1: "1", n: str(n)} if n > 1 else {1: "1"}
+    if n > 8:
+        marks[n // 2] = str(n // 2)
+    fig, cards = session_view(session_id, scope, default_budget, (1, n))
     return html.Div([
-        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+        html.Div([
+            html.Div([
+                html.Span("Budget, as a share of the window", style={"color": MUTED, "fontSize": "11.5px", "fontFamily": MONO}),
+                dcc.Slider(id="budget-pct", min=50, max=100, step=5, value=default_budget,
+                           marks={v: f"{v}%" for v in (50, 60, 70, 80, 90, 100)},
+                           tooltip={"placement": "bottom"}),
+            ], style={"flex": "1", "minWidth": "260px"}),
+            html.Div([
+                html.Span("Compare turns A and B", style={"color": MUTED, "fontSize": "11.5px", "fontFamily": MONO}),
+                dcc.RangeSlider(id="turn-range", min=1, max=n, step=1, value=[1, n],
+                                marks=marks, tooltip={"placement": "bottom"},
+                                allowCross=False),
+            ], style={"flex": "2", "minWidth": "320px"}),
+        ], style={"display": "flex", "gap": "28px", "flexWrap": "wrap",
+                  "padding": "10px 6px 2px 6px"}),
+        html.Div("The shaded bands are the warn, compact and blocked zones for the model in use, "
+                 "so headroom is read off the chart rather than computed. The budget line is a "
+                 "share of the window rather than a token count, because the windows here differ "
+                 "by a factor of five. Move A and B apart to see what entered the window between "
+                 "two turns, and what it cost.", style=SECTION_NOTE),
+        dcc.Graph(id="session-fig", figure=fig, config={"displayModeBar": False}),
         html.Div(cards, style={"marginTop": "10px"}),
+        html.Div(id="session-diff", style={"marginTop": "18px"}),
     ])
 
 
@@ -2497,6 +2536,30 @@ def _compaction_clicked(active_cell, rows):
 
 
 @callback(
+    Output("session-fig", "figure"),
+    Output("session-diff", "children"),
+    Input("budget-pct", "value"),
+    Input("turn-range", "value"),
+    Input("sel-session", "value"),
+    Input("session-scope", "value"),
+)
+def _session_controls(budget_pct, turn_range, session_id, scope):
+    """Redraw the session chart and the turn diff for the current slider positions.
+
+    One callback for both sliders because they write to the same figure: a separate callback per
+    control would have two of them racing to own it, and whichever fired last would erase the
+    other's marks.
+    """
+    if not session_id:
+        raise PreventUpdate
+    scope = scope or "main"
+    a, b = (turn_range or [None, None])[:2]
+    fig, _cards = session_view(session_id, scope, budget_pct, (a, b), with_cards=False)
+    turns = session_turns(session_id, include_sidechain=(scope != "main"))
+    return fig, turn_diff_panel(session_id, scope, turns, a, b)
+
+
+@callback(
     Output("message-detail", "children"),
     Input("tbl-messages", "active_cell"),
     State("tbl-messages", "derived_viewport_data"),
@@ -2520,7 +2583,174 @@ def _message_clicked(active_cell, rows):
         str(r["text"]), ACCENT)
 
 
-def session_view(session_id, scope="main"):
+def band_zones(fig, segs, ts_list, n_turns):
+    """Shade warn and compact zones per model segment, so headroom is read rather than computed.
+
+    Per segment, not flat across the session: the window belongs to the model in use, and a session
+    that switched models has more than one. The dashed compact line was already drawn this way; a
+    flat band would contradict it for every segment but one.
+
+    Drawn below the traces, so a line never disappears into its own background.
+    """
+    drawn = 0
+    for seg in segs:
+        window = seg.get("window")
+        if not window or window not in THRESHOLDS:
+            continue
+        t = THRESHOLDS[window]
+        x0 = next((i + 1 for i, v in enumerate(ts_list) if v and v >= seg["startTs"]), 1)
+        x1 = next((i + 1 for i in range(len(ts_list) - 1, -1, -1)
+                   if ts_list[i] and ts_list[i] <= seg["endTs"]), n_turns)
+        x1 = max(x1, x0)
+        for y0, y1, colour, opacity in (
+                (t["warn"], t["compact"], WARN, 0.10),
+                (t["compact"], t["blocked"], DANGER, 0.10),
+                (t["blocked"], window, DANGER, 0.20)):
+            fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, xref="x", yref="y",
+                          fillcolor=colour, opacity=opacity, line_width=0, layer="below")
+        drawn += 1
+    return drawn
+
+
+def budget_line(fig, segs, ts_list, n_turns, budget_pct, latest):
+    """A target budget, as a share of each segment's window, and the headroom left against it.
+
+    A percentage rather than a token count, because the windows in this store differ by a factor of
+    five and a single absolute number would be meaningless on most of them.
+    """
+    if not budget_pct:
+        return None
+    headroom = None
+    for seg in segs:
+        window = seg.get("window")
+        if not window:
+            continue
+        target = window * budget_pct / 100.0
+        x0 = next((i + 1 for i, v in enumerate(ts_list) if v and v >= seg["startTs"]), 1)
+        x1 = next((i + 1 for i in range(len(ts_list) - 1, -1, -1)
+                   if ts_list[i] and ts_list[i] <= seg["endTs"]), n_turns)
+        fig.add_shape(type="line", x0=x0, x1=max(x1, x0), y0=target, y1=target,
+                      line=dict(color=GOOD, width=1.5, dash="dot"))
+        headroom = target - latest
+    if headroom is not None:
+        fig.add_annotation(
+            x=n_turns, y=headroom + latest, xanchor="right", yanchor="bottom", showarrow=False,
+            text=f"budget {budget_pct}% | {fmt_tokens(abs(headroom))} "
+                 f"{'left' if headroom >= 0 else 'OVER'}",
+            font=dict(color=GOOD if headroom >= 0 else DANGER, size=10, family=MONO))
+    return headroom
+
+
+def turn_diff(session_id, scope, ts_a, ts_b):
+    """What entered the window between two turns, and what it cost.
+
+    The question the rest of this tab could not answer. A resident line says the context grew; it
+    does not say what grew it, and the answer is almost always a specific tool result or a specific
+    file, which is the thing a reader can act on. Everything here is between the two timestamps,
+    exclusive of A and inclusive of B, so the numbers add up to the delta shown beside them.
+    """
+    w, args = scoped(session_id, scope)
+    span = (ts_a, ts_b)
+
+    spend = q(f"""SELECT COUNT(*) AS calls,
+                         COALESCE(SUM(output_tokens), 0) AS output,
+                         COALESCE(SUM(thinking_tokens), 0) AS thinking,
+                         COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read,
+                         COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_write
+                    FROM api_calls WHERE ts > ? AND ts <= ? {w}""",
+              (*span, *args))
+
+    tools = q(f"""SELECT tool_name AS tool,
+                         COUNT(*) AS calls,
+                         COALESCE(SUM(result_bytes), 0) AS result_bytes,
+                         COALESCE(SUM(input_bytes), 0) AS input_bytes,
+                         SUM(CASE WHEN is_error THEN 1 ELSE 0 END) AS errors
+                    FROM tool_calls WHERE ts > ? AND ts <= ? {w}
+                   GROUP BY tool ORDER BY result_bytes DESC LIMIT 40""",
+                (*span, *args))
+
+    targets = q(f"""SELECT target, tool_name AS tool, COUNT(*) AS reads,
+                           COALESCE(SUM(result_bytes), 0) AS result_bytes
+                      FROM tool_calls
+                     WHERE ts > ? AND ts <= ? AND target IS NOT NULL AND target != '' {w}
+                     GROUP BY target, tool ORDER BY result_bytes DESC LIMIT 40""",
+                  (*span, *args))
+
+    said = q(f"""SELECT role, type, COUNT(*) AS messages,
+                        COALESCE(SUM(chars), 0) AS chars
+                   FROM messages WHERE ts > ? AND ts <= ? {w}
+                  GROUP BY role, type ORDER BY chars DESC""",
+              (*span, *args))
+    return spend, tools, targets, said
+
+
+def turn_diff_panel(session_id, scope, turns, a, b):
+    """Render the diff between turns a and b, with the SQL that produced each table."""
+    if turns.empty or not a or not b or a >= b:
+        return html.Div("Move the two handles apart to compare a range of turns.",
+                        style=SECTION_NOTE)
+    a = max(1, min(a, len(turns)))
+    b = max(1, min(b, len(turns)))
+    ts_a = str(turns["ts"].iloc[a - 1])
+    ts_b = str(turns["ts"].iloc[b - 1])
+    resident_a = int(turns["total_resident"].iloc[a - 1] or 0)
+    resident_b = int(turns["total_resident"].iloc[b - 1] or 0)
+    delta = resident_b - resident_a
+
+    spend, tools, targets, said = turn_diff(session_id, scope, ts_a, ts_b)
+    row = spend.iloc[0] if not spend.empty else None
+
+    # The unexplained remainder is stated rather than hidden. Resident growth is not the sum of the
+    # tool results in the range: a compaction can drop context inside it, and the store holds no
+    # size for every record. A panel that implied the parts added up would be inviting a wrong
+    # conclusion, which is the same defect as a number with no context.
+    accounted = int(tools["result_bytes"].sum()) if not tools.empty else 0
+
+    cards = html.Div([
+        stat_card("turns", f"{a} to {b}", sub=f"{b - a} turns"),
+        stat_card("resident at A", fmt_tokens(resident_a)),
+        stat_card("resident at B", fmt_tokens(resident_b), color=ACCENT),
+        stat_card("delta", ("+" if delta >= 0 else "-") + fmt_tokens(abs(delta)),
+                  color=DANGER if delta > 0 else GOOD,
+                  sub="a drop means a compaction fired in the range"),
+        stat_card("re-read in range", fmt_tokens(int(row["cache_read"]) if row is not None else 0),
+                  color=WARN, sub=f"{int(row['calls']) if row is not None else 0} API calls"),
+        stat_card("output", fmt_tokens(int(row["output"]) if row is not None else 0),
+                  sub=f"{fmt_tokens(int(row['thinking']) if row is not None else 0)} thinking"),
+        stat_card("tool results", fmt_bytes(accounted),
+                  sub="bytes returned, not tokens: no conversion is recorded"),
+    ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
+
+    blocks = [
+        html.Div(f"Between turn {a} ({ts_a[:19]}) and turn {b} ({ts_b[:19]})", style=SECTION_HEAD),
+        cards,
+    ]
+    if not tools.empty:
+        blocks.append(evidence_block(
+            "tools called in this range", tools,
+            "SELECT tool_name, COUNT(*), SUM(result_bytes), SUM(input_bytes), SUM(is_error) "
+            "FROM tool_calls WHERE ts > ? AND ts <= ? GROUP BY tool_name",
+            (ts_a, ts_b),
+            columns=numeric_columns(list(tools.columns),
+                                    {"calls", "result_bytes", "input_bytes", "errors"})))
+    if not targets.empty:
+        blocks.append(evidence_block(
+            "what was read, largest first", targets,
+            "SELECT target, tool_name, COUNT(*), SUM(result_bytes) FROM tool_calls "
+            "WHERE ts > ? AND ts <= ? AND target IS NOT NULL GROUP BY target, tool_name",
+            (ts_a, ts_b),
+            columns=numeric_columns(list(targets.columns), {"reads", "result_bytes"})))
+    if not said.empty:
+        blocks.append(evidence_block(
+            "what was said", said,
+            "SELECT role, type, COUNT(*), SUM(chars) FROM messages "
+            "WHERE ts > ? AND ts <= ? GROUP BY role, type",
+            (ts_a, ts_b),
+            columns=numeric_columns(list(said.columns), {"messages", "chars"})))
+    return html.Div(blocks)
+
+
+def session_view(session_id, scope="main", budget_pct=None, mark=None, with_cards=True):
     """Everything the Session tab shows, for ONE selection.
 
     This was a callback bound to a picker that lived on the tab. The picker is now in the header
@@ -2640,6 +2870,20 @@ def session_view(session_id, scope="main"):
 
     baseline_marks(fig, _x_for, ts_list)
 
+    # Zones and budget go on after the threshold lines so they share the same segment geometry.
+    band_zones(fig, segs, ts_list, len(x))
+    _latest_for_budget = int(turns["total_resident"].iloc[-1]) if len(turns) else 0
+    budget_line(fig, segs, ts_list, len(x), budget_pct, _latest_for_budget)
+
+    # The scrubber's two handles. A and B are turn numbers, and the diff panel below the chart
+    # reports what happened between them, so the marks are what tie the two together.
+    if mark:
+        for label, pos in zip(("A", "B"), mark):
+            if pos and 1 <= pos <= len(x):
+                fig.add_vline(x=pos, line=dict(color=ACCENT, width=1, dash="dot"))
+                fig.add_annotation(x=pos, y=0, text=label, showarrow=False, yanchor="top",
+                                   font=dict(color=ACCENT, size=11, family=MONO))
+
     # Mark the turns that survived a compaction. Unmatched survivor uuids are user or attachment
     # records the store does not hold, so the marked set is a lower bound and is labelled as one.
     surv = session_survivors(session_id)
@@ -2658,6 +2902,12 @@ def session_view(session_id, scope="main"):
                             line=dict(color=BG, width=1)),
                 hovertemplate="turn %{x}<br>survived a compaction<extra></extra>",
             ))
+
+    # The slider callback wants the figure and nothing else. Building the cards anyway meant two
+    # tables, one of them 400 rows, constructed and dropped on every drag, plus the queries behind
+    # them. Found by the table audit, which reported them as built but never walked.
+    if not with_cards:
+        return dark_fig(fig, 460), None
 
     total_out = int(turns["output_tokens"].sum())
     think = int(turns["thinking_tokens"].sum())
