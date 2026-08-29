@@ -149,8 +149,18 @@ for (const session of SESSIONS) {
     // After the switch point the session runs on a different model, which starts a new segment.
     const model = (session.switchAfter !== undefined && compactionsDone >= session.switchAfter)
       ? SECOND_MODEL : baseModel;
-    insertTurn.run(uuid, session.id, ts, model, requestId, 1_200, 18_000, cacheRead, output,
-                   turn % 3 === 0 ? 400 : 0, resident, 'fixture://transcript.jsonl', turn + 1);
+    // A STREAMED message writes several turn rows under one request id. The input and cache
+    // columns repeat on each of them while output_tokens accumulates, which is exactly why
+    // api_calls takes the max per request id rather than summing. Every fourth turn streams, so the
+    // store contains both shapes and a check that confuses them has something to trip on.
+    const chunks = turn % 4 === 0 ? 3 : 1;
+    for (let chunk = 0; chunk < chunks; chunk++) {
+      insertTurn.run(chunk ? `${uuid}-c${chunk}` : uuid, session.id, ts, model, requestId,
+                     1_200, 18_000, cacheRead,
+                     Math.round(output * (chunk + 1) / chunks),      // accumulates as it streams
+                     turn % 3 === 0 ? 400 : 0, resident,
+                     'fixture://transcript.jsonl', turn + 1);
+    }
 
     const text = `Fixture message ${turn} for ${session.id}. Synthetic text, not a real conversation.`;
     insertMessage.run(`${uuid}-msg`, session.id, ts, turn % 2 === 0 ? 'user' : 'assistant',
@@ -285,6 +295,8 @@ const distinctModels = db.prepare(
   'SELECT COUNT(DISTINCT model) AS n FROM turns WHERE model IS NOT NULL').get().n;
 const mcpCalls = db.prepare(
   'SELECT COUNT(*) AS n FROM tool_calls WHERE server_name IS NOT NULL').get().n;
+const distinctRequestIds = db.prepare(
+  'SELECT COUNT(DISTINCT request_id) AS n FROM turns WHERE request_id IS NOT NULL').get().n;
 const maxReReads = db.prepare(`
   SELECT COALESCE(MAX(n), 0) AS n FROM (
     SELECT COUNT(*) AS n FROM tool_calls WHERE target IS NOT NULL
@@ -314,7 +326,11 @@ if (!SELF_TEST) {
     ['probe rows, or the Probes tab raises', counts.probes > 0 && counts.probe_details > 0],
     ['attachments, hook events and a record census, or the Sources tab returns before its tables',
      counts.attachments > 0 && counts.hook_events > 0 && counts.record_types > 0],
-    ['api_calls dedupes nothing away here, one row per request', apiCalls === counts.turns],
+    // The invariant the whole api_calls view exists for. This used to assert the OPPOSITE, that
+    // the fixture held one row per request, which guaranteed the dedup was never exercised.
+    ['streamed messages present, so api_calls dedupes rows away', apiCalls < counts.turns],
+    ['and the dedup is per request id, not a blanket drop',
+     apiCalls === distinctRequestIds],
   ];
   let failed = 0;
   for (const [what, ok] of checks) {

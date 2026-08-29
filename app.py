@@ -383,11 +383,21 @@ def selector_options(cohort=None) -> list:
         df = df[df["session_id"].isin(ids)]
     if df.empty:
         return []
+    # Sorted by PATH then title, both case-insensitively, rather than by the table's
+    # section-then-recency order. A dropdown is scanned by eye for a name, and alphabetical by
+    # project is how you find one; recency is what the table sorts by and what the GUI shows.
+    rows = sorted(df.itertuples(),
+                  key=lambda r: (str(r.project).lower(), str(r.title).lower()))
     opts = []
-    for r in df.itertuples():
+    for r in rows:
+        # Both figures are labelled. They were a bare date and a bare token count, and neither said
+        # which of several plausible quantities it was: the date is the LAST UPDATE rather than the
+        # creation, and the number is the PEAK rather than where the window sits now. Both refresh
+        # on the 5s tick, bounded by the 45s cache behind session_rows().
         when = str(r.last_ts or "")[:10]
         opts.append({
-            "label": f"{r.title[:60]}  ·  {r.project}  ·  {when}  ·  {fmt_tokens(r.peak)}",
+            "label": f"{r.title[:60]}  ·  {r.project}  ·  updated {when}  ·  "
+                     f"peak {fmt_tokens(r.peak)}",
             "value": r.session_id,
         })
     return opts
@@ -684,10 +694,12 @@ def _render_tab(idx, session_id, scope, cohort):
     Input("tick", "n_intervals"),
 )
 def _selector_options(cohort, _n):
-    """Populate the selector once, then leave it alone.
+    """Rebuild the selector on every tick, so its dates and peaks stay live.
 
-    Built here rather than at import so the first paint is not blocked by the query, and guarded
-    so a 5s tick does not rebuild a 300-row option list forever.
+    Built here rather than at import so the first paint is not blocked by the query. It DOES rebuild
+    on each 5s tick: an earlier version of this docstring claimed a guard against that which the
+    body never had. The rebuild is what keeps the figures current, and session_rows() is cached for
+    45 seconds, so the cost is a list comprehension rather than a query.
     """
     return selector_options(cohort)
 
