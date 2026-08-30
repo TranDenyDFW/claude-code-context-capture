@@ -73,6 +73,15 @@ const PY = [
   ['-m', ['c4x.api.cache', '--self-test'], 'API response cache self-test', 'SELF-TEST PASS',
    { noStore: true }],
   ['tools/table_audit.py', [], 'audit of the live app', 'AUDIT PASS'],
+  // The same DATA rules, applied to the API payload instead of a Dash component tree, so they
+  // outlive Dash. Store-dependent, and not marked noStore: importing table_audit for its rule
+  // definitions pulls in c4x.store, which refuses to run without one.
+  //
+  // BOTH audits run while both frontends exist. The new one cannot prove every table-building code
+  // path was reached, which is what the old one instruments construction to do, so retiring the old
+  // one early would lose that quietly.
+  ['tools/contract_audit.py', ['--self-test'], 'API contract audit self-test', 'SELF-TEST PASS'],
+  ['tools/contract_audit.py', [], 'audit of the API payloads', 'AUDIT PASS'],
   // The pytest suite in tests/ replaced tools/session_checks.py, which checked three Session-tab
   // features by hand. Those checks were migrated into tests/test_session.py rather than deleted,
   // and the suite now covers every tab. `-q` still prints the "N passed" line the marker needs.
