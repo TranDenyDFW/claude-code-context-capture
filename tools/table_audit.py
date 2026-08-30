@@ -678,6 +678,23 @@ def main():
                  hits, walked)
         exercise("_cohort_options", errors, exercised, lambda: m._cohort_options(0, [{"a": 1}]),
                  hits, walked)
+        # Both cross-filters BUILD A TABLE's rows, so every gate below depends on them running:
+        # a stringified number introduced by a filter would be invisible to an audit that only
+        # ever saw the unfiltered render. Driven through their real branches, including the two
+        # that refuse: an empty box, and a click on the reference diagonal.
+        _rows = [{"session_id": session_id, "turns": 1, "peak": 2, "compactions": 0}]
+        for _sel in (None, {"points": []},
+                     {"points": [{"customdata": ["t", "p", 0, session_id]}]}):
+            exercise("_sessions_crossfilter", errors, exercised,
+                     lambda s=_sel: m._sessions_crossfilter(s, _rows), hits, walked)
+        _held = {"rows": [{"reads": 3, "bytes": 1.0}], "population": 9}
+        for _click in (None, {"points": [{"curveNumber": 1, "x": 5, "y": 50}]},
+                       {"points": [{"curveNumber": 0, "x": 1, "y": 40.0}]},
+                       {"points": [{"curveNumber": 0, "x": 99, "y": 99.0}]},
+                       {"points": [{"curveNumber": 0, "x": None}]}):
+            exercise("_reread_crossfilter", errors, exercised,
+                     lambda c=_click: m._reread_crossfilter(c, _held), hits, walked)
+
         exercise("_pick_from_table", errors, exercised,
                  lambda: m._pick_from_table([0], [{"session_id": session_id}]), hits, walked)
         exercise("_pick_from_table", errors, exercised, lambda: m._pick_from_table([], []),

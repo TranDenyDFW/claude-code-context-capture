@@ -73,6 +73,11 @@ from c4x.store import (  # noqa: E402, F401
 from c4x.tabs import session_view  # noqa: E402, F401
 from c4x.theme import GOOD, fmt_tokens  # noqa: E402, F401
 from c4x.ui.callbacks.compare import _cmp_render, _cmp_targets  # noqa: E402, F401
+from c4x.ui.callbacks.crossfilter import (  # noqa: E402, F401
+    _reread_crossfilter,
+    _sessions_crossfilter,
+    selected_ids,
+)
 from c4x.ui.callbacks.navigation import (  # noqa: E402, F401
     _render_tab,
     _switch_tab,

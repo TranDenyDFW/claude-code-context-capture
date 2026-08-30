@@ -73,7 +73,11 @@ def sessions_scatter(rows):
             mode="markers", name=f"{section} ({len(group):,})",
             marker=dict(size=7, opacity=0.72, color=SECTION_COLORS[index % len(SECTION_COLORS)],
                         line=dict(width=0)),
-            customdata=[[r["title"], r["project"], r["compactions"]] for r in group],
+            # session_id rides along as customdata[3] so a box selection can be turned back into
+            # rows. Plotly reports a selection as point indices WITHIN A TRACE, and there is one
+            # trace per section here, so an index alone cannot identify a session.
+            customdata=[[r["title"], r["project"], r["compactions"], r["session_id"]]
+                        for r in group],
             hovertemplate="%{customdata[0]}<br>%{customdata[1]}<br>"
                           "%{x:,} turns, peak %{y:,}<br>%{customdata[2]} compactions<extra></extra>",
         ))
@@ -120,13 +124,23 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
         # nowhere else to put it; the gap it describes is real (one session holds 59,864 rows of
         # which 690 are main thread) and the tooltip states it on the column it concerns.
         html.Div(archived_note(df), style=SECTION_NOTE),
-        dcc.Graph(figure=sessions_scatter(rows), config={"displayModeBar": False}),
+        # The mode bar stays ON here, unlike every other chart in the app, because it carries the
+        # box and lasso tools that drive the cross-filter below. A hidden mode bar would leave the
+        # feature reachable only by a drag nobody was told about.
+        dcc.Graph(id="fig-sessions", figure=sessions_scatter(rows),
+                  config={"displayModeBar": True, "displaylogo": False,
+                          "modeBarButtonsToRemove": ["autoScale2d", "toggleSpikelines"]}),
         html.Div(
             "One point per session. The table below holds the same rows sixteen at a time, "
             "which is the right shape for looking one session up and the wrong shape for seeing "
             "that a handful of them are unlike all the others. Shaded cells in the table mark "
             "the same outliers in whatever order you have sorted it into.",
             style=SECTION_NOTE),
+        # Every row, unfiltered, so the cross-filter can narrow AND restore without a query. The
+        # table's own `data` is the filtered view, so it cannot be the source: reading it back
+        # would make each selection narrow the previous one and never widen.
+        dcc.Store(id="sessions-rows", data=rows),
+        html.Div(id="sessions-filter-note"),
         dash_table.DataTable(
             id="tbl-session",
             columns=(_cols := numeric_columns(
