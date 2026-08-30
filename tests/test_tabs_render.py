@@ -28,7 +28,7 @@ def selections(session_id, cohort):
 
 @pytest.mark.parametrize("tab_id", [
     "tab-summary", "tab-sessions", "tab-session", "tab-compactions", "tab-window",
-    "tab-probes", "tab-waste", "tab-compare", "tab-mirror",
+    "tab-cost", "tab-compare", "tab-diagnostics",
 ])
 def test_tab_renders_under_every_selection(tab_id, pane, session_id, cohort, has_store):
     for label, sid, scope, coh in selections(session_id, cohort):
@@ -40,7 +40,7 @@ def test_tab_renders_under_every_selection(tab_id, pane, session_id, cohort, has
 
 @pytest.mark.parametrize("tab_id", [
     "tab-summary", "tab-sessions", "tab-session", "tab-compactions", "tab-window",
-    "tab-probes", "tab-waste", "tab-mirror",
+    "tab-cost", "tab-diagnostics",
 ])
 def test_tab_produces_something_a_reader_can_use(tab_id, pane, session_id, cohort, has_store):
     """A tab that renders an empty div is not a working tab.
@@ -70,7 +70,7 @@ def test_every_tab_states_the_population_it_describes(pane, session_id, has_stor
     """
     exempt = {"tab-summary", "tab-compare"}
     for tab_id in ("tab-sessions", "tab-session", "tab-compactions", "tab-window",
-                   "tab-probes", "tab-waste", "tab-mirror"):
+                   "tab-cost", "tab-diagnostics"):
         if tab_id in exempt:
             continue
         text = "\n".join(extract.texts(pane(tab_id, session=session_id)))
