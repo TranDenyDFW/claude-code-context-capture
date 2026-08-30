@@ -1,59 +1,59 @@
 {
   "store": {
     "sessions": 1325,
-    "turns": 345316,
-    "tool_calls": 193619
+    "turns": 345835,
+    "tool_calls": 193905
   },
   "session": "3d6ee47a-ca81-4df5-af5f-4cfa49fe9d94",
   "repeats": 5,
   "tabs": {
     "tab-summary": {
-      "cold_ms": 1679.0,
-      "warm_ms": 1581.3,
-      "warm_min_ms": 1539.7,
-      "warm_max_ms": 1642.7
+      "cold_ms": 1829.9,
+      "warm_ms": 1612.4,
+      "warm_min_ms": 1505.9,
+      "warm_max_ms": 1670.2
     },
     "tab-sessions": {
-      "cold_ms": 524.3,
-      "warm_ms": 15.3,
-      "warm_min_ms": 15.1,
-      "warm_max_ms": 16.9
+      "cold_ms": 511.3,
+      "warm_ms": 15.0,
+      "warm_min_ms": 14.3,
+      "warm_max_ms": 15.8
     },
     "tab-session": {
-      "cold_ms": 1424.3,
-      "warm_ms": 1158.1,
-      "warm_min_ms": 1061.5,
-      "warm_max_ms": 1216.8
+      "cold_ms": 1409.1,
+      "warm_ms": 1131.9,
+      "warm_min_ms": 1075.9,
+      "warm_max_ms": 1166.3
     },
     "tab-compactions": {
-      "cold_ms": 17.0,
-      "warm_ms": 23.9,
-      "warm_min_ms": 15.0,
-      "warm_max_ms": 116.8
+      "cold_ms": 15.0,
+      "warm_ms": 16.4,
+      "warm_min_ms": 16.0,
+      "warm_max_ms": 17.0
     },
     "tab-window": {
-      "cold_ms": 503.7,
-      "warm_ms": 453.8,
-      "warm_min_ms": 448.5,
-      "warm_max_ms": 481.9
+      "cold_ms": 499.7,
+      "warm_ms": 482.0,
+      "warm_min_ms": 451.1,
+      "warm_max_ms": 496.8
     },
     "tab-cost": {
-      "cold_ms": 971.7,
-      "warm_ms": 1011.7,
-      "warm_min_ms": 971.4,
-      "warm_max_ms": 1065.0
+      "cold_ms": 1183.9,
+      "warm_ms": 949.3,
+      "warm_min_ms": 933.9,
+      "warm_max_ms": 1059.6
     },
     "tab-compare": {
-      "cold_ms": 87.0,
-      "warm_ms": 82.6,
-      "warm_min_ms": 74.4,
-      "warm_max_ms": 90.0
+      "cold_ms": 1630.3,
+      "warm_ms": 1583.6,
+      "warm_min_ms": 1497.9,
+      "warm_max_ms": 1694.8
     },
     "tab-diagnostics": {
-      "cold_ms": 13.4,
-      "warm_ms": 12.1,
-      "warm_min_ms": 10.9,
-      "warm_max_ms": 12.6
+      "cold_ms": 57.0,
+      "warm_ms": 12.4,
+      "warm_min_ms": 12.3,
+      "warm_max_ms": 86.6
     }
   }
 }

@@ -28,6 +28,9 @@ if str(ROOT) not in sys.path:
 
 from fastapi import FastAPI, HTTPException, Query  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import Response  # noqa: E402
+
+from c4x.api import cache  # noqa: E402
 
 api = FastAPI(
     title="c4x",
@@ -68,6 +71,30 @@ def _jsonable(payload):
 
     import plotly.utils as plotly_utils
     return json.loads(json.dumps(payload, cls=plotly_utils.PlotlyJSONEncoder))
+
+
+def _cached(key, build):
+    """Serve `key` from the cache, or build it, serialise it once, and keep it.
+
+    The endpoint returns raw bytes rather than a dict, which is not a micro-optimisation: FastAPI
+    would otherwise re-encode a 543 KB payload on every hit, and re-encoding on a hit would put back
+    most of what the cache is for.
+
+    `no_cache=1` on any request skips it entirely. There is no invalidation endpoint on purpose,
+    because an endpoint that empties a cache is a thing to remember to call; the version stamp means
+    there is nothing to remember.
+    """
+    from c4x import store
+    version = cache.stamp(str(store.DB_PATH))
+    found = cache.get(key, version)
+    if found is not None:
+        return Response(content=found, media_type="application/json",
+                        headers={"x-c4x-cache": "hit"})
+    import json
+    payload = json.dumps(build()).encode("utf-8")
+    cache.put(key, version, payload)
+    return Response(content=payload, media_type="application/json",
+                    headers={"x-c4x-cache": "miss"})
 
 
 def _app():
@@ -118,7 +145,11 @@ def health():
     from c4x import store
     return {"ok": True,
             "db": str(store.DB_PATH),
-            "read_only": bool(os.environ.get("C4X_READ_ONLY"))}
+            "read_only": bool(os.environ.get("C4X_READ_ONLY")),
+            # Reported so the cache can be checked on a running server rather than trusted. A hit
+            # rate of zero in the wild would mean the version stamp is moving on every request,
+            # which is a failure that costs nothing visible and undoes the whole of phase 3.
+            "cache": cache.stats()}
 
 
 @api.get("/api/tabs")
@@ -137,16 +168,24 @@ def tab(tab_id: str,
         scope: str = Query("main", pattern="^(main|all)$"),
         cohort: str | None = Query(None),
         compare_with: str | None = Query(None, description="tab-compare only: the other arm"),
-        compare_kind: str = Query("session", pattern="^(session|cohort)$")):
+        compare_kind: str = Query("session", pattern="^(session|cohort)$"),
+        no_cache: bool = Query(False, description="rebuild rather than serving a cached answer")):
     """The verification shape: tables with their rows and tooltips, charts as extents, text.
 
     Identical to `python -m c4x.cli dump --tab <id> --json`, which is what makes this the surface
     the parity differ compares and the surface the existing tests can be re-pointed at.
     """
     from c4x.cli import extract
-    payload = extract.describe(_pane(tab_id, session, scope, cohort, compare_with, compare_kind))
-    payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
-    return _jsonable(payload)
+
+    def build():
+        payload = extract.describe(
+            _pane(tab_id, session, scope, cohort, compare_with, compare_kind))
+        payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
+        return _jsonable(payload)
+
+    if no_cache:
+        return build()
+    return _cached(("verify", tab_id, session, scope, cohort, compare_with, compare_kind), build)
 
 
 @api.get("/api/tab/{tab_id}/render")
@@ -155,18 +194,25 @@ def tab_render(tab_id: str,
                scope: str = Query("main", pattern="^(main|all)$"),
                cohort: str | None = Query(None),
                compare_with: str | None = Query(None),
-               compare_kind: str = Query("session", pattern="^(session|cohort)$")):
+               compare_kind: str = Query("session", pattern="^(session|cohort)$"),
+               no_cache: bool = Query(False)):
     """The drawing shape: everything above, plus each chart as full Plotly JSON.
 
     Charts are returned in the order they appear in the pane, so `plotly[i]` describes the same
     figure as `figures[i]`. A frontend that pairs them by index is relying on something real.
     """
     from c4x.cli import extract
-    pane = _pane(tab_id, session, scope, cohort, compare_with, compare_kind)
-    payload = extract.describe(pane)
-    payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
-    payload["plotly"] = [f.to_plotly_json() for f in _figures(pane)]
-    return _jsonable(payload)
+
+    def build():
+        pane = _pane(tab_id, session, scope, cohort, compare_with, compare_kind)
+        payload = extract.describe(pane)
+        payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
+        payload["plotly"] = [f.to_plotly_json() for f in _figures(pane)]
+        return _jsonable(payload)
+
+    if no_cache:
+        return build()
+    return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind), build)
 
 
 def _figures(node, found=None):

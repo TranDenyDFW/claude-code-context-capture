@@ -184,6 +184,64 @@ def test_the_session_limit_is_bounded(client):
     assert client.get("/api/sessions", params={"limit": 0}).status_code == 422
 
 
+def test_a_repeat_request_is_served_from_the_cache(client, session_id):
+    """The whole of phase 3. Without this the migration cannot meet "don't make it slower":
+    a React frontend leaves every query where it is and adds a hop."""
+    params = {"session": session_id}
+    client.get("/api/tab/tab-compactions", params=params)
+    again = client.get("/api/tab/tab-compactions", params=params)
+    assert again.headers.get("x-c4x-cache") == "hit"
+
+
+def test_the_cache_does_not_change_the_answer(client, session_id):
+    """A cache that returns something different from a fresh build is not a cache, it is a bug
+    with good latency. Compared against a build that explicitly bypasses it."""
+    params = {"session": session_id}
+    client.get("/api/tab/tab-cost", params=params)
+    cached = client.get("/api/tab/tab-cost", params=params)
+    assert cached.headers.get("x-c4x-cache") == "hit"
+    fresh = client.get("/api/tab/tab-cost", params={**params, "no_cache": "1"})
+    assert [t["id"] for t in cached.json()["tables"]] == [t["id"] for t in fresh.json()["tables"]]
+    assert [len(t["rows"]) for t in cached.json()["tables"]] == \
+           [len(t["rows"]) for t in fresh.json()["tables"]]
+
+
+def test_no_cache_actually_bypasses_it(client, session_id):
+    """The escape hatch has to work, because it is what the bench uses to measure a first view
+    and what a reader uses when they suspect the cache."""
+    params = {"session": session_id}
+    client.get("/api/tab/tab-compactions", params=params)
+    forced = client.get("/api/tab/tab-compactions", params={**params, "no_cache": "1"})
+    assert forced.headers.get("x-c4x-cache") is None, "no_cache was served from the cache"
+
+
+def test_different_selections_do_not_share_a_cache_entry(client, session_id):
+    """The key carries every parameter that changes the answer. A key that dropped one would serve
+    a pane for the wrong scope, which looks entirely plausible on screen.
+
+    The cache is emptied first, and that is not tidiness. The first version of this test asserted
+    that a scope=all request was not a hit, and it failed: an earlier test in this module is
+    parametrized over both scopes and had already cached them, so the hit proved nothing about the
+    key and everything about test order. Starting from empty makes each assertion mean what it says.
+    """
+    from c4x.api import cache
+    cache.clear()
+    params = {"session": session_id}
+    first = client.get("/api/tab/tab-session", params={**params, "scope": "main"})
+    assert first.headers.get("x-c4x-cache") == "miss", "the cache was not actually empty"
+    other = client.get("/api/tab/tab-session", params={**params, "scope": "all"})
+    assert other.headers.get("x-c4x-cache") == "miss", "a different scope reused the entry"
+    again = client.get("/api/tab/tab-session", params={**params, "scope": "main"})
+    assert again.headers.get("x-c4x-cache") == "hit", "the first entry was lost, nothing is keyed"
+    assert first.status_code == other.status_code == 200
+
+
+def test_health_reports_the_cache_so_it_can_be_checked_in_the_wild(client):
+    body = client.get("/api/health").json()
+    assert "cache" in body
+    assert set(body["cache"]) >= {"entries", "bytes", "hits", "misses"}
+
+
 def test_the_entry_point_checks_its_own_argument_handling():
     from c4x.api.__main__ import db_from_argv, port_from_argv
     assert port_from_argv(["--port", "9999"]) == 9999
