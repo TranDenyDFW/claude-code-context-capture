@@ -41,8 +41,94 @@ from c4x.theme import (
     stat_card,
 )
 
-
 # ---- Session --------------------------------------------------------------
+# The detector's two settings, together, chosen by measurement rather than by convention.
+#
+# The plan called for a 20-call window at 2 sigma. Measured against this store, that flags 15.6%
+# of the calls in its largest session and 8.3% in the next: cache reads are heavily skewed and
+# bursty, so a two-sigma band over a short window describes the texture of the series rather than
+# anything unusual in it. Widening to 50 calls at three sigma flags 1.0% of both, which is a rate
+# a reader can actually look at.
+#
+# Recorded here rather than tuned silently, because a threshold with no stated basis is the part
+# of an anomaly detector nobody can check.
+ANOMALY_WINDOW = 50
+ANOMALY_SIGMA = 3.0
+# Enough history for a standard deviation to mean anything. Below this the band is not drawn at
+# all, rather than drawn from four points and read as if it were a measurement.
+ANOMALY_MIN = 12
+# A chart with 1,018 markers on it has no markers on it. The most extreme are drawn and the note
+# says how many were outside in total, so the cap can never read as the count.
+ANOMALY_MARKS = 40
+
+
+def rolling_band(series, window=ANOMALY_WINDOW, sigma=ANOMALY_SIGMA):
+    """Rolling mean, its band, and which points fall outside it.
+
+    Returns (mean, upper, lower, outside) or None when the series is too short for the statistic
+    to say anything. Trailing window: each point is judged against the calls BEFORE it, which is
+    the only version that could be computed live, and it means the first ANOMALY_MIN points are
+    never judged rather than being judged against the future.
+    """
+    if series is None or len(series) < ANOMALY_MIN:
+        return None
+    mean = series.rolling(window, min_periods=ANOMALY_MIN).mean()
+    deviation = series.rolling(window, min_periods=ANOMALY_MIN).std()
+    upper = mean + sigma * deviation
+    lower = (mean - sigma * deviation).clip(lower=0)
+    outside = (series > upper) | (series < lower)
+    return mean, upper, lower, outside.fillna(False)
+
+
+def anomaly_band(fig, x, series):
+    """Draw the band behind the cache-read line, and mark the calls that left it.
+
+    The threshold lines elsewhere on this chart mark PUBLISHED limits: they say "you are near the
+    ceiling", which is a fact about the model. This says "this call was unlike the rest of this
+    session", which is a fact about the session and usually arrives earlier. A session can be
+    nowhere near a compaction threshold and still have one call that read six times its usual
+    context, and nothing else on this page would show it.
+
+    Returns (drawn, note). The note is the caller's to place; a band with no stated window and no
+    stated sigma is a shaded area a reader has to guess the meaning of.
+    """
+    result = rolling_band(series)
+    if result is None:
+        return False, (f"Fewer than {ANOMALY_MIN} calls, so no anomaly band is drawn: a rolling "
+                       f"deviation over that few points is not a measurement.")
+    mean, upper, lower, outside = result
+    fig.add_trace(go.Scatter(x=x, y=upper, mode="lines", line=dict(width=0),
+                             hoverinfo="skip", showlegend=False, name="band upper"))
+    fig.add_trace(go.Scatter(
+        x=x, y=lower, mode="lines", line=dict(width=0), fill="tonexty",
+        fillcolor="rgba(163,113,247,0.13)", hoverinfo="skip",
+        name=f"usual range ({ANOMALY_WINDOW}-call mean +/- {ANOMALY_SIGMA:g} sd)"))
+    total = int(outside.sum())
+    if total:
+        # Ranked by DISTANCE outside the band, in band widths, so the marks are the calls least
+        # like their neighbours rather than simply the largest ones. The largest call in a session
+        # that is uniformly large is not an anomaly.
+        width = (upper - mean).replace(0, float("nan"))
+        distance = ((series - mean).abs() / width)[outside].dropna()
+        picked = list(distance.sort_values(ascending=False).index[:ANOMALY_MARKS])
+        fig.add_trace(go.Scatter(
+            x=[x[i] for i in range(len(x)) if series.index[i] in picked],
+            y=[series.iloc[i] for i in range(len(x)) if series.index[i] in picked],
+            mode="markers", name=f"outside it ({total:,})",
+            marker=dict(color=DANGER, size=7, symbol="circle-open", line=dict(width=1.5)),
+            hovertemplate="turn %{x}<br>%{y:,.0f} cache read, outside the usual range"
+                          "<extra></extra>"))
+    shown = min(total, ANOMALY_MARKS)
+    return True, (
+        f"The shaded band is this session's own usual range for cache read: a trailing "
+        f"{ANOMALY_WINDOW}-call mean, plus and minus {ANOMALY_SIGMA:g} standard deviations. "
+        f"{total:,} of {len(series):,} calls fell outside it"
+        + (f"; the {shown} furthest outside are circled. " if total > shown else ". ")
+        + "This is a different claim from the dashed threshold lines, which mark published model "
+          "limits. A call can be well under every limit and still be unlike the rest of its own "
+          "session, which is usually the earlier signal.")
+
+
 def band_zones(fig, segs, ts_list, n_turns):
     """Shade warn and compact zones per model segment, so headroom is read rather than computed.
 
@@ -191,6 +277,9 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
 
     x = list(range(1, len(turns) + 1))
     fig = go.Figure()
+    # The band goes on FIRST so it sits behind the lines. Plotly draws in the order traces are
+    # added, and a filled ribbon added last covers the series it is describing.
+    band, band_note = anomaly_band(fig, x, turns["cache_read_input_tokens"].fillna(0))
     fig.add_trace(go.Scatter(
         x=x, y=turns["total_resident"], mode="lines", name="resident",
         line=dict(color=ACCENT, width=2),
@@ -360,6 +449,14 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     churn_peak = int(cdf.iloc[0]["peak"] or 0) if not cdf.empty else 0
     rebill = (cache_total / churn_peak) if churn_peak else 0.0
 
+    # The band's method, directly under the chart that draws it. A shaded area with no stated
+    # window and no stated sigma is something a reader has to guess the meaning of, and the guess
+    # available here is the wrong one: the dashed lines above it are published model limits, so an
+    # unexplained band reads as another of those rather than as this session's own spread.
+    band_explainer = html.Div(band_note, style={**SECTION_NOTE,
+                                                "color": VIOLET if band else MUTED,
+                                                "margin": "2px 0 12px 0"})
+
     cards = html.Div([
         stat_card("current", fmt_tokens(latest), color=ACCENT, sub=latest_sub),
         stat_card("peak resident", fmt_tokens(peak), color=VIOLET, sub="high-water mark"),
@@ -372,6 +469,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
         stat_card("compactions", str(len(comps)), color=DANGER if len(comps) else TEXT),
         stat_card("models", ", ".join(real_models(turns["model"])[:2]) or "-"),
     ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
+    cards = html.Div([band_explainer, cards])
 
     if not comps.empty:
         show = comps.copy()
