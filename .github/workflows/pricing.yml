@@ -1,0 +1,62 @@
+name: pricing
+
+# Keep c4x/prices.json equal to what Anthropic publishes.
+#
+# There is no pricing API, so this parses two pages: the docs table, which lists every model, and
+# claude.com/pricing, which lists the current few. Where both name a model they must agree; a
+# disagreement FAILS rather than being reconciled, because two prices for one model means the tool
+# cannot tell which is real.
+#
+# Deliberately NOT part of the required test suite. The suite runs the parser's --self-test, which
+# is offline and proves the parsing works; this runs --check, which needs the network. A docs-page
+# outage should redden the pricing job and nothing else, rather than blocking an unrelated PR.
+
+on:
+  push:
+    branches: [main]
+    # Without this the auto-commit below re-triggers this workflow, which finds nothing to do and
+    # stops - but it still costs a run per push, and a loop that terminates by luck is still a loop.
+    paths-ignore:
+      - 'c4x/prices.json'
+  schedule:
+    # Prices move without anyone pushing. Daily, so a stale table is at most a day stale.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Offline first. If the parser itself is broken there is no point asking it what the prices
+      # are, and the failure should name the parser rather than the pricing pages.
+      - name: The parser's own checks
+        run: node tools/fetch-pricing.mjs --self-test
+
+      - name: Read the published prices
+        id: refresh
+        run: node tools/fetch-pricing.mjs --write
+
+      - name: Commit any change
+        run: |
+          if git diff --quiet -- c4x/prices.json; then
+            echo "prices unchanged"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add c4x/prices.json
+          git commit -m "chore: published prices moved
+
+          Written by tools/fetch-pricing.mjs from the two pricing pages it parses. The docs table
+          supplies the numbers and claude.com/pricing audits them; this commit exists because they
+          agreed with each other and disagreed with the committed table."
+          git push

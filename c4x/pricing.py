@@ -19,49 +19,73 @@ Three rules, all of them load-bearing:
    and see the exact numbers it came from, which is the same standard the SQL accordions hold
    every table on the page to.
 
-WHAT IS AND IS NOT IN THE TABLE BELOW. Only prices that could be stated with confidence are
-entered. Every other model this store has seen is deliberately absent, so its cost renders blank
-and the page says how many calls that covers. That is a real gap and the app names it on screen
-rather than filling it with a plausible guess: a wrong price is worse than no price, because it
-is indistinguishable from a right one on the page and it multiplies through billions of tokens.
+WHERE THE NUMBERS CAME FROM. Every row below was read off the published pricing table at the URL
+in PRICE_SOURCE on the date in PRICE_TABLE_DATE, and nothing was inferred. A model the page does
+not list stays out of this table, so its cost renders blank and the app says how many calls that
+covers: a wrong price is worse than no price, because it is indistinguishable from a right one on
+the page and it multiplies through billions of tokens.
 
 Adding a model is one entry here. Nothing else in the app needs to change.
+
+TWO REASONS EVERY FIGURE HERE IS A LOWER BOUND, both because the store records less than the
+price list distinguishes:
+
+1. Cache writes are billed by TTL: 1.25x the base input rate for a five-minute cache and 2x for a
+   one-hour one. `cache_creation_input_tokens` records the tokens and not which TTL bought them,
+   so the cheaper rate is used. A session running a one-hour cache is undercharged on that
+   component by a factor of 1.6.
+2. Claude 4.6 and later charge 1.1x under a non-global inference geography, and regional endpoints
+   carry a 10% premium. Nothing in the transcripts records either, so the global rate is used.
+
+Both are stated on the page rather than corrected for, which is the same rule the rest of this
+app follows: report what was recorded, and name what was not.
 """
 
 # The date the entries below were last checked, and where they must be checked against. Printed on
 # the page beside every figure derived from them, so a reader can see how stale the arithmetic is
 # without opening this file.
-PRICE_TABLE_DATE = "2026-08-30"
-PRICE_SOURCE = "https://www.anthropic.com/pricing"
+import json
+from pathlib import Path
 
-# Multipliers on the model's base INPUT price, rather than separate per-model numbers.
-#
-# They are published as ratios and they have held across models, so writing them per model would
-# invite four numbers per entry where two plus a shared ratio is the same information. If a model
-# ever prices its cache differently, it gets explicit cache_read / cache_write keys, which
-# price_for() prefers over these.
-CACHE_READ_MULTIPLIER = 0.10
-CACHE_WRITE_MULTIPLIER = 1.25
+# The committed table, beside this file. JSON rather than a Python literal because a MACHINE keeps
+# it current: tools/fetch-pricing.mjs reads the published pricing pages on every push and rewrites
+# this file when they move. A dict in source would mean the updater had to edit Python, and an
+# updater that edits code is one bad regex away from breaking the app it is keeping honest.
+TABLE_PATH = Path(__file__).with_name("prices.json")
 
-# USD per MILLION tokens. Keys are the model strings exactly as the transcripts record them.
-PRICES = {
-    "claude-haiku-4-5-20251001": {
-        "input": 1.00,
-        "output": 5.00,
-        "note": "Claude Haiku 4.5, standard tier",
-    },
-}
 
-# Models this store has seen that are deliberately NOT priced above, and why. Listed rather than
-# left implicit so the gap is a documented decision and not an oversight: the page counts these
-# and says so, and a reader adding prices knows exactly which entries are missing.
+def _load():
+    """The table, or an empty one that makes every cost render blank.
+
+    A missing or unparseable file must NOT raise. The dashboard would fail to import, which turns
+    "this app does not know what these tokens cost" into "this app does not start", and the first
+    is the honest consequence of a missing price table.
+    """
+    try:
+        data = json.loads(TABLE_PATH.read_text(encoding="utf-8"))
+    except Exception:                               # noqa: BLE001 - a bad table must not stop the app
+        return {"checked": "never", "source": "", "models": {},
+                "cache_multipliers": {"read": 0.10, "write_5m": 1.25, "write_1h": 2.00}}
+    return data
+
+
+_TABLE = _load()
+
+PRICE_TABLE_DATE = _TABLE.get("checked") or "never"
+PRICE_SOURCE = _TABLE.get("source") or ""
+_MULTIPLIERS = _TABLE.get("cache_multipliers") or {}
+CACHE_READ_MULTIPLIER = float(_MULTIPLIERS.get("read", 0.10))
+CACHE_WRITE_MULTIPLIER = float(_MULTIPLIERS.get("write_5m", 1.25))
+CACHE_WRITE_1H_MULTIPLIER = float(_MULTIPLIERS.get("write_1h", 2.00))
+
+# USD per MILLION tokens, keyed by the model id the published table names.
+PRICES = _TABLE.get("models") or {}
+
 UNPRICED_REASON = (
-    "no published price was confirmed for this model when the table was last checked, so its cost "
+    "the published pricing table carried no row for it when this table was last read, so its cost "
     "is left blank rather than estimated"
 )
 
-# Not a model. The harvest writes this where a transcript recorded usage with no model string, so
-# it is excluded from the "you could price this" count: there is nothing to look up.
 SYNTHETIC = "<synthetic>"
 
 
@@ -73,16 +97,28 @@ def price_for(model):
     """
     if not model:
         return None
-    entry = PRICES.get(str(model))
-    if not entry:
-        return None
+    name = str(model)
+    entry = PRICES.get(name)
+    if entry is None:
+        # The pricing page names a FAMILY, "Claude Haiku 4.5", and the transcripts record a
+        # SNAPSHOT, "claude-haiku-4-5-20251001". Without this the released model that actually ran
+        # is unpriced while its family sits in the table one suffix away, and the page reports a
+        # gap it does not have.
+        #
+        # Longest match wins, and only on a hyphen boundary. Matching a bare prefix would let
+        # "claude-opus-4" price "claude-opus-45" if such a name ever appeared, which is a wrong
+        # price rather than a missing one, and this module treats those very differently.
+        candidates = [key for key in PRICES if name.startswith(f"{key}-")]
+        if not candidates:
+            return None
+        entry = PRICES[max(candidates, key=len)]
     base = float(entry["input"])
     return {
         "input": base,
         "output": float(entry["output"]),
         "cache_read": float(entry.get("cache_read", base * CACHE_READ_MULTIPLIER)),
         "cache_write": float(entry.get("cache_write", base * CACHE_WRITE_MULTIPLIER)),
-        "note": entry.get("note", ""),
+        "note": entry.get("label") or entry.get("note", ""),
     }
 
 
@@ -135,8 +171,13 @@ def coverage_note(missing, priced_calls):
     """
     real = {model: calls for model, calls in missing.items() if model != SYNTHETIC}
     if not real:
-        return (f"Estimated from the price table of {PRICE_TABLE_DATE}, which covers every model "
-                f"in this population.")
+        # The SOURCE belongs in both branches. It used to appear only when coverage was
+        # incomplete, so completing the table removed the one link that said where the money came
+        # from: the better the coverage got, the less the page explained itself.
+        return (f"ESTIMATE. Priced from the table in c4x/prices.json, read from {PRICE_SOURCE} on "
+                f"{PRICE_TABLE_DATE}, which covers every model in this population. Cache writes "
+                f"are charged at the five-minute rate and no inference-geography premium is "
+                f"applied, because the store records neither, so this is a LOWER BOUND.")
     names = ", ".join(f"{model} ({calls:,} calls)"
                       for model, calls in sorted(real.items(), key=lambda kv: -kv[1])[:4])
     more = len(real) - 4

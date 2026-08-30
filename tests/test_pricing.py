@@ -179,28 +179,55 @@ def test_a_priced_row_carries_a_number_that_matches_the_table(cost_pane):
         assert row["est_usd"] == pytest.approx(round(expected, 2))
 
 
-def test_the_session_card_says_not_priced_rather_than_zero(pane, q, has_store):
-    """A card reading $0.00 says the session was free. An empty one says this app does not know."""
+def test_the_session_card_says_not_priced_rather_than_zero(q, has_store, monkeypatch):
+    """A card reading $0.00 says the session was free. An empty one says this app does not know.
+
+    Exercised by EMPTYING the price table rather than by hunting for an unpriced session. Once the
+    table covers every model this store has seen, no such session exists, and a test that skips
+    there stops checking the rule at exactly the moment the rule is easiest to break: nothing on
+    the page would look different if the blank branch were deleted.
+
+    This is the plan's requirement read literally - a model absent from the table must render
+    blank, not zero - with the absence arranged rather than found.
+    """
     from c4x.tabs.session import session_view
-    unpriced = q("""SELECT session_id FROM api_calls
-                     WHERE model IS NOT NULL AND model NOT IN ({})
-                     GROUP BY session_id ORDER BY COUNT(*) DESC LIMIT 1""".format(
-                         ",".join("?" * len(pricing.PRICES))), tuple(pricing.PRICES))
-    if unpriced.empty:
-        pytest.skip("every session in this store runs a priced model")
-    _figure, cards = session_view(unpriced.iloc[0]["session_id"], "main")
+    session_id = q("""SELECT session_id FROM api_calls WHERE model IS NOT NULL
+                       GROUP BY session_id ORDER BY COUNT(*) DESC LIMIT 1""").iloc[0]["session_id"]
+    monkeypatch.setattr(pricing, "PRICES", {})
+    _figure, cards = session_view(session_id, "main")
     texts = extract.texts(cards)
     assert "estimated cost" in texts
     value = texts[texts.index("estimated cost") + 1]
     assert value == "not priced", f"an unpriced session's cost card reads {value!r}"
-    assert "0.00" not in value and "$0" not in value
+    assert "0.00" not in value and "$" not in value
+    assert "no price in c4x/pricing.py" in texts[texts.index("estimated cost") + 2]
+
+
+def test_an_unpriced_model_reaches_the_cost_table_as_a_blank(q, has_store, monkeypatch):
+    """The same rule on the Cost tab's per-model table, arranged the same way."""
+    import app as module
+    monkeypatch.setattr(pricing, "PRICES", {})
+    ids = [t[0] for t in module.TABS]
+    body = module._render_tab(ids.index("tab-cost"), None, "main", None)
+    table = [t for t in extract.tables(body) if "est_usd" in t["columns"]][0]
+    assert table["rows"], "the cost table is empty"
+    for row in table["rows"]:
+        value = row["est_usd"]
+        assert value is None or (isinstance(value, float) and value != value), (
+            f"{row['model']} is unpriced and rendered {value!r}")
+        assert not row["priced"]
+    assert "INCOMPLETE" in extract.all_words(body)
 
 
 def test_a_priced_session_card_carries_the_table_date(q, has_store):
     from c4x.tabs.session import session_view
+    models = q("SELECT DISTINCT model FROM api_calls WHERE model IS NOT NULL")["model"]
+    known = [m for m in models if pricing.price_for(m) is not None]
+    if not known:
+        pytest.skip("no model in this store is priced")
     priced = q("""SELECT session_id FROM api_calls WHERE model IN ({})
                    GROUP BY session_id ORDER BY COUNT(*) DESC LIMIT 1""".format(
-                       ",".join("?" * len(pricing.PRICES))), tuple(pricing.PRICES))
+                       ",".join("?" * len(known))), tuple(known))
     if priced.empty:
         pytest.skip("no session in this store runs a priced model")
     _figure, cards = session_view(priced.iloc[0]["session_id"], "all")
