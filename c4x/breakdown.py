@@ -16,7 +16,6 @@ import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 from dash.dash_table.Format import Format, Scheme
 
-from c4x.probe_detail import probe_detail_blocks
 from c4x.store import ROOT, q, scoped
 from c4x.theme import (
     ACCENT,
@@ -98,7 +97,14 @@ def latest_baseline():
     return None if df.empty else df.iloc[0].to_dict()
 
 
-def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None):
+def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=None):
+    """The category split as it stands, and how it moved. DERIVED from a calibrated baseline.
+
+    The item detail that used to be appended here lives in c4x/probe_detail.py and is rendered as
+    its own panel of the Window tab. Keeping a `with_items` flag would have left a branch nothing
+    took, which the table audit reported as a call that can build a table on a path never
+    exercised: the accurate description of dead code.
+    """
     b = latest_baseline()
     if not b:
         return html.Div([
@@ -250,7 +256,7 @@ def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None
             f"observed on their configuration, so their category split is an estimate and their "
             f"Messages figure is the least trustworthy number on this page.",
             style={"color": WARN, "fontSize": "11.5px", "marginBottom": "8px"}))
-    return html.Div([
+    composition = [
         html.Div([
             html.Span("context window", style={"color": MUTED, "fontSize": "12px"}),
             html.Span(f"  {fmt_tokens(resident)} / {fmt_tokens(window)} "
@@ -278,8 +284,8 @@ def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None
             style={"color": MUTED, "fontSize": "11.5px", "margin": "12px 0 14px 0",
                    "maxWidth": "900px", "lineHeight": "1.55"}),
         dcc.Graph(figure=dark_fig(fig, 420), config={"displayModeBar": False}),
-        # The categories above are DERIVED from a baseline. Everything below is a direct reading,
-        # and it is the only place this store can say WHICH skill or WHICH tool the tokens went to.
-        html.Div(style={"height": "22px"}),
-        html.Div(probe_detail_blocks(b)),
-    ])
+    ]
+    # The categories above are DERIVED from a baseline. The item detail is a direct reading, and
+    # the only place this store can say WHICH skill or WHICH tool the tokens went to. Two subjects,
+    # returned separately so a caller can show one without the other.
+    return html.Div(composition)

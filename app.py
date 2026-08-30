@@ -86,6 +86,7 @@ from c4x.ui.callbacks.selection import (  # noqa: E402, F401
     _selector_options,
     _tick,
 )
+from c4x.ui.callbacks.window import _window_panel, _window_panel_chosen  # noqa: E402, F401
 from c4x.ui.header import refresh_store  # noqa: E402, F401
 from c4x.ui.layout import SELECTION_SCOPED, TAB_IDS, TABS, tab_button, tab_style  # noqa: E402, F401
 

@@ -229,13 +229,40 @@ def probe_detail_blocks(baseline=None):
                    "name AS path, extra AS type, tokens", ["path", "type", "tokens"], {"tokens"}),
     ]
     blocks += [t for t in tables if t is not None]
-    blocks += message_blocks(pid)
     blocks.append(html.Div(
         "A reading describes the moment it was taken. Record another after adding an MCP server, "
         "installing a skill, or editing CLAUDE.md.",
         style={"color": MUTED, "fontSize": "11.5px", "margin": "14px 0 4px 0"}))
     blocks.append(probe_command_hint())
     return blocks
+
+
+def conversation_blocks(baseline=None):
+    """What the CONVERSATION put in the window, as opposed to what the configuration holds.
+
+    Separated from probe_detail_blocks because together they were eight tables and 5.4 screens, and
+    they answer different questions: the configuration half is identical on turn 1 and turn 900,
+    while this half is the part that grows. Nothing else in this store records the split at all.
+    """
+    probe = latest_probe()
+    if probe is None:
+        return [
+            html.Div("No probe reading yet", style=SECTION_HEAD),
+            html.Div(
+                "The message half of the window is computed by Claude Code for its tooltip and "
+                "discarded. A probe is the only way this store learns it. Run "
+                "node tools/probe.mjs to record one.", style=SECTION_NOTE),
+        ]
+    pid = int(probe["id"])
+    when = str(probe["ts"])[:19].replace("T", " ")
+    return [
+        html.Div("What the conversation put in the window", style=SECTION_HEAD),
+        html.Div(
+            f"Read by probe {pid} at {when}. A probe spawns a fresh session, so its conversation "
+            f"half is small by construction: what matters here is the SHAPE, which categories "
+            f"carry the tokens, not the totals.",
+            style=SECTION_NOTE),
+    ] + message_blocks(pid)
 
 
 def message_blocks(probe_id):
