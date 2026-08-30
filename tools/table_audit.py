@@ -656,6 +656,22 @@ def main():
                  hits, walked)
         context_value.set(AttributeDict(triggered_inputs=[]))
 
+        # The style half of the nav, split out so a callback other than a button click can move
+        # the reader between tabs. It builds no table, but an unexercised callback is a hole in
+        # every other gate below, so it is driven at both ends of the range.
+        for index in (0, len(m.TABS) - 1):
+            exercise("_tab_styles", errors, exercised, lambda i=index: m._tab_styles(i),
+                     hits, walked)
+
+        # A finding is a door: clicking one sets the header selection and switches the tab. Driven
+        # with a row that has a destination, one that has none, and no row at all, because the
+        # PreventUpdate branches are the ones that decide whether a click quietly does nothing.
+        _rows = [{"goes to": m.TAB_IDS[-1], "session_id": session_id},
+                 {"goes to": None, "session_id": None}]
+        for _cell in ({"row": 0}, {"row": 1}, {"row": 99}, None):
+            exercise("_finding_clicked", errors, exercised,
+                     lambda c=_cell: m._finding_clicked(c, _rows), hits, walked)
+
         exercise("_selector_options", errors, exercised, lambda: m._selector_options(cohort, 0),
                  hits, walked)
         exercise("_cohort_options", errors, exercised, lambda: m._cohort_options(0, None),

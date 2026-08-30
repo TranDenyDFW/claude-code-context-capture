@@ -173,3 +173,22 @@ def test_compare_labels_both_arms(two_sessions, has_store):
     text = "\n".join(payload["text"])
     assert "A" in text and "B" in text
     assert extract.tables(payload) is not None
+
+
+def test_the_sweep_reports_compare_as_a_working_tab(has_store):
+    """`c4x all` printed `tab-compare  0 tables, 0 figures, 0 rows` for every run it ever made.
+
+    That is what the pane holds, and it is the wrong thing to report: the body arrives from a
+    callback, so the sweep was measuring the shell. Anyone reading the sweep as a health check,
+    which is the only reason to run it, saw one dead tab out of eight.
+
+    Now that arm B has a default, the sweep asks for the same default a reader gets.
+    """
+    class _Args:
+        session = None
+        scope = "main"
+        cohort = None
+
+    payload = commands._compare_by_default(_Args())
+    assert payload["tables"], "the sweep still reports Compare as empty"
+    assert sum(len(t["rows"]) for t in payload["tables"]) > 0

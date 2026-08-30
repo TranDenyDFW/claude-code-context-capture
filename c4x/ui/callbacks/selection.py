@@ -7,7 +7,7 @@ Registered by importing this module. Dash's `callback` decorator writes into a g
 these attach wherever they are defined; app.py imports them and re-exports the names, because the
 tests and the table audit reach them as app._name and should not have to know where each one lives.
 """
-from dash import Input, Output, State, callback, html
+from dash import Input, Output, State, callback, html, no_update
 from dash.exceptions import PreventUpdate
 
 from c4x.store import (
@@ -45,6 +45,38 @@ def _cohort_options(_n, existing):
     if existing:
         raise PreventUpdate
     return cohort_options()
+
+@callback(
+    Output("sel-session", "value", allow_duplicate=True),
+    Output("active-tab", "data", allow_duplicate=True),
+    Input("tbl-findings", "active_cell"),
+    State("tbl-findings", "derived_viewport_data"),
+    prevent_initial_call=True,
+)
+def _finding_clicked(active_cell, rows):
+    """Send the reader to the evidence for the finding they clicked.
+
+    allow_duplicate on both outputs: `_pick_from_table` also sets the session and `_switch_tab`
+    also sets the tab. Two routes into the same state is the point, and it only works because the
+    nav styles itself from the Store rather than from whichever button was pressed last.
+
+    A finding with no destination raises PreventUpdate rather than selecting nothing, so clicking
+    the fixed-overhead row does not silently clear a selection the reader had already made.
+    """
+    if not active_cell or not rows:
+        raise PreventUpdate
+    index = active_cell.get("row")
+    if index is None or not (0 <= index < len(rows)):
+        raise PreventUpdate
+    row = rows[index]
+    target, session_id = row.get("goes to"), row.get("session_id")
+    if not target:
+        raise PreventUpdate
+    from c4x.ui.layout import TAB_IDS
+    if target not in TAB_IDS:
+        raise PreventUpdate
+    return (session_id or no_update), TAB_IDS.index(target)
+
 
 @callback(
     Output("sel-session", "value"),

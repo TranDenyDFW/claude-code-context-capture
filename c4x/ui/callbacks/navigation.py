@@ -9,6 +9,7 @@ from dash import Input, Output, State, callback, html
 from c4x.store import (
     population_label,
 )
+from c4x.tabs.session import most_recent_session
 from c4x.theme import (
     CODE_BLOCK,
     DANGER,
@@ -19,7 +20,23 @@ from c4x.ui.layout import SELECTION_SCOPED, TAB_IDS, TABS, tab_style
 
 
 @callback(
-    [Output(f"btn-{t}", "style") for t in TAB_IDS] + [Output("active-tab", "data")],
+    [Output(f"btn-{t}", "style") for t in TAB_IDS],
+    Input("active-tab", "data"),
+)
+def _tab_styles(index):
+    """Style the strip from the Store, so anything that sets the tab gets a correct nav.
+
+    Separated from the click handler on purpose. While the click was the only route into a tab, one
+    callback could do both; a finding that jumps the reader to another tab is a second route, and
+    with the styles bound to the click that route would have moved the pane and left the wrong
+    button highlighted.
+    """
+    current = int(index or 0)
+    return [tab_style(i == current) for i in range(len(TABS))]
+
+
+@callback(
+    Output("active-tab", "data"),
     [Input(f"btn-{t}", "n_clicks") for t in TAB_IDS],
     State("active-tab", "data"),
     prevent_initial_call=True,
@@ -28,8 +45,7 @@ def _switch_tab(*args):
     from dash import ctx
     current = args[-1]
     which = ctx.triggered_id
-    idx = TAB_IDS.index(which.replace("btn-", "")) if which else current
-    return [tab_style(i == idx) for i in range(len(TABS))] + [idx]
+    return TAB_IDS.index(which.replace("btn-", "")) if which else current
 
 @callback(
     Output("tab-content", "children"),
@@ -73,7 +89,19 @@ def _render_tab(idx, session_id, scope, cohort):
     if tab_id in ("tab-summary", "tab-compare", "tab-cost"):
         banner = None
     elif tab_id in SELECTION_SCOPED:
-        banner = html.Div(f"Describing {population_label(session_id, cohort, scope or 'main')}.",
+        # The Session tab substitutes the most recent session when nothing is selected, so with a
+        # null selection the generic label would say "the whole store, every session" directly
+        # above one session's chart. Same class of bug as the Cost banner above: the banner is
+        # built from the HEADER, and a tab that renders something other than what the header says
+        # turns it into a false statement.
+        #
+        # Resolved by CALLING the tab's own default rather than restating it, so the two cannot
+        # drift. The tab still prints its own line saying the selection was made for the reader;
+        # this one says which session that turned out to be.
+        described = session_id
+        if tab_id == "tab-session" and not described:
+            described = most_recent_session(cohort)
+        banner = html.Div(f"Describing {population_label(described, cohort, scope or 'main')}.",
                           style=SECTION_NOTE)
     else:
         banner = html.Div("Store-wide. Not affected by the header selection.", style=SECTION_NOTE)
