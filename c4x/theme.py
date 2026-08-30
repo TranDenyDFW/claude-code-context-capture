@@ -365,6 +365,10 @@ COLUMN_HELP = {
                         "sessions each asking once, which is a different problem from one session "
                         "asking 68 times."),
     "first_seen": "Earliest call with this input, anywhere in the population.",
+    "agent": ("Which KIND of subagent the Agent call asked for, read from the call's own input. "
+              "\"(not recorded)\" means the call named none and took the default: the transcript "
+              "recorded the omission, so this reports the omission rather than the default."),
+    "errors": "Calls whose result block was flagged as an error.",
     "last_seen": "Latest call with this input. Still recent means the repetition is not history.",
     "target": ("The file or resource the call named. BLANK where the tool has no target, such as "
                "Bash or ToolSearch: the store keeps a hash of the input, never the input itself, "

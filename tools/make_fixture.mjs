@@ -95,8 +95,9 @@ const insertSession = db.prepare(`
 const insertTurn = db.prepare(`
   INSERT INTO turns (uuid, session_id, ts, model, request_id, input_tokens,
                      cache_creation_input_tokens, cache_read_input_tokens, output_tokens,
-                     thinking_tokens, total_resident, is_sidechain, file_path, line_no)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+                     thinking_tokens, total_resident, is_sidechain, file_path, line_no,
+                     parent_uuid)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 const insertMessage = db.prepare(`
   INSERT INTO messages (uuid, session_id, ts, role, type, text, chars, model, request_id,
                         is_sidechain, file_path, line_no)
@@ -111,8 +112,8 @@ const insertSurvivor = db.prepare(
 const insertTool = db.prepare(`
   INSERT INTO tool_calls (tool_use_id, session_id, turn_uuid, ts, tool_name, server_name, target,
                           input_sha1, input_bytes, result_bytes, is_error, is_sidechain,
-                          file_path, line_no)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`);
+                          file_path, line_no, subagent_type)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`);
 
 for (const session of SESSIONS) {
   insertSession.run(session.id, 'C--fixture-project', 'C:\\fixture\\project', 'main', VERSION,
@@ -167,11 +168,21 @@ for (const session of SESSIONS) {
     // table counts it without saying so. A fixture with none of it cannot exercise any of that,
     // and two tests refused to pass rather than report a check that could not run.
     if (turn % 2 === 0) {
+      // The Agent call that spawned them, and the parent link back to it. Without both, CI cannot
+      // exercise anything the subagent-identity capture added: a store with sidechain turns and
+      // no parent_uuid looks exactly like a store harvested before the column existed.
+      //
+      // Two agent TYPES, not one. A single type makes "group by subagent_type" indistinguishable
+      // from "count the Agent calls", which is the query the column exists to make possible.
+      const kind = turn % 4 === 0 ? 'general-purpose' : 'Explore';
+      insertTool.run(`${uuid}-agent`, session.id, uuid, ts, 'Agent', null, null,
+                     `sha-agent-${turn}`, 120, 4_000,
+                     'fixture://transcript.jsonl', turn, kind);
       for (let agent = 0; agent < 2; agent++) {
         insertTurn.run(`${uuid}-sub${agent}`, session.id, ts, model, `${requestId}-sub${agent}`,
                        900, 4_000, Math.round(cacheRead / 4), 300, 0,
                        Math.round(resident / 3), 1,
-                       'fixture://subagent.jsonl', turn + 1);
+                       'fixture://subagent.jsonl', turn + 1, uuid);
       }
     }
 

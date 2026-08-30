@@ -51,7 +51,12 @@ CREATE TABLE IF NOT EXISTS turns (
   uuid TEXT PRIMARY KEY, session_id TEXT, ts TEXT, model TEXT, request_id TEXT,
   input_tokens INTEGER, cache_creation_input_tokens INTEGER, cache_read_input_tokens INTEGER,
   output_tokens INTEGER, thinking_tokens INTEGER, eph_1h INTEGER, eph_5m INTEGER,
-  service_tier TEXT, total_resident INTEGER, is_sidechain INTEGER, file_path TEXT, line_no INTEGER
+  service_tier TEXT, total_resident INTEGER, is_sidechain INTEGER, file_path TEXT, line_no INTEGER,
+  -- The record this one replied to. Present on 30,400 of 42,407 records in this store's four
+  -- largest transcripts and read by nothing until now. It is what turns a flat list of turns into
+  -- the tree it actually was: a subagent's turns hang off the Agent call that spawned them, which
+  -- is the only way to attribute the ~70% of calls that are subagent work to anything.
+  parent_uuid TEXT
 );
 CREATE INDEX IF NOT EXISTS turns_session_ts ON turns(session_id, ts);
 CREATE INDEX IF NOT EXISTS turns_request ON turns(request_id);
@@ -130,7 +135,11 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   tool_name TEXT, server_name TEXT,
   target TEXT, input_sha1 TEXT, input_bytes INTEGER,
   result_bytes INTEGER, is_error INTEGER,
-  is_sidechain INTEGER, file_path TEXT, line_no INTEGER
+  is_sidechain INTEGER, file_path TEXT, line_no INTEGER,
+  -- Which KIND of subagent an Agent call asked for, e.g. "general-purpose". Carried in the tool
+  -- input and discarded until now, so this store held 827 Agent rows that could not say what any
+  -- of them ran. NULL on every other tool, which is the honest value: they have no agent type.
+  subagent_type TEXT
 );
 CREATE INDEX IF NOT EXISTS tool_calls_session ON tool_calls (session_id);
 CREATE INDEX IF NOT EXISTS tool_calls_target ON tool_calls (target);
@@ -210,6 +219,15 @@ export const HOOK_EVENT_COLUMNS = [
   'permission_mode', 'tool_name', 'tool_input_bytes', 'tool_response_bytes', 'prompt_chars',
   'source', 'reason', 'agent_id', 'agent_type', 'truncated', 'extra',
 ];
+
+// Columns added to tables that already existed in the wild, by table. Every one is TEXT and
+// nullable, so adding it cannot invalidate a row: an old row simply has nothing in it, which is
+// exactly true. Anything needing a type or a default is a rebuild, not an entry here.
+export const ADDED_COLUMNS = {
+  hook_events: HOOK_EVENT_COLUMNS,
+  turns: ['parent_uuid'],
+  tool_calls: ['subagent_type'],
+};
 const BOOLEAN_EVENT_COLUMNS = new Set(['probe', 'known', 'truncated']);
 
 export function ingestEvents(db, path) {
@@ -335,10 +353,24 @@ export function openDb(dbPath = DB_PATH) {
   // A store written before transcript_path and extra were stored keeps its rows; the columns are
   // added in place. Non-destructive, unlike the primary-key rebuild above, because nothing about
   // the existing rows is wrong, they are merely missing two fields. Announced rather than silent.
-  const have = new Set(db.prepare('PRAGMA table_info(hook_events)').all().map((r) => r.name));
-  const missing = HOOK_EVENT_COLUMNS.filter((c) => !have.has(c));
-  for (const c of missing) db.exec(`ALTER TABLE hook_events ADD COLUMN ${c} TEXT`);
-  if (missing.length) console.error(`harvest: hook_events gained ${missing.join(', ')}`);
+  //
+  // Table-driven, because hook_events was not the last table to gain a column. turns gained
+  // parent_uuid and tool_calls gained subagent_type for the same reason: the field was always in
+  // the transcripts and nothing read it. A store written before either keeps every row and gains
+  // the columns empty, which is what `--backfill-agents` then fills.
+  for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
+    const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
+    const missing = columns.filter((c) => !have.has(c));
+    for (const c of missing) db.exec(`ALTER TABLE ${table} ADD COLUMN ${c} TEXT`);
+    if (missing.length) console.error(`harvest: ${table} gained ${missing.join(', ')}`);
+  }
+  // AFTER the migration, not inside SCHEMA. An index over a migrated column cannot be created
+  // alongside the CREATE TABLE that mentions it: on a store that already has the table, the
+  // CREATE TABLE IF NOT EXISTS is a no-op and the index statement then names a column that does
+  // not exist yet, so `db.exec(SCHEMA)` throws "no such column: parent_uuid" and the whole tool
+  // refuses to open a perfectly good store. Found by running the backfill against a copy, which
+  // is exactly the reason the copy comes first.
+  db.exec('CREATE INDEX IF NOT EXISTS turns_parent ON turns(parent_uuid)');
   return db;
 }
 
@@ -388,6 +420,97 @@ async function backfillTitles(dbPath = DB_PATH) {
   }, null, 2));
   db.close();
   return 0;
+}
+
+/**
+ * Fill parent_uuid and subagent_type on rows harvested before those columns existed.
+ *
+ * The same problem backfillTitles solves and the same shape of solution, deliberately: the
+ * incremental walk stores a byte offset per file and never revisits what it consumed, so a field
+ * added to the ingest is not retroactive. `--full` would do it and re-reads 10 GB to collect a few
+ * hundred kilobytes, and it has already lost a race with a hook harvest halfway through.
+ *
+ * UPDATE, never INSERT. This touches only rows the store already has, matched by primary key, so
+ * it cannot create a turn, cannot resurrect a deleted one, and cannot change any column but the
+ * two it exists to fill. That is what makes it safe to run against a live store, and it is checked
+ * rather than asserted: run it against a copy and diff the row counts of every table.
+ *
+ * A record with no parentUuid is left alone rather than written as NULL. Rewriting it would be
+ * harmless and would also make the "rows still empty" figure below unable to distinguish "not
+ * backfilled yet" from "genuinely has no parent", which is the number that says whether a second
+ * pass is worth running.
+ */
+export async function backfillAgents(dbPath = DB_PATH, { quiet = false } = {}) {
+  const db = openDb(dbPath);
+  const setParent = db.prepare('UPDATE turns SET parent_uuid = ? WHERE uuid = ? AND parent_uuid IS NULL');
+  const setAgent = db.prepare('UPDATE tool_calls SET subagent_type = ? WHERE tool_use_id = ? AND subagent_type IS NULL');
+  const before = {
+    turns: db.prepare('SELECT COUNT(*) n FROM turns').get().n,
+    tool_calls: db.prepare('SELECT COUNT(*) n FROM tool_calls').get().n,
+    parents: db.prepare('SELECT COUNT(*) n FROM turns WHERE parent_uuid IS NOT NULL').get().n,
+    agents: db.prepare('SELECT COUNT(*) n FROM tool_calls WHERE subagent_type IS NOT NULL').get().n,
+  };
+  const files = listTranscripts(PROJECTS);
+  let scanned = 0, skipped = 0, parents = 0, agents = 0;
+  const perFile = [];
+  for (const path of files) {
+    scanned++;
+    let text;
+    try { text = readFileSync(path, 'utf8'); } catch { skipped++; continue; }
+    let fileParents = 0, fileAgents = 0;
+    for (const line of text.split('\n')) {
+      // A string test before any JSON.parse, like backfillTitles. Parsing every line of 10 GB to
+      // find two fields is the cost this whole approach exists to avoid.
+      if (!line || (!line.includes('"parentUuid"') && !line.includes('"subagent_type"'))) continue;
+      let d;
+      try { d = JSON.parse(line); } catch { continue; }
+      if (typeof d?.uuid === 'string' && typeof d.parentUuid === 'string') {
+        fileParents += setParent.run(d.parentUuid, d.uuid).changes;
+      }
+      const content = d?.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const b of content) {
+        if (b?.type !== 'tool_use' || typeof b.id !== 'string') continue;
+        const kind = b.input?.subagent_type;
+        if (typeof kind === 'string' && kind) fileAgents += setAgent.run(kind, b.id).changes;
+      }
+    }
+    parents += fileParents;
+    agents += fileAgents;
+    if (fileParents || fileAgents) perFile.push({ file: path, parents: fileParents, agents: fileAgents });
+    if (!quiet && scanned % 1000 === 0) {
+      console.error(`  ${scanned}/${files.length} files, ${parents} parents, ${agents} agent types`);
+    }
+  }
+  const after = {
+    turns: db.prepare('SELECT COUNT(*) n FROM turns').get().n,
+    tool_calls: db.prepare('SELECT COUNT(*) n FROM tool_calls').get().n,
+    parents: db.prepare('SELECT COUNT(*) n FROM turns WHERE parent_uuid IS NOT NULL').get().n,
+    agents: db.prepare('SELECT COUNT(*) n FROM tool_calls WHERE subagent_type IS NOT NULL').get().n,
+  };
+  const report = {
+    files_scanned: scanned,
+    files_unreadable: skipped,
+    files_that_contributed: perFile.length,
+    // Row counts before and after, because a backfill that changed either created or destroyed a
+    // row and this one is only allowed to fill columns. Reported rather than assumed.
+    rows_before: { turns: before.turns, tool_calls: before.tool_calls },
+    rows_after: { turns: after.turns, tool_calls: after.tool_calls },
+    rows_unchanged: before.turns === after.turns && before.tool_calls === after.tool_calls,
+    parent_uuid: { before: before.parents, after: after.parents, filled: parents },
+    subagent_type: { before: before.agents, after: after.agents, filled: agents },
+    turns_still_without_a_parent: after.turns - after.parents,
+    agent_calls_still_without_a_type: db.prepare(
+      "SELECT COUNT(*) n FROM tool_calls WHERE tool_name = 'Agent' AND subagent_type IS NULL").get().n,
+    by_subagent_type: db.prepare(`SELECT subagent_type, COUNT(*) n FROM tool_calls
+                                   WHERE subagent_type IS NOT NULL GROUP BY 1 ORDER BY n DESC`).all(),
+    busiest_files: perFile.sort((a, b) => (b.parents + b.agents) - (a.parents + a.agents)).slice(0, 5),
+  };
+  if (!quiet) console.log(JSON.stringify(report, null, 2));
+  db.close();
+  // A backfill that changed a row count did something it is not allowed to do, and the exit code
+  // has to say so: this runs unattended from a script as often as it runs by hand.
+  return report.rows_unchanged ? 0 : 1;
 }
 
 function listTranscripts(dir) {
@@ -441,8 +564,9 @@ class Harvest {
         git_branch=COALESCE(excluded.git_branch, sessions.git_branch)`),
       putTurn: db.prepare(`INSERT OR REPLACE INTO turns
         (uuid,session_id,ts,model,request_id,input_tokens,cache_creation_input_tokens,cache_read_input_tokens,
-         output_tokens,thinking_tokens,eph_1h,eph_5m,service_tier,total_resident,is_sidechain,file_path,line_no)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+         output_tokens,thinking_tokens,eph_1h,eph_5m,service_tier,total_resident,is_sidechain,file_path,line_no,
+         parent_uuid)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
       putCompaction: db.prepare(`INSERT OR REPLACE INTO compactions
         (uuid,session_id,ts,trigger,version,entrypoint,pre_tokens,post_tokens,duration_ms,cumulative_dropped_tokens,
          messages_summarized,discovered_tools_json,preserved_json,summary_uuid,summary_chars,file_path,line_no)
@@ -454,10 +578,10 @@ class Harvest {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`),
       putToolCall: db.prepare(`INSERT OR REPLACE INTO tool_calls
         (tool_use_id,session_id,turn_uuid,ts,tool_name,server_name,target,input_sha1,input_bytes,
-         result_bytes,is_error,is_sidechain,file_path,line_no)
+         result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type)
         VALUES (?,?,?,?,?,?,?,?,?,
          COALESCE((SELECT result_bytes FROM tool_calls WHERE tool_use_id = ?), NULL),
-         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?)`),
+         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?)`),
       // The result arrives on a LATER line than the use, so this fills the row in place. If the
       // two land in different harvest runs the update finds nothing and result_bytes stays NULL,
       // which reads as "not yet seen" rather than as zero bytes.
@@ -538,7 +662,8 @@ class Harvest {
           u.output_tokens_details?.thinking_tokens ?? 0,
           u.cache_creation?.ephemeral_1h_input_tokens ?? 0,
           u.cache_creation?.ephemeral_5m_input_tokens ?? 0,
-          u.service_tier ?? null, inp + cw + cr, d.isSidechain ? 1 : 0, path, lineNo);
+          u.service_tier ?? null, inp + cw + cr, d.isSidechain ? 1 : 0, path, lineNo,
+          typeof d.parentUuid === 'string' ? d.parentUuid : null);
         this.stats.turns++;
       } else if (d.type === 'system' && d.subtype === 'compact_boundary') {
         const cm = d.compactMetadata ?? {};
@@ -617,7 +742,11 @@ class Harvest {
           typeof target === 'string' ? target : null,
           createHash('sha1').update(raw).digest('hex'), Buffer.byteLength(raw, 'utf8'),
           b.id, b.id,
-          d.isSidechain ? 1 : 0, path, lineNo);
+          d.isSidechain ? 1 : 0, path, lineNo,
+          // Only where the tool actually asked for one. Storing the empty string or "none" on
+          // every other tool would make `subagent_type IS NOT NULL` stop meaning "this spawned an
+          // agent", which is the one question the column exists to answer.
+          typeof input.subagent_type === 'string' ? input.subagent_type : null);
         this.stats.toolCalls++;
       } else if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
         const c = b.content;
@@ -818,6 +947,12 @@ async function selfTest() {
     // columns null forever because the upsert only coalesced version.
     { type: 'assistant', uuid: 'm1', sessionId: 's1', timestamp: '2026-08-20T00:07:00Z', entrypoint: 'claude-desktop', gitBranch: 'main', message: { model: 'claude-opus-5', content: [{ type: 'thinking', thinking: 'THINKTEXT' }, { type: 'text', text: 'SPOKENTEXT' }] } },
     { type: 'user', uuid: 'm2', sessionId: 's1', timestamp: '2026-08-20T00:07:01Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu9', content: [{ type: 'text', text: 'ARRAYRESULT' }] }] } },
+    // Subagent identity. An Agent call that names its type, a turn that hangs off it by
+    // parentUuid, and an ordinary tool call on the same file that must NOT acquire a type: the
+    // column has to distinguish "spawned an agent" from "did not", and a default of '' or 'none'
+    // would make `subagent_type IS NOT NULL` true for every row in the table.
+    { type: 'assistant', uuid: 'ag1', sessionId: 's1', timestamp: '2026-08-20T00:08:00Z', message: { model: 'claude-opus-5', content: [{ type: 'tool_use', id: 'tua', name: 'Agent', input: { subagent_type: 'general-purpose', prompt: 'go' } }] } },
+    { type: 'assistant', uuid: 'ag2', parentUuid: 'ag1', sessionId: 's1', timestamp: '2026-08-20T00:08:30Z', requestId: 'r-agent', isSidechain: true, message: { model: 'claude-opus-5', usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 5, output_tokens: 2 } } },
   ];
   writeFileSync(tf, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
 
@@ -1034,13 +1169,31 @@ async function selfTest() {
   const same = db.prepare(
     'SELECT COUNT(DISTINCT input_sha1) n FROM tool_calls WHERE target = ?').get('C:/x/a.md').n;
   checks.push(['byte-identical inputs share one sha1', same === 1, String(same)]);
+
+  // Subagent identity. Both fields were in the transcripts from the start and read by nothing.
+  const agent = db.prepare('SELECT * FROM tool_calls WHERE tool_use_id = ?').get('tua');
+  checks.push(['an Agent call records which agent it asked for',
+    agent?.subagent_type === 'general-purpose', String(agent?.subagent_type)]);
+  checks.push(['a tool that spawned no agent has NULL, not an empty string',
+    tc?.subagent_type === null, JSON.stringify(tc?.subagent_type)]);
+  const spawned = db.prepare('SELECT * FROM turns WHERE uuid = ?').get('ag2');
+  checks.push(['a turn records the record it replied to', spawned?.parent_uuid === 'ag1',
+    String(spawned?.parent_uuid)]);
+  const rootless = db.prepare('SELECT * FROM turns WHERE uuid = ?').get('u1');
+  checks.push(['a record with no parent stores NULL rather than its own uuid',
+    rootless?.parent_uuid === null, JSON.stringify(rootless?.parent_uuid)]);
+  checks.push(['the parent is a real row in this store, so the link resolves',
+    db.prepare('SELECT COUNT(*) n FROM tool_calls WHERE turn_uuid = ?').get('ag1').n === 1]);
   // Negative controls: extraction that always fired would pass everything above.
   checks.push(['a tool_use with no result leaves result_bytes NULL (gate can fail)',
     db.prepare('SELECT result_bytes r FROM tool_calls WHERE tool_use_id = ?').get('tu2').r === null]);
   checks.push(['a record with no content blocks yields no tool_calls',
     db.prepare('SELECT COUNT(*) n FROM tool_calls WHERE turn_uuid = ?').get('u1').n === 0]);
-  checks.push(['exactly the three planted calls were captured, no phantoms',
-    db.prepare('SELECT COUNT(*) n FROM tool_calls').get().n === 3,
+  // Four now: two Reads, one MCP call and the Agent call added with subagent identity. The number
+  // is written out rather than counted from the fixture on purpose, so adding a tool_use to that
+  // fixture has to be a deliberate edit here as well.
+  checks.push(['exactly the four planted calls were captured, no phantoms',
+    db.prepare('SELECT COUNT(*) n FROM tool_calls').get().n === 4,
     String(db.prepare('SELECT COUNT(*) n FROM tool_calls').get().n)]);
 
   // Survivor extraction.
@@ -1134,5 +1287,6 @@ else if (argv.includes('--self-test')) code = await selfTest();
 else if (argv.includes('--stats')) code = stats();
 else if (argv.includes('--backfill-survivors')) code = backfillSurvivors(DB_PATH) ? 0 : 1;
 else if (argv.includes('--backfill-titles')) code = await backfillTitles();
+else if (argv.includes('--backfill-agents')) code = await backfillAgents(resolveDbPath(argv));
 else code = await run({ full: argv.includes('--full') });
 if (IS_ENTRY) process.exit(code);
