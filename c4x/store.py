@@ -20,7 +20,12 @@ from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = ROOT / "data" / "context.db"
+# C4X_DB, the same override every node tool honours through paths.mjs. That module exists because
+# some tools read the variable and others hardcoded the default, so `C4X_DB=copy.db` silently read
+# one store and wrote another. The Python side never got the same treatment and ignored the
+# variable outright, which meant the dashboard and the audit could only ever be run against the
+# real store: pointing them at a fixture, the way CI does, was impossible.
+DB_PATH = Path(os.environ.get("C4X_DB") or (ROOT / "data" / "context.db"))
 HOME = str(Path.home())
 
 # Window resolution spawns node, so it is cached per session for a short ttl to keep that
