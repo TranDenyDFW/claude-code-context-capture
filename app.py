@@ -686,7 +686,14 @@ def _render_tab(idx, session_id, scope, cohort):
     # Summary states its own scope in its first line; Compare labels each arm itself and takes the
     # header selection as arm A, so the generic "not affected by the selection" banner would be a
     # false statement on it.
-    if tab_id in ("tab-summary", "tab-compare"):
+    #
+    # Waste is exempt for a sharper reason: it OVERRIDES the scope, calling scoped(..., "all", ...)
+    # whatever the radio says, because subagents make nearly every tool call. The banner is built
+    # from the header's scope and cannot know that, so on this tab it printed "main thread only"
+    # over numbers that count subagents. That is not a mismatch of wording, it inverts the figure:
+    # the worst re-read offender here is 614 reads, all of them subagent, and the main-thread
+    # reading the banner promised is zero. The tab states its own population instead.
+    if tab_id in ("tab-summary", "tab-compare", "tab-waste"):
         banner = None
     elif tab_id in SELECTION_SCOPED:
         banner = html.Div(f"Describing {population_label(session_id, cohort, scope or 'main')}.",

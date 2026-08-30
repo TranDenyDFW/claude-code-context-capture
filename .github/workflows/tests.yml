@@ -31,7 +31,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install -r requirements.txt
-          pip install ruff
+          pip install -r requirements-dev.txt
 
       # Synthetic, and it says so in every row it writes. Nothing here came from a conversation.
       - name: Build the fixture store
