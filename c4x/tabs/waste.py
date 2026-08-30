@@ -69,7 +69,8 @@ def _reread_curve(read_tools, where, args, dup_min):
     top10 = float(share[min(9, len(share) - 1)])
     half = int(next((i + 1 for i, v in enumerate(share) if v >= 50), len(share)))
     return html.Div([
-        dcc.Graph(figure=dark_fig(fig, 360), config={"displayModeBar": False}),
+        dcc.Graph(id="fig-reread", figure=dark_fig(fig, 360),
+                  config={"displayModeBar": False}),
         html.Div(
             f"The ten worst groups are {top10:.1f}% of all {total:,} re-reads, and half of them "
             f"sit in the worst {half:,} of {len(share):,} groups. The table above shows the "
@@ -195,11 +196,18 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         evidence_block(
             "Files read repeatedly inside one session", dup, sql_dup, dup_args,
             columns=["reads", "bytes", "variants", "session_id", "target"],
-            heat=["reads", "bytes"],
+            heat=["reads", "bytes"], table_id="tbl-reread",
             note=f"Every re-read is re-billed on every later request in that session, so the cost "
                  f"is the read multiplied by the turns that follow it. THE WORST 200 GROUPS of "
                  f"{groups:,}: the cards above and the curve below count all of them."),
 
+        # The rows the table was built from, unfiltered, plus the size of the population behind
+        # them. The curve is drawn over every group and the table holds the worst 200, so the
+        # cross-filter needs both numbers to say what a click actually did.
+        dcc.Store(id="reread-rows",
+                  data={"rows": dup.to_dict("records") if not dup.empty else [],
+                        "population": groups}),
+        html.Div(id="reread-filter-note"),
         _reread_curve(read_tools, wsid, wargs, dup_min),
 
         evidence_block(
