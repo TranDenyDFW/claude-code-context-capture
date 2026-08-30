@@ -6,7 +6,17 @@ import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 
 from c4x.store import COMPACTION_WINDOWS, THRESHOLDS, all_compactions, fit_window
-from c4x.theme import BORDER, DANGER, GOOD, MUTED, TABLE_STYLE, TEXT, dark_fig, numeric_columns
+from c4x.theme import (
+    BORDER,
+    DANGER,
+    GOOD,
+    MUTED,
+    TABLE_STYLE,
+    TEXT,
+    dark_fig,
+    header_help,
+    numeric_columns,
+)
 
 
 # ---- Compactions ----------------------------------------------------------
@@ -61,12 +71,14 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
         ),
         dash_table.DataTable(
             id="tbl-compactions",
-            columns=numeric_columns(cols, {"pre_tokens", "post_tokens", "dropped", "survivors",
-                                           "fitted_window", "threshold", "overshoot"}),
+            columns=(_cols :=
+                numeric_columns(cols, {"pre_tokens", "post_tokens", "dropped", "survivors",
+                                           "fitted_window", "threshold", "overshoot"})),
+            tooltip_header=header_help(_cols),
             # uuid rides along in the data but is not a displayed column, so a click can be traced
             # back to the right compaction even after the user sorts or filters the table.
             data=show[cols + ["uuid"]].to_dict("records"),
-            page_size=15, sort_action="native", filter_action="native",
+            page_size=15, filter_action="native",  # sort comes from TABLE_STYLE
             style_table={"overflowX": "auto"},
             style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
             **TABLE_STYLE,

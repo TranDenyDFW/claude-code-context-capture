@@ -22,6 +22,7 @@ from c4x.theme import (
     dark_fig,
     fmt_bytes,
     fmt_tokens,
+    header_help,
     stat_card,
 )
 
@@ -60,7 +61,9 @@ def summary_layout(session_id=None, scope="main", cohort=None):
 
         accordion("What to do about it", f"{len(rows)} finding(s), each with an action",
                   dash_table.DataTable(
-                      columns=[{"name": c, "id": c} for c in ["finding", "evidence", "do this"]],
+                      columns=(_cols :=
+                          [{"name": c, "id": c} for c in ["finding", "evidence", "do this"]]),
+                      tooltip_header=header_help(_cols),
                       data=rows,
                       style_cell_conditional=[
                           {"if": {"column_id": "finding"}, "minWidth": "200px", "maxWidth": "240px",

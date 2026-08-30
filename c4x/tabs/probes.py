@@ -13,6 +13,7 @@ from c4x.theme import (
     TABLE_STYLE,
     TEXT,
     WARN,
+    header_help,
     stat_card,
 )
 
@@ -54,8 +55,9 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                      "describe the probe, not your live work. That difference is the finding.",
                      style=SECTION_NOTE),
             dash_table.DataTable(
-                columns=[{"name": c, "id": c} for c in
-                         ["id", "ts", "ok", "model", "total_tokens", "auto_compact_threshold"]],
+                columns=(_cols := [{"name": c, "id": c} for c in
+                         ["id", "ts", "ok", "model", "total_tokens", "auto_compact_threshold"]]),
+                tooltip_header=header_help(_cols),
                 data=probes.astype(object).where(probes.notna(), "").to_dict("records"),
                 **TABLE_STYLE),
             html.Div("Per-category items and cost", style=SECTION_HEAD),
@@ -63,7 +65,9 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                      "of them, which is exactly what makes the per-item cost unrecoverable from "
                      "this route alone.", style=SECTION_NOTE),
             dash_table.DataTable(
-                columns=[{"name": c, "id": c} for c in ["probe_id", "kind", "items", "tokens"]],
+                columns=(_cols :=
+                    [{"name": c, "id": c} for c in ["probe_id", "kind", "items", "tokens"]]),
+                tooltip_header=header_help(_cols),
                 data=details.to_dict("records"), page_size=12,
                 style_table={"overflowX": "auto"}, **TABLE_STYLE),
         ]
@@ -71,7 +75,9 @@ def probes_layout(session_id=None, scope="main", cohort=None):
             body += [
                 html.Div("The items that carry a price", style=SECTION_HEAD),
                 dash_table.DataTable(
-                    columns=[{"name": c, "id": c} for c in ["probe_id", "kind", "name", "tokens"]],
+                    columns=(_cols :=
+                        [{"name": c, "id": c} for c in ["probe_id", "kind", "name", "tokens"]]),
+                    tooltip_header=header_help(_cols),
                     data=named.to_dict("records"), page_size=12,
                     style_table={"overflowX": "auto"}, **TABLE_STYLE),
             ]

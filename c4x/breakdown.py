@@ -31,6 +31,7 @@ from c4x.theme import (
     WARN,
     dark_fig,
     fmt_tokens,
+    header_help,
     numeric_columns,
 )
 
@@ -260,9 +261,10 @@ def breakdown_body(include_sidechain: bool = False, session_id=None, cohort=None
         bar,
         html.Div(style={"height": "14px"}),
         dash_table.DataTable(
-            columns=numeric_columns(
+            columns=(_cols := numeric_columns(
                 ["category", "tokens", "percent", "items"], {"tokens", "percent", "items"},
-                {"percent": Format(precision=1, scheme=Scheme.fixed)}),
+                {"percent": Format(precision=1, scheme=Scheme.fixed)})),
+            tooltip_header=header_help(_cols),
             data=rows, **TABLE_STYLE),
         html.Div(notes, style={"margin": "10px 0 0 0"}),
         html.Div(
