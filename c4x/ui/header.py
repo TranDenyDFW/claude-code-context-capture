@@ -10,6 +10,7 @@ calls it unqualified. That is deliberate: the table audit rebinds app.refresh_st
 before exercising the callbacks, because the real one harvests and an audit must not write to the
 store it is auditing.
 """
+import os
 import subprocess
 import threading as _threading
 import time as _time
@@ -120,7 +121,16 @@ def refresh_store(min_interval: float = 4.0) -> None:
     Guarded twice: a non-blocking lock so overlapping ticks cannot start a second node process,
     and a floor on frequency so a fast Interval cannot spawn harvests in a loop. A failure is
     recorded rather than raised; a dashboard that cannot refresh must still render.
+
+    C4X_READ_ONLY stops it entirely, because THE DASHBOARD IS A WRITER and that is easy to forget.
+    Pointing it at a copy of a store does not leave the copy alone: this harvest runs against
+    whatever store it was pointed at and writes real rows into it. That was found the hard way,
+    building redacted screenshots: the copy was verified clean, the dashboard was pointed at it,
+    and within one tick the harvest had re-inserted every real working directory it had just been
+    stripped of. The images looked wrong for twenty minutes before the cause was the obvious one.
     """
+    if os.environ.get("C4X_READ_ONLY"):
+        return
     if not _harvest_lock.acquire(blocking=False):
         return
     try:
