@@ -9,6 +9,7 @@ import time as _time
 from dash import dash_table, html
 from dash.dash_table.Format import Format, Scheme
 
+from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     q,
     scoped,
@@ -203,7 +204,22 @@ def selection_metrics(session_id=None, cohort=None, scope="main") -> dict:
     calls = int(row["calls"] or 0)
     peak = int(row["peak"] or 0)
     cache = int(row["cache_read"] or 0)
+    # Cost is per MODEL, so it needs its own grouped query rather than a multiplication of the
+    # totals above: a selection spanning two models has two prices, and one of them may not be in
+    # the table at all. Returns 0.0 with `cost_calls` at 0 when nothing here is priced, and the
+    # compare table drops any row where both arms are zero, so an unpriced comparison shows no
+    # cost row rather than a row of zeroes claiming both arms were free.
+    by_model = q(f"""SELECT model, COUNT(*) AS calls,
+                            SUM(COALESCE(input_tokens,0))                AS input_tokens,
+                            SUM(COALESCE(output_tokens,0))               AS output_tokens,
+                            SUM(COALESCE(cache_read_input_tokens,0))     AS cache_read_input_tokens,
+                            SUM(COALESCE(cache_creation_input_tokens,0))
+                              AS cache_creation_input_tokens
+                       FROM api_calls WHERE 1=1 {w} GROUP BY model""", args)
+    cost, cost_calls, _missing = cost_of_rows(by_model.to_dict("records"))
     return {
+        "cost_usd": round(cost, 2),
+        "cost_calls": cost_calls,
         "sessions": int(row["sessions"] or 0),
         "calls": calls,
         "cache_read": cache,
@@ -243,6 +259,13 @@ COMPARE_ROWS = [
     ("compactions", "compactions", "count", "higher", False),
     ("tool_calls", "tool calls", "count", None, False),
     ("tool_bytes", "tool result bytes", "bytes", "higher", False),
+    # Last, and labelled as an estimate in its own unit column, because it is the one row here
+    # that is not a reading. Every other metric is something the transcripts recorded; this is
+    # arithmetic over a price table that lives in c4x/pricing.py and is dated on the Cost tab.
+    # It scales with population, like the other totals, so it is never marked comparable across
+    # arms of different sizes.
+    ("cost_usd", "estimated cost, USD", f"estimate, prices of {PRICE_TABLE_DATE}", "higher", False),
+    ("cost_calls", "calls the price table covers", "count", None, False),
 ]
 
 
