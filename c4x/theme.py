@@ -196,7 +196,7 @@ def heat_cells(rows, column, *, invert=False):
         operator = ">="
         edges = [values[int(len(values) * f) - 1] for f in (0.50, 0.70, 0.85, 0.95)]
     out, previous = [], None
-    for shade, edge in zip(shades, edges):
+    for shade, edge in zip(shades, edges, strict=True):
         # A tie across a boundary would emit two rules with the same threshold, and the deeper one
         # would win for every row the shallower one covers. Skipped rather than emitted, so a
         # column with few distinct values gets fewer bands instead of one flat block of colour.
@@ -236,7 +236,7 @@ def toward_background(color: str, amount: float) -> str:
     top = color.lstrip("#")
     mixed = [round(int(top[i:i + 2], 16) * (1 - amount) + int(base[i:i + 2], 16) * amount)
              for i in (0, 2, 4)]
-    return "#%02x%02x%02x" % tuple(mixed)
+    return "#{:02x}{:02x}{:02x}".format(*mixed)
 
 
 def treemap(labels, parents, values, *, title, height=420, colors=None, hover=None) -> go.Figure:
