@@ -330,9 +330,14 @@ def table_sites(module=None):
     observation as well.
     """
     sites, edges, entries, opaque = [], {}, {}, []
+    STALE_EXEMPTIONS.clear()
     for real, name in sorted(APP_FILES.items(), key=lambda kv: kv[1]):
         scan_one(real, name, sites, edges, entries, opaque, module)
-    calls, opaque_calls = finish_scan(sites, edges, opaque, module)
+    calls, opaque_calls, stale = finish_scan(sites, edges, opaque, module)
+    # Kept on the module rather than threaded through four signatures. coverage_errors reads it, so
+    # an exemption that stopped describing its call is reported by the same gate that would have
+    # caught the call in the first place.
+    STALE_EXEMPTIONS.extend(stale)
     return sites, calls, entries, opaque_calls
 
 
@@ -368,10 +373,53 @@ def scan_one(real, name, sites, edges, entries, opaque, module):
                 # too meant any method sharing a builder's name became a call site the audit
                 # demanded be taken, which it never could be.
                 if isinstance(child.func, ast.Name) and here:
-                    edges.setdefault(here, []).append((child.func.id, position))
+                    # Keyword LITERALS at the call site, so an exemption can be checked against
+                    # what the call actually passes rather than trusted.
+                    literals = {kw.arg: kw.value.value for kw in child.keywords
+                                if kw.arg and isinstance(kw.value, ast.Constant)}
+                    edges.setdefault(here, []).append((child.func.id, position, literals))
             walk(child, here)
 
     walk(tree, None)
+
+
+STALE_EXEMPTIONS = []
+
+# Calls that name a table-building function but cannot reach a table, with the reason.
+#
+# Keyed by (caller, callee, keyword, value): the exemption applies only while the call still passes
+# that keyword. Checked, not assumed - exempt_is_still_true() re-reads the source and reports an
+# exemption that no longer describes the code, so a stale one fails rather than hides a real gap.
+EXEMPT_CALLS = {
+    ("_session_controls", "session_view"): (
+        "with_cards", False,
+        "session_view returns at `if not with_cards` before building anything, so this call can "
+        "never reach a table and no exercise could make it"),
+}
+
+
+def exempt_is_still_true(calls_with_keywords):
+    """Every exemption must still describe the call it exempts.
+
+    Returns the errors, so a keyword that was removed or flipped is reported rather than silently
+    granting coverage to a call that now really can build a table.
+    """
+    errors = []
+    seen = {(caller, callee) for caller, callee, _position, _kw in calls_with_keywords}
+    for (caller, callee), (keyword, value, reason) in EXEMPT_CALLS.items():
+        if not reason.strip():
+            errors.append(f"the exemption for {caller}->{callee} carries no reason")
+        if (caller, callee) not in seen:
+            errors.append(f"{caller}() no longer calls {callee}(), so its exemption is stale "
+                          f"and should be deleted")
+            continue
+        actual = next(kw for c, k, _p, kw in calls_with_keywords
+                      if (c, k) == (caller, callee))
+        if actual.get(keyword) != value:
+            errors.append(f"{caller}() calls {callee}() with {keyword}={actual.get(keyword)!r}, "
+                          f"not {value!r}, so the exemption no longer holds and this call must be "
+                          f"covered like any other")
+    return errors
 
 
 def finish_scan(sites, edges, opaque, module):
@@ -385,7 +433,7 @@ def finish_scan(sites, edges, opaque, module):
     while growing:
         growing = False
         for caller, called in edges.items():
-            if caller not in builders and any(c in builders for c, _ in called):
+            if caller not in builders and any(c in builders for c, _, _ in called):
                 builders.add(caller)
                 growing = True
 
@@ -396,10 +444,13 @@ def finish_scan(sites, edges, opaque, module):
             if id(getattr(module, attr, None)) in objects:
                 builders.add(attr)
 
-    calls = [(caller, callee, position)
+    every = [(caller, callee, position, literals)
              for caller, called in edges.items()
-             for callee, position in called if callee in builders]
-    return calls, opaque
+             for callee, position, literals in called if callee in builders]
+    stale = exempt_is_still_true(every)
+    calls = [(caller, callee, position) for caller, callee, position, _lit in every
+             if (caller, callee) not in EXEMPT_CALLS]
+    return calls, opaque, stale
 
 
 def coverage_errors(built, chain, constructed, walked, sites, calls,
@@ -438,6 +489,10 @@ def coverage_errors(built, chain, constructed, walked, sites, calls,
     # A shared builder reached through one caller says nothing about its other callers, and
     # evidence_block has eight.
     reached = set(built) | set(chain)
+    # An exemption that no longer describes its call is a failure here, not a note: it would
+    # otherwise grant coverage to a call that can now really build a table.
+    errors.extend(STALE_EXEMPTIONS)
+
     for caller, callee, position in calls:
         if position not in reached:
             errors.append(f"{at(position)} in {caller}() calls {callee}(), which can build "
