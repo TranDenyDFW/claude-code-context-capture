@@ -67,7 +67,10 @@ def _render_tab(idx, session_id, scope, cohort):
     # over numbers that count subagents. That is not a mismatch of wording, it inverts the figure:
     # the worst re-read offender here is 614 reads, all of them subagent, and the main-thread
     # reading the banner promised is zero. The tab states its own population instead.
-    if tab_id in ("tab-summary", "tab-compare", "tab-waste"):
+    # Named ids, and a test asserts every one of them exists in TABS. This tuple held "tab-waste"
+    # for one commit after that tab was renamed to "tab-cost", which switched the exemption off
+    # silently and put the contradiction it exists to prevent back onto the page.
+    if tab_id in ("tab-summary", "tab-compare", "tab-cost"):
         banner = None
     elif tab_id in SELECTION_SCOPED:
         banner = html.Div(f"Describing {population_label(session_id, cohort, scope or 'main')}.",

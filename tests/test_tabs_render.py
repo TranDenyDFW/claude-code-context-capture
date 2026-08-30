@@ -8,6 +8,7 @@ The Session tab shipped a defect that this shape of test catches and none of the
 rendered correctly on the server every time, and the page reset itself. That half is checked in the
 browser pass, not here, but a tab that raises is caught right here.
 """
+
 import pytest
 
 from c4x.cli import extract
@@ -76,6 +77,43 @@ def test_every_tab_states_the_population_it_describes(pane, session_id, has_stor
         text = "\n".join(extract.texts(pane(tab_id, session=session_id)))
         assert ("session" in text.lower() or "store" in text.lower()), (
             f"{tab_id} never names its population")
+
+
+def test_every_banner_exemption_names_a_tab_that_exists(app):
+    """A stale id in that tuple switches an exemption off silently.
+
+    It held "tab-waste" for one commit after the tab was renamed to "tab-cost", so the Cost tab
+    went back to printing the generic "main thread only" banner directly above its own sentence
+    saying it counts subagent work whichever way the radio is set. Nothing failed: every test
+    checked what the tab SAYS, and the contradiction was in the line above it.
+    """
+    import ast as _ast
+    import inspect
+    import textwrap
+
+    from c4x.ui.callbacks import navigation
+
+    # Parsed, not grepped. A regex over the source also reads the COMMENT that documents this very
+    # bug, which names the dead id on purpose, so a text scan fails on correct code. Only string
+    # constants in the executable body count, and the docstring is skipped for the same reason.
+    tree = _ast.parse(textwrap.dedent(inspect.getsource(navigation._render_tab)))
+    function = tree.body[0]
+    body = function.body[1:] if isinstance(function.body[0], _ast.Expr) else function.body
+    quoted = {node.value for statement in body for node in _ast.walk(statement)
+              if isinstance(node, _ast.Constant) and isinstance(node.value, str)
+              and node.value.startswith("tab-")}
+    known = {tab_id for tab_id, _label, _fn in app.TABS}
+    unknown = quoted - known
+    assert not unknown, f"_render_tab names tabs that do not exist: {sorted(unknown)}"
+
+
+def test_a_tab_that_overrides_the_scope_does_not_get_the_generic_banner(pane, session_id,
+                                                                       has_store):
+    """The Cost tab forces scope="all". The generic banner is built from the HEADER's scope and
+    cannot know that, so on this tab it states the opposite of what the numbers are."""
+    text = "\n".join(extract.texts(pane("tab-cost", session=session_id, scope="main")))
+    assert "main thread only" not in text, (
+        "the Cost tab counts subagent work and the banner above it claims main thread only")
 
 
 def test_the_failure_panel_itself_works(app, has_store):
