@@ -73,7 +73,11 @@ from c4x.store import (  # noqa: E402, F401
 from c4x.tabs import session_view  # noqa: E402, F401
 from c4x.theme import GOOD, fmt_tokens  # noqa: E402, F401
 from c4x.ui.callbacks.compare import _cmp_render, _cmp_targets  # noqa: E402, F401
-from c4x.ui.callbacks.navigation import _render_tab, _switch_tab  # noqa: E402, F401
+from c4x.ui.callbacks.navigation import (  # noqa: E402, F401
+    _render_tab,
+    _switch_tab,
+    _tab_styles,
+)
 from c4x.ui.callbacks.panels import (  # noqa: E402, F401
     _compaction_clicked,
     _message_clicked,
@@ -82,6 +86,7 @@ from c4x.ui.callbacks.panels import (  # noqa: E402, F401
 )
 from c4x.ui.callbacks.selection import (  # noqa: E402, F401
     _cohort_options,
+    _finding_clicked,
     _pick_from_table,
     _selector_options,
     _tick,

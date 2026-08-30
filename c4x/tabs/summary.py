@@ -26,6 +26,9 @@ from c4x.theme import (
     stat_card,
 )
 
+# Carried for the click, never shown. Named once so the table and the findings cannot drift.
+_HIDDEN = ("session_id", "goes to")
+
 
 def summary_layout(session_id=None, scope="main", cohort=None):
     """Store-wide values, all of them, and nothing per-selection.
@@ -61,9 +64,23 @@ def summary_layout(session_id=None, scope="main", cohort=None):
 
         accordion("What to do about it", f"{len(rows)} finding(s), each with an action",
                   dash_table.DataTable(
+                      # Clickable. A finding names the tab that proves it, and usually a session,
+                      # so a reader is not left copying an 8-character prefix into a dropdown of
+                      # 316. A finding about the whole store, like fixed overhead, names a tab and
+                      # no session: it moves the reader without touching their selection.
+                      #
+                      # Both travel as DECLARED columns that are then hidden. hidden_columns only
+                      # hides a column that exists; naming one that was never declared hides
+                      # nothing and, worse, keeps it out of `derived_viewport_data`, which is the
+                      # row the click callback reads. That was the state this shipped in for one
+                      # commit: the table rendered, the rows looked clickable, and every click was
+                      # a no-op that raised PreventUpdate where nothing could see it.
+                      id="tbl-findings",
                       columns=(_cols :=
-                          [{"name": c, "id": c} for c in ["finding", "evidence", "do this"]]),
+                          [{"name": c, "id": c} for c in ["finding", "evidence", "do this"]]) +
+                          [{"name": c, "id": c} for c in _HIDDEN],
                       tooltip_header=header_help(_cols),
+                      hidden_columns=list(_HIDDEN),
                       data=rows,
                       style_cell_conditional=[
                           {"if": {"column_id": "finding"}, "minWidth": "200px", "maxWidth": "240px",
@@ -153,6 +170,8 @@ def decisions() -> list:
                         f"{mult:,.0f}x its own peak window",
             "do this": "Split long-running work into fresh sessions. Context cost grows with "
                        "turns resident, not with what you asked for.",
+            "session_id": str(r["session_id"]),
+            "goes to": "tab-session",
         })
 
     # 2. A file read N times in one session is billed on every request after each read.
@@ -172,6 +191,8 @@ def decisions() -> list:
                         f"{extra:,} of them repeats, {fmt_bytes(r['bytes'])} of results",
             "do this": "Grep for the line you need instead of re-reading the file, or delegate the "
                        "reading to a subagent so the content never enters this window.",
+            "session_id": str(r["session_id"]),
+            "goes to": "tab-cost",
         })
 
     # 3. An MCP server's schema is resident whether or not you call it.
@@ -187,6 +208,7 @@ def decisions() -> list:
             "evidence": f"least used: {names}",
             "do this": "Remove the ones you do not use from your MCP config. Their tool schemas "
                        "occupy the window from session start whether or not you call them.",
+            "goes to": "tab-cost",
         })
 
     # 4. Fixed overhead is paid at the start of every session, before anything is asked.
@@ -202,6 +224,9 @@ def decisions() -> list:
                             f"{fmt_tokens(mem)} is memory files and {fmt_tokens(skl)} is skills",
                 "do this": "Trim CLAUDE.md and unload skills you are not using. This is paid on "
                            "the first request of every session and never freed.",
+                # No session: the baseline is one measurement of the machine, not of a session.
+                # Window's Configuration panel is where the memory files and skills are itemised.
+                "goes to": "tab-window",
             })
 
     # 5. Compactions are recoverable but lossy, and a session that compacts repeatedly is a
@@ -231,6 +256,10 @@ def decisions() -> list:
             "evidence": f"{str(r['session_id'])[:8]} compacted {n} times, {dropped_txt}",
             "do this": "Check the Compactions tab for what it discarded, then split that work "
                        "across sessions so the window is not repeatedly rebuilt.",
+            # It tells the reader to check a tab, so clicking it goes there. A finding that names
+            # its evidence and then makes the reader navigate by hand is half a finding.
+            "session_id": str(r["session_id"]),
+            "goes to": "tab-compactions",
         })
 
     return out

@@ -141,7 +141,20 @@ def test_the_tab_renders_for_a_session_with_no_compactions(pane, q, has_store):
     assert extract.figures(body), "no chart rendered for a session with no compactions"
 
 
-def test_no_session_selected_says_so_rather_than_rendering_an_empty_chart(pane, has_store):
+def test_no_session_selected_draws_a_real_session_and_names_it(pane, has_store):
+    """This used to assert the opposite, and the opposite was the right assertion at the time.
+
+    The tab rendered "No session selected" and nothing else. Refusing to draw an empty chart was
+    correct, because an empty chart reads as a session with no activity. But the refusal was the
+    whole page, and a first-time reader who has selected nothing sees this tab before any other.
+
+    It now draws the most recently active session and says, in the tab and in the banner above it,
+    which session that is. What must never come back is a chart with no population named: that is
+    the failure both versions of this test exist to prevent.
+    """
     body = pane("tab-session", session=None)
-    assert "No session selected" in "\n".join(extract.texts(body))
-    assert not extract.figures(body), "a chart was drawn with nothing selected"
+    text = "\n".join(extract.texts(body))
+    assert extract.figures(body), "nothing is drawn when nothing is selected"
+    assert "most recently active session" in text, "it defaulted and did not say so"
+    assert "the whole store" not in text, (
+        "the banner claims the whole store above one session's chart")
