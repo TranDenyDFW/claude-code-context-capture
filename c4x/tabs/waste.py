@@ -139,6 +139,49 @@ def _estimated_cost(where, args):
     ])
 
 
+def _subagent_types(where, args):
+    """Which kinds of subagent were spawned, and what their calls returned.
+
+    Subagent work is roughly 70% of the API calls in this store and was the largest block the app
+    could not attribute to anything: `tool_calls` held 827 Agent rows and not one of them could say
+    what it ran. The type was in the transcripts the whole time, in the tool's own input, and was
+    discarded at ingest.
+
+    A row of `Agent` with no type is not an error. Some Agent calls omit `subagent_type` and take
+    the default, and the transcript records the omission rather than the default, so this reports
+    them as unknown rather than filling in what it thinks was meant.
+    """
+    sql = """SELECT COALESCE(subagent_type, '(not recorded)') AS agent,
+                    COUNT(*)                                 AS calls,
+                    COUNT(DISTINCT session_id)               AS sessions,
+                    SUM(COALESCE(result_bytes, 0))           AS bytes,
+                    SUM(COALESCE(is_error, 0))               AS errors,
+                    MIN(ts) AS first_seen, MAX(ts) AS last_seen
+               FROM tool_calls
+              WHERE tool_name IN ('Agent', 'Task') """ + where + """
+              GROUP BY agent ORDER BY calls DESC"""
+    df = q(sql, args)
+    if df.empty:
+        return html.Div()
+    df["bytes"] = (df["bytes"] / 1024).round(1)
+    for column in ("first_seen", "last_seen"):
+        df[column] = df[column].astype(str).str.slice(0, 16).str.replace("T", " ")
+    unknown = int(df.loc[df["agent"] == "(not recorded)", "calls"].sum())
+    return evidence_block(
+        "Subagents, by the kind that was asked for", df, sql, args,
+        columns=numeric_columns(
+            ["agent", "calls", "sessions", "bytes", "errors", "first_seen", "last_seen"],
+            {"calls", "sessions", "bytes", "errors"},
+            {"bytes": Format(precision=1, scheme=Scheme.fixed)}),
+        heat=["calls", "bytes"], page_size=10,
+        note="Read from the Agent call's own input, which this store began keeping in the "
+             "harvest and backfilled over every transcript already on disk. "
+             + (f"{unknown:,} calls named no type and are reported as such rather than assumed to "
+                f"be the default. " if unknown else "")
+             + "bytes is tool RESULT bytes, not tokens: an agent's own turns are counted "
+               "elsewhere, under the session that spawned it.")
+
+
 def _repeated_inputs(where, args, session_id=None):
     """Identical tool INPUTS issued in more than one session.
 
@@ -336,6 +379,8 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         _reread_curve(read_tools, wsid, wargs, dup_min),
 
         _estimated_cost(wsid, wargs),
+
+        _subagent_types(wsid, wargs),
 
         _repeated_inputs(wsid, wargs, session_id),
 

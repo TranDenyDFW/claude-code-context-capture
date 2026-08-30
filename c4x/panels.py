@@ -4,8 +4,6 @@ Everything here builds a component from data the store returned, so it sits abov
 store.py and below the tabs. `evidence_block` is the busiest thing in the app, built from eight
 different callers, which is why the audit measures coverage per CALLER rather than per line.
 """
-import time as _time
-
 from dash import dash_table, html
 from dash.dash_table.Format import Format, Scheme
 
@@ -37,29 +35,6 @@ from c4x.theme import (
     numeric_columns,
     stat_card,
 )
-
-_text_note_cache = {"at": 0.0, "note": None}
-
-
-def stored_text_note(ttl: float = 300.0) -> str:
-    """One line naming what the store holds, with the scale, for the header.
-
-    Cached the way the rest of this file caches, because the header is rebuilt by every callback and
-    a COUNT over messages on each of those would be a self-inflicted cost on the page that exists to
-    show what things cost.
-    """
-    now = _time.time()
-    if _text_note_cache["note"] is not None and now - _text_note_cache["at"] < ttl:
-        return _text_note_cache["note"]
-    try:
-        row = q("SELECT COUNT(*) AS n, COALESCE(SUM(chars), 0) AS chars FROM messages").iloc[0]
-        note = (f"this store keeps the TEXT of {int(row['n']):,} records "
-                f"({fmt_bytes(int(row['chars']))} of it), not just their sizes")
-    except Exception:                               # noqa: BLE001 - a header must always render
-        note = "this store keeps the text of your conversations, not just their sizes"
-    _text_note_cache["at"] = now
-    _text_note_cache["note"] = note
-    return note
 
 
 # ---- Overview -------------------------------------------------------------
