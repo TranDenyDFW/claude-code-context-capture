@@ -1,0 +1,69 @@
+@import 'tailwindcss';
+
+/* The palette the dashboard already uses, named rather than repeated.
+ *
+ * The Dash app carries these values inline in 136 style dicts, which is the actual reason a
+ * restyle was hard enough to prompt a rewrite: there was no one place to change a colour. There is
+ * now. Tailwind 4 takes its config from CSS, so this block IS the design system.
+ *
+ * The hues are GitHub dark, kept deliberately: this tool is read beside a terminal and an editor,
+ * and a dashboard that fights them for attention gets closed. */
+@theme {
+  --color-page: #0d1117;
+  --color-panel: #161b22;
+  --color-panel-raised: #1c2129;
+  --color-edge: #30363d;
+  --color-edge-bright: #444c56;
+  --color-ink: #e6edf3;
+  --color-ink-dim: #8b949e;
+  --color-ink-faint: #6e7681;
+
+  --color-accent: #58a6ff;
+  --color-good: #3fb950;
+  --color-warn: #d29922;
+  --color-bad: #f85149;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbars. Left to the browser they arrive as a bright light-grey strip on a near-black page,
+ * which is the single loudest thing on screen and is furniture. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-edge-bright) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--color-edge-bright);
+  border-radius: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* A column carrying an explanation is marked, because the only other way to discover a tooltip is
+ * to hover every header in turn. Same convention the Dash app settled on. */
+.has-help {
+  border-bottom: 1px dotted var(--color-ink-faint);
+  cursor: help;
+}
