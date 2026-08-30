@@ -353,3 +353,21 @@ def mirror_predict(tokens: int, window: int = 1_000_000):
         raise HTTPException(
             status_code=503,
             detail={"error": "mirror unavailable", "cause": str(exc)[:200]}) from exc
+
+
+# The built frontend, served by this same process when it exists.
+#
+# LAST, and after every /api route, because a mount at "/" catches whatever did not match above it.
+# Registered earlier it would swallow the API and every request would be answered with index.html,
+# which a browser renders as a blank page and no error anywhere says why.
+#
+# It is OPTIONAL. In development the page is served by Vite on 5173 with hot reload and proxies /api
+# here, so `frontend/dist` is usually absent and this does nothing. After `npm run build` the same
+# server answers both, which means one process and no CORS rather than two ports to remember.
+_dist = ROOT / "frontend" / "dist"
+if _dist.is_dir():
+    from fastapi.staticfiles import StaticFiles
+
+    # html=True serves index.html for "/" itself. The app keeps its state in memory rather than in
+    # the URL, so there are no client-side routes needing a catch-all beyond that.
+    api.mount("/", StaticFiles(directory=str(_dist), html=True), name="frontend")
