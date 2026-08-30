@@ -112,6 +112,88 @@ describe('a table tells the truth about its values', () => {
   })
 })
 
+describe('clicking a row to select a session', () => {
+  it('acts on a table that identifies a session in a HIDDEN column', () => {
+    // The real shape of the All sessions table: `session_id` is in every row and absent from the
+    // column list, which is how the dashboard carries an identifier without showing a uuid. The
+    // first version of this check read `columns`, which made the one table the feature exists for
+    // the only table where it did nothing.
+    const clicked: Record<string, unknown>[] = []
+    const rows = [{ session_id: 'abc', turns: 10 }]
+    const hidden = { id: 't', columns: ['turns'], rows }
+    render(
+      <Pane payload={payload({ tables: [hidden] })} onRowClick={(r) => clicked.push(r)} />,
+    )
+    const row = screen.getByRole('table').querySelector('tbody tr')!
+    row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(clicked).toEqual([{ session_id: 'abc', turns: 10 }])
+  })
+
+  it('is INERT on a table with no session column, rather than looking clickable and doing nothing', () => {
+    const clicked: Record<string, unknown>[] = []
+    render(
+      <Pane
+        payload={payload({ tables: [table('t', [{ model: 'opus', usd: 1 }])] })}
+        onRowClick={(r) => clicked.push(r)}
+      />,
+    )
+    const row = screen.getByRole('table').querySelector('tbody tr')!
+    row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(clicked).toEqual([])
+    expect(row.className).not.toContain('cursor-pointer')
+  })
+})
+
+describe('the query behind a table', () => {
+  const query = 'SELECT session_id FROM turns'
+
+  function withSections() {
+    return payload({
+      tables: [table('tbl-a', [{ a: 1 }]), table('(anonymous)', [{ a: 2 }])],
+      // `text` carries the query too, because extract.texts() flattens the whole pane including
+      // what is inside a collapsed block. That is the duplication this must not reproduce.
+      text: ['a caveat about the population', query, 'The query behind this table'],
+      details: [{ summary: 'The query behind this table', body: [query], table_index: 1 }],
+    })
+  }
+
+  it('puts the query under the table it belongs to, not the first one', () => {
+    render(<Pane payload={withSections()} />)
+    const sections = document.querySelectorAll('details')
+    expect(sections).toHaveLength(1)
+    // The section must be inside the SECOND table's block. Attributing a query to a table that did
+    // not produce it is worse than showing no query: it is a wrong answer that looks checkable.
+    const blocks = [...document.querySelectorAll('main, div > section')]
+    const owner = [...document.querySelectorAll('section')].find((s) => s.querySelector('details'))
+    expect(owner?.textContent).toContain('2')
+    expect(blocks.length).toBeGreaterThan(0)
+  })
+
+  it('does not also print the query as prose, which would show it twice', () => {
+    render(<Pane payload={withSections()} />)
+    const shown = document.body.textContent ?? ''
+    expect(shown.split(query).length - 1).toBe(1)
+  })
+
+  it('keeps prose that is NOT part of a section', () => {
+    render(<Pane payload={withSections()} />)
+    expect(screen.getByText('a caveat about the population')).toBeTruthy()
+  })
+
+  it('renders a section on its own when the server could not attribute it', () => {
+    render(
+      <Pane
+        payload={payload({
+          tables: [table('tbl-a', [{ a: 1 }])],
+          details: [{ summary: 'unattached', body: ['something'], table_index: null }],
+        })}
+      />,
+    )
+    expect(document.querySelectorAll('details')).toHaveLength(1)
+    expect(screen.getByText('unattached')).toBeTruthy()
+  })
+})
+
 describe('headings', () => {
   it('never shows "(anonymous)", which is a placeholder and not a name', () => {
     render(<Pane payload={payload({ tables: [table('(anonymous)', [{ a: 1 }])] })} />)

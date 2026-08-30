@@ -61,6 +61,16 @@ export function DataTable({
   if (!table.columns.length) return null
 
   const visible = rows.slice(0, limit)
+  // Only a table that identifies a session can be navigated from. Offering a pointer cursor and a
+  // hover state on every row of every table would promise something that does nothing on most of
+  // them, and a control that sometimes silently does nothing is worse than no control.
+  //
+  // Read from the ROW, not from `columns`. The All sessions table carries `session_id` as a HIDDEN
+  // column: it is in every row and absent from the column list, which is how the dashboard passes
+  // an identifier along without showing a uuid in the table. Checking `columns` looked right, type
+  // checked, and made the one table this feature exists for the only table it did not work on.
+  const navigable = Boolean(onRowClick) && rows.length > 0 &&
+    ('session_id' in rows[0] || 'session' in rows[0])
 
   return (
     <div className="overflow-hidden rounded-lg border border-edge bg-panel">
@@ -98,9 +108,10 @@ export function DataTable({
             {visible.map((row, index) => (
               <tr
                 key={index}
-                onClick={onRowClick ? () => onRowClick(row) : undefined}
+                onClick={navigable ? () => onRowClick!(row) : undefined}
+                title={navigable ? 'select this session' : undefined}
                 className={`border-b border-edge/40 last:border-0 hover:bg-panel-raised
-                            ${onRowClick ? 'cursor-pointer' : ''}`}
+                            ${navigable ? 'cursor-pointer' : ''}`}
               >
                 {table.columns.map((column) => {
                   const value = row[column]

@@ -24,6 +24,20 @@ export interface FigureSummary {
   traces: { name?: string | null; type?: string | null; points?: number }[]
 }
 
+/**
+ * A collapsible section, most often the SQL that produced the table above it.
+ *
+ * `table_index` indexes `TabPayload.tables`. It is -1 for a section that appears before any table,
+ * and null when the server could not attribute it, in which case it must be rendered on its own
+ * rather than guessed at: a query shown under a table that did not produce it would be worse than
+ * no query at all.
+ */
+export interface Section {
+  summary: string
+  body: string[]
+  table_index: number | null
+}
+
 export interface TabPayload {
   tab: string
   session: string | null
@@ -34,6 +48,8 @@ export interface TabPayload {
   text: string[]
   /** Only on /render. Full Plotly figures, in the same order as `figures`. */
   plotly?: PlotlyFigure[]
+  /** Only on /render. See `Section`. */
+  details?: Section[]
 }
 
 /** Deliberately loose. This is handed straight to Plotly, which is the authority on its own shape. */

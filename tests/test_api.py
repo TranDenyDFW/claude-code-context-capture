@@ -128,6 +128,44 @@ def test_the_render_endpoint_carries_a_drawable_figure(client, tab_ids, session_
     assert drawn, "no figure anywhere carries a series, so nothing could be drawn"
 
 
+def test_render_carries_the_collapsible_sections_the_verify_shape_flattens(client):
+    """"Every table carries the query that built it" is a feature, and `describe()` destroys it.
+
+    `extract.texts()` flattens a pane to a list of strings, so over the API the SQL arrives as loose
+    paragraphs with nothing saying where a query starts or which table it belongs to. A frontend
+    rendering that faithfully prints six queries down the Cost tab as body text.
+    """
+    body = client.get("/api/tab/tab-cost/render").json()
+    assert body["details"], "the Cost tab's queries did not survive the API"
+    assert any("SELECT" in "\n".join(s["body"]).upper() for s in body["details"])
+
+
+def test_each_section_is_attributed_to_a_real_table(client):
+    """By INDEX, because five of the Cost tab's six tables have no id at all.
+
+    A section pointing at the wrong table would show a query under a table that did not produce it,
+    which is worse than showing no query: it is a wrong answer that looks checkable.
+    """
+    body = client.get("/api/tab/tab-cost/render").json()
+    tables = body["tables"]
+    indices = [s["table_index"] for s in body["details"]]
+    for index in indices:
+        assert index is None or -1 <= index < len(tables), f"{index} is not a table on this tab"
+    real = [i for i in indices if isinstance(i, int) and i >= 0]
+    # One query per table, each to a different one. If the walk ever fell out of step with the
+    # extractor's ordering, this is where it would show.
+    assert len(real) == len(set(real)), "two queries were attributed to the same table"
+
+
+def test_the_verify_shape_does_NOT_carry_sections(client, session_id):
+    """The parity surface stays frozen.
+
+    `/api/tab/{id}` is compared field for field against Dash and is byte for byte what the CLI
+    prints. Growing a field there for a browser's benefit would change both.
+    """
+    assert "details" not in client.get("/api/tab/tab-cost", params={"session": session_id}).json()
+
+
 def test_sessions_lists_the_store_and_says_how_many_there_are(client):
     body = client.get("/api/sessions", params={"limit": 5}).json()
     assert len(body["rows"]) <= 5

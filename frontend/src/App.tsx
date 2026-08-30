@@ -13,6 +13,7 @@ import { Pane } from '@/components/Pane'
 export default function App() {
   const [tab, setTab] = useState<string | null>(null)
   const [selection, setSelection] = useState<Selection>({ scope: 'main' })
+  const [live, setLive] = useState(false)
 
   const tabs = useQuery({ queryKey: ['tabs'], queryFn: api.tabs })
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 30_000 })
@@ -29,6 +30,13 @@ export default function App() {
     // The server holds an answer for five seconds; asking again inside that window would spend a
     // round trip to be handed the same bytes back.
     staleTime: 5_000,
+    // OFF BY DEFAULT, and that is a change from the dashboard, which ticks every five seconds
+    // whether anyone is looking or not. Three of these tabs cost over a second of SQL to build, so
+    // an always-on tick means a background window spending a second of the machine every five
+    // seconds forever, and the store it is reading is one this same machine is writing. A reader
+    // watching a session fill up turns it on; everyone else is reading history, which does not
+    // move. The cache means an unchanged store answers the tick in about 3 ms.
+    refetchInterval: live ? 5_000 : false,
     // NO `placeholderData: previous`. It was here, and it meant that switching from Window to Cost
     // showed WINDOW's tables and charts under the heading "Cost" for about a second: the right
     // label over the wrong numbers, which is the single worst thing a tool like this can display.
@@ -38,6 +46,21 @@ export default function App() {
     // Nothing is lost by removing it. React Query still caches per key, so returning to a tab
     // already visited is instant; only a tab being seen for the first time shows the skeleton.
   })
+
+  /**
+   * Clicking a row that identifies a session selects it, everywhere.
+   *
+   * Driven by the ROW, not by which tab is open. Any table with a `session_id` column becomes a way
+   * to navigate, which is how the All sessions and Compactions tables behave in the dashboard, and
+   * it also picks up every other table that happens to carry one without needing a list here that
+   * would go stale. A row with no session id is not clickable, and `DataTable` only shows the hand
+   * cursor when there is something to click.
+   */
+  const selectFromRow = (row: Record<string, unknown>) => {
+    const found = row.session_id ?? row.session
+    if (typeof found !== 'string' || !found) return
+    setSelection((was) => ({ ...was, session: found }))
+  }
 
   const cohorts = useMemo(() => {
     const found = new Set<string>()
@@ -91,6 +114,17 @@ export default function App() {
             >
               {selection.scope === 'all' ? 'including subagents' : 'main thread only'}
             </button>
+            <button
+              onClick={() => setLive((was) => !was)}
+              title="Re-read this tab every five seconds. Useful while a session is still running."
+              className={`rounded-md border px-2.5 py-1.5 text-[12px] transition-colors ${
+                live
+                  ? 'border-good/60 bg-good/10 text-good'
+                  : 'border-edge bg-panel text-ink-dim hover:text-ink'
+              }`}
+            >
+              {live ? 'live' : 'paused'}
+            </button>
           </div>
         </div>
 
@@ -125,7 +159,7 @@ export default function App() {
             data-loading={pane.isFetching ? 'true' : 'false'}
             className={pane.isFetching ? 'opacity-60 transition-opacity' : undefined}
           >
-            <Pane payload={pane.data} />
+            <Pane payload={pane.data} onRowClick={selectFromRow} />
           </div>
         )}
       </main>

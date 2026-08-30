@@ -1,6 +1,7 @@
 import type { TabPayload } from '@/api'
 import { DataTable } from './DataTable'
 import { Plot } from './Plot'
+import { Section } from './Section'
 
 /**
  * A whole tab, drawn from the payload, with no per-tab code.
@@ -34,6 +35,27 @@ export function Pane({
   onRowClick?: (row: Record<string, unknown>) => void
 }) {
   const figures = payload.plotly ?? []
+  const sections = payload.details ?? []
+
+  // A section's body is ALSO in `text`, because `extract.texts()` flattens the whole pane including
+  // what is inside a collapsed block. Rendered naively, every SQL query would appear twice: once as
+  // a wall of prose at the top of the tab and again inside its own section. The prose is filtered
+  // against what the sections already carry rather than the sections being dropped, because the
+  // collapsed version is the one that says which table the query belongs to.
+  const claimed = new Set<string>()
+  for (const section of sections) {
+    for (const line of section.body) claimed.add(line)
+    if (section.summary) claimed.add(section.summary)
+  }
+  const prose = payload.text.filter(
+    (line) => !claimed.has(line) && !sections.some((s) => s.summary.includes(line)),
+  )
+
+  const attached = (index: number) => sections.filter((s) => s.table_index === index)
+  const loose = sections.filter(
+    (s) => s.table_index === null || s.table_index < 0 || s.table_index >= payload.tables.length,
+  )
+
   return (
     <div className="flex flex-col gap-5">
       {figures.map((figure, index) => (
@@ -47,15 +69,19 @@ export function Pane({
         </section>
       ))}
 
-      {payload.text.length > 0 && (
+      {prose.length > 0 && (
         <section className="rounded-lg border border-edge bg-panel px-4 py-3">
-          {payload.text.map((line, index) => (
+          {prose.map((line, index) => (
             <p key={index} className="text-[12.5px] leading-relaxed text-ink-dim">
               {line}
             </p>
           ))}
         </section>
       )}
+
+      {loose.map((section, index) => (
+        <Section key={`loose-${index}`} section={section} />
+      ))}
 
       {payload.tables.map((table, index) => (
         // Keyed by INDEX, not by id. Five of the Cost tab's six tables report the id
@@ -67,6 +93,9 @@ export function Pane({
             <h3 className="text-[13px] font-semibold text-ink-dim">{heading(table.id)}</h3>
           )}
           <DataTable table={table} onRowClick={onRowClick} />
+          {attached(index).map((section, at) => (
+            <Section key={at} section={section} table={table} />
+          ))}
         </section>
       ))}
 
