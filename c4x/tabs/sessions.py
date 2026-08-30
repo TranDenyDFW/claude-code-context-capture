@@ -61,6 +61,15 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
         html.Div("Click a row to make it the header selection. Sections come from disk: the "
                  "working directory, the entrypoint, and whether the transcript still exists.",
                  style=SECTION_NOTE),
+        # The main-thread / include-subagents radio does NOT narrow this table, and the gap is far
+        # too large to leave unsaid: one session here holds 59,864 transcript rows of which 690 are
+        # main thread. Read beside the Session tab, which does respect the radio, that is an 87x
+        # difference with nothing on the page accounting for it.
+        html.Div("turns, current and peak count EVERY transcript row for a session, subagent work "
+                 "included, whichever way the main thread / include subagents radio is set. This "
+                 "table is an index of what exists rather than a measurement under a scope, so "
+                 "its turns column can be many times the row count the Session tab shows for the "
+                 "same session.", style=SECTION_NOTE),
         html.Div(archived_note(df), style=SECTION_NOTE),
         dash_table.DataTable(
             id="tbl-session",

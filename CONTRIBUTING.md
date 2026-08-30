@@ -29,6 +29,15 @@ node tools/run_tests.mjs
 That is what CI does. The fixture is not decoration: two node self-tests and all three Python checks
 read a store, and without one they correctly fail rather than skip.
 
+The Python side needs its dev dependencies for the suite and the linter:
+
+    pip install -r requirements.txt -r requirements-dev.txt
+
+`node tools/run_tests.mjs` runs everything, pytest included, and reports one total. Running pytest
+directly works too, but note that the runner reads pytest's `N passed` summary line to know the
+suite executed at all: an entry that exits 0 without printing its marker is treated as not having
+run, which is why `addopts` in pyproject.toml does not set `-q`.
+
 ## The self-test convention
 
 Every tool answers `--self-test`, exits non-zero on failure, and prints `SELF-TEST PASS (N checks)`.
@@ -76,6 +85,33 @@ and `tabs/`, one module per tab.
 Moving code between them is safe as long as `python tools/table_audit.py` still reports the same
 number of construction sites. It reads the whole package, taken from the import graph rather than a
 list of filenames, so a new module is covered the moment the app imports it.
+
+`c4x/cli/` is the same app without a browser. It does not query anything itself: it calls
+`_render_tab`, the exact callback the browser calls, and reads the components back into plain data.
+That distinction is the point. A parallel implementation would drift, and worse, it would agree
+with itself while the page was broken: this repo has already shipped a tab that produced perfectly
+correct data on the server and blanked itself in the browser.
+
+    python -m c4x.cli tabs                      # what tabs exist
+    python -m c4x.cli sessions --limit 10       # ids to feed the next command
+    python -m c4x.cli dump --tab tab-breakdown  # one tab's tables, figures and prose
+    python -m c4x.cli all --session <id>        # every tab, and what each produced
+    python -m c4x.cli dump --tab tab-compare --session <a> --compare-with <b>
+
+Add `--json` to any dump for the whole payload rather than the first page of each table.
+
+`tests/` is one file per tab, so a failure names the tab in its filename. Two rules run through all
+of them:
+
+- Render through the CALLBACK, never the builder. Calling `session_layout(...)` proves the builder
+  works and says nothing about the path that delivers it.
+- Derive the expected value INDEPENDENTLY. A test that calls the same function the page called is a
+  tautology, so these write their own SQL and disagree when the app's query is wrong.
+
+They run against a SNAPSHOT of the store, taken once in `conftest.py` through sqlite's backup API.
+Against the live store a rendered figure and a later `SELECT` are read at different instants while
+the capture hooks are appending, and a growing count differs for no reason but elapsed time. That
+mistake has already cost an afternoon here.
 
 ## House rules that are not obvious
 
