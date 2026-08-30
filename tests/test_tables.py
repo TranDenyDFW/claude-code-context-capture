@@ -15,7 +15,7 @@ from c4x.cli import extract
 from c4x.theme import COLUMN_HELP
 
 TABS = ["tab-summary", "tab-sessions", "tab-session", "tab-compactions", "tab-window",
-        "tab-probes", "tab-waste", "tab-mirror"]
+        "tab-cost", "tab-diagnostics"]
 
 
 def every_body(pane, session_id, other_session_id=None):
@@ -103,8 +103,8 @@ def test_a_caveat_that_moved_to_a_tooltip_is_still_reachable(pane, session_id, h
     assert "subagent" in sessions, "the turns caveat vanished with the paragraph"
     assert "not known" in sessions or "no desktop record" in sessions, (
         "the archived caveat vanished with the paragraph")
-    waste = extract.all_words(pane("tab-waste", session=session_id)).lower()
-    assert "subagent" in waste, "the Cost/Waste scope caveat vanished"
+    cost = extract.all_words(pane("tab-cost", session=session_id)).lower()
+    assert "subagent" in cost, "the Cost tab scope caveat vanished"
 
 
 def test_tooltips_do_not_simply_repeat_the_column_name(pane, session_id, has_store):

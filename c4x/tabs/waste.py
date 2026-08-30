@@ -8,7 +8,32 @@ from dash import html
 from c4x.breakdown import tool_spec
 from c4x.panels import evidence_block
 from c4x.store import q, scoped
-from c4x.theme import DANGER, SECTION_NOTE, TEXT, stat_card
+from c4x.theme import (
+    DANGER,
+    SECTION_NOTE,
+    TEXT,
+    fmt_tokens,
+    stat_card,
+)
+
+
+def _rebill_card(session_id=None, cohort=None):
+    """Cache reads as a multiple of the peak window: how many times the context was paid for.
+
+    Scoped to the header selection like the rest of the tab, and computed off api_calls rather than
+    turns, because a streamed message writes several rows under one request id and summing turns
+    would multiply the answer by the streaming.
+    """
+    where, args = scoped(session_id, "all", alias="", cohort=cohort)
+    row = q(f"""SELECT COALESCE(SUM(cache_read_input_tokens), 0) AS churn,
+                       COALESCE(MAX(total_resident), 0)          AS peak
+                  FROM api_calls WHERE 1=1 {where}""", args).iloc[0]
+    churn, peak = int(row["churn"] or 0), int(row["peak"] or 0)
+    if not peak:
+        return stat_card("Re-billed", "-", sub="no resident reading in this population")
+    return stat_card("Re-billed", f"{churn / peak:,.0f}x", color=DANGER,
+                     sub=f"{fmt_tokens(churn)} of cache reads against a "
+                         f"{fmt_tokens(peak)} peak window")
 
 
 def waste_layout(session_id=None, scope="main", cohort=None):
@@ -81,6 +106,7 @@ def waste_layout(session_id=None, scope="main", cohort=None):
             stat_card("Re-reads beyond the first", f"{repeats:,}",
                       color=DANGER if repeats else TEXT),
             stat_card("KB in the repeats", f"{repeat_bytes/1024:,.1f}", sub="tool result bytes"),
+            _rebill_card(session_id, cohort),
             stat_card("Tool calls recorded",
                       f"{int(tools['calls'].sum()):,}" if not tools.empty else "0"),
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "18px"}),
