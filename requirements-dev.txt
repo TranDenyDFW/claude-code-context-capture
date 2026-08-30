@@ -1,0 +1,14 @@
+# Development dependencies: everything needed to run the checks, on top of requirements.txt.
+#
+# Kept separate because the dashboard itself needs none of them. Someone who only wants to LOOK at
+# their context does not need a test runner, and someone changing the code should not have to guess
+# which of the runtime pins the suite actually depends on.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# The test suite in tests/. One file per tab, each recomputing what the page rendered from SQL it
+# writes itself.
+pytest>=8.0.0
+
+# The Python linter. Configuration lives in pyproject.toml.
+ruff>=0.6.0

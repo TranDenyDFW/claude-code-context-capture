@@ -8,7 +8,7 @@ from dash import html
 from c4x.breakdown import tool_spec
 from c4x.panels import evidence_block
 from c4x.store import q, scoped
-from c4x.theme import DANGER, TEXT, stat_card
+from c4x.theme import DANGER, SECTION_NOTE, TEXT, stat_card
 
 
 def waste_layout(session_id=None, scope="main", cohort=None):
@@ -23,6 +23,10 @@ def waste_layout(session_id=None, scope="main", cohort=None):
     # for speed, but the definition lives in one place: these were two literals under a docstring
     # asserting they could not disagree, which asserted it rather than ensuring it.
     spec, spec_err = tool_spec("waste.mjs", "--spec")
+    # scope="all", ALWAYS, whatever the header radio says. Tool calls are overwhelmingly subagent
+    # work in this store, and a main-thread-only reading of the worst offender on this tab is zero
+    # against a real 614. The override is deliberate; the tab states it below rather than letting
+    # the header's banner claim otherwise.
     wsid, wargs = scoped(session_id, "all", cohort=cohort)
     if spec:
         read_tools, dup_min = spec["read_tools"], int(spec["duplicate_min"])
@@ -60,7 +64,16 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         if not frame.empty and "bytes" in frame:
             frame["bytes"] = (frame["bytes"] / 1024).round(1)
 
+    scope_note = html.Div(
+        "Counting EVERY tool call, subagent work included, whichever way the main thread / "
+        "include subagents radio is set. Subagents make almost all the tool calls in a Claude Code "
+        "session, so a main-thread-only reading of this tab would report most waste as zero."
+        + (f" Narrowed to {'this session' if session_id else 'this cohort'}." if
+           (session_id or cohort) else " Describing the whole store."),
+        style=SECTION_NOTE)
+
     return html.Div([
+        scope_note,
         html.Div([
             stat_card("Re-read groups", f"{len(dup):,}",
                       sub=(f"same file, one session, {dup_min}+ reads" if read_tools
