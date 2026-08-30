@@ -144,8 +144,19 @@ def carries_data(payload):
 
 
 def fetch_api(client, tab, params, render=False):
+    """The API's answer, built fresh.
+
+    `no_cache` deliberately. The API may serve an answer up to five seconds old (see
+    `c4x/api/cache.py`), and the Dash side of this comparison is always built now, against a store
+    that is harvested continuously. Comparing the two would report a difference whenever a turn
+    landed in between, which is a property of the clock rather than of either backend, and it would
+    make this gate flaky in exactly the way that teaches people to re-run it until it passes.
+
+    That the CACHED answer matches a fresh one is a separate property, checked separately, in
+    `tests/test_api.py::test_the_cache_does_not_change_the_answer`.
+    """
     suffix = "/render" if render else ""
-    response = client.get(f"/api/tab/{tab}{suffix}", params=params)
+    response = client.get(f"/api/tab/{tab}{suffix}", params={**params, "no_cache": "1"})
     if response.status_code != 200:
         raise RuntimeError(f"API {response.status_code} for {tab} {params}: {response.text[:200]}")
     return response.json()

@@ -67,6 +67,11 @@ const PY = [
    { noStore: true }],
   ['-m', ['c4x.cli', '--self-test'], 'CLI backend switch self-test', 'SELF-TEST PASS',
    { noStore: true }],
+  // The response cache, which is the only reason the migration can meet "don't make it slower".
+  // Its checks are about correctness, not speed: a stale entry served past the age bound would be
+  // a wrong pane that looks entirely right, which is the one failure a latency gate cannot see.
+  ['-m', ['c4x.api.cache', '--self-test'], 'API response cache self-test', 'SELF-TEST PASS',
+   { noStore: true }],
   ['tools/table_audit.py', [], 'audit of the live app', 'AUDIT PASS'],
   // The pytest suite in tests/ replaced tools/session_checks.py, which checked three Session-tab
   // features by hand. Those checks were migrated into tests/test_session.py rather than deleted,
