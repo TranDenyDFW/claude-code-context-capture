@@ -43,9 +43,8 @@ def figure_titled(node, fragment):
     match = [f for f in every
              if fragment.lower() in str(getattr(getattr(f.layout, "title", None), "text", "")
                                         or "").lower()]
-    assert match, ("no figure titled like %r; titles present: %s"
-                   % (fragment, [str(getattr(getattr(f.layout, "title", None), "text", ""))
-                                 for f in every]))
+    titles = [str(getattr(getattr(f.layout, "title", None), "text", "")) for f in every]
+    assert match, f"no figure titled like {fragment!r}; titles present: {titles}"
     return match[0]
 
 
@@ -123,8 +122,9 @@ def test_the_composition_treemap_parent_is_the_sum_of_its_children(has_store):
     fig = composition_treemap(baseline, resident, labels, 5000, 100000, 1000000)
     trace = fig.data[0]
     assert trace.branchvalues == "total"
-    by_label = dict(zip(trace.labels, trace.values))
-    children = [v for label, parent, v in zip(trace.labels, trace.parents, trace.values)
+    by_label = dict(zip(trace.labels, trace.values, strict=True))
+    children = [v for _label, parent, v
+                in zip(trace.labels, trace.parents, trace.values, strict=True)
                 if parent == "Configuration"]
     if "Configuration" in by_label:
         assert by_label["Configuration"] == sum(children)
@@ -142,7 +142,8 @@ def test_the_composition_treemap_covers_the_whole_window(has_store):
     window, messages = 1000000, 5000
     free = window - messages - int(baseline["static_total"])
     trace = composition_treemap(baseline, resident, labels, messages, free, window).data[0]
-    top = sum(v for parent, v in zip(trace.parents, trace.values) if parent == "")
+    top = sum(v for parent, v in zip(trace.parents, trace.values, strict=True)
+              if parent == "")
     assert top == window, f"the top level sums to {top:,}, not the {window:,} window"
 
 
@@ -291,7 +292,8 @@ def test_the_message_bar_refuses_a_single_segment(has_store):
     one = pd.DataFrame([{"probe_id": 1, "name": "attachmentTokens", "tokens": 5212,
                          "ts": "2026-01-01"}])
     assert stacked_message_figure(one) is None
-    assert stacked_message_figure(pd.DataFrame(columns=["probe_id", "name", "tokens", "ts"])) is None
+    empty = pd.DataFrame(columns=["probe_id", "name", "tokens", "ts"])
+    assert stacked_message_figure(empty) is None
 
 
 def test_the_message_bar_stacks_by_probe_when_there_is_a_shape_to_show():

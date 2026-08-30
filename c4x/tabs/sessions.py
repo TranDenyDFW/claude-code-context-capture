@@ -79,7 +79,8 @@ def sessions_scatter(rows):
             customdata=[[r["title"], r["project"], r["compactions"], r["session_id"]]
                         for r in group],
             hovertemplate="%{customdata[0]}<br>%{customdata[1]}<br>"
-                          "%{x:,} turns, peak %{y:,}<br>%{customdata[2]} compactions<extra></extra>",
+                          "%{x:,} turns, peak %{y:,}<br>"
+                          "%{customdata[2]} compactions<extra></extra>",
         ))
     fig.update_layout(title=f"{len(rows):,} sessions: turns against peak resident tokens",
                       title_font=dict(color=TEXT, size=13),
