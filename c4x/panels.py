@@ -31,6 +31,7 @@ from c4x.theme import (
     accordion,
     fmt_bytes,
     fmt_tokens,
+    header_help,
     numeric_columns,
     stat_card,
 )
@@ -112,10 +113,12 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
         html.Div(f"{len(records):,} rows.{truncated}" + (f" {note}" if note else ""),
                  style=SECTION_NOTE),
         dash_table.DataTable(
-            columns=cols,
+            columns=(_cols := cols),
+            tooltip_header=header_help(_cols),
             data=records,
             page_size=page_size,
             sort_action="native",
+            tooltip_duration=None,   # stay up while hovering; see TABLE_STYLE for why
             filter_action="native",
             export_format="csv",
             export_headers="display",
@@ -273,10 +276,11 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
                      style={"flex": "1"}),
         ], style={"display": "flex", "gap": "16px", "marginBottom": "10px"}),
         dash_table.DataTable(
-            columns=numeric_columns(
+            columns=(_cols := numeric_columns(
                 ["metric", "unit", "A", "B", "B vs A", "verdict", "basis"],
                 {"A", "B", "B vs A"},
-                {"B vs A": Format(precision=2, scheme=Scheme.fixed)}),
+                {"B vs A": Format(precision=2, scheme=Scheme.fixed)})),
+            tooltip_header=header_help(_cols),
             data=rows,
             export_format="csv",
             export_headers="display",
@@ -285,6 +289,8 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
                 {"if": {"filter_query": '{verdict} contains "worse"'}, "color": DANGER},
                 {"if": {"filter_query": '{verdict} contains "better"'}, "color": GOOD},
             ],
+            sort_action="native",   # uniform with every other table in the app
+            tooltip_duration=None,
             style_cell=TABLE_STYLE["style_cell"], style_header=TABLE_STYLE["style_header"],
             style_table={"overflowX": "auto"}),
         html.Div("Values are raw, in the unit each row names, so the export carries numbers "

@@ -51,7 +51,12 @@ def _seq(value):
 
 
 def tables(node, found=None):
-    """Every DataTable in the tree, as {id, columns, rows}."""
+    """Every DataTable in the tree, as {id, columns, rows, tooltips}.
+
+    Tooltips are carried ON the table rather than in a separate mapping keyed by id. Keyed by id
+    they collapsed: the Breakdown tab renders nine tables and most are anonymous, so every one of
+    them landed under "(anonymous)" and eight tables' tooltips were reported as the ninth's.
+    """
     found = [] if found is None else found
     if isinstance(node, (list, tuple)):
         for child in node:
@@ -65,6 +70,14 @@ def tables(node, found=None):
             "columns": [c.get("id") for c in _seq(getattr(node, "columns", None))
                         if isinstance(c, dict)],
             "rows": _seq(getattr(node, "data", None)),
+            "tooltips": {
+                column: (value.get("value") if isinstance(value, dict) else value)
+                for column, value in (getattr(node, "tooltip_header", None) or {}).items()
+            },
+            "sorts": getattr(node, "sort_action", None) == "native",
+            # None means "stay up while hovering". Dash's default of 2000ms is shorter than these
+            # tooltips take to read, so the value matters and a test asserts on it.
+            "tooltip_duration": getattr(node, "tooltip_duration", 2000),
         })
         return found
     for name in getattr(node, "_prop_names", ()):
@@ -170,6 +183,28 @@ def texts(node, found=None):
         if isinstance(value, (list, tuple, str, int, float)) or _is_component(value):
             texts(value, found)
     return found
+
+
+def tooltips(node):
+    """[(table id, {column: text})] for every table that has any, in tree order.
+
+    A LIST, not a dict: table ids are not unique here, and most of the Breakdown tab's tables have
+    no id at all.
+    """
+    return [(table["id"], table["tooltips"]) for table in tables(node) if table["tooltips"]]
+
+
+def all_words(node):
+    """Everything a reader can read: prose, figure titles, and tooltips.
+
+    The right target for "does the page say X", because where a statement lives is a presentation
+    decision and a test should not break when it moves from a paragraph to a tooltip.
+    """
+    parts = list(texts(node))
+    parts += [str(f["title"]) for f in figures(node) if f.get("title")]
+    for _table_id, columns in tooltips(node):
+        parts += [str(v) for v in columns.values()]
+    return "\n".join(parts)
 
 
 def joined_text(node):

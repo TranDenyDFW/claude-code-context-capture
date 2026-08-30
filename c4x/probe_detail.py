@@ -25,6 +25,7 @@ from c4x.theme import (
     SECTION_NOTE,
     TABLE_STYLE,
     TEXT,
+    header_help,
     numeric_columns,
 )
 
@@ -194,11 +195,12 @@ def probe_detail_blocks(baseline=None):
             html.Div("Recorded against calibrated, per category",
                      style={"color": MUTED, "fontSize": "11.5px", "margin": "10px 0 6px 0"}),
             dash_table.DataTable(
-                columns=numeric_columns(
+                columns=(_cols := numeric_columns(
                     ["category", "items recorded", "items in baseline", "tokens recorded",
                      "tokens in baseline", "not loaded"],
                     {"items recorded", "items in baseline", "tokens recorded",
-                     "tokens in baseline", "not loaded"}),
+                     "tokens in baseline", "not loaded"})),
+                tooltip_header=header_help(_cols),
                 data=rows, **TABLE_STYLE),
             html.Div(
                 "Where the two columns disagree, the probe and the calibration saw different "
@@ -211,16 +213,11 @@ def probe_detail_blocks(baseline=None):
 
     tables = [
         item_table(pid, "skill", "Every skill, largest first",
-                   "Source says where a skill comes from: built-in ships with Claude Code, "
-                   "userSettings is one you wrote, plugin arrives with a plugin. Only the last "
-                   "two are yours to remove.",
+                   "Largest first. Only userSettings and plugin skills are yours to remove.",
                    "name, extra AS source, tokens", ["name", "source", "tokens"], {"tokens"}),
         mcp_by_server(pid),
         item_table(pid, "mcpTool", "Every MCP tool, by server",
-                   "loaded = 0 means the tool was deferred at the time of the reading, and a "
-                   "deferred tool costs nothing until something loads it. Its 0 is a statement "
-                   "about residency, NOT a measurement that the schema is free: the same tool "
-                   "loaded is worth its full schema.",
+                   "A server is the unit you can switch off; a tool is not.",
                    "name, extra AS server, loaded, tokens",
                    ["name", "server", "loaded", "tokens"], {"loaded", "tokens"}),
         item_table(pid, "agent", "Custom agents",
@@ -232,13 +229,40 @@ def probe_detail_blocks(baseline=None):
                    "name AS path, extra AS type, tokens", ["path", "type", "tokens"], {"tokens"}),
     ]
     blocks += [t for t in tables if t is not None]
-    blocks += message_blocks(pid)
     blocks.append(html.Div(
         "A reading describes the moment it was taken. Record another after adding an MCP server, "
         "installing a skill, or editing CLAUDE.md.",
         style={"color": MUTED, "fontSize": "11.5px", "margin": "14px 0 4px 0"}))
     blocks.append(probe_command_hint())
     return blocks
+
+
+def conversation_blocks(baseline=None):
+    """What the CONVERSATION put in the window, as opposed to what the configuration holds.
+
+    Separated from probe_detail_blocks because together they were eight tables and 5.4 screens, and
+    they answer different questions: the configuration half is identical on turn 1 and turn 900,
+    while this half is the part that grows. Nothing else in this store records the split at all.
+    """
+    probe = latest_probe()
+    if probe is None:
+        return [
+            html.Div("No probe reading yet", style=SECTION_HEAD),
+            html.Div(
+                "The message half of the window is computed by Claude Code for its tooltip and "
+                "discarded. A probe is the only way this store learns it. Run "
+                "node tools/probe.mjs to record one.", style=SECTION_NOTE),
+        ]
+    pid = int(probe["id"])
+    when = str(probe["ts"])[:19].replace("T", " ")
+    return [
+        html.Div("What the conversation put in the window", style=SECTION_HEAD),
+        html.Div(
+            f"Read by probe {pid} at {when}. A probe spawns a fresh session, so its conversation "
+            f"half is small by construction: what matters here is the SHAPE, which categories "
+            f"carry the tokens, not the totals.",
+            style=SECTION_NOTE),
+    ] + message_blocks(pid)
 
 
 def message_blocks(probe_id):

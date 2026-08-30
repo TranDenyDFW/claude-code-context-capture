@@ -58,6 +58,13 @@ FIELD = {"backgroundColor": "#ffffff", "color": "#10141a", "border": f"1px solid
 TABLE_STYLE = dict(
     export_format="csv",
     export_headers="display",
+    # Sorting on EVERY table, not just the ones built through evidence_block. Half of them sorted
+    # and half did not, with nothing on screen to tell a reader which kind they were looking at.
+    sort_action="native",
+    # Tooltips stay up while the pointer is on the header. Dash hides them after 2000ms by
+    # default, and these run to about 200 characters: the `turns` caveat vanished mid-sentence
+    # while being read. None means "as long as you are hovering".
+    tooltip_duration=None,
     style_cell={
         "backgroundColor": PANEL, "color": TEXT, "border": f"1px solid {BORDER}",
         "fontFamily": MONO, "fontSize": "12px", "padding": "6px 10px", "textAlign": "left",
@@ -156,6 +163,86 @@ def empty_fig(msg: str) -> go.Figure:
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False)
     return dark_fig(fig, height=300)
+
+
+# What a column means, where the meaning is not obvious from its name.
+#
+# Every entry here replaces prose that used to sit above a table. The rule for adding one: if a
+# reader could take the number at face value and be wrong, the column needs a line. If the name
+# already says it, it does not.
+#
+# These are deliberately blunt. A tooltip that hedges is worse than no tooltip, because the reader
+# still has to go and check.
+COLUMN_HELP = {
+    # All sessions
+    "turns": ("Every transcript row for this session, subagent work included, whichever way the "
+              "main thread / include subagents radio is set. The Session tab respects that radio, "
+              "so its row count for the same session is usually much smaller."),
+    "current": ("Where the window sat at this session's newest recorded call. `peak` is the "
+                "high-water mark; the gap between them is what a compaction took out."),
+    "peak": "The highest resident total this session ever reached, not where it sits now.",
+    "compactions": "How many times this session's context window was compacted.",
+    "section": ("Read from disk, not stored: the working directory, the entrypoint, and whether "
+                "the transcript file still exists on this machine."),
+    "project": ("The working directory. A path ending in \\archived is a chat the desktop app "
+                "has archived. An unmarked path means NOT KNOWN to be archived: the flag is only "
+                "readable for chats the app kept a record of, which is a minority of these."),
+    "last active": "The last recorded activity, not when the session was created.",
+    "title": ("Read from the transcript. Imported sessions carry a generated Imported_YYYYMMDD "
+              "name instead, because the only titler there is walks this machine's transcripts."),
+
+    # Breakdown and the probe detail
+    "percent": "Share of the whole context window, not of the resident total.",
+    "items": "How many items the calibrated baseline counted in this category.",
+    "pct_of_kind": "This item's share of its own category, not of the whole window.",
+    "source": ("Where it comes from: built-in ships with Claude Code, userSettings is one you "
+               "wrote, plugin arrives with a plugin. Only the last two are yours to remove."),
+    "server": ("The MCP server the tool belongs to. A server is the unit you can remove from your "
+               "config; a single tool is not."),
+    "loaded": ("0 means the tool was deferred when this reading was taken, so it cost nothing "
+               "yet. That is a statement about residency, NOT a measurement that its schema is "
+               "free: the same tool loaded is worth its full schema."),
+    "not loaded": ("Blank where the kind carries no residency flag at all, rather than 0, which "
+                   "would claim a measurement that was never made."),
+    "items recorded": "What the probe actually saw, which is one session's configuration.",
+    "items in baseline": ("What the calibration counted. A gap means the two readings saw "
+                          "different configurations, which is expected for MCP tools and would "
+                          "not be for skills."),
+    "tokens recorded": "Measured by the probe. 0 can mean deferred rather than free; see `loaded`.",
+    "tokens in baseline": "Taken from the calibrated baseline, not from this probe.",
+
+    # Compare
+    "basis": ("Whether this row is a total, which grows with the size of the population, or a "
+              "per-unit figure. Comparing one session against a cohort makes every total larger "
+              "for the cohort by construction."),
+    "B vs A": "B divided by A. Blank where A is zero.",
+    "verdict": "Which arm is better, where for a cost metric lower is better.",
+    "unit": "What the two numbers are counted in.",
+
+    # Cost / waste
+    "reads": ("Times this exact target was read. Counts subagent calls: they make almost every "
+              "tool call, so a main-thread-only reading of this column is close to zero."),
+    "variants": "Distinct spellings of the same target, which is how a re-read hides.",
+    "result_bytes": "Bytes of tool RESULT, not tokens. This store records no per-call token count.",
+
+    # Compactions
+    "dropped": "Tokens the compaction discarded, as the transcript recorded it.",
+    "pre_tokens": "Resident tokens immediately before the compaction.",
+    "post_tokens": "Resident tokens immediately after it.",
+}
+
+
+def header_help(cols, extra=None):
+    """tooltip_header for a DataTable, for whichever of `cols` have something worth saying.
+
+    Returns only the columns that HAVE help, so a table gains tooltips on the columns that need
+    them and none on the rest, rather than a tooltip everywhere repeating the column name.
+    """
+    help_for = dict(COLUMN_HELP)
+    help_for.update(extra or {})
+    names = [c if isinstance(c, str) else c.get("id") for c in cols]
+    return {name: {"value": help_for[name], "type": "markdown"}
+            for name in names if name in help_for}
 
 
 def numeric_columns(cols, numeric, formats=None):

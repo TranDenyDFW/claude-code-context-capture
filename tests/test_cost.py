@@ -1,4 +1,4 @@
-"""The Waste tab: re-reads, MCP traffic and tool spend, each against its own SQL.
+"""The Cost tab (formerly Waste): re-reads, MCP traffic and tool spend, each against its own SQL.
 
 This tab exists to say what was paid for twice, so a number that is too low here is worse than a
 missing tab: it reports the store as tidier than it is.
@@ -10,7 +10,7 @@ from c4x.cli import extract
 
 @pytest.fixture(scope="module")
 def body(pane, has_store):
-    return pane("tab-waste")
+    return pane("tab-cost")
 
 
 def table_with(body, column):
@@ -24,7 +24,7 @@ def test_re_read_counts_match_sql(body, q):
     """A file counted as read N times must have been read N times."""
     table = table_with(body, "reads")
     if table is None:
-        pytest.fail("no re-read table on the Waste tab, so its central claim is unverifiable")
+        pytest.fail("no re-read table on the Cost tab, so its central claim is unverifiable")
     for row in table["rows"][:15]:
         target = row.get("target")
         if not target:
