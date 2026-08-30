@@ -241,6 +241,53 @@ if (NODE_ONLY) {
   }
 }
 
+// The React frontend. Same rules as everything above: exit 0 is not enough, the run has to print
+// the line a real run prints, and a skip is stated rather than absorbed into the total.
+//
+// It is SKIPPED, not failed, when node_modules is absent. The frontend is 149 MB of dependencies
+// that a clone does not have until `npm install --prefix frontend`, and failing the whole suite
+// over that would mean the Python and capture checks could not be run without it.
+if (!NODE_ONLY) {
+  const frontend = join(ROOT, 'frontend');
+  const installed = existsSync(join(frontend, 'node_modules'));
+  const FRONT = [
+    [['run', 'typecheck'], 'the frontend still type-checks', null],
+    // `vitest run` prints "Tests  N passed", which CHECKS already matches, so the count joins the
+    // suite total rather than being a silent pass.
+    [['run', 'test'], 'the payload reaches the DOM intact', 'passed'],
+  ];
+  for (const [args, what, marker] of FRONT) {
+    const label = `frontend npm ${args.join(' ')}`;
+    if (!installed) {
+      skipped++;
+      results.push({ rel: label, state: 'SKIPPED',
+                     note: `frontend/node_modules is absent; run npm install --prefix frontend (${what})` });
+      continue;
+    }
+    const run = spawnSync('npm', [...args, '--prefix', frontend], {
+      encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: process.platform === 'win32',
+    });
+    const text = `${run.stdout || ''}${run.stderr || ''}`;
+    const match = text.match(CHECKS);
+    const count = match ? Number(match[1] ?? match[2]) : null;
+    if (run.status !== 0 || run.signal) {
+      failed++;
+      results.push({ rel: label, state: 'FAIL',
+                     note: run.signal ? `killed (${run.signal})` : `exit ${run.status}`,
+                     tail: text.trim().split('\n').slice(-3).join(' | ') });
+    } else if (marker && !text.includes(marker)) {
+      failed++;
+      results.push({ rel: label, state: 'FAIL',
+                     note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
+                     tail: text.trim().split('\n').slice(-2).join(' | ') });
+    } else {
+      if (marker && count) total += count;
+      results.push({ rel: label, state: 'pass', count: marker ? count ?? null : null,
+                     note: marker && count ? '' : what });
+    }
+  }
+}
+
 for (const r of results) {
   const label = r.rel.padEnd(38);
   if (r.state === 'pass') {
