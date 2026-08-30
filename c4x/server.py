@@ -11,6 +11,12 @@ import time as _time
 
 from flask import request as _flask_request
 
+# `{reason}` is substituted with str.replace, NOT str.format.
+#
+# This template carries literal CSS, `body{background:#0d1117;...}`, and str.format reads that as a
+# replacement field: the call raised KeyError('background') and the route returned HTTP 500. The
+# process still exited, because hardened_shutdown() had already started its thread, so every caller
+# saw the server stop and read the 500 as success. It went unnoticed for several runs.
 STOPPED_PAGE = (
     "<!doctype html><meta charset=utf-8>"
     "<title>Context capture - stopped</title>"
@@ -26,6 +32,15 @@ GET_REFUSED = (
     "Use POST. This route stops the capture dashboard, and a GET route can be triggered by "
     "any page your browser visits."
 )
+
+
+def stopped_page(reason: str) -> str:
+    """The shutdown confirmation page, with the reason escaped.
+
+    A function rather than an inline expression so it can be tested without stopping the process
+    running the test.
+    """
+    return STOPPED_PAGE.replace("{reason}", _html.escape(reason))
 
 
 def port_from_argv(argv, fallback):
@@ -85,8 +100,11 @@ def register_routes(server, db_path, port):
         reason = (_flask_request.form.get("reason")
                   or _flask_request.args.get("reason")
                   or "user hit /__shutdown__")
+        # Rendered BEFORE the kill, so a template fault surfaces as a failed response rather than
+        # as a 500 from a process that is already on its way out.
+        page = stopped_page(reason)
         hardened_shutdown(reason)
-        return (STOPPED_PAGE.format(reason=_html.escape(reason)), 200)
+        return (page, 200)
 
     @server.route("/__health__")
     def _health():
