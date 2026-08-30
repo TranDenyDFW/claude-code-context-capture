@@ -7,7 +7,6 @@ finding in this store's own audit.
 """
 from dash import dcc, html
 
-from c4x.panels import stored_text_note
 from c4x.store import COHORT_ALL, DB_PATH
 from c4x.tabs import (
     compactions_layout,
@@ -19,7 +18,7 @@ from c4x.tabs import (
     waste_layout,
     window_layout,
 )
-from c4x.theme import ACCENT, BG, BORDER, FIELD, MONO, MUTED, PANEL, TEXT, WARN
+from c4x.theme import ACCENT, BG, BORDER, FIELD, MONO, MUTED, PANEL, TEXT
 from c4x.ui.header import quick_view, scope_radio
 
 
@@ -49,21 +48,11 @@ header = html.Div(
                 html.Span("context capture", style={"fontWeight": 800, "fontSize": "15px"}),
                 html.Span(f"  {DB_PATH}", style={"color": MUTED, "fontSize": "11px",
                                                  "marginLeft": "10px"}),
-                # What is in that file, said on every tab rather than only in the README. Someone
-                # can otherwise use this for an hour without learning that the store holds
-                # conversation text rather than measurements of it.
-                html.Div(
-                    [
-                        html.Span("PRIVACY  ", style={"color": WARN, "fontWeight": 700,
-                                                      "letterSpacing": "0.06em"}),
-                        html.Span(stored_text_note()),
-                        html.Span("  Nothing leaves this machine, and uninstalling is the only "
-                                  "way to stop capture: see the README.",
-                                  style={"color": MUTED}),
-                    ],
-                    style={"color": TEXT, "fontSize": "10.5px", "fontFamily": MONO,
-                           "marginTop": "3px", "maxWidth": "760px"},
-                ),
+                # The privacy paragraph that used to sit here is gone. It said the same three
+                # sentences on every tab of every session, which is how a standing notice stops
+                # being read: after the first minute it is furniture, and it was costing four
+                # lines of the header on every screen to say something the README says once.
+                # The store's path is right there, and what is in it belongs in the README.
             ],
         ),
         html.Div(
