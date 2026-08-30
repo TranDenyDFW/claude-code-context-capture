@@ -56,6 +56,13 @@ const PY = [
   // features by hand. Those checks were migrated into tests/test_session.py rather than deleted,
   // and the suite now covers every tab. `-q` still prints the "N passed" line the marker needs.
   ['-m', ['pytest', 'tests/', '-q', '-p', 'no:warnings'], 'every tab, against SQL written independently', ' passed'],
+  // Ruff runs HERE, inside the suite, and not as a command anyone remembers to type.
+  //
+  // It was a separate step for seven stages, and its verdict was being read off the last line of
+  // its output. Ruff prints an advisory "N hidden fixes" line AFTER "Found 8 errors", so the last
+  // line says nothing about whether it passed: three stages merged carrying lint errors while the
+  // gate reported clean. A check whose result depends on how you read it is not a gate.
+  ['-m', ['ruff', 'check', '.'], 'style, as a gate rather than a habit', 'All checks passed'],
 ];
 
 // Files with no self-test, and the reason. Anything NOT listed here is required to have one, so
