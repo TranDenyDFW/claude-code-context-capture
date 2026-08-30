@@ -121,6 +121,59 @@ else:
           signed in text,
           f"turns {lo} to {hi} fall by {unsigned}; panel shows {signed!r}: {signed in text}")
 
+# 4. The archived reader, against records this check writes, so it runs on a machine with no
+# desktop app at all. It reads a bounded prefix for speed and falls back to a full parse; both
+# paths are exercised here, and a record whose fields sit past the prefix is the whole reason the
+# fallback exists.
+import json  # noqa: E402
+import os  # noqa: E402
+import shutil  # noqa: E402
+
+fixture = os.path.join("tmp", "archived-check", "a", "b")
+shutil.rmtree(os.path.join("tmp", "archived-check"), ignore_errors=True)
+os.makedirs(fixture, exist_ok=True)
+
+
+def write_record(name, cli, archived, padding=0):
+    """One session record. `padding` pushes the fields past the prefix the fast path reads."""
+    record = {}
+    if padding:
+        # A large map ahead of the fields, which is what a real record's enabledMcpTools is.
+        record["enabledMcpTools"] = {f"server__tool_{i}": True for i in range(padding)}
+    record.update({"sessionId": f"local_{cli}", "cliSessionId": cli, "isArchived": archived})
+    with open(os.path.join(fixture, name), "w", encoding="utf-8") as fh:
+        json.dump(record, fh)
+
+
+write_record("local_a.json", "11111111-1111-4111-8111-111111111111", True)
+write_record("local_b.json", "22222222-2222-4222-8222-222222222222", False)
+write_record("local_c.json", "33333333-3333-4333-8333-333333333333", True, padding=900)
+with open(os.path.join(fixture, "scheduled-tasks.json"), "w", encoding="utf-8") as fh:
+    json.dump({"scheduledTasks": []}, fh)          # present in the real directory, not a session
+
+head_bytes = os.path.getsize(os.path.join(fixture, "local_c.json"))
+found = store.archived_sessions(root=os.path.join("tmp", "archived-check"), ttl=0)
+check("the archived reader finds every session record and no others",
+      len(found) == 3,
+      f"{len(found)} of 3 records, from 4 files (one is a scheduled-tasks file, not a session)")
+check("archived and not-archived are distinguished, not collapsed",
+      found.get("11111111-1111-4111-8111-111111111111") is True
+      and found.get("22222222-2222-4222-8222-222222222222") is False,
+      "one True and one False")
+check("a record whose fields sit past the prefix is still read, via the full-parse fallback",
+      found.get("33333333-3333-4333-8333-333333333333") is True,
+      f"that file is {head_bytes:,} bytes, prefix is {store._HEAD_BYTES:,}")
+# Negative control: the reader must be reading these files, not returning something canned.
+write_record("local_a.json", "11111111-1111-4111-8111-111111111111", False)
+flipped = store.archived_sessions(root=os.path.join("tmp", "archived-check"), ttl=0)
+check("flipping a record flips the answer, so this gate can fail",
+      flipped.get("11111111-1111-4111-8111-111111111111") is False,
+      "same id now reads False")
+check("a directory with no records yields nothing rather than raising",
+      store.archived_sessions(root=os.path.join("tmp", "archived-check", "nope"), ttl=0) == {},
+      "empty dict")
+shutil.rmtree(os.path.join("tmp", "archived-check"), ignore_errors=True)
+
 print()
 print("FEATURE CHECKS PASS" if not failures else f"FEATURE CHECKS FAIL: {failures}")
 sys.exit(0 if not failures else 1)

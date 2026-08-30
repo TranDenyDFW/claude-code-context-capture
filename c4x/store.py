@@ -10,8 +10,10 @@ The one thing to know before changing a query here: **sum api_calls, never turns
 assistant message is written as several transcript rows sharing one request id, so summing turns
 counts the same API call two to eight times.
 """
+import glob
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import time as _time
@@ -187,6 +189,72 @@ def session_rows(ttl: float = 45.0) -> pd.DataFrame:
     return df
 
 
+ARCHIVED_SUFFIX = "archived"
+
+# Enough of a session record to reach isArchived, which sits near the top of a file whose bulk is
+# an enabledMcpTools map. Measured across the 188 records on this machine: the field is inside the
+# first 8 KB of 59 of the 60 sampled, and the parser falls back to the whole file for the rest, so
+# the bound is an optimisation and never a source of a wrong answer.
+_HEAD_BYTES = 8192
+_CLI_ID = re.compile(r'"cliSessionId"\s*:\s*"([0-9a-fA-F-]{36})"')
+_ARCHIVED = re.compile(r'"isArchived"\s*:\s*(true|false)')
+
+_archived_cache = {"map": None, "at": 0.0, "root": None}
+
+
+def sessions_root():
+    """Where the desktop app keeps its per-chat records."""
+    return os.path.join(os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming"),
+                        "Claude", "claude-code-sessions")
+
+
+def read_archived_record(path):
+    """(cli session id, archived) for one record file, or None when it is not a session record.
+
+    Reads a bounded prefix first. If either field is missing from it the whole file is parsed, so a
+    record that happens to order its keys differently is answered correctly rather than skipped.
+    That directory also holds scheduled-tasks.json files, which carry neither field and are not
+    session records; those return None rather than counting as a failed read.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(_HEAD_BYTES)
+    except OSError:
+        return None
+    cli, arch = _CLI_ID.search(head), _ARCHIVED.search(head)
+    if cli and arch:
+        return cli.group(1), arch.group(1) == "true"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            record = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or not record.get("cliSessionId"):
+        return None
+    return str(record["cliSessionId"]), bool(record.get("isArchived"))
+
+
+def archived_sessions(root=None, ttl: float = 45.0) -> dict:
+    """{session id: archived} for every chat the desktop app has a record of.
+
+    Keyed by cliSessionId, which is what this store calls session_id. The desktop app's own
+    sessionId is a different namespace entirely (`local_<uuid>`), and matching on it finds almost
+    nothing, which is what made this look unreadable the first time.
+    """
+    root = root or sessions_root()
+    now = _time.time()
+    if (_archived_cache["map"] is not None and _archived_cache["root"] == root
+            and now - _archived_cache["at"] < ttl):
+        return _archived_cache["map"]
+    found = {}
+    for path in glob.glob(os.path.join(root, "*", "*", "*.json")):
+        row = read_archived_record(path)
+        if row is not None:
+            found[row[0]] = row[1]
+    _archived_cache.update({"map": found, "at": now, "root": root})
+    return found
+
+
 _transcript_cache = {"ids": None, "at": 0.0}
 
 
@@ -322,9 +390,15 @@ def _session_rows_uncached() -> pd.DataFrame:
     def classify(r):
         """Which section a session belongs to. Every test is answerable from disk.
 
-        No Archived section: that flag lives in the desktop app's IndexedDB, not in the transcripts
-        and not in any readable file, so it cannot be shown without a snapshot that would go stale
-        silently. A stale flag presented as live is worse than an absent one.
+        No Archived section, but not for the reason this comment used to give. It claimed the flag
+        lived in the desktop app's IndexedDB and "not in any readable file". It is a plain JSON
+        file per chat under %APPDATA%/Claude/claude-code-sessions, carrying isArchived beside a
+        cliSessionId that IS this store's session_id. Being wrong about that is what kept it off
+        the page.
+
+        It stays out of the SECTIONS because a section implies a partition, and this flag is a
+        tri-state: archived, not archived, and no record. It is shown on the path instead, where
+        the unmarked case is honest about meaning "not known".
         """
         path = r.transcript_path
         # The stored path is whatever file was harvested for this session LAST, and that can be a
@@ -346,8 +420,16 @@ def _session_rows_uncached() -> pd.DataFrame:
         return "Projects"
 
     df["section"] = df.apply(classify, axis=1)
-    df["project"] = [project_label(c, s)
-                     for c, s in zip(df["cwd"], df["project_slug"], strict=True)]
+    # Archived chats get a path of their own, which is what puts them together and away from the
+    # rest under a sort by project. The flag is only knowable for the sessions the desktop app has
+    # a record of, so `archived` is a tri-state: True, False, or None for "no record". None is NOT
+    # folded into False, because the page says how many are unknown and that number would be a lie.
+    flags = archived_sessions()
+    df["archived"] = [flags.get(sid) for sid in df["session_id"]]
+    df["project"] = [
+        project_label(c, s) + ("\\" + ARCHIVED_SUFFIX if archived else "")
+        for c, s, archived in zip(df["cwd"], df["project_slug"], df["archived"], strict=True)
+    ]
     # A session with no title of any kind says so, rather than showing an empty cell that reads
     # like a rendering fault. An imported one gets a name instead, because it is not merely
     # untitled, it is untitleable: every title in this store was read out of a transcript record by
