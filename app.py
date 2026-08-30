@@ -26,12 +26,37 @@ import os
 import sys
 from pathlib import Path
 
-from dash import Dash
+# --db, BEFORE any c4x import.
+#
+# Every node tool in tools/ takes --db and the dashboard did not, so pointing it at another store
+# meant setting C4X_DB in the environment, which is fine in a shell and unreliable everywhere else:
+# a backgrounded launcher that re-spawns the process drops it, and the failure is silent because
+# the app cheerfully opens the default store instead. A flag cannot be dropped.
+#
+# It has to run here rather than in main(), because c4x.store resolves its path at IMPORT time and
+# every module below imports it. Setting the variable after that would change nothing and look
+# like it had worked, which is the same silent failure with an extra step.
+if "--db" in sys.argv:
+    _at = sys.argv.index("--db")
+    if _at + 1 < len(sys.argv):
+        os.environ["C4X_DB"] = str(Path(sys.argv[_at + 1]).expanduser().resolve())
 
-from c4x.server import port_from_argv, register_routes, run
+# --read-only: serve the store and never write to it.
+#
+# THE DASHBOARD IS A WRITER. Its refresh tick runs an incremental harvest so the page follows a
+# live session, and that harvest writes into whatever store it was pointed at. Pointing it at a
+# copy therefore does not leave the copy alone, which is surprising exactly when it matters: a
+# redacted store built for public screenshots was verified clean, served for one tick, and had
+# every real working directory written straight back into it.
+if "--read-only" in sys.argv:
+    os.environ["C4X_READ_ONLY"] = "1"
+
+from dash import Dash  # noqa: E402 - after the --db handling above, deliberately
+
+from c4x.server import port_from_argv, register_routes, run  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
-DB_PATH = ROOT / "data" / "context.db"
+DB_PATH = Path(os.environ.get("C4X_DB") or (ROOT / "data" / "context.db"))
 # --port beats C4X_PORT beats the default. Overridable because a fixed port is not a fixed port:
 # the sibling repo runs the same app, Windows permits a second bind on an address already in use
 # rather than refusing it, and two servers then answer on one port with no error anywhere.
