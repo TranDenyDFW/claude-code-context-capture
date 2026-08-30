@@ -1,5 +1,13 @@
 # Python dependencies. The capture tools themselves are node and need nothing from pip.
 
+# HTTP access to what the dashboard renders (c4x/api/, `python -m c4x.api`).
+#
+# In requirements.txt rather than an optional extra ON PURPOSE. tests/test_api.py skips itself when
+# fastapi is absent, so leaving these out would mean CI installs nothing, skips the whole file, and
+# reports green for an API nobody checked. A test that cannot run is not a passing test.
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
 # Explorer UI (app.py).
 dash>=4.0.0
 plotly>=6.0.0
