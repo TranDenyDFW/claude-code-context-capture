@@ -14,8 +14,8 @@ import pytest
 from c4x.cli import extract
 from c4x.theme import COLUMN_HELP
 
-TABS = ["tab-summary", "tab-sessions", "tab-session", "tab-compactions", "tab-breakdown",
-        "tab-sources", "tab-probes", "tab-waste", "tab-mirror"]
+TABS = ["tab-summary", "tab-sessions", "tab-session", "tab-compactions", "tab-window",
+        "tab-probes", "tab-waste", "tab-mirror"]
 
 
 def every_body(pane, session_id, other_session_id=None):
@@ -27,6 +27,16 @@ def every_body(pane, session_id, other_session_id=None):
     """
     for tab_id in TABS:
         yield tab_id, pane(tab_id, session=session_id)
+    # Sub-panels. A tab body shows only its FIRST panel, so a population built from tab bodies
+    # alone goes blind to the other two the moment a tab gains a strip. That is exactly what
+    # happened when Breakdown and Sources became Window: nine column-help entries looked dead
+    # because the panel rendering them was one click away.
+    from c4x.tabs.window import PANELS as WINDOW_PANELS
+    from c4x.tabs.window import panel_body as window_panel
+    for index, (key, _label, _description) in enumerate(WINDOW_PANELS):
+        if index == 0:
+            continue                               # already covered by the tab body above
+        yield f"tab-window/{key}", window_panel(index, session_id, "main", None)
     import app as module
     # The Session tab's A/B diff, which renders the tool and message tables for a turn range and
     # is the only place `result_bytes` appears.

@@ -10,16 +10,15 @@ from dash import dcc, html
 from c4x.panels import stored_text_note
 from c4x.store import COHORT_ALL, DB_PATH
 from c4x.tabs import (
-    breakdown_layout,
     compactions_layout,
     compare_layout,
     mirror_layout,
     probes_layout,
     session_layout,
     sessions_table_layout,
-    sources_layout,
     summary_layout,
     waste_layout,
+    window_layout,
 )
 from c4x.theme import ACCENT, BG, BORDER, FIELD, MONO, MUTED, PANEL, TEXT, WARN
 from c4x.ui.header import quick_view, scope_radio
@@ -167,8 +166,7 @@ TABS = [
     ("tab-sessions", "All sessions", sessions_table_layout),
     ("tab-session", "Session", session_layout),
     ("tab-compactions", "Compactions", compactions_layout),
-    ("tab-breakdown", "Breakdown", breakdown_layout),
-    ("tab-sources", "Sources", sources_layout),
+    ("tab-window", "Window", window_layout),
     ("tab-probes", "Probes", probes_layout),
     ("tab-waste", "Waste", waste_layout),
     ("tab-compare", "Compare", compare_layout),
@@ -178,8 +176,7 @@ TAB_IDS = [t[0] for t in TABS]
 
 # Summary is store-wide. Everything after it describes the header selection, and each tab says so
 # on the page rather than leaving the reader to work it out.
-SELECTION_SCOPED = {"tab-session", "tab-compactions", "tab-breakdown", "tab-sources",
-                    "tab-waste"}
+SELECTION_SCOPED = {"tab-session", "tab-compactions", "tab-window", "tab-waste"}
 # Probes describes 3 control-protocol runs that belong to no session, and Mirror is a
 # calculator over published constants. Labelling either as scoped would be the same false
 # statement this restructure removed.

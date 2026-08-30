@@ -672,6 +672,33 @@ def main():
                  hits, walked)
         # The whole session as the compared range, so the diff panel builds all three of its
         # tables. A degenerate range returns a prompt instead, and would leave them unbuilt.
+        # Sub-panels, driven by the registry rather than by a hardcoded list. A tab body renders
+        # only its FIRST panel, so walking TABS alone saw a third of the Window tab and reported
+        # 40 tables where there were 74. Every panel of every panelled tab, under the same
+        # selections the tabs get.
+        from c4x.ui import subpanels
+        for prefix, entry in sorted(subpanels.PANELLED.items()):
+            for index, (key, _label, _description) in enumerate(entry["panels"]):
+                for case, sid, coh in cases:
+                    pane = exercise(f"{prefix} panel {key}", errors, exercised,
+                                    lambda i=index, s=sid, c=coh, e=entry:
+                                    e["body"](i, s, "main", c))
+                    if pane is None:
+                        continue
+                    if render_failed(pane):
+                        errors.append(f"{prefix}/{key} / {case} rendered an exception panel")
+                    hits += findings(f"{prefix}/{key} / {case}", pane, walked)
+            # The callbacks that switch and render those panels, so their own construction sites
+            # are taken rather than merely their builders.
+            exercise("_window_panel", errors, exercised,
+                     lambda: m._window_panel(1, session_id, "main", None), hits, walked)
+            context_value.set(AttributeDict(
+                triggered_inputs=[{"prop_id": f"{subpanels.button_id(prefix, 'items')}.n_clicks"}]))
+            exercise("_window_panel_chosen", errors, exercised,
+                     lambda e=entry: m._window_panel_chosen(*([1] * len(e["panels"])), 0),
+                     hits, walked)
+            context_value.set(AttributeDict(triggered_inputs=[]))
+
         exercise("_session_controls", errors, exercised,
                  lambda: m._session_controls(80, [1, 10 ** 6], session_id, "main"), hits, walked)
         exercise("_message_clicked", errors, exercised,
