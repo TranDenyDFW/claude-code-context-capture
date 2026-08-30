@@ -5,6 +5,7 @@ What was paid for twice: files re-read, and tools loaded but never called.
 import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
+from dash.dash_table.Format import Format, Scheme
 
 from c4x.breakdown import tool_spec
 from c4x.panels import evidence_block
@@ -12,10 +13,12 @@ from c4x.store import q, scoped
 from c4x.theme import (
     DANGER,
     MUTED,
+    SECTION_HEAD,
     SECTION_NOTE,
     TEXT,
     dark_fig,
     fmt_tokens,
+    numeric_columns,
     stat_card,
 )
 
@@ -78,6 +81,72 @@ def _reread_curve(read_tools, where, args, dup_min):
             f"denominators are different on purpose.",
             style=SECTION_NOTE),
     ])
+
+
+def _repeated_inputs(where, args, session_id=None):
+    """Identical tool INPUTS issued in more than one session.
+
+    The table above counts a file read repeatedly inside one session, which is the expensive kind:
+    every re-read is re-billed on every later request in that window. This counts something else
+    and must not be read as more of it. An identical input issued in two different sessions is
+    paid once in each, not multiplied, because no cache spans sessions.
+
+    What it is good for is the thing the per-session view cannot see at all: work being redone
+    from scratch across a project. A brief read 480 times across 4 sessions, or one ToolSearch
+    query issued in 68 separate sessions, is a standing answer being re-derived rather than
+    written down.
+
+    `input_sha1` is a hash of the tool's input, so identity here is exact: same tool, same
+    arguments, byte for byte. The store does NOT keep the input itself, which is why a Bash or
+    ToolSearch group shows a blank target and can only be identified by its tool and its shape.
+    """
+    sql = """SELECT tool_name AS tool, target,
+                    COUNT(DISTINCT session_id) AS sessions,
+                    COUNT(*)                   AS calls,
+                    COUNT(*) - COUNT(DISTINCT session_id) AS beyond_one_each,
+                    SUM(COALESCE(result_bytes, 0)) AS bytes,
+                    MIN(ts) AS first_seen, MAX(ts) AS last_seen
+               FROM tool_calls
+              WHERE input_sha1 IS NOT NULL """ + where + """
+              GROUP BY input_sha1
+             HAVING sessions > 1
+              ORDER BY calls DESC, sessions DESC
+              LIMIT 200"""
+    # With one session selected the HAVING can never be satisfied, so the panel would simply not
+    # appear. Saying why is the difference between "there are none" and "this question cannot be
+    # asked from here", and only one of those is true.
+    if session_id:
+        return html.Div([
+            html.Div("The same input, issued in more than one session", style=SECTION_HEAD),
+            html.Div("Not answerable with a single session selected: this table compares sessions "
+                     "to each other. Clear the session in the header, or pick a project, to see "
+                     "which inputs repeat across a whole population.", style=SECTION_NOTE),
+        ])
+    df = q(sql, args)
+    if df.empty:
+        return html.Div()
+    df["bytes"] = (df["bytes"] / 1024).round(1)
+    for column in ("first_seen", "last_seen"):
+        df[column] = df[column].astype(str).str.slice(0, 16).str.replace("T", " ")
+    totals = q("""SELECT COUNT(*) AS groups, COALESCE(SUM(calls), 0) AS calls,
+                         COALESCE(SUM(sessions), 0) AS pairs FROM (
+                    SELECT COUNT(*) AS calls, COUNT(DISTINCT session_id) AS sessions
+                      FROM tool_calls WHERE input_sha1 IS NOT NULL """ + where + """
+                     GROUP BY input_sha1 HAVING sessions > 1)""", args).iloc[0]
+    return evidence_block(
+        "The same input, issued in more than one session", df, sql, args,
+        columns=numeric_columns(
+            ["tool", "target", "sessions", "calls", "beyond_one_each", "bytes",
+             "first_seen", "last_seen"],
+            {"sessions", "calls", "beyond_one_each", "bytes"},
+            {"bytes": Format(precision=1, scheme=Scheme.fixed)}),
+        heat=["sessions", "calls"], page_size=12,
+        note=f"{int(totals['groups']):,} inputs repeat across sessions, "
+             f"{int(totals['calls']):,} calls in total. NOT the same cost as the table above: "
+             f"across sessions each call is paid once, not re-billed, because no cache spans "
+             f"sessions. This is work being re-derived rather than written down. Identity is a "
+             f"hash of the tool input, so it is exact; the input itself is not stored, which is "
+             f"why a Bash or ToolSearch row has no target to show.")
 
 
 def _rebill_card(session_id=None, cohort=None):
@@ -209,6 +278,8 @@ def waste_layout(session_id=None, scope="main", cohort=None):
                         "population": groups}),
         html.Div(id="reread-filter-note"),
         _reread_curve(read_tools, wsid, wargs, dup_min),
+
+        _repeated_inputs(wsid, wargs, session_id),
 
         evidence_block(
             "MCP servers by invocation count", srv, sql_srv, wargs,

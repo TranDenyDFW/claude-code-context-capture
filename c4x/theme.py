@@ -333,6 +333,22 @@ COLUMN_HELP = {
     "variants": "Distinct spellings of the same target, which is how a re-read hides.",
     "result_bytes": "Bytes of tool RESULT, not tokens. This store records no per-call token count.",
 
+    # Repeated inputs across sessions. Every one of these describes a row grouped by input_sha1,
+    # which is a hash of the tool's arguments, so "the same" here means byte-identical rather
+    # than similar.
+    "sessions": ("How many DIFFERENT sessions issued this identical input. Two or more is the "
+                 "whole filter for this table: one session repeating itself is the table above."),
+    "calls": "Total calls with this exact input, across every session that made one.",
+    "beyond_one_each": ("Calls minus sessions: how much of the repetition is WITHIN sessions "
+                        "rather than across them. A row of 68 sessions and 0 here is 68 separate "
+                        "sessions each asking once, which is a different problem from one session "
+                        "asking 68 times."),
+    "first_seen": "Earliest call with this input, anywhere in the population.",
+    "last_seen": "Latest call with this input. Still recent means the repetition is not history.",
+    "target": ("The file or resource the call named. BLANK where the tool has no target, such as "
+               "Bash or ToolSearch: the store keeps a hash of the input, never the input itself, "
+               "so those rows are identified by their tool and their shape alone."),
+
     # Compactions
     "dropped": "Tokens the compaction discarded, as the transcript recorded it.",
     "pre_tokens": "Resident tokens immediately before the compaction.",
