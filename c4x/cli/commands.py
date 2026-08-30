@@ -4,69 +4,49 @@ Every command renders through the SAME callback the browser calls. Calling a tab
 would prove the builder works and say nothing about the path that delivers it, which is where two
 of this repo's defects actually lived: a table that was correct in its builder and invisible on the
 page, and a tab that rendered fine on the server while the page reset itself.
+
+WHERE the panes come from is `source.py`'s problem, not this file's. These commands read the same
+payload shape whether it was built in this process or fetched from `python -m c4x.api`, which is
+what makes `python -m c4x.cli all --via api` a real check on the API rather than a second program
+that happens to print similar numbers.
 """
-from c4x.cli import extract, render
-
-
-def _app():
-    """Import the Dash app lazily.
-
-    Importing it costs a Dash registration pass and opens the store, which `--help` has no business
-    paying for.
-    """
-    import app as module
-    return module
+from c4x.cli import render, source
 
 
 def tab_ids():
-    return [tab[0] for tab in _app().TABS]
+    return source.tab_ids()
 
 
 def cmd_tabs(_args):
-    for tab_id, label, _fn in _app().TABS:
+    for tab_id, label in source.tab_labels():
         print(f"{tab_id:18} {label}")
     return 0
 
 
 def cmd_sessions(args):
-    from c4x import store
-    df = store.session_rows()
-    if df.empty:
+    rows = source.sessions(args.limit)
+    if not rows:
         print("no sessions in the store")
         return 1
+    if args.json:
+        print(render.as_json({"sessions": rows}))
+        return 0
+    import pandas as pd
     columns = ["session_id", "title", "project", "section", "turns", "current", "peak",
                "compactions"]
-    df = df.sort_values("last_ts", ascending=False)[columns].head(args.limit)
-    if args.json:
-        print(render.as_json({"sessions": df.to_dict("records")}))
-    else:
-        print(df.to_string(index=False))
+    frame = pd.DataFrame(rows)
+    print(frame[[c for c in columns if c in frame.columns]].to_string(index=False))
     return 0
 
 
 def render_tab(tab_id, session=None, scope="main", cohort=None):
     """One tab's pane, as data."""
-    module = _app()
-    ids = tab_ids()
-    if tab_id not in ids:
-        raise SystemExit(f"unknown tab {tab_id!r}. Known: {', '.join(ids)}")
-    pane = module._render_tab(ids.index(tab_id), session, scope, cohort)
-    payload = extract.describe(pane)
-    payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
-    return payload
+    return source.render_tab(tab_id, session, scope, cohort)
 
 
 def render_compare(kind, target, session=None, cohort=None, scope="main"):
-    """Compare's body, which its own callback delivers.
-
-    The pane renders a placeholder until that callback runs, so dumping the tab alone shows nothing
-    and would read as "compare produces no data".
-    """
-    body = _app()._cmp_render(kind, target, session, cohort, scope)
-    payload = extract.describe(body)
-    payload.update({"tab": "tab-compare", "kind": kind, "target": target, "session": session,
-                    "scope": scope, "cohort": cohort})
-    return payload
+    """Compare's body, which its own callback delivers."""
+    return source.render_compare(kind, target, session, cohort, scope)
 
 
 def _compare_by_default(args):
@@ -78,10 +58,10 @@ def _compare_by_default(args):
     thing.
 
     The tab now defaults arm B, so the sweep can ask for exactly what a reader sees: the same
-    default, through the same callback. `render_compare` was already here and unused by this path.
+    default, through the same callback. Over the API the default is applied server-side, so no arm
+    is named here and the same pane comes back.
     """
-    from c4x.tabs.compare import default_arm_b
-    target = default_arm_b(args.session, args.cohort)
+    target = source.default_compare_arm(args.session, args.cohort)
     if not target:
         return render_tab("tab-compare", args.session, args.scope, args.cohort)
     return render_compare("session", target, args.session, args.cohort, args.scope)
@@ -103,6 +83,7 @@ def cmd_all(args):
     A tab that raises is reported and the sweep continues, because stopping at the first failure
     hides how many others are also broken.
     """
+    print(f"source: {source.describe_source()}")
     failed = []
     for tab_id in tab_ids():
         try:
@@ -110,6 +91,8 @@ def cmd_all(args):
                 payload = _compare_by_default(args)
             else:
                 payload = render_tab(tab_id, args.session, args.scope, args.cohort)
+        except SystemExit:
+            raise
         except Exception as exc:                   # noqa: BLE001 - report, do not abort the sweep
             failed.append(tab_id)
             print(f"== {tab_id}\n   RAISED {type(exc).__name__}: {exc}")
