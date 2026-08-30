@@ -111,9 +111,11 @@ def test_this_table_ignores_the_scope_switch_and_says_so(pane, has_store, q):
     main = extract.table_by_id(pane("tab-sessions", scope="main"), TABLE_ID)
     every = extract.table_by_id(pane("tab-sessions", scope="all"), TABLE_ID)
     assert main["rows"] == every["rows"], "the table is documented as scope-independent"
-    text = "\n".join(extract.texts(pane("tab-sessions")))
-    assert "subagent" in text.lower(), (
-        "the table counts subagent rows and the page never says so")
+    # all_words, not texts: this statement moved from a paragraph above the table to the `turns`
+    # column tooltip, which is where it belongs. Where a caveat LIVES is a presentation decision;
+    # that a reader can find it at all is the thing worth testing.
+    said = extract.all_words(pane("tab-sessions")).lower()
+    assert "subagent" in said, "the table counts subagent rows and the page never says so"
 
 
 def test_the_turns_column_really_does_include_subagent_rows(table, q):

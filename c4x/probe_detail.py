@@ -25,6 +25,7 @@ from c4x.theme import (
     SECTION_NOTE,
     TABLE_STYLE,
     TEXT,
+    header_help,
     numeric_columns,
 )
 
@@ -194,11 +195,12 @@ def probe_detail_blocks(baseline=None):
             html.Div("Recorded against calibrated, per category",
                      style={"color": MUTED, "fontSize": "11.5px", "margin": "10px 0 6px 0"}),
             dash_table.DataTable(
-                columns=numeric_columns(
+                columns=(_cols := numeric_columns(
                     ["category", "items recorded", "items in baseline", "tokens recorded",
                      "tokens in baseline", "not loaded"],
                     {"items recorded", "items in baseline", "tokens recorded",
-                     "tokens in baseline", "not loaded"}),
+                     "tokens in baseline", "not loaded"})),
+                tooltip_header=header_help(_cols),
                 data=rows, **TABLE_STYLE),
             html.Div(
                 "Where the two columns disagree, the probe and the calibration saw different "
@@ -211,16 +213,11 @@ def probe_detail_blocks(baseline=None):
 
     tables = [
         item_table(pid, "skill", "Every skill, largest first",
-                   "Source says where a skill comes from: built-in ships with Claude Code, "
-                   "userSettings is one you wrote, plugin arrives with a plugin. Only the last "
-                   "two are yours to remove.",
+                   "Largest first. Only userSettings and plugin skills are yours to remove.",
                    "name, extra AS source, tokens", ["name", "source", "tokens"], {"tokens"}),
         mcp_by_server(pid),
         item_table(pid, "mcpTool", "Every MCP tool, by server",
-                   "loaded = 0 means the tool was deferred at the time of the reading, and a "
-                   "deferred tool costs nothing until something loads it. Its 0 is a statement "
-                   "about residency, NOT a measurement that the schema is free: the same tool "
-                   "loaded is worth its full schema.",
+                   "A server is the unit you can switch off; a tool is not.",
                    "name, extra AS server, loaded, tokens",
                    ["name", "server", "loaded", "tokens"], {"loaded", "tokens"}),
         item_table(pid, "agent", "Custom agents",

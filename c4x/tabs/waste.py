@@ -64,12 +64,12 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         if not frame.empty and "bytes" in frame:
             frame["bytes"] = (frame["bytes"] / 1024).round(1)
 
+    # Why subagents are counted is on the `reads` column tooltip. What stays here is the one thing
+    # a tooltip cannot say: which population this page is describing right now.
     scope_note = html.Div(
-        "Counting EVERY tool call, subagent work included, whichever way the main thread / "
-        "include subagents radio is set. Subagents make almost all the tool calls in a Claude Code "
-        "session, so a main-thread-only reading of this tab would report most waste as zero."
-        + (f" Narrowed to {'this session' if session_id else 'this cohort'}." if
-           (session_id or cohort) else " Describing the whole store."),
+        "Every tool call, subagent work included, whichever way the scope radio is set. "
+        + (f"Narrowed to {'this session' if session_id else 'this cohort'}."
+           if (session_id or cohort) else "Describing the whole store."),
         style=SECTION_NOTE)
 
     return html.Div([

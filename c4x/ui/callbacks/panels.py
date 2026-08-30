@@ -33,6 +33,7 @@ from c4x.theme import (
     TEXT,
     WARN,
     fmt_tokens,
+    header_help,
     numeric_columns,
     stat_card,
 )
@@ -130,7 +131,9 @@ def _compaction_clicked(active_cell, rows):
                 style={"color": MUTED, "fontSize": "11.5px", "margin": "14px 0 6px 0"},
             ),
             dash_table.DataTable(
-                columns=numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"}),
+                columns=(_cols :=
+                    numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"})),
+                tooltip_header=header_help(_cols),
                 data=d.to_dict("records"), page_size=10,
                 style_table={"overflowX": "auto"}, **TABLE_STYLE,
             ),

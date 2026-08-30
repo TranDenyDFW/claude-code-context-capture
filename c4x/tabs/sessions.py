@@ -4,8 +4,8 @@ Every session as a sortable, filterable table. Clicking a row sets the header se
 """
 from dash import dash_table, html
 
-from c4x.store import ARCHIVED_SUFFIX, cohort_sessions, session_rows
-from c4x.theme import MUTED, SECTION_NOTE, TABLE_STYLE, numeric_columns
+from c4x.store import cohort_sessions, session_rows
+from c4x.theme import MUTED, SECTION_NOTE, TABLE_STYLE, header_help, numeric_columns
 
 
 def archived_note(df):
@@ -21,13 +21,10 @@ def archived_note(df):
     marked = int((df["archived"] == True).sum())          # noqa: E712 - tri-state, not truthiness
     known_not = int((df["archived"] == False).sum())       # noqa: E712 - None must not count here
     unknown = int(df["archived"].isna().sum())
-    return (
-        f"Archived chats carry \\{ARCHIVED_SUFFIX} on their path, which sorts them beside the "
-        f"project they came from: {marked:,} here. The flag is read from the desktop app's own "
-        f"session records, so it is only knowable for the chats it has one for: {known_not:,} are "
-        f"recorded as not archived and {unknown:,} have no record at all. An unmarked path "
-        f"therefore means NOT KNOWN to be archived, which is not the same as not archived."
-    )
+    # The COUNTS stay on the page; what the marker MEANS moved to the `project` column tooltip.
+    # A reader needs to know that 226 of these are unknown without hovering to find out.
+    return (f"Archived: {marked:,} marked, {known_not:,} recorded as not archived, "
+            f"{unknown:,} with no desktop record at all.")
 
 
 def sessions_table_layout(session_id=None, scope="main", cohort=None):
@@ -61,26 +58,25 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
         html.Div("Click a row to make it the header selection. Sections come from disk: the "
                  "working directory, the entrypoint, and whether the transcript still exists.",
                  style=SECTION_NOTE),
-        # The main-thread / include-subagents radio does NOT narrow this table, and the gap is far
-        # too large to leave unsaid: one session here holds 59,864 transcript rows of which 690 are
-        # main thread. Read beside the Session tab, which does respect the radio, that is an 87x
-        # difference with nothing on the page accounting for it.
-        html.Div("turns, current and peak count EVERY transcript row for a session, subagent work "
-                 "included, whichever way the main thread / include subagents radio is set. This "
-                 "table is an index of what exists rather than a measurement under a scope, so "
-                 "its turns column can be many times the row count the Session tab shows for the "
-                 "same session.", style=SECTION_NOTE),
+        # This paragraph is now the `turns` column tooltip. It was written here because there was
+        # nowhere else to put it; the gap it describes is real (one session holds 59,864 rows of
+        # which 690 are main thread) and the tooltip states it on the column it concerns.
         html.Div(archived_note(df), style=SECTION_NOTE),
         dash_table.DataTable(
             id="tbl-session",
-            columns=numeric_columns(
+            columns=(_cols := numeric_columns(
                 ["section", "title", "project", "last active", "turns", "current", "peak",
                  "compactions"],
-                {"turns", "current", "peak", "compactions"}),
+                {"turns", "current", "peak", "compactions"})),
+            tooltip_header=header_help(_cols),
             data=rows,
             hidden_columns=["session_id"],
             page_size=16,
             sort_action="native",
+            # This table does not spread TABLE_STYLE, so it needs the tooltip setting explicitly.
+            # It carries the longest tooltip in the app and was the one still hiding it after two
+            # seconds, which is less time than the sentence takes to read.
+            tooltip_duration=None,
             filter_action="native",
             row_selectable="single",
             cell_selectable=False,
