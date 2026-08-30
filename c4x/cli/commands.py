@@ -69,6 +69,24 @@ def render_compare(kind, target, session=None, cohort=None, scope="main"):
     return payload
 
 
+def _compare_by_default(args):
+    """Compare, rendered the way the browser renders it on arrival.
+
+    The sweep reported `tab-compare  0 tables, 0 figures, 0 rows` for as long as this command has
+    existed, because the pane is a pair of dropdowns and its body arrives from a callback. Read as
+    a health check, that line says the tab is broken. It was reporting the truth about the wrong
+    thing.
+
+    The tab now defaults arm B, so the sweep can ask for exactly what a reader sees: the same
+    default, through the same callback. `render_compare` was already here and unused by this path.
+    """
+    from c4x.tabs.compare import default_arm_b
+    target = default_arm_b(args.session, args.cohort)
+    if not target:
+        return render_tab("tab-compare", args.session, args.scope, args.cohort)
+    return render_compare("session", target, args.session, args.cohort, args.scope)
+
+
 def cmd_dump(args):
     if args.tab == "tab-compare" and args.compare_with:
         payload = render_compare(args.compare_kind, args.compare_with, args.session, args.cohort,
@@ -88,7 +106,10 @@ def cmd_all(args):
     failed = []
     for tab_id in tab_ids():
         try:
-            payload = render_tab(tab_id, args.session, args.scope, args.cohort)
+            if tab_id == "tab-compare":
+                payload = _compare_by_default(args)
+            else:
+                payload = render_tab(tab_id, args.session, args.scope, args.cohort)
         except Exception as exc:                   # noqa: BLE001 - report, do not abort the sweep
             failed.append(tab_id)
             print(f"== {tab_id}\n   RAISED {type(exc).__name__}: {exc}")
