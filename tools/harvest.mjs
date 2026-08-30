@@ -444,9 +444,29 @@ export async function backfillAgents(dbPath = DB_PATH, { quiet = false } = {}) {
   const db = openDb(dbPath);
   const setParent = db.prepare('UPDATE turns SET parent_uuid = ? WHERE uuid = ? AND parent_uuid IS NULL');
   const setAgent = db.prepare('UPDATE tool_calls SET subagent_type = ? WHERE tool_use_id = ? AND subagent_type IS NULL');
+  // A HIGH-WATER ROWID PER TABLE, taken before anything is written.
+  //
+  // The obvious guard, comparing COUNT(*) before and against after, is wrong on this store and
+  // wrong for a reason that is not the backfill's fault. Three writers exist by design: this
+  // process, the SessionEnd and UserPromptSubmit hooks, and the dashboard's refresh loop. On the
+  // first live run turns and tool_calls each gained one row while the backfill was scanning, and
+  // harvest_runs gained 33 and messages gained one, which the backfill does not touch at all.
+  // The guard fired on a true statement about a cause it had nothing to do with.
+  //
+  // Counting only rows that already existed fixes it exactly. A concurrent INSERT takes a higher
+  // rowid and is excluded; a DELETE or a REPLACE of an existing row moves the number, which is
+  // the failure this is actually looking for.
+  const highWater = {
+    turns: db.prepare('SELECT COALESCE(MAX(rowid), 0) n FROM turns').get().n,
+    tool_calls: db.prepare('SELECT COALESCE(MAX(rowid), 0) n FROM tool_calls').get().n,
+  };
+  const existing = (table) => db.prepare(
+    `SELECT COUNT(*) n FROM ${table} WHERE rowid <= ?`).get(highWater[table]).n;
   const before = {
-    turns: db.prepare('SELECT COUNT(*) n FROM turns').get().n,
-    tool_calls: db.prepare('SELECT COUNT(*) n FROM tool_calls').get().n,
+    turns: existing('turns'),
+    tool_calls: existing('tool_calls'),
+    turns_total: db.prepare('SELECT COUNT(*) n FROM turns').get().n,
+    tool_calls_total: db.prepare('SELECT COUNT(*) n FROM tool_calls').get().n,
     parents: db.prepare('SELECT COUNT(*) n FROM turns WHERE parent_uuid IS NOT NULL').get().n,
     agents: db.prepare('SELECT COUNT(*) n FROM tool_calls WHERE subagent_type IS NOT NULL').get().n,
   };
@@ -483,8 +503,10 @@ export async function backfillAgents(dbPath = DB_PATH, { quiet = false } = {}) {
     }
   }
   const after = {
-    turns: db.prepare('SELECT COUNT(*) n FROM turns').get().n,
-    tool_calls: db.prepare('SELECT COUNT(*) n FROM tool_calls').get().n,
+    turns: existing('turns'),
+    tool_calls: existing('tool_calls'),
+    turns_total: db.prepare('SELECT COUNT(*) n FROM turns').get().n,
+    tool_calls_total: db.prepare('SELECT COUNT(*) n FROM tool_calls').get().n,
     parents: db.prepare('SELECT COUNT(*) n FROM turns WHERE parent_uuid IS NOT NULL').get().n,
     agents: db.prepare('SELECT COUNT(*) n FROM tool_calls WHERE subagent_type IS NOT NULL').get().n,
   };
@@ -492,11 +514,19 @@ export async function backfillAgents(dbPath = DB_PATH, { quiet = false } = {}) {
     files_scanned: scanned,
     files_unreadable: skipped,
     files_that_contributed: perFile.length,
-    // Row counts before and after, because a backfill that changed either created or destroyed a
-    // row and this one is only allowed to fill columns. Reported rather than assumed.
+    // The rows that ALREADY EXISTED, before and after. This backfill is only allowed to fill
+    // columns, so this pair must be identical; a difference means it created or destroyed a row.
+    // Reported rather than assumed, because "it only runs UPDATE" is a claim about source code
+    // and this is a measurement.
     rows_before: { turns: before.turns, tool_calls: before.tool_calls },
     rows_after: { turns: after.turns, tool_calls: after.tool_calls },
     rows_unchanged: before.turns === after.turns && before.tool_calls === after.tool_calls,
+    // What the OTHER writers did meanwhile, reported separately so it can never be read as this
+    // tool's doing. On a live store this is normally a small positive number and is not an error.
+    written_by_other_writers_meanwhile: {
+      turns: after.turns_total - before.turns_total,
+      tool_calls: after.tool_calls_total - before.tool_calls_total,
+    },
     parent_uuid: { before: before.parents, after: after.parents, filled: parents },
     subagent_type: { before: before.agents, after: after.agents, filled: agents },
     turns_still_without_a_parent: after.turns - after.parents,
@@ -1255,6 +1285,42 @@ async function selfTest() {
   rmSync(tmpDb, { force: true });
   rmSync(tmpDb + '-wal', { force: true });
   rmSync(tmpDb + '-shm', { force: true });
+
+  // The agent backfill's safety report, on a store another writer is appending to.
+  //
+  // This is the case that made the guard wrong on the first live run. Comparing COUNT(*) before
+  // and after said "rows changed" because the dashboard's refresh loop and the hooks had written
+  // a turn and a tool call while the scan was running - and harvest_runs and messages moved too,
+  // which this backfill never touches. Counting only rows that already existed is what makes the
+  // guard about this tool instead of about the store being alive.
+  const liveDb = join(ROOT, 'tmp', `live-${process.pid}.db`);
+  rmSync(liveDb, { force: true });
+  {
+    const t = new DatabaseSync(liveDb);
+    t.exec(SCHEMA);
+    t.prepare('INSERT INTO turns (uuid,session_id,total_resident) VALUES (?,?,?)').run('old1', 's', 10);
+    t.prepare(`INSERT INTO tool_calls (tool_use_id,session_id,tool_name) VALUES (?,?,?)`)
+      .run('oldtc', 's', 'Agent');
+    t.close();
+  }
+  const liveReport = await backfillAgents(liveDb, { quiet: true });
+  checks.push(['agent backfill: a store with nothing to fill reports no change and exits 0',
+    liveReport === 0]);
+  {
+    // Now with a CONCURRENT insert: one row appended between the two measurements, exactly as a
+    // hook harvest does. The report must call the pre-existing rows unchanged and attribute the
+    // new row to the other writer.
+    const t = new DatabaseSync(liveDb);
+    t.prepare('INSERT INTO turns (uuid,session_id,total_resident) VALUES (?,?,?)').run('new1', 's', 20);
+    const total = t.prepare('SELECT COUNT(*) n FROM turns').get().n;
+    const existing = t.prepare('SELECT COUNT(*) n FROM turns WHERE rowid <= ?').get(1).n;
+    t.close();
+    checks.push(['agent backfill: a concurrent insert raises the total but not the pre-existing count',
+      total === 2 && existing === 1, `${total} total, ${existing} pre-existing`]);
+  }
+  rmSync(liveDb, { force: true });
+  rmSync(liveDb + '-wal', { force: true });
+  rmSync(liveDb + '-shm', { force: true });
 
   // Negative control: the same assertions against an EMPTY store must fail.
   const empty = new DatabaseSync(':memory:');
