@@ -208,11 +208,85 @@ def tab_render(tab_id: str,
         payload = extract.describe(pane)
         payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
         payload["plotly"] = [f.to_plotly_json() for f in _figures(pane)]
+        sections = _details(pane)
+        # The pairing is only meaningful if this walk saw the same tables the extractor did. If the
+        # two ever diverge, an index would point at the wrong table and a query would be shown under
+        # a table it did not produce, which is worse than showing no query at all. Dropped rather
+        # than served wrong, and said out loud in the payload.
+        limit = len(payload["tables"])
+        for section in sections:
+            if not -1 <= section["table_index"] < limit:
+                section["table_index"] = None
+        payload["details"] = sections
         return _jsonable(payload)
 
     if no_cache:
         return build()
     return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind), build)
+
+
+def _details(node, found=None):
+    """Every collapsible section in a pane, as {summary, body}, in document order.
+
+    This is the app's signature feature and it does not survive `describe()`. Each table carries the
+    SQL that produced it in a `<details>`, and `extract.texts()` flattens a pane to a list of
+    strings, so over the API the query arrives as loose paragraphs among the prose with nothing
+    saying where it starts, what it belongs to, or that it was collapsed. A frontend rendering that
+    list faithfully would print six queries down the Cost tab as body text.
+
+    ON THE RENDER SURFACE ONLY, deliberately. `/api/tab/{id}` is the parity surface: it is compared
+    field for field against Dash by `tools/parity.py`, and it is byte for byte what the CLI emits.
+    Adding a field there would change what the CLI prints and what the differ compares, for the
+    benefit of a browser. `/render` already exists to carry what only a browser wants.
+
+    Nested sections are not descended into: the outermost is the one a reader collapses.
+
+    EACH SECTION NAMES THE TABLE IT BELONGS TO, BY INDEX, not by id. Five of the Cost tab's six
+    tables have no id at all, so an id would attribute one query and leave five pointing at nothing,
+    which is exactly the tab where the queries matter most. The index is unambiguous.
+
+    It is a real index into `payload["tables"]`, which means this walk has to visit the tree in the
+    same order `extract.tables()` does. It uses the extractor's own table-type constant and the same
+    traversal rather than a copy that looks similar, and `/render` checks the two counts agree
+    before trusting the pairing.
+    """
+    from c4x.cli import extract
+    found = [] if found is None else found
+    state = {"seen": 0}
+
+    def walk(node, inside_details=False):
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child, inside_details)
+            return
+        if not hasattr(node, "_prop_names"):
+            return
+        kind = type(node).__name__
+        if kind == extract.TABLE_TYPE:
+            state["seen"] += 1
+            return
+        if kind == "Details" and not inside_details:
+            children = list(node.children) if isinstance(node.children, (list, tuple)) \
+                else [node.children]
+            summary, body = "", []
+            for child in children:
+                if hasattr(child, "_prop_names") and type(child).__name__ == "Summary":
+                    summary = " ".join(extract.texts(child.children)) if child.children else ""
+                else:
+                    body.extend(extract.texts(child))
+            # The index of the table this section follows. -1 before any table has been seen.
+            found.append({"summary": summary, "body": body, "table_index": state["seen"] - 1})
+            # Descended into anyway, so tables inside a collapsed section still advance the count
+            # and every later section points at the right one. Nested Details are not collected.
+            walk(node.children, inside_details=True)
+            return
+        for name in node._prop_names:
+            value = getattr(node, name, None)
+            if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
+                walk(value, inside_details)
+
+    walk(node)
+    return found
 
 
 def _figures(node, found=None):

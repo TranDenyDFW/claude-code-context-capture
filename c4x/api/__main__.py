@@ -3,6 +3,7 @@
     python -m c4x.api                       # 127.0.0.1:8059
     python -m c4x.api --port 8060
     python -m c4x.api --db tmp/demo-store.db
+    python -m c4x.api --reload              # restart on source changes, for development
     python -m c4x.api --self-test           # no network, no store
 
 Port 8059 by default, beside the dashboard's 8056 rather than on top of it, because both are meant
@@ -78,15 +79,29 @@ def main(argv=None):
 
     import uvicorn
 
-    from c4x.api.main import api
-
     port = port_from_argv(argv)
+    reload = "--reload" in argv
+
     from c4x import store
     print(f"c4x api on http://127.0.0.1:{port}/api/docs")
     print(f"  store: {store.DB_PATH}")
     print("  read-only: this server never harvests, unlike the dashboard")
+    if reload:
+        print("  reloading on source changes")
+
     # host is fixed, not configurable. This process can read every conversation on the machine.
-    uvicorn.run(api, host="127.0.0.1", port=port, log_level="warning")
+    #
+    # RELOAD TAKES AN IMPORT STRING, not the app object: uvicorn's reloader re-imports the module in
+    # a child process, and handing it an already-constructed app silently disables reloading while
+    # printing nothing. Worth the branch, because a server quietly serving code from before the last
+    # edit cost two rounds of "the frontend is broken" during this migration, and both times the
+    # frontend was fine.
+    if reload:
+        uvicorn.run("c4x.api.main:api", host="127.0.0.1", port=port, log_level="warning",
+                    reload=True, reload_dirs=[str(ROOT / "c4x")])
+    else:
+        from c4x.api.main import api
+        uvicorn.run(api, host="127.0.0.1", port=port, log_level="warning")
     return 0
 
 
