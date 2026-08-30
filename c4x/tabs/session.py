@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from dash import dash_table, dcc, html
 
 from c4x.panels import baseline_marks
+from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     THRESHOLDS,
     cohort_sessions,
@@ -35,6 +36,7 @@ from c4x.theme import (
     WARN,
     dark_fig,
     empty_fig,
+    fmt_cost,
     fmt_tokens,
     header_help,
     numeric_columns,
@@ -445,6 +447,18 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     cdf = q(f"""SELECT SUM(COALESCE(cache_read_input_tokens,0)) AS churn,
                        MAX(total_resident) AS peak
                 FROM api_calls WHERE 1=1 {cw}""", cargs)
+    # Per MODEL, because a session that switched models has more than one price and possibly only
+    # one of them in the table. Grouped here rather than multiplied off the totals above, for the
+    # same reason the threshold lines are drawn per segment rather than flat across the session.
+    _by_model = q(f"""SELECT model, COUNT(*) AS calls,
+                            SUM(COALESCE(input_tokens,0))                AS input_tokens,
+                            SUM(COALESCE(output_tokens,0))               AS output_tokens,
+                            SUM(COALESCE(cache_read_input_tokens,0))     AS cache_read_input_tokens,
+                            SUM(COALESCE(cache_creation_input_tokens,0))
+                              AS cache_creation_input_tokens
+                       FROM api_calls WHERE 1=1 {cw} GROUP BY model""", cargs)
+    cost_usd, cost_calls, _unpriced = cost_of_rows(_by_model.to_dict("records"))
+    cost_usd = cost_usd if cost_calls else None
     cache_total = int(cdf.iloc[0]["churn"] or 0) if not cdf.empty else 0
     churn_peak = int(cdf.iloc[0]["peak"] or 0) if not cdf.empty else 0
     rebill = (cache_total / churn_peak) if churn_peak else 0.0
@@ -468,6 +482,16 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
         stat_card("output", fmt_tokens(total_out), sub=f"{fmt_tokens(think)} thinking"),
         stat_card("compactions", str(len(comps)), color=DANGER if len(comps) else TEXT),
         stat_card("models", ", ".join(real_models(turns["model"])[:2]) or "-"),
+        # BLANK, not zero, when this session ran a model the price table does not carry. A cost
+        # card reading $0.00 says the session was free, which is a claim; an empty one says this
+        # app does not know what it cost, which is true. The sub-line carries the price table's
+        # date, so a figure derived from a stale table cannot look current.
+        stat_card("estimated cost", fmt_cost(cost_usd) or "not priced",
+                  color=WARN if cost_usd else MUTED,
+                  sub=(f"prices of {PRICE_TABLE_DATE}, {cost_calls:,} of {len(turns):,} calls"
+                       if cost_calls else
+                       f"no price in c4x/pricing.py for "
+                       f"{', '.join(real_models(turns['model'])[:2]) or 'this model'}")),
     ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
     cards = html.Div([band_explainer, cards])
 

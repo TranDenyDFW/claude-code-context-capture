@@ -9,6 +9,7 @@ from dash.dash_table.Format import Format, Scheme
 
 from c4x.breakdown import tool_spec
 from c4x.panels import evidence_block
+from c4x.pricing import PRICE_TABLE_DATE, cost_of, cost_of_rows, coverage_note
 from c4x.store import q, scoped
 from c4x.theme import (
     DANGER,
@@ -16,7 +17,9 @@ from c4x.theme import (
     SECTION_HEAD,
     SECTION_NOTE,
     TEXT,
+    WARN,
     dark_fig,
+    fmt_cost,
     fmt_tokens,
     numeric_columns,
     stat_card,
@@ -80,6 +83,59 @@ def _reread_curve(read_tools, where, args, dup_min):
             f"first 200 of those groups; this curve is computed over all of them, so the two "
             f"denominators are different on purpose.",
             style=SECTION_NOTE),
+    ])
+
+
+def _estimated_cost(where, args):
+    """What the recorded tokens would have cost, per model, with the price table on the page.
+
+    The only derived-money figure in this app, so it carries more caveat than anything else here.
+    A model the table does not price renders a BLANK cost, never a zero, and the note beneath
+    counts how many calls that leaves out. The alternative, quietly summing only what is priced
+    under a label that says "total", is a smaller number wearing the right name.
+
+    The price table's date is printed here rather than only in the source, because a price has a
+    shelf life and a figure derived from a stale one is wrong in a way nothing on screen shows.
+    """
+    sql = """SELECT model,
+                    COUNT(*)                                        AS calls,
+                    SUM(COALESCE(input_tokens, 0))                  AS input_tokens,
+                    SUM(COALESCE(output_tokens, 0))                 AS output_tokens,
+                    SUM(COALESCE(cache_read_input_tokens, 0))       AS cache_read_input_tokens,
+                    SUM(COALESCE(cache_creation_input_tokens, 0))   AS cache_creation_input_tokens
+               FROM api_calls WHERE 1=1 """ + where + """
+              GROUP BY model ORDER BY calls DESC"""
+    df = q(sql, args)
+    if df.empty:
+        return html.Div()
+    rows = df.to_dict("records")
+    total, priced_calls, missing = cost_of_rows(rows)
+    for row in rows:
+        value = cost_of(row["model"], row["input_tokens"], row["output_tokens"],
+                        row["cache_read_input_tokens"], row["cache_creation_input_tokens"])
+        # The estimate as a NUMBER, so it sorts and exports as one, and a separate rendered
+        # string, because Dash cannot express "blank for missing" through a numeric format and
+        # numeric_columns would print a missing value as an empty cell only by accident.
+        row["est_usd"] = None if value is None else round(value, 2)
+        row["priced"] = "yes" if value is not None else ""
+    return html.Div([
+        html.Div([
+            stat_card("Estimated cost", fmt_cost(total) or "-", color=WARN,
+                      sub=f"priced models only, table of {PRICE_TABLE_DATE}"),
+            stat_card("Calls priced", f"{priced_calls:,}",
+                      sub=f"of {int(df['calls'].sum()):,} in this population"),
+        ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap",
+                  "margin": "18px 0 10px 0"}),
+        evidence_block(
+            "What these tokens would have cost", pd.DataFrame(rows), sql, args,
+            columns=numeric_columns(
+                ["model", "calls", "input_tokens", "output_tokens",
+                 "cache_read_input_tokens", "cache_creation_input_tokens", "est_usd", "priced"],
+                {"calls", "input_tokens", "output_tokens", "cache_read_input_tokens",
+                 "cache_creation_input_tokens", "est_usd"},
+                {"est_usd": Format(precision=2, scheme=Scheme.fixed)}),
+            heat=["est_usd", "cache_read_input_tokens"], page_size=10,
+            note=coverage_note(missing, priced_calls)),
     ])
 
 
@@ -278,6 +334,8 @@ def waste_layout(session_id=None, scope="main", cohort=None):
                         "population": groups}),
         html.Div(id="reread-filter-note"),
         _reread_curve(read_tools, wsid, wargs, dup_min),
+
+        _estimated_cost(wsid, wargs),
 
         _repeated_inputs(wsid, wargs, session_id),
 

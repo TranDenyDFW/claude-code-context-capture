@@ -95,6 +95,27 @@ def fmt_tokens(n) -> str:
     return f"{n:.0f}"
 
 
+def fmt_cost(usd) -> str:
+    """A money figure, or BLANK when there is no price for it.
+
+    Blank, not "-", and never 0. `fmt_tokens` returns "-" for a missing value because a missing
+    token count is a gap in a measurement; a missing cost is a gap in this app's KNOWLEDGE of a
+    price, and "-" reads as "measured, and it was nothing". An empty cell reads as what it is.
+
+    Sub-cent amounts collapse to "<$0.01" rather than rendering $0.0004. Six decimal places on a
+    dashboard implies a precision the price table does not have, and a column of them is unreadable
+    next to a $12,000 total.
+    """
+    if usd is None or (isinstance(usd, float) and pd.isna(usd)):
+        return ""
+    usd = float(usd)
+    if usd and abs(usd) < 0.01:
+        return "<$0.01"
+    if abs(usd) >= 1000:
+        return f"${usd:,.0f}"
+    return f"${usd:,.2f}"
+
+
 def fmt_bytes(n) -> str:
     """Bytes, said as bytes. Never converted to tokens.
 
