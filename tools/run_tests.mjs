@@ -51,6 +51,13 @@ function nodeTargets() {
 // quietly dropped by fourteen while the run still said PASS.
 const PY = [
   ['tools/table_audit.py', ['--self-test'], 'gate self-test', 'SELF-TEST PASS'],
+  // The latency gate's own checks. Pure logic, no store, so it runs anywhere the suite does.
+  //
+  // The gate ITSELF is not in this suite on purpose: it needs a real store and a baseline
+  // recorded on that store, and CI runs against a synthetic fixture three orders of magnitude
+  // smaller, where it correctly refuses to compare. It is a phase-boundary gate, run by hand.
+  // What belongs here is proof that it can still tell a regression from noise.
+  ['tools/bench.py', ['--self-test'], 'latency gate self-test', 'SELF-TEST PASS'],
   ['tools/table_audit.py', [], 'audit of the live app', 'AUDIT PASS'],
   // The pytest suite in tests/ replaced tools/session_checks.py, which checked three Session-tab
   // features by hand. Those checks were migrated into tests/test_session.py rather than deleted,

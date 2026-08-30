@@ -36,8 +36,11 @@ desktop.ini
 # minified identifier may never anchor a claim. Read them before changing behaviour they explain.
 .md/
 
-# Research notes dropped in for review. Working documents about OTHER tools, not this extension's
-# source, and they carry third-party product descriptions verbatim. They stay on disk, out of git.
+# Notes and proposals dropped in for review. Some are working documents about OTHER tools, carrying
+# third-party product descriptions verbatim; others are proposals about THIS extension that were
+# written against a snapshot of it and are already wrong in specifics. Neither kind is source, and a
+# stale proposal in the repo reads like a decision. They stay on disk, out of git.
 Extension Features and Context Capture.md
 Claude Code Context Capture Extension - Analytical UX Report.md
 Claude-Code-Context-Capture Technical Review.md
+React+TypeScript Dashboard.md
