@@ -79,18 +79,41 @@ def test_each_panel_states_what_it_is(session_id, has_store):
         assert description[:40] in said, f"panel {index} does not state what it is"
 
 
-def test_the_panels_between_them_hold_everything_the_two_old_tabs_did(session_id, has_store):
-    """Content conservation across the merge.
+def test_no_panel_drops_content_from_the_builder_behind_it(session_id, has_store):
+    """Content conservation across the merge, as an invariant rather than a number.
 
-    Breakdown rendered 9 tables and 1 figure, Sources 2 and 1. Splitting a page into panels is only
-    a reorganisation if the total is unchanged; otherwise it is a deletion wearing a nicer layout.
+    Splitting a page into panels is only a reorganisation if nothing is lost; otherwise it is a
+    deletion wearing a nicer layout. The first version of this test asserted 11 tables and 2
+    figures, which are facts about the author's store and not about the code: against the CI
+    fixture the same correct panels render 14, and the test failed on a difference in the DATA.
+
+    Each panel is compared against the builder it wraps instead, which holds on any store.
     """
-    tables = sum(len(extract.tables(panel_body(i, session_id, "main", None)))
-                 for i in range(len(PANELS)))
-    figures = sum(len(extract.figures(panel_body(i, session_id, "main", None)))
-                  for i in range(len(PANELS)))
-    assert tables == 11, f"{tables} tables across the panels, expected the 9 + 2 the tabs had"
-    assert figures == 2, f"{figures} figures across the panels, expected the 1 + 1 the tabs had"
+    from c4x.breakdown import composition_blocks
+    from c4x.probe_detail import conversation_blocks, probe_detail_blocks
+    from c4x.tabs.sources import sources_layout
+    from c4x.tabs.window import _latest_baseline
+
+    baseline = _latest_baseline()
+    expected = {
+        "composition": composition_blocks(False, session_id, None),
+        "configuration": probe_detail_blocks(baseline),
+        "conversation": conversation_blocks(baseline),
+        "injected": sources_layout(session_id, "main", None),
+    }
+    for index, (key, label, _description) in enumerate(PANELS):
+        panel = panel_body(index, session_id, "main", None)
+        built = expected[key]
+        assert len(extract.tables(panel)) == len(extract.tables(built)), (
+            f"{label} renders fewer tables than its builder produces")
+        assert len(extract.figures(panel)) == len(extract.figures(built)), (
+            f"{label} renders fewer figures than its builder produces")
+
+
+def test_the_panels_cover_every_builder_the_two_old_tabs_used(session_id, has_store):
+    """And that all four builders are actually reachable, so none was orphaned by the merge."""
+    keys = {key for key, _label, _description in PANELS}
+    assert keys == {"composition", "configuration", "conversation", "injected"}
 
 
 def test_no_panel_is_a_scroll_in_disguise(session_id, has_store):
