@@ -17,7 +17,7 @@
 // Usage: node tools/run_tests.mjs [--node-only] [--self-test]
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,6 +56,18 @@ const PY = [
   // features by hand. Those checks were migrated into tests/test_session.py rather than deleted,
   // and the suite now covers every tab. `-q` still prints the "N passed" line the marker needs.
   ['-m', ['pytest', 'tests/', '-q', '-p', 'no:warnings'], 'every tab, against SQL written independently', ' passed'],
+  // AND AGAIN, against a freshly built synthetic fixture.
+  //
+  // The entry above runs against whatever store is present, which on a developer's machine is a
+  // real one with 1,324 sessions and on CI is the fixture. Those are different shapes, and a test
+  // that quietly depends on the real one passes here and fails there. That is not hypothetical:
+  // three merges went to main with CI red because four tests demanded a session of more than 500
+  // calls, which the fixture's longest (90) cannot satisfy, and nothing run locally could see it.
+  //
+  // Running both closes the gap, so a green run here means a green run in CI.
+  ['-m', ['pytest', 'tests/', '-q', '-p', 'no:warnings'],
+   'the same suite against the synthetic fixture, which is the shape CI runs', ' passed',
+   { fixture: true }],
   // Ruff runs HERE, inside the suite, and not as a command anyone remembers to type.
   //
   // It was a separate step for seven stages, and its verdict was being read off the last line of
@@ -139,7 +151,33 @@ if (NODE_ONLY) {
                    note: `--node-only was passed, so this did not run (${what})` });
   }
 } else {
-  for (const [rel, args, what, marker] of PY) {
+  // Built once, before the loop, for the entries that ask for it. In tmp/ rather than at the
+  // default store path: overwriting a developer's real store to run a test would be a far worse
+  // bug than the one this exists to catch.
+  const fixture = join(ROOT, 'tmp', 'suite-fixture.db');
+  let fixtureBuilt = false;
+  if (!NODE_ONLY && PY.some(([, , , , o]) => o?.fixture)) {
+    rmSync(fixture, { force: true });
+    const built = spawnSync(process.execPath, [join(ROOT, 'tools', 'make_fixture.mjs'),
+                                               '--out', fixture],
+                            { encoding: 'utf8', cwd: ROOT, timeout: 300_000 });
+    fixtureBuilt = built.status === 0 && existsSync(fixture);
+    if (!fixtureBuilt) {
+      failed++;
+      results.push({ rel: 'tools/make_fixture.mjs --out tmp/suite-fixture.db', state: 'FAIL',
+                     note: 'could not build the fixture the suite runs against',
+                     tail: `${built.stdout || ''}${built.stderr || ''}`.trim()
+                       .split('\n').slice(-2).join(' | ') });
+    }
+  }
+
+  for (const [rel, args, what, marker, opts] of PY) {
+    if (opts?.fixture && !fixtureBuilt) {
+      skipped++;
+      results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
+                     note: `the fixture could not be built, so this did not run (${what})` });
+      continue;
+    }
     if (!existsSync(store)) {
       skipped++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
@@ -150,8 +188,12 @@ if (NODE_ONLY) {
     // onto it would spawn a file called "-m" that does not exist, and the failure would look like
     // a broken test rather than a broken runner.
     const argv = rel.startsWith('-') ? [rel, ...args] : [join(ROOT, rel), ...args];
-    const run = spawnSync('python', argv,
-                          { encoding: 'utf8', cwd: ROOT, timeout: 900_000 });
+    const run = spawnSync('python', argv, {
+      encoding: 'utf8', cwd: ROOT, timeout: 900_000,
+      // C4X_DB is the store override the app already honours, so the fixture run needs no special
+      // support anywhere else in the codebase.
+      env: opts?.fixture ? { ...process.env, C4X_DB: fixture } : process.env,
+    });
     const text = `${run.stdout || ''}${run.stderr || ''}`;
     const match = text.match(CHECKS);
     const count = match ? Number(match[1] ?? match[2]) : null;
@@ -168,8 +210,8 @@ if (NODE_ONLY) {
                      tail: text.trim().split('\n').slice(-2).join(' | ') });
     } else {
       if (count) total += count;
-      results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'pass',
-                     count: count ?? null, note: count ? '' : what });
+      results.push({ rel: `${rel} ${args.join(' ')}`.trim() + (opts?.fixture ? '  [fixture]' : ''),
+                     state: 'pass', count: count ?? null, note: count ? '' : what });
     }
   }
 }

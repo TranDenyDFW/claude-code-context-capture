@@ -103,18 +103,24 @@ def test_the_detector_flags_a_small_share_of_a_real_session(q, has_store):
 # --- what reaches the page -------------------------------------------------
 @pytest.fixture(scope="module")
 def drawn(q, has_store):
-    """A session with MORE anomalies than the marker cap, so the cap is actually exercised.
+    """The session in this store with the MOST calls outside its own band.
 
-    The obvious choice, the session with the most rows, has 690 on the main thread and 11 calls
-    outside its band: below the cap, so `min(total, cap)` and `total` are the same number there
-    and a test using it cannot tell the two apart. Replanting the defect that reports the cap as
-    the count passed against that session, which is how this fixture came to select on the
-    property under test rather than on size.
+    Selecting on the property under test rather than on size. The obvious choice, the longest
+    session, can have fewer anomalies than a shorter one, and a test that lands on a session with
+    none cannot tell a working detector from a deleted one.
+
+    It does NOT fail when no session has any. A synthetic or very small store legitimately has
+    none, and turning that into an error is how this file broke CI: it demanded a session with
+    more than 500 calls, the CI fixture's longest has 90, and four tests errored on every push
+    for three merges while passing locally against a real store.
     """
     from c4x.store import session_turns
     from c4x.tabs.session import rolling_band
-    candidates = q("""SELECT session_id FROM turns GROUP BY session_id
-                       HAVING COUNT(*) > 500 ORDER BY COUNT(*) DESC LIMIT 12""")
+    candidates = q(f"""SELECT session_id FROM turns GROUP BY session_id
+                        HAVING COUNT(*) >= {ANOMALY_MIN * 2}
+                        ORDER BY COUNT(*) DESC LIMIT 12""")
+    if candidates.empty:
+        pytest.skip(f"no session here has {ANOMALY_MIN * 2} calls, so no band can be drawn")
     best, most = None, -1
     for session_id in candidates["session_id"]:
         result = rolling_band(session_turns(session_id, False)["cache_read_input_tokens"].fillna(0))
@@ -124,7 +130,7 @@ def drawn(q, has_store):
         if count > most:
             best, most = session_id, count
     if best is None:
-        pytest.fail("no session in this store is long enough to draw a band")
+        pytest.skip("no session in this store is long enough to draw a band")
     figure, cards = session_view(best, "main")
     return extract.describe_figure(figure), " ".join(extract.texts(cards)), most
 
@@ -143,18 +149,54 @@ def test_the_marks_are_capped_and_the_count_is_not(drawn):
     """A chart with 1,018 markers on it has no markers on it. The cap must never be reported as
     the number of anomalies, which is the way a cap quietly becomes a finding."""
     figure, note, outside = drawn
-    if outside <= ANOMALY_MARKS:
-        pytest.fail(f"the chosen session has only {outside} anomalies, at or below the cap of "
-                    f"{ANOMALY_MARKS}, so this test cannot tell the cap from the count")
     marks = [t for t in figure["traces"] if t["name"] and t["name"].startswith("outside it")]
+    if not outside:
+        assert not marks, "nothing fell outside the band and something was marked anyway"
+        pytest.skip("no call in this store falls outside its session's band")
     assert marks, "calls fell outside the band and none were marked"
-    assert marks[0]["points"] <= ANOMALY_MARKS, "the cap is not applied to what is drawn"
+    # The INVARIANT, which holds at any scale: draw at most the cap, and state the real count.
+    # The earlier version demanded a session with more than the cap's worth of anomalies so the
+    # cap itself would be exercised, which no synthetic store can satisfy. The cap is exercised
+    # by the store-free test below instead, and this one now checks the relationship.
+    assert marks[0]["points"] == min(outside, ANOMALY_MARKS), (
+        f"{marks[0]['points']} marks drawn for {outside} anomalies, cap {ANOMALY_MARKS}")
     stated = int(marks[0]["name"].split("(")[1].rstrip(")").replace(",", ""))
     assert stated == outside, (
         f"the legend says {stated:,} outside the band when {outside:,} were: the cap has been "
         f"reported as the count")
     assert f"{outside:,} of " in note, "the note does not state the real number outside the band"
-    assert "furthest outside are circled" in note, "the cap is not disclosed"
+    if outside > ANOMALY_MARKS:
+        assert "furthest outside are circled" in note, "the cap is not disclosed"
+
+
+def test_the_cap_holds_when_there_are_more_anomalies_than_it_will_draw():
+    """The cap, driven directly, on a series no store here contains.
+
+    A chart with a thousand markers on it has no markers on it, so the marks are capped and the
+    NOTE carries the real number. Both halves need a session with more anomalies than the cap,
+    and neither the CI fixture nor a small real store has one - which is exactly why the earlier
+    version of this file failed CI rather than skipping. Built here instead: a flat series with a
+    periodic spike, which the trailing window flags every time.
+    """
+    import plotly.graph_objects as go
+
+    from c4x.tabs.session import anomaly_band
+    series = pd.Series([100.0 * (10 if i % 15 == 14 else 1) for i in range(900)])
+    _mean, _upper, _lower, outside = rolling_band(series)
+    total = int(outside.sum())
+    assert total > ANOMALY_MARKS, (
+        f"this synthetic series produces {total} anomalies, at or below the cap of "
+        f"{ANOMALY_MARKS}, so it cannot exercise the cap it was built to exercise")
+    figure = go.Figure()
+    drew, note = anomaly_band(figure, list(range(1, len(series) + 1)), series)
+    assert drew
+    marks = [t for t in figure.data if t.name and t.name.startswith("outside it")]
+    assert marks, "anomalies were found and none were marked"
+    assert len(marks[0].x) == ANOMALY_MARKS, (
+        f"{len(marks[0].x)} markers drawn against a cap of {ANOMALY_MARKS}")
+    assert f"({total:,})" in marks[0].name, "the legend reports the cap rather than the count"
+    assert f"{total:,} of {len(series):,} calls fell outside it" in note
+    assert f"the {ANOMALY_MARKS} furthest outside are circled" in note
 
 
 def test_the_note_states_the_window_and_the_sigma(drawn):

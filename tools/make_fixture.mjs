@@ -144,7 +144,19 @@ for (const session of SESSIONS) {
     const step = Math.max(4_000, Math.floor(headroom / Math.max(2, perCompaction - (turn % perCompaction))));
     resident = Math.min(resident + step, target);
 
-    const cacheRead = Math.max(0, resident - 20_000);
+    // Cache read tracks resident, plus a small deterministic wobble, plus a rare deliberate SPIKE.
+    //
+    // A perfectly smooth ramp has zero variance, so a rolling band drawn over it is a flat line
+    // with nothing outside it, and the Session tab's anomaly detector cannot be exercised at all.
+    // That is how it shipped: stage 8 added the detector and left the fixture unable to produce a
+    // single anomaly, so the tests passed against a real store and errored in CI. The wobble gives
+    // the band a width to be measured against; the spike gives it something to catch.
+    //
+    // Deterministic, not random: the fixture must build byte-identically on every run, and a
+    // random spike would make one CI run flag six anomalies and the next flag two.
+    const wobble = 1 + ((turn * 37) % 11) / 100;                    // +0% to +10%, repeating
+    const spike  = (turn % 23 === 7) ? 6 : 1;                       // one call in 23 reads ~6x
+    const cacheRead = Math.round(Math.max(0, resident - 20_000) * wobble * spike);
     const output = 900 + (turn % 7) * 130;
 
     // After the switch point the session runs on a different model, which starts a new segment.
