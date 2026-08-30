@@ -136,6 +136,47 @@ def test_sessions_lists_the_store_and_says_how_many_there_are(client):
         assert "session_id" in body["rows"][0]
 
 
+def test_sessions_are_newest_first_and_sorted_before_they_are_sliced(client):
+    """The order is the whole value of a browse index, and the bug is invisible either way.
+
+    `session_rows()` does not come back in time order, so `head(limit)` on it returns an arbitrary
+    50 of 1,325 sessions. Both that and the correct answer look like a plausible list of sessions.
+    The way it would have been noticed is `c4x.cli sessions --via api` listing different sessions
+    than `c4x.cli sessions`, which is a comparison nobody runs by accident.
+
+    The WHOLE listing is checked, not the first page of it. The first draft of this test asked for
+    ten rows and compared them against the first ten of a larger request. It passed with the sort
+    removed, twice: the head of the unsorted frame happens to be in time order, and two slices of
+    one unsorted frame always agree with each other. A gate that cannot fail is not a gate, and the
+    only reason this one was caught is that it was deliberately fed the broken code.
+    """
+    everything = client.get("/api/sessions", params={"limit": 2000}).json()["rows"]
+    stamps = [r["last_ts"] for r in everything if r.get("last_ts") is not None]
+    assert len(stamps) > 10, "too few sessions here for the order to mean anything"
+    assert stamps == sorted(stamps, reverse=True), "the session list is not newest first"
+
+    page = client.get("/api/sessions", params={"limit": 10}).json()["rows"]
+    assert [r["session_id"] for r in page] == [r["session_id"] for r in everything[:len(page)]], \
+        "a page of the list is not the head of the list"
+
+
+def test_compare_accepts_a_named_arm(client, session_id, other_session_id):
+    """`c4x.cli dump --compare-with` could do this in-process and could not over HTTP.
+
+    Without the parameter the API always answers with `default_arm_b`, so the CLI's compare flag
+    would have silently ignored the arm the caller asked for and returned a different comparison.
+    """
+    named = client.get("/api/tab/tab-compare",
+                       params={"session": session_id, "compare_with": other_session_id})
+    assert named.status_code == 200
+    assert named.json()["tables"], "a named arm returned no body"
+
+
+def test_compare_refuses_a_kind_it_has_no_meaning_for(client):
+    assert client.get("/api/tab/tab-compare",
+                      params={"compare_kind": "sideways"}).status_code == 422
+
+
 def test_the_session_limit_is_bounded(client):
     """An unbounded limit over a 1,300-session store is a way to ask this process to build a very
     large response by accident."""

@@ -84,7 +84,7 @@ def _tab_ids():
     return [t[0] for t in _app().TABS]
 
 
-def _pane(tab_id, session, scope, cohort):
+def _pane(tab_id, session, scope, cohort, compare_with=None, compare_kind="session"):
     """One rendered pane, or a 404 naming what does exist.
 
     A wrong tab id is the most likely mistake a caller makes, so the error lists the real ones
@@ -99,13 +99,17 @@ def _pane(tab_id, session, scope, cohort):
     # tab whose content is one callback away. The CLI shipped that bug for as long as it existed
     # and it is not being reproduced here.
     #
-    # The default arm is the tab's own `default_arm_b`, so an API caller sees what a reader sees on
-    # arrival rather than an empty room.
+    # Without `compare_with` the arm is the tab's own `default_arm_b`, so a caller who names nothing
+    # sees what a reader sees on arrival rather than an empty room. With it, the caller picks the
+    # arm, which is what `c4x.cli dump --compare-with` has always been able to do in-process and
+    # could not do over HTTP until this parameter existed.
     if tab_id == "tab-compare":
-        from c4x.tabs.compare import default_arm_b
-        target = default_arm_b(session, cohort)
+        target = compare_with
+        if not target:
+            from c4x.tabs.compare import default_arm_b
+            target = default_arm_b(session, cohort)
         if target:
-            return _app()._cmp_render("session", target, session, cohort, scope or "main")
+            return _app()._cmp_render(compare_kind, target, session, cohort, scope or "main")
     return _app()._render_tab(ids.index(tab_id), session, scope or "main", cohort)
 
 
@@ -131,14 +135,16 @@ def tabs():
 def tab(tab_id: str,
         session: str | None = Query(None),
         scope: str = Query("main", pattern="^(main|all)$"),
-        cohort: str | None = Query(None)):
+        cohort: str | None = Query(None),
+        compare_with: str | None = Query(None, description="tab-compare only: the other arm"),
+        compare_kind: str = Query("session", pattern="^(session|cohort)$")):
     """The verification shape: tables with their rows and tooltips, charts as extents, text.
 
     Identical to `python -m c4x.cli dump --tab <id> --json`, which is what makes this the surface
     the parity differ compares and the surface the existing tests can be re-pointed at.
     """
     from c4x.cli import extract
-    payload = extract.describe(_pane(tab_id, session, scope, cohort))
+    payload = extract.describe(_pane(tab_id, session, scope, cohort, compare_with, compare_kind))
     payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
     return _jsonable(payload)
 
@@ -147,14 +153,16 @@ def tab(tab_id: str,
 def tab_render(tab_id: str,
                session: str | None = Query(None),
                scope: str = Query("main", pattern="^(main|all)$"),
-               cohort: str | None = Query(None)):
+               cohort: str | None = Query(None),
+               compare_with: str | None = Query(None),
+               compare_kind: str = Query("session", pattern="^(session|cohort)$")):
     """The drawing shape: everything above, plus each chart as full Plotly JSON.
 
     Charts are returned in the order they appear in the pane, so `plotly[i]` describes the same
     figure as `figures[i]`. A frontend that pairs them by index is relying on something real.
     """
     from c4x.cli import extract
-    pane = _pane(tab_id, session, scope, cohort)
+    pane = _pane(tab_id, session, scope, cohort, compare_with, compare_kind)
     payload = extract.describe(pane)
     payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
     payload["plotly"] = [f.to_plotly_json() for f in _figures(pane)]
@@ -192,6 +200,12 @@ def sessions(limit: int = Query(50, ge=1, le=2000), cohort: str | None = Query(N
 
     The one endpoint that does not render a pane, because the CLI's `sessions` command does not
     either: this is a browse index, not a tab.
+
+    NEWEST FIRST, and the sort happens BEFORE the slice. `session_rows()` does not come back in
+    time order, so taking `head(limit)` of it returns an arbitrary 50 of 1,325 sessions rather than
+    the 50 most recent. The CLI's `sessions` command already sorts by `last_ts` before slicing, so
+    without this the same command run over HTTP would list DIFFERENT sessions than run in-process,
+    and both would look correct.
     """
     from c4x import store
     frame = store.session_rows()
@@ -199,7 +213,10 @@ def sessions(limit: int = Query(50, ge=1, le=2000), cohort: str | None = Query(N
         ids = store.cohort_sessions(cohort)
         if ids:
             frame = frame[frame["session_id"].isin(ids)]
-    return {"rows": frame.head(limit).to_dict("records"), "total": int(len(frame))}
+    total = int(len(frame))
+    if "last_ts" in frame.columns:
+        frame = frame.sort_values("last_ts", ascending=False)
+    return {"rows": frame.head(limit).to_dict("records"), "total": total}
 
 
 @api.post("/api/mirror/predict")

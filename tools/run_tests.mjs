@@ -57,7 +57,16 @@ const PY = [
   // recorded on that store, and CI runs against a synthetic fixture three orders of magnitude
   // smaller, where it correctly refuses to compare. It is a phase-boundary gate, run by hand.
   // What belongs here is proof that it can still tell a regression from noise.
-  ['tools/bench.py', ['--self-test'], 'latency gate self-test', 'SELF-TEST PASS'],
+  ['tools/bench.py', ['--self-test'], 'latency gate self-test', 'SELF-TEST PASS',
+   { noStore: true }],
+  // The parity differ's own checks, and the source switch's. Same reasoning as bench.py: the FULL
+  // parity run needs a store with enough in it to compare, so it is a phase-boundary gate run by
+  // hand. What runs here is proof that the differ can still spot a difference, which is the only
+  // property that makes a passing parity run mean anything.
+  ['tools/parity.py', ['--self-test'], 'API-vs-dashboard differ self-test', 'SELF-TEST PASS',
+   { noStore: true }],
+  ['-m', ['c4x.cli', '--self-test'], 'CLI backend switch self-test', 'SELF-TEST PASS',
+   { noStore: true }],
   ['tools/table_audit.py', [], 'audit of the live app', 'AUDIT PASS'],
   // The pytest suite in tests/ replaced tools/session_checks.py, which checked three Session-tab
   // features by hand. Those checks were migrated into tests/test_session.py rather than deleted,
@@ -185,7 +194,11 @@ if (NODE_ONLY) {
                      note: `the fixture could not be built, so this did not run (${what})` });
       continue;
     }
-    if (!existsSync(store)) {
+    // A self-test that touches no store runs everywhere, including a fresh clone. Without this
+    // exemption the store gate below skipped the parity differ's and the latency gate's OWN checks
+    // on any machine without data/context.db, which is every clone: the two checks that prove
+    // those gates can still fail were the ones sitting out.
+    if (!opts?.noStore && !existsSync(store)) {
       skipped++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
                      note: `needs data/context.db, which is gitignored and absent here (${what})` });
