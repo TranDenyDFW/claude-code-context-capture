@@ -28,4 +28,19 @@ ignore = [
 # The audit imports app.py after inserting the repo root on sys.path, which has to happen before
 # the import and therefore cannot satisfy E402.
 "tools/table_audit.py" = ["E402"]
-"tools/session_checks.py" = ["E402"]
+
+# A test asserts on what a tab RENDERED, so it imports the app after the path is arranged, and it
+# reads private callbacks by design: the callback is the delivery path, and calling a builder
+# instead would prove the builder works and say nothing about the page.
+"tests/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# No addopts. The runner already passes -q, and setting it here too made pytest -qq, which
+# suppresses the "N passed" summary line the runner reads to know the suite actually ran. It
+# reported exit 0 with the marker missing and failed the entry, which is the rule working.
+filterwarnings = [
+  # dash_table is deprecated upstream in favour of dash-ag-grid. That is a migration, not a test
+  # failure, and it fires once per component built.
+  "ignore::DeprecationWarning",
+]

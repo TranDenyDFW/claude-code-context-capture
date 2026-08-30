@@ -25,7 +25,9 @@ const SELF = fileURLToPath(import.meta.url);
 const ROOT = dirname(dirname(SELF));
 const NODE_ONLY = process.argv.includes('--node-only');
 
-const CHECKS = /\((\d+) checks\)/;
+// "(N checks)" is what every self-test prints. pytest prints "N passed" instead, and counting it
+// as zero made the suite total understate itself by more than a hundred assertions.
+const CHECKS = /\((\d+) checks\)|(\d+) passed/;
 
 function nodeTargets() {
   const out = [];
@@ -50,7 +52,10 @@ function nodeTargets() {
 const PY = [
   ['tools/table_audit.py', ['--self-test'], 'gate self-test', 'SELF-TEST PASS'],
   ['tools/table_audit.py', [], 'audit of the live app', 'AUDIT PASS'],
-  ['tools/session_checks.py', [], 'Session tab features against the store', 'FEATURE CHECKS PASS'],
+  // The pytest suite in tests/ replaced tools/session_checks.py, which checked three Session-tab
+  // features by hand. Those checks were migrated into tests/test_session.py rather than deleted,
+  // and the suite now covers every tab. `-q` still prints the "N passed" line the marker needs.
+  ['-m', ['pytest', 'tests/', '-q', '-p', 'no:warnings'], 'every tab, against SQL written independently', ' passed'],
 ];
 
 // Files with no self-test, and the reason. Anything NOT listed here is required to have one, so
@@ -134,10 +139,15 @@ if (NODE_ONLY) {
                      note: `needs data/context.db, which is gitignored and absent here (${what})` });
       continue;
     }
-    const run = spawnSync('python', [join(ROOT, rel), ...args],
-                          { encoding: 'utf8', cwd: ROOT, timeout: 300_000 });
+    // An entry beginning with a dash is a python FLAG, not a path: `-m pytest ...`. Joining ROOT
+    // onto it would spawn a file called "-m" that does not exist, and the failure would look like
+    // a broken test rather than a broken runner.
+    const argv = rel.startsWith('-') ? [rel, ...args] : [join(ROOT, rel), ...args];
+    const run = spawnSync('python', argv,
+                          { encoding: 'utf8', cwd: ROOT, timeout: 900_000 });
     const text = `${run.stdout || ''}${run.stderr || ''}`;
     const match = text.match(CHECKS);
+    const count = match ? Number(match[1] ?? match[2]) : null;
     if (run.status !== 0 || run.signal) {
       failed++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
@@ -150,9 +160,9 @@ if (NODE_ONLY) {
                      note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
                      tail: text.trim().split('\n').slice(-2).join(' | ') });
     } else {
-      if (match) total += Number(match[1]);
+      if (count) total += count;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'pass',
-                     count: match ? Number(match[1]) : null, note: match ? '' : what });
+                     count: count ?? null, note: count ? '' : what });
     }
   }
 }
