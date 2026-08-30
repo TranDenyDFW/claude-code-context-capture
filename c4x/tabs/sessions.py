@@ -2,10 +2,30 @@
 
 Every session as a sortable, filterable table. Clicking a row sets the header selection.
 """
-from dash import dash_table, html
+import plotly.graph_objects as go
+from dash import dash_table, dcc, html
 
 from c4x.store import cohort_sessions, session_rows
-from c4x.theme import MUTED, SECTION_NOTE, TABLE_STYLE, header_help, numeric_columns
+from c4x.theme import (
+    ACCENT,
+    GOOD,
+    MUTED,
+    SECTION_NOTE,
+    TABLE_STYLE,
+    TEXT,
+    VIOLET,
+    WARN,
+    dark_fig,
+    empty_fig,
+    header_help,
+    heat_cells,
+    numeric_columns,
+)
+
+# One colour per section, assigned by sorted position so the same section keeps the same colour
+# across renders. Taken from the palette rather than from a Plotly default, which would ignore the
+# page theme and put a light-mode qualitative scale on a dark background.
+SECTION_COLORS = (ACCENT, GOOD, VIOLET, WARN, "#e8590c", MUTED)
 
 
 def archived_note(df):
@@ -25,6 +45,44 @@ def archived_note(df):
     # A reader needs to know that 226 of these are unknown without hovering to find out.
     return (f"Archived: {marked:,} marked, {known_not:,} recorded as not archived, "
             f"{unknown:,} with no desktop record at all.")
+
+
+def sessions_scatter(rows):
+    """Every session as a point: how long it ran against how full it got.
+
+    The table is a lookup tool and a bad survey. Sixteen rows at a time cannot show that this
+    store's sessions form two groups, a dense cluster of short ones and a thin tail that ran for
+    thousands of turns, or that length and peak are only loosely related: a session can run 900
+    turns and never fill the window, and another can hit the ceiling in fifty.
+
+    Coloured by section, which is the one attribute here that comes from disk rather than from the
+    store, so the chart also shows whether the outliers are real project work or leftovers.
+
+    Both axes are logarithmic. Turns span 5 to 59,864 in this store and peaks span three orders of
+    magnitude; on a linear axis every point but a dozen lands in one corner, and the chart becomes
+    a picture of the outliers with the population as a smudge behind them.
+    """
+    if len(rows) < 2:
+        return empty_fig("Not enough sessions to plot")
+    fig = go.Figure()
+    for index, section in enumerate(sorted({r["section"] for r in rows})):
+        group = [r for r in rows if r["section"] == section]
+        fig.add_trace(go.Scatter(
+            x=[max(1, r["turns"]) for r in group],
+            y=[max(1, r["peak"]) for r in group],
+            mode="markers", name=f"{section} ({len(group):,})",
+            marker=dict(size=7, opacity=0.72, color=SECTION_COLORS[index % len(SECTION_COLORS)],
+                        line=dict(width=0)),
+            customdata=[[r["title"], r["project"], r["compactions"]] for r in group],
+            hovertemplate="%{customdata[0]}<br>%{customdata[1]}<br>"
+                          "%{x:,} turns, peak %{y:,}<br>%{customdata[2]} compactions<extra></extra>",
+        ))
+    fig.update_layout(title=f"{len(rows):,} sessions: turns against peak resident tokens",
+                      title_font=dict(color=TEXT, size=13),
+                      xaxis_title="turns (log)", yaxis_title="peak resident tokens (log)")
+    fig.update_xaxes(type="log")
+    fig.update_yaxes(type="log")
+    return dark_fig(fig, 400)
 
 
 def sessions_table_layout(session_id=None, scope="main", cohort=None):
@@ -62,6 +120,13 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
         # nowhere else to put it; the gap it describes is real (one session holds 59,864 rows of
         # which 690 are main thread) and the tooltip states it on the column it concerns.
         html.Div(archived_note(df), style=SECTION_NOTE),
+        dcc.Graph(figure=sessions_scatter(rows), config={"displayModeBar": False}),
+        html.Div(
+            "One point per session. The table below holds the same rows sixteen at a time, "
+            "which is the right shape for looking one session up and the wrong shape for seeing "
+            "that a handful of them are unlike all the others. Shaded cells in the table mark "
+            "the same outliers in whatever order you have sorted it into.",
+            style=SECTION_NOTE),
         dash_table.DataTable(
             id="tbl-session",
             columns=(_cols := numeric_columns(
@@ -89,8 +154,16 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
                 {"if": {"column_id": "project"}, "minWidth": "200px", "maxWidth": "320px",
                  "whiteSpace": "normal"},
             ],
+            # ORDER MATTERS, and the three rules here do different jobs. Striping first. Then the
+            # shading, which sets a background AND a text colour. Then the muted rule for
+            # non-project rows, which sets ONLY a colour, so it wins the text of a shaded cell
+            # while leaving its background: a session outside Projects stays visibly outside
+            # Projects even where it is one of the largest in the store.
             style_data_conditional=[
                 {"if": {"row_index": "odd"}, "backgroundColor": "#12171e"},
+                *heat_cells(rows, "turns"),
+                *heat_cells(rows, "peak"),
+                *heat_cells(rows, "compactions"),
                 {"if": {"filter_query": '{section} != "Projects"'}, "color": MUTED},
             ],
             style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},

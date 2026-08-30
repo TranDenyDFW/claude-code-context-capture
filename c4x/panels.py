@@ -32,6 +32,7 @@ from c4x.theme import (
     fmt_bytes,
     fmt_tokens,
     header_help,
+    heat_cells,
     numeric_columns,
     stat_card,
 )
@@ -80,7 +81,7 @@ def sql_preview(sql: str, params=()) -> str:
 
 
 def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size: int = 12,
-                   note: str = None, style_data_conditional=None):
+                   note: str = None, style_data_conditional=None, heat=()):
     """A table, the query that produced it, and a way to take the rows away.
 
     Every figure on this page should be reproducible by someone who does not have this app open.
@@ -124,8 +125,14 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
             export_headers="display",
             style_table={"overflowX": "auto"},
             style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
-            style_data_conditional=(style_data_conditional or
-                                    [{"if": {"row_index": "odd"}, "backgroundColor": "#12171e"}]),
+            # `heat` shades named numeric columns and keeps the striping; the older
+            # `style_data_conditional` replaces both and is left alone for the callers that need
+            # full control. Passing both would give the explicit list the last word on any
+            # property they share, which is why they are not combined.
+            style_data_conditional=(
+                style_data_conditional or
+                [{"if": {"row_index": "odd"}, "backgroundColor": "#12171e"},
+                 *[rule for column in heat for rule in heat_cells(records, column)]]),
             style_cell=TABLE_STYLE["style_cell"],
             style_header=TABLE_STYLE["style_header"],
         ),

@@ -157,6 +157,114 @@ def dark_fig(fig: go.Figure, height: int = 420) -> go.Figure:
     return fig
 
 
+def heat_cells(rows, column, *, invert=False):
+    """Background shading for one numeric column, by where each value sits in that column's range.
+
+    A 316-row table hides its own outliers. Sorting finds them one column at a time and destroys
+    whatever order the reader had; shading shows them in whatever order the table is already in.
+
+    Returns style_data_conditional entries, so it MUST be combined with the striping in
+    TABLE_STYLE rather than replacing it. `heated()` below does that; call it rather than this.
+
+    Banded, not continuous. Dash matches these with filter expressions, one per band, and a
+    per-row rule on 316 rows is 316 filter expressions evaluated in the browser. Four bands read
+    the same and cost nothing. Values are bucketed by RANK, not by value, because token counts are
+    heavily skewed: by value, one 24x outlier puts every other row in the bottom band and the
+    shading says nothing.
+
+    Rows on the quiet side of the median take no rule at all, so they keep the odd-row striping
+    and the table still reads as a table rather than as a heat map with text on it.
+
+    ORDER IS LOAD-BEARING. Dash applies matching rules in order and the last one wins, so a value
+    in the top 5% matches every band and takes whichever is emitted last. Emitted shallowest
+    first, deepest last, which is the reverse of how the bands read.
+
+    `invert` shades SMALL values hot, for a column where low is the bad end.
+    """
+    values = sorted(v for v in (r.get(column) for r in rows)
+                    if isinstance(v, (int, float)) and not pd.isna(v))
+    if len(values) < 5 or values[0] == values[-1]:
+        return []
+    # Shallow to deep, matching the emit order above. Deliberately low-saturation: this is a
+    # background behind monospace figures, and anything stronger makes the numbers themselves
+    # harder to read than no shading at all.
+    shades = ["#26241d", "#3d2a1d", "#5c2c1c", "#7d2d1e"]
+    if invert:
+        operator = "<="
+        edges = [values[int(len(values) * f)] for f in (0.50, 0.30, 0.15, 0.05)]
+    else:
+        operator = ">="
+        edges = [values[int(len(values) * f) - 1] for f in (0.50, 0.70, 0.85, 0.95)]
+    out, previous = [], None
+    for shade, edge in zip(shades, edges):
+        # A tie across a boundary would emit two rules with the same threshold, and the deeper one
+        # would win for every row the shallower one covers. Skipped rather than emitted, so a
+        # column with few distinct values gets fewer bands instead of one flat block of colour.
+        if edge == previous:
+            continue
+        previous = edge
+        out.append({"if": {"filter_query": f"{{{column}}} {operator} {edge}",
+                           "column_id": column},
+                    "backgroundColor": shade, "color": TEXT})
+    return out
+
+
+def heated(rows, *columns, invert=()):
+    """TABLE_STYLE with shading applied to some of its columns, as kwargs to spread.
+
+    The combining is done HERE so no caller has to remember it. A caller passing
+    `style_data_conditional=heat_cells(...)` by hand would silently drop the odd-row striping that
+    every other table on the page has, and the table would read as a different component.
+    """
+    style = dict(TABLE_STYLE)
+    conditional = list(style["style_data_conditional"])
+    for column in columns:
+        conditional += heat_cells(rows, column, invert=column in invert)
+    style["style_data_conditional"] = conditional
+    return style
+
+
+def toward_background(color: str, amount: float) -> str:
+    """A colour mixed towards the page background. `amount` 0 keeps it, 1 is the background.
+
+    Used to shade a treemap's leaves by rank inside their parent. Written here rather than reached
+    for from a colour library because it is six lines and this app has no colour dependency: every
+    surface sets its own values, which is the reason the dark theme holds together at all.
+    """
+    amount = min(max(float(amount), 0.0), 1.0)
+    base = BG.lstrip("#")
+    top = color.lstrip("#")
+    mixed = [round(int(top[i:i + 2], 16) * (1 - amount) + int(base[i:i + 2], 16) * amount)
+             for i in (0, 2, 4)]
+    return "#%02x%02x%02x" % tuple(mixed)
+
+
+def treemap(labels, parents, values, *, title, height=420, colors=None, hover=None) -> go.Figure:
+    """A proportional area chart with two levels: category, then the items inside it.
+
+    Built for the case a stacked bar cannot serve. The composition bar reads well for eight
+    categories; the configuration behind it holds 321 skills, and 321 segments of a bar is a
+    solid block. Area gives every item a size a reader can compare without a legend and without
+    scrolling a table sorted by the column they happened to think of.
+
+    `branchvalues="total"` means a parent's value is its own, not the sum of its children, so the
+    caller must pass parent totals that really are the sum. Passing "remainder" instead hides
+    mismatches by inventing a residual slice, which is exactly the kind of quiet correction this
+    app does not make anywhere else.
+    """
+    fig = go.Figure(go.Treemap(
+        labels=labels, parents=parents, values=values, branchvalues="total",
+        marker=dict(colors=colors, line=dict(color=BG, width=1)) if colors else
+        dict(line=dict(color=BG, width=1)),
+        textinfo="label+value+percent parent",
+        hovertemplate=(hover or "%{label}<br>%{value:,} tokens<br>"
+                                "%{percentParent} of %{parent}<extra></extra>"),
+        tiling=dict(pad=2),
+    ))
+    fig.update_layout(title=title, title_font=dict(color=TEXT, size=13))
+    return dark_fig(fig, height)
+
+
 def empty_fig(msg: str) -> go.Figure:
     fig = go.Figure()
     fig.add_annotation(text=msg, showarrow=False, font=dict(color=MUTED, size=13, family=MONO))
