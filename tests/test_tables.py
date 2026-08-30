@@ -27,6 +27,13 @@ def every_body(pane, session_id, other_session_id=None):
     """
     for tab_id in TABS:
         yield tab_id, pane(tab_id, session=session_id)
+    # And with NOTHING selected, which is a real state a reader arrives in and not merely the
+    # absence of one. Some tables only exist there: the cross-session repeat table compares
+    # sessions to each other, so a selected session makes its HAVING unsatisfiable and it renders
+    # a sentence instead of a table. Three column-help entries read as dead until this line
+    # existed, because every body in this population had a session in it.
+    for tab_id in TABS:
+        yield f"{tab_id}/nothing selected", pane(tab_id, session=None)
     # Sub-panels. A tab body shows only its FIRST panel, so a population built from tab bodies
     # alone goes blind to the other two the moment a tab gains a strip. That is exactly what
     # happened when Breakdown and Sources became Window: nine column-help entries looked dead
