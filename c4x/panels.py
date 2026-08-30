@@ -81,7 +81,7 @@ def sql_preview(sql: str, params=()) -> str:
 
 
 def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size: int = 12,
-                   note: str = None, style_data_conditional=None, heat=()):
+                   note: str = None, style_data_conditional=None, heat=(), table_id=None):
     """A table, the query that produced it, and a way to take the rows away.
 
     Every figure on this page should be reproducible by someone who does not have this app open.
@@ -114,6 +114,9 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
         html.Div(f"{len(records):,} rows.{truncated}" + (f" {note}" if note else ""),
                  style=SECTION_NOTE),
         dash_table.DataTable(
+            # Only the tables a callback drives carry one, so an id here means "something on this
+            # page filters this table" rather than being decoration.
+            **({"id": table_id} if table_id else {}),
             columns=(_cols := cols),
             tooltip_header=header_help(_cols),
             data=records,
