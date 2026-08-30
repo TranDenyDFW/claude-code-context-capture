@@ -3,18 +3,80 @@
 What was paid for twice: files re-read, and tools loaded but never called.
 """
 import pandas as pd
-from dash import html
+import plotly.graph_objects as go
+from dash import dcc, html
 
 from c4x.breakdown import tool_spec
 from c4x.panels import evidence_block
 from c4x.store import q, scoped
 from c4x.theme import (
     DANGER,
+    MUTED,
     SECTION_NOTE,
     TEXT,
+    dark_fig,
     fmt_tokens,
     stat_card,
 )
+
+
+def _reread_curve(read_tools, where, args, dup_min):
+    """How concentrated the re-reading is: cumulative share against rank.
+
+    The table above answers "which file was read most". This answers the question that decides
+    whether the table is worth acting on: if the top ten groups are 60% of the repeats, ten fixes
+    end most of it; if the curve is a straight line, the re-reading is diffuse and no small number
+    of fixes will help.
+
+    Computed over EVERY group, not the 200 the table shows. The table's LIMIT is a display cap and
+    a share measured inside it would be a share of the head, which is the shape of answer that
+    always looks concentrated: the top ten of a top-200 list is 5% of the rows by construction.
+    This store has 1,129 groups behind that 200, so the difference is not academic.
+    """
+    if not read_tools:
+        return html.Div()
+    placeholders = ",".join("?" for _ in read_tools)
+    every = q(f"""SELECT COUNT(*) - 1 AS repeats FROM tool_calls
+                   WHERE tool_name IN ({placeholders}) AND target IS NOT NULL {where}
+                   GROUP BY session_id, target HAVING COUNT(*) >= ?
+                   ORDER BY COUNT(*) DESC""",
+              tuple(read_tools) + args + (dup_min,))
+    if len(every) < 5:
+        return html.Div()
+    repeats = every["repeats"].astype(int).to_numpy()
+    total = int(repeats.sum())
+    if total <= 0:
+        return html.Div()
+    share = repeats.cumsum() / total * 100
+    rank = list(range(1, len(share) + 1))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=rank, y=share, mode="lines", name="cumulative share",
+                            line=dict(color=DANGER, width=2), fill="tozeroy",
+                            fillcolor="rgba(248,81,73,0.12)",
+                            hovertemplate="top %{x:,} groups<br>%{y:.1f}% of all "
+                                          "re-reads<extra></extra>"))
+    # The diagonal is what "no concentration at all" looks like. Without it a curve that bends
+    # slightly reads as concentrated, because every cumulative curve bends.
+    fig.add_trace(go.Scatter(x=[1, len(share)], y=[100 / len(share), 100], mode="lines",
+                            name="if every group were equal",
+                            line=dict(color=MUTED, width=1, dash="dot"),
+                            hoverinfo="skip"))
+    fig.update_layout(title=f"Concentration of re-reading across {len(share):,} groups",
+                      title_font=dict(color=TEXT, size=13),
+                      xaxis_title="groups, largest first",
+                      yaxis_title="% of all re-reads")
+    fig.update_yaxes(range=[0, 101])
+    top10 = float(share[min(9, len(share) - 1)])
+    half = int(next((i + 1 for i, v in enumerate(share) if v >= 50), len(share)))
+    return html.Div([
+        dcc.Graph(figure=dark_fig(fig, 360), config={"displayModeBar": False}),
+        html.Div(
+            f"The ten worst groups are {top10:.1f}% of all {total:,} re-reads, and half of them "
+            f"sit in the worst {half:,} of {len(share):,} groups. The table above shows the "
+            f"first 200 of those groups; this curve is computed over all of them, so the two "
+            f"denominators are different on purpose.",
+            style=SECTION_NOTE),
+    ])
 
 
 def _rebill_card(session_id=None, cohort=None):
@@ -79,11 +141,30 @@ def waste_layout(session_id=None, scope="main", cohort=None):
            GROUP BY tool_name ORDER BY calls DESC LIMIT 40"""
     tools = q(sql_tools, wargs)
 
-    if dup.empty:
-        repeats, repeat_bytes = 0, 0
+    # The three cards below count EVERY group, not the 200 the table shows.
+    #
+    # They were computed from `dup`, which carries LIMIT 200, so every headline on this tab was a
+    # sum over the head of its own display list. In this store that reported 200 groups against a
+    # real 1,129, 4,494 re-reads against 7,323, and 41.7 MB against 71.1: a 39% understatement in
+    # a figure captioned as a total, presented next to a table that gave no sign it was truncated.
+    # The cumulative curve below made it visible, because its denominator is the whole population
+    # and its first ten points did not agree with the card above it.
+    if not read_tools:
+        groups, repeats, repeat_bytes = 0, 0, 0
     else:
-        repeats = int((dup["reads"] - 1).sum())
-        repeat_bytes = int((dup["bytes"] * (dup["reads"] - 1) / dup["reads"]).sum())
+        totals = q(f"""SELECT COUNT(*) AS groups,
+                              COALESCE(SUM(reads - 1), 0) AS repeats,
+                              COALESCE(SUM(bytes * (reads - 1) / reads), 0) AS bytes
+                         FROM (SELECT COUNT(*) AS reads,
+                                      SUM(COALESCE(result_bytes,0)) AS bytes
+                                 FROM tool_calls
+                                WHERE tool_name IN ({placeholders})
+                                  AND target IS NOT NULL {wsid}
+                                GROUP BY session_id, target HAVING reads >= ?)""",
+                   dup_args).iloc[0]
+        groups = int(totals["groups"])
+        repeats = int(totals["repeats"])
+        repeat_bytes = int(totals["bytes"])
 
     for frame in (dup, srv, tools):
         if not frame.empty and "bytes" in frame:
@@ -100,7 +181,7 @@ def waste_layout(session_id=None, scope="main", cohort=None):
     return html.Div([
         scope_note,
         html.Div([
-            stat_card("Re-read groups", f"{len(dup):,}",
+            stat_card("Re-read groups", f"{groups:,}",
                       sub=(f"same file, one session, {dup_min}+ reads" if read_tools
                            else "UNAVAILABLE: read-tool spec unreadable")),
             stat_card("Re-reads beyond the first", f"{repeats:,}",
@@ -114,8 +195,12 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         evidence_block(
             "Files read repeatedly inside one session", dup, sql_dup, dup_args,
             columns=["reads", "bytes", "variants", "session_id", "target"],
-            note="Every re-read is re-billed on every later request in that session, so the cost "
-                 "is the read multiplied by the turns that follow it."),
+            heat=["reads", "bytes"],
+            note=f"Every re-read is re-billed on every later request in that session, so the cost "
+                 f"is the read multiplied by the turns that follow it. THE WORST 200 GROUPS of "
+                 f"{groups:,}: the cards above and the curve below count all of them."),
+
+        _reread_curve(read_tools, wsid, wargs, dup_min),
 
         evidence_block(
             "MCP servers by invocation count", srv, sql_srv, wargs,
@@ -126,5 +211,5 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
         evidence_block(
             "Tool invocations", tools, sql_tools, wargs,
-            columns=["tool", "calls", "bytes", "errors"]),
+            columns=["tool", "calls", "bytes", "errors"], heat=["calls", "bytes", "errors"]),
     ])

@@ -97,6 +97,53 @@ def latest_baseline():
     return None if df.empty else df.iloc[0].to_dict()
 
 
+def composition_treemap(baseline, resident_cols, labels, messages, free, window):
+    """The window as area, grouped by what a reader can actually do about each part.
+
+    Three groups, because that is the decision the flat bar cannot express: Configuration is fixed
+    for the whole session and yours to change, Messages grows with the conversation and is not,
+    and Free space is what is left. The bar puts all eight categories side by side in one row, so
+    a reader comparing "my skills" against "this conversation" has to add up the segments first.
+
+    branchvalues="total" is safe here because the category columns sum EXACTLY to static_total by
+    construction: `breakdown.mjs --calibrate` records both, and a mismatch would mean the
+    calibration itself disagreed with its own parts. Asserted rather than assumed, and a mismatch
+    drops to a flat one-level map rather than drawing a wrong one.
+    """
+    from c4x.theme import treemap
+    parts = [(BREAKDOWN_LABELS.get(c) or labels.get(c, c), int(baseline[c] or 0))
+             for c in resident_cols]
+    parts = [(name, value) for name, value in parts if value > 0]
+    static = sum(value for _name, value in parts)
+    labels_, parents, values, colors = [], [], [], []
+    if static and static == int(baseline["static_total"] or 0):
+        labels_.append("Configuration")
+        parents.append("")
+        values.append(static)
+        colors.append("#e8590c")
+        for index, (name, value) in enumerate(parts):
+            labels_.append(name)
+            parents.append("Configuration")
+            values.append(value)
+            colors.append(breakdown_color(name, index))
+    elif static:
+        # The calibration does not agree with its own parts. Draw the categories at the top level
+        # rather than under a parent whose value would be a number this store cannot support.
+        for index, (name, value) in enumerate(parts):
+            labels_.append(name)
+            parents.append("")
+            values.append(value)
+            colors.append(breakdown_color(name, index))
+    for name, value, color in (("Messages", messages, ACCENT), ("Free space", free, "#21262d")):
+        if value > 0:
+            labels_.append(name)
+            parents.append("")
+            values.append(int(value))
+            colors.append(color)
+    return treemap(labels_, parents, values, colors=colors, height=380,
+                   title=f"What is in the window right now, of {fmt_tokens(window)}")
+
+
 def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=None):
     """The category split as it stands, and how it moved. DERIVED from a calibrated baseline.
 
@@ -266,6 +313,15 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
         ], style={"marginBottom": "8px"}),
         bar,
         html.Div(style={"height": "14px"}),
+        dcc.Graph(figure=composition_treemap(b, resident_cols, labels, messages, free, window),
+                  config={"displayModeBar": False}),
+        html.Div(
+            "The bar above is the same figure flat. It is the shape the tooltip uses, which makes "
+            "the two comparable at a glance, and it loses the one distinction that decides what "
+            "you can do about any of it: Configuration is fixed and yours to change, Messages "
+            "grows and is not. The treemap groups them; the bar cannot.",
+            style={"color": MUTED, "fontSize": "11.5px", "margin": "4px 0 14px 0",
+                   "maxWidth": "900px", "lineHeight": "1.55"}),
         dash_table.DataTable(
             columns=(_cols := numeric_columns(
                 ["category", "tokens", "percent", "items"], {"tokens", "percent", "items"},

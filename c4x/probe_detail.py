@@ -10,7 +10,8 @@ describes the session that ran it. Where a probe's own numbers disagree with the
 baseline, both are shown side by side rather than one being quietly preferred.
 """
 import pandas as pd
-from dash import dash_table, html
+import plotly.graph_objects as go
+from dash import dash_table, dcc, html
 from dash.dash_table.Format import Format, Scheme
 
 from c4x.panels import evidence_block
@@ -27,6 +28,7 @@ from c4x.theme import (
     TEXT,
     header_help,
     numeric_columns,
+    toward_background,
 )
 
 # What each probe kind is called on the page, and which baseline column counts the same thing.
@@ -123,7 +125,7 @@ def item_table(probe_id, kind, title, note, columns_sql, columns, numeric):
         title, df, sql, args,
         columns=numeric_columns(columns + ["pct_of_kind"], numeric | {"pct_of_kind"},
                                 {"pct_of_kind": Format(precision=2, scheme=Scheme.fixed)}),
-        page_size=12, note=note)
+        page_size=12, note=note, heat=["tokens"])
 
 
 def mcp_by_server(probe_id):
@@ -144,10 +146,75 @@ def mcp_by_server(probe_id):
         "MCP servers, and what each one costs", df, sql, (int(probe_id),),
         columns=numeric_columns(["server", "tools", "loaded_tools", "tokens"],
                                 {"tools", "loaded_tools", "tokens"}),
-        page_size=12,
+        page_size=12, heat=["tokens", "tools"],
         note="A server is the unit you can remove; a tool is not. tokens is what its schemas cost "
              "IN THIS READING, so a server whose tools were all deferred shows 0 and would not "
              "show 0 in a session that loaded them.")
+
+
+CONFIGURATION_KINDS = ("skill", "mcpTool", "agent", "memoryFile")
+
+# One base colour per kind, in the order the kinds appear. Every leaf under a kind is this colour
+# faded towards the page background by its rank, so the treemap stays inside the app's palette
+# instead of taking Plotly's light-mode qualitative default.
+KIND_COLORS = ("#1f6feb", "#a371f7", "#3fb950", "#d29922", "#e8590c", "#f85149")
+
+
+def configuration_treemap(probe_id):
+    """Every configured item this probe saw, sized, grouped by kind. Two levels, one picture.
+
+    This is the case the proportional bar upstairs cannot serve and the reason the treemap exists
+    at all. The Skills category is one segment of that bar and one row of that table; behind it
+    are 321 skills, and a bar with 321 segments is a solid block while a table with 321 rows
+    answers "which is biggest" only after the reader sorts it and only for one column.
+
+    Items with zero tokens are dropped rather than drawn. A probe records `loaded` separately, and
+    a zero-token item is one that was listed but not resident: giving it a slice of an area chart
+    about what OCCUPIES the window would state the opposite of what it means. How many were
+    dropped is reported by the caller, because a picture that silently omits 17 of 346 items is
+    the kind of quiet trimming this app does not do.
+
+    Returns (figure, shown, dropped), or (None, 0, 0) when there is nothing with a size.
+    """
+    from c4x.theme import treemap
+    rows = q(f"""SELECT kind, name, extra, tokens FROM probe_details
+                  WHERE probe_id = ? AND kind IN ({','.join('?' * len(CONFIGURATION_KINDS))})
+                  ORDER BY tokens DESC""",
+             (int(probe_id), *CONFIGURATION_KINDS))
+    if rows.empty:
+        return None, 0, 0
+    sized = rows[rows["tokens"].fillna(0) > 0]
+    dropped = len(rows) - len(sized)
+    if sized.empty:
+        return None, 0, dropped
+    names = {kind: label for kind, label, _col, _items in KINDS}
+    labels, parents, values, colors = [], [], [], []
+    for index, (kind, group) in enumerate(sized.groupby("kind", sort=False)):
+        parent = names.get(kind, kind)
+        base = KIND_COLORS[index % len(KIND_COLORS)]
+        labels.append(parent)
+        parents.append("")
+        values.append(int(group["tokens"].sum()))
+        colors.append(base)
+        # Leaves shade from the kind's colour down towards the page background, by RANK within
+        # the kind. Left to itself Plotly assigns a light qualitative palette that ignores the
+        # theme entirely: 321 pastel rectangles on a dark page, and no relationship between the
+        # colour of a tile and anything about it. This way the colour carries the same ordering
+        # the area does, so the eye and the size agree instead of competing.
+        span = max(len(group) - 1, 1)
+        for rank, row in enumerate(group.itertuples()):
+            # Names repeat across kinds and, for MCP tools, within one. Plotly identifies a node
+            # by its label, so two nodes sharing one would merge into a single slice carrying both
+            # values. Qualified with the parent, and the hover template shows the plain name.
+            labels.append(f"{parent}: {row.name}")
+            parents.append(parent)
+            values.append(int(row.tokens))
+            colors.append(toward_background(base, 0.15 + 0.7 * rank / span))
+    return (treemap(labels, parents, values, colors=colors, height=460,
+                    title=f"Every configured item probe {int(probe_id)} saw, by size",
+                    hover="%{label}<br>%{value:,} tokens<br>%{percentParent} of "
+                          "%{parent}<extra></extra>"),
+            len(sized), dropped)
 
 
 def probe_detail_blocks(baseline=None):
@@ -211,6 +278,18 @@ def probe_detail_blocks(baseline=None):
                        "maxWidth": "900px", "lineHeight": "1.55"}),
         ]
 
+    figure, shown, dropped = configuration_treemap(pid)
+    if figure is not None:
+        blocks.append(dcc.Graph(figure=figure, config={"displayModeBar": False}))
+        note = (f"{shown:,} items with a recorded size, grouped by kind. The tables below carry "
+                f"the same items with their sources and their loaded state.")
+        if dropped:
+            note += (f" {dropped:,} more were listed by the probe with no tokens against them and "
+                     f"are not drawn: an item recorded at zero was seen but is not occupying the "
+                     f"window, and giving it an area would say the opposite. They are still in "
+                     f"the tables.")
+        blocks.append(html.Div(note, style=SECTION_NOTE))
+
     tables = [
         item_table(pid, "skill", "Every skill, largest first",
                    "Largest first. Only userSettings and plugin skills are yours to remove.",
@@ -265,6 +344,56 @@ def conversation_blocks(baseline=None):
     ] + message_blocks(pid)
 
 
+def message_composition_bar(probe_id):
+    """Every probe's message half as one stacked bar, so the shape can be compared across probes.
+
+    One bar per probe, oldest left. The question is which categories carry the conversation, and a
+    single reading cannot answer it: a probe spawns a fresh session, so its conversation half is
+    small by construction, and the way to tell a real shape from an artefact of that is to see
+    whether it holds across readings.
+
+    Returns None rather than a chart when no probe recorded more than one non-zero category.
+    A stacked bar with one segment is a rectangle, and drawing it would present "this store has
+    one usable reading" as a finding about how conversations are composed. The table below states
+    the same fact in words, which is the honest form for it.
+    """
+    return stacked_message_figure(q("""
+        SELECT b.probe_id, b.name, b.tokens, p.ts
+          FROM probe_message_breakdown b JOIN probes p ON p.id = b.probe_id
+         WHERE b.tokens > 0 ORDER BY p.ts, b.tokens DESC"""))
+
+
+def stacked_message_figure(rows):
+    """The drawing half, separated from the query so it can be exercised on data this store lacks.
+
+    Every probe recorded here reports one non-zero category, so the wrapper above returns None on
+    this store and would return None in CI too. Code that only ever takes its refusal branch is
+    code nothing has checked: the branch that draws would ship untested and stay untested until
+    the first probe that made it run, which is the worst moment to find out it does not.
+    """
+    if rows.empty:
+        return None
+    per_probe = rows.groupby("probe_id")["name"].nunique()
+    if int(per_probe.max()) < 2:
+        return None
+    from c4x.theme import BG, dark_fig
+    order = list(dict.fromkeys(rows["probe_id"]))
+    palette = ("#1f6feb", "#3fb950", "#a371f7", "#d29922", "#e8590c", "#f85149", "#8b949e")
+    fig = go.Figure()
+    for index, name in enumerate(dict.fromkeys(rows["name"])):
+        by_probe = {int(r.probe_id): int(r.tokens) for r in
+                    rows[rows["name"] == name].itertuples()}
+        fig.add_trace(go.Bar(
+            x=[f"probe {p}" for p in order], y=[by_probe.get(int(p), 0) for p in order],
+            name=name, marker=dict(color=palette[index % len(palette)],
+                                   line=dict(color=BG, width=1)),
+            hovertemplate="%{x}<br>" + name + ": %{y:,} tokens<extra></extra>"))
+    fig.update_layout(barmode="stack", title="The message half, by category, per probe",
+                      title_font=dict(color=TEXT, size=13),
+                      xaxis_title="", yaxis_title="tokens")
+    return dcc.Graph(figure=dark_fig(fig, 340), config={"displayModeBar": False})
+
+
 def message_blocks(probe_id):
     """What the CONVERSATION half of the window is made of, as opposed to the configuration half.
 
@@ -279,6 +408,9 @@ def message_blocks(probe_id):
              (int(probe_id),))
     n_zero = int(zero.iloc[0]["n"]) if not zero.empty else 0
     out = []
+    bar = message_composition_bar(probe_id)
+    if bar is not None:
+        out.append(bar)
     if not df.empty:
         out.append(evidence_block(
             "What the messages are made of", df, sql, (int(probe_id),),
