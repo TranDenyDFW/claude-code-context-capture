@@ -5,7 +5,7 @@ The window math, mirrored from mirror-core.mjs, and a calculator over it.
 from dash import dash_table, dcc, html
 
 from c4x.store import MATH
-from c4x.theme import FIELD, MUTED, TABLE_STYLE, fmt_tokens, numeric_columns
+from c4x.theme import FIELD, MUTED, TABLE_STYLE, fmt_tokens, header_help, numeric_columns
 
 
 # ---- Mirror ---------------------------------------------------------------
@@ -37,8 +37,9 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
             html.Div("Thresholds for every window this build can produce",
                      style={"color": MUTED, "fontSize": "12px", "margin": "20px 0 8px 0"}),
             dash_table.DataTable(
-                columns=numeric_columns(["window", "warn at", "compact at", "blocked at"],
-                                        {"window", "warn at", "compact at", "blocked at"}),
+                columns=(_cols := numeric_columns(["window", "warn at", "compact at", "blocked at"],
+                                        {"window", "warn at", "compact at", "blocked at"})),
+                tooltip_header=header_help(_cols),
                 data=rows, **TABLE_STYLE,
             ),
         ]),

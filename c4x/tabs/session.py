@@ -36,6 +36,7 @@ from c4x.theme import (
     dark_fig,
     empty_fig,
     fmt_tokens,
+    header_help,
     numeric_columns,
     stat_card,
 )
@@ -352,9 +353,10 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                 "duration_ms", "version"]
         cards = html.Div([cards, html.Div(style={"height": "14px"}),
                           dash_table.DataTable(
-                              columns=numeric_columns(cols, {"pre_tokens", "post_tokens",
+                              columns=(_cols := numeric_columns(cols, {"pre_tokens", "post_tokens",
                                                              "cumulative_dropped_tokens",
-                                                             "duration_ms"}),
+                                                             "duration_ms"})),
+                              tooltip_header=header_help(_cols),
                               data=show[cols].to_dict("records"), **TABLE_STYLE)])
 
     # What was actually said. The chart shows the window filling; this shows what filled it.
@@ -374,9 +376,11 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                      style={"color": MUTED, "fontSize": "11.5px", "margin": "16px 0 6px 0"}),
             dash_table.DataTable(
                 id="tbl-messages",
-                columns=numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"}),
+                columns=(_cols :=
+                    numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"})),
+                tooltip_header=header_help(_cols),
                 data=m[["ts", "role", "type", "chars", "preview", "uuid"]].to_dict("records"),
-                page_size=12, sort_action="native", filter_action="native",
+                page_size=12, filter_action="native",  # sort comes from TABLE_STYLE
                 style_table={"overflowX": "auto"},
                 style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
                 **TABLE_STYLE,

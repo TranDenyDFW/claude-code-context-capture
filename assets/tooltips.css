@@ -1,0 +1,45 @@
+/* Dark-theme styling for the table header tooltips.
+ *
+ * Dash renders these into a portal outside the table, so a DataTable `css` rule cannot reach them
+ * and they arrive with the library's light-theme default: grey text on a near-white box, dropped
+ * onto a #0d1117 page. The first hover after the tooltips shipped was legible only if you already
+ * knew what it said, which for a caveat is the same as not being there.
+ *
+ * Dash serves everything in assets/ automatically; no wiring in app.py.
+ */
+
+.dash-table-tooltip {
+  background-color: #161b22 !important;
+  color: #e6edf3 !important;
+  border: 1px solid #30363d !important;
+  border-radius: 6px !important;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55) !important;
+  padding: 10px 12px !important;
+  max-width: 460px !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+  font-size: 12px !important;
+  line-height: 1.55 !important;
+}
+
+/* The markdown wrapper Dash puts the text in, which otherwise keeps its own colour. */
+.dash-table-tooltip .dash-tooltip-content,
+.dash-table-tooltip p,
+.dash-table-tooltip span {
+  color: #e6edf3 !important;
+  margin: 0 !important;
+}
+
+/* The little arrow, so it matches the box rather than pointing a white wedge at the header. */
+.dash-tooltip[data-attr-anchor] > div,
+.dash-table-tooltip::before,
+.dash-table-tooltip::after {
+  border-top-color: #30363d !important;
+  border-bottom-color: #30363d !important;
+}
+
+/* A column that carries help is worth marking, otherwise the only way to find a tooltip is to
+ * hover every header in turn. A dotted underline is the long-standing convention for it. */
+.dash-header.has-help .column-header-name {
+  border-bottom: 1px dotted #8b949e;
+  cursor: help;
+}

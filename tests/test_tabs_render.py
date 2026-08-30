@@ -27,8 +27,8 @@ def selections(session_id, cohort):
 
 
 @pytest.mark.parametrize("tab_id", [
-    "tab-summary", "tab-sessions", "tab-session", "tab-compactions", "tab-breakdown",
-    "tab-sources", "tab-probes", "tab-waste", "tab-compare", "tab-mirror",
+    "tab-summary", "tab-sessions", "tab-session", "tab-compactions", "tab-window",
+    "tab-cost", "tab-compare", "tab-diagnostics",
 ])
 def test_tab_renders_under_every_selection(tab_id, pane, session_id, cohort, has_store):
     for label, sid, scope, coh in selections(session_id, cohort):
@@ -39,8 +39,8 @@ def test_tab_renders_under_every_selection(tab_id, pane, session_id, cohort, has
 
 
 @pytest.mark.parametrize("tab_id", [
-    "tab-summary", "tab-sessions", "tab-session", "tab-compactions", "tab-breakdown",
-    "tab-sources", "tab-probes", "tab-waste", "tab-mirror",
+    "tab-summary", "tab-sessions", "tab-session", "tab-compactions", "tab-window",
+    "tab-cost", "tab-diagnostics",
 ])
 def test_tab_produces_something_a_reader_can_use(tab_id, pane, session_id, cohort, has_store):
     """A tab that renders an empty div is not a working tab.
@@ -54,7 +54,7 @@ def test_tab_produces_something_a_reader_can_use(tab_id, pane, session_id, cohor
     assert tables or figures or len(text) > 80, f"{tab_id} rendered nothing substantial"
 
 
-@pytest.mark.parametrize("tab_id", ["tab-session", "tab-compactions", "tab-breakdown"])
+@pytest.mark.parametrize("tab_id", ["tab-session", "tab-compactions", "tab-window"])
 def test_a_tab_that_needs_a_selection_says_so_when_there_is_none(tab_id, pane, has_store):
     """Rather than rendering an empty chart that reads as "no activity"."""
     body = pane(tab_id, session=None)
@@ -69,8 +69,8 @@ def test_every_tab_states_the_population_it_describes(pane, session_id, has_stor
     rather than by a pattern that would quietly exempt a tab that simply stopped saying it.
     """
     exempt = {"tab-summary", "tab-compare"}
-    for tab_id in ("tab-sessions", "tab-session", "tab-compactions", "tab-breakdown",
-                   "tab-sources", "tab-probes", "tab-waste", "tab-mirror"):
+    for tab_id in ("tab-sessions", "tab-session", "tab-compactions", "tab-window",
+                   "tab-cost", "tab-diagnostics"):
         if tab_id in exempt:
             continue
         text = "\n".join(extract.texts(pane(tab_id, session=session_id)))
