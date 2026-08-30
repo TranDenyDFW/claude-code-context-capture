@@ -101,17 +101,43 @@ def budget_line(fig, segs, ts_list, n_turns, budget_pct, latest):
     return headroom
 
 
+def most_recent_session(cohort=None):
+    """The newest session in the population that has any turns, or None.
+
+    Newest by last activity, which is the order the desktop sidebar uses and the order a reader
+    coming back to the app expects the default to follow.
+    """
+    ids = cohort_sessions(cohort)
+    if ids:
+        placeholders = ",".join("?" * len(ids))
+        df = q(f"""SELECT session_id FROM turns WHERE session_id IN ({placeholders})
+                    GROUP BY session_id ORDER BY MAX(ts) DESC LIMIT 1""", tuple(ids))
+    else:
+        df = q("SELECT session_id FROM turns GROUP BY session_id ORDER BY MAX(ts) DESC LIMIT 1")
+    return None if df.empty else df.iloc[0]["session_id"]
+
+
 def session_layout(session_id=None, scope="main", cohort=None):
     """One session, in detail. Scoped entirely by the header selection."""
+    defaulted = None
     if not session_id:
-        n = len(cohort_sessions(cohort))
-        extra = (f" The population is {n:,} sessions; this tab charts one at a time."
-                 if n else "")
-        return html.Div([
-            html.Div("No session selected", style=SECTION_HEAD),
-            html.Div("Pick one in the header, or browse them on the All sessions tab." + extra,
-                     style=SECTION_NOTE),
-        ])
+        # Show the most recent rather than an empty page, and say that is what happened. The
+        # header still reads "nothing selected", so a tab quietly rendering a session the header
+        # does not name would be read as the selection, which is worse than showing nothing.
+        session_id = most_recent_session(cohort)
+        if not session_id:
+            n = len(cohort_sessions(cohort))
+            extra = (f" The population is {n:,} sessions; this tab charts one at a time."
+                     if n else "")
+            return html.Div([
+                html.Div("No session to show", style=SECTION_HEAD),
+                html.Div("Nothing in this population has turns recorded." + extra,
+                         style=SECTION_NOTE),
+            ])
+        defaulted = html.Div(
+            "Nothing is selected in the header, so this is the most recently active session in "
+            "the population. Pick one in the header, or click a row on All sessions, to change it.",
+            style={**SECTION_NOTE, "color": WARN})
     turns = session_turns(session_id, include_sidechain=(scope != "main"))
     n = max(len(turns), 1)
     default_budget = 80
@@ -120,6 +146,7 @@ def session_layout(session_id=None, scope="main", cohort=None):
         marks[n // 2] = str(n // 2)
     fig, cards = session_view(session_id, scope, default_budget, (1, n))
     return html.Div([
+        defaulted,
         html.Div([
             html.Div([
                 html.Span("Budget, as a share of the window", style=CONTROL_LABEL),
