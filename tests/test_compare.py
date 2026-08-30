@@ -124,8 +124,12 @@ def test_the_rebilled_multiple_is_cache_reads_over_peak(compared):
         reads = float(compared["cache re-reads"][arm])
         if not peak:
             continue
+        # The page rounds this to one decimal, so the tolerance is half a display step rather than
+        # a relative one. A relative tolerance passed on the author's store only because the
+        # numbers there are large: on a small fixture 35.3 against a true 35.2514 failed, which is
+        # rounding working correctly and the test being wrong about it.
         assert float(compared["re-billed, as a multiple of peak"][arm]) == pytest.approx(
-            reads / peak, rel=0.001)
+            reads / peak, abs=0.05)
 
 
 def test_every_metric_declares_whether_it_scales_with_population(compared):
