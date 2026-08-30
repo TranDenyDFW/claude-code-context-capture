@@ -96,7 +96,7 @@ const insertTurn = db.prepare(`
   INSERT INTO turns (uuid, session_id, ts, model, request_id, input_tokens,
                      cache_creation_input_tokens, cache_read_input_tokens, output_tokens,
                      thinking_tokens, total_resident, is_sidechain, file_path, line_no)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`);
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 const insertMessage = db.prepare(`
   INSERT INTO messages (uuid, session_id, ts, role, type, text, chars, model, request_id,
                         is_sidechain, file_path, line_no)
@@ -158,8 +158,21 @@ for (const session of SESSIONS) {
       insertTurn.run(chunk ? `${uuid}-c${chunk}` : uuid, session.id, ts, model, requestId,
                      1_200, 18_000, cacheRead,
                      Math.round(output * (chunk + 1) / chunks),      // accumulates as it streams
-                     turn % 3 === 0 ? 400 : 0, resident,
+                     turn % 3 === 0 ? 400 : 0, resident, 0,
                      'fixture://transcript.jsonl', turn + 1);
+    }
+
+    // SUBAGENT work, on the same session. Roughly 70% of the API calls in a real store are
+    // sidechain, the Waste tab overrides the scope radio because of it, and the All sessions
+    // table counts it without saying so. A fixture with none of it cannot exercise any of that,
+    // and two tests refused to pass rather than report a check that could not run.
+    if (turn % 2 === 0) {
+      for (let agent = 0; agent < 2; agent++) {
+        insertTurn.run(`${uuid}-sub${agent}`, session.id, ts, model, `${requestId}-sub${agent}`,
+                       900, 4_000, Math.round(cacheRead / 4), 300, 0,
+                       Math.round(resident / 3), 1,
+                       'fixture://subagent.jsonl', turn + 1);
+      }
     }
 
     const text = `Fixture message ${turn} for ${session.id}. Synthetic text, not a real conversation.`;
@@ -294,7 +307,10 @@ const MESSAGE_BREAKDOWN = [
   ['unattributedTokens', 7],
 ];
 
-const CATEGORIES = [
+// Free space is computed rather than written, so the categories always sum to the window even if
+// a resident category is added or changed here. A fixture whose split does not add up cannot catch
+// a missing category, which is the one thing that test is for.
+const RESIDENT_CATEGORIES = [
   ['System prompt', 3_100, '#4493f8', 0],
   ['System tools', 12_800, '#3fb950', 0],
   ['MCP tools', 9_400, '#a371f7', 0],
@@ -302,8 +318,12 @@ const CATEGORIES = [
   ['Memory files', 11_700, '#f85149', 0],
   ['Deferred tools', 104_900, '#8b949e', 1],
 ];
+const RESIDENT_TOTAL = RESIDENT_CATEGORIES
+  .filter((c) => !c[3]).reduce((sum, c) => sum + c[1], 0);
+const CATEGORIES = [...RESIDENT_CATEGORIES,
+  ['Free space', WINDOW - RESIDENT_TOTAL, '#8b949e', 0]];
 for (const probeId of [1, 2]) {
-  const resident = CATEGORIES.filter((c) => !c[3]).reduce((sum, c) => sum + c[1], 0);
+  const resident = RESIDENT_TOTAL;
   insertProbe.run(probeId, iso(probeId), MODEL, WINDOW, resident + probeId * 500,
                   Number(((resident / WINDOW) * 100).toFixed(2)), COMPACT_AT);
   for (const [name, tokens, color, deferred] of CATEGORIES) {
@@ -336,6 +356,13 @@ const maxReReads = db.prepare(`
      GROUP BY session_id, target)`).get().n;
 // Read before the handle closes: the checks below run after it, and a query there throws
 // "database is not open" rather than failing the check it was meant to make.
+const sidechainTurns = db.prepare(
+  'SELECT COUNT(*) n FROM turns WHERE is_sidechain = 1').get().n;
+const mainTurns = db.prepare(
+  'SELECT COUNT(*) n FROM turns WHERE COALESCE(is_sidechain,0) = 0').get().n;
+const categorySum = db.prepare(`
+  SELECT COALESCE(SUM(tokens),0) n FROM probe_categories
+   WHERE probe_id = 1 AND COALESCE(is_deferred,0) = 0`).get().n;
 const probeKinds = new Set(
   db.prepare('SELECT DISTINCT kind FROM probe_details').all().map((r) => r.kind)).size;
 const deferredMcp = db.prepare(
@@ -378,6 +405,12 @@ if (!SELF_TEST) {
      loadedMcp > 0],
     ['a message breakdown, which is the only record of what the conversation half holds',
      messageRowCount > 0],
+    // Subagent rows. Without them the fixture cannot exercise the scope radio, the Waste tab's
+    // deliberate override of it, or the All sessions table counting subagent work silently.
+    ['subagent turns exist, so scope-dependent behaviour can be exercised', sidechainTurns > 0],
+    ['and main-thread turns exist too, so the two can be told apart', mainTurns > 0],
+    ['a probe accounts for the whole window, free space included',
+     categorySum === WINDOW],
     ['attachments, hook events and a record census, or the Sources tab returns before its tables',
      counts.attachments > 0 && counts.hook_events > 0 && counts.record_types > 0],
     // The invariant the whole api_calls view exists for. This used to assert the OPPOSITE, that
