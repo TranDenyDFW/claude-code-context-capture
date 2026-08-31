@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
 import { Palette, type Choice } from '@/components/Palette'
+import { Sidebar, useCollapsed } from '@/components/Sidebar'
 
 /**
  * The shell: what is selected, which tab is open, and what the server says about both.
@@ -16,6 +17,7 @@ export default function App() {
   const [selection, setSelection] = useState<Selection>({ scope: 'main' })
   const [live, setLive] = useState(false)
   const [palette, setPalette] = useState(false)
+  const [collapsed, setCollapsed] = useCollapsed()
 
   const tabs = useQuery({ queryKey: ['tabs'], queryFn: api.tabs })
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 30_000 })
@@ -107,10 +109,18 @@ export default function App() {
     : (selected?.label ?? `${selection.session?.slice(0, 8)}…`)
 
   return (
-    <div className="flex min-h-full flex-col">
-      <header className="sticky top-0 z-20 border-b border-edge bg-page/95 backdrop-blur">
+    <div className="flex min-h-full">
+      <Sidebar
+        tabs={tabs.data ?? []}
+        active={tab}
+        onPick={setTab}
+        collapsed={collapsed}
+        onToggle={() => setCollapsed(!collapsed)}
+      />
+
+      <div className="flex min-w-0 flex-1 flex-col">
+      <header className="sticky top-0 z-20 border-b border-edge/60 bg-page/85 backdrop-blur">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-6 py-3">
-          <span className="text-lg font-semibold tracking-tight text-ink">C4X</span>
           {/* A keyboard shortcut nobody is told about does not exist. */}
           <button
             onClick={() => setPalette(true)}
@@ -188,26 +198,6 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="mx-auto flex max-w-[1600px] gap-1 overflow-x-auto px-6">
-          {(tabs.data ?? []).map((entry) => (
-            <button
-              key={entry.id}
-              // `btn-<tab id>`, the same id the Dash page used. `tools/screenshots.py` selects on
-              // it to regenerate the README's images, and keeping the name means that tool did not
-              // have to learn a second convention when the page underneath it changed.
-              id={`btn-${entry.id}`}
-              onClick={() => setTab(entry.id)}
-              className={`-mb-px border-b-2 px-3 py-2 text-md whitespace-nowrap
-                          transition-colors ${
-                            tab === entry.id
-                              ? 'border-accent text-ink'
-                              : 'border-transparent text-ink-dim hover:text-ink'
-                          }`}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </nav>
       </header>
 
       <main className="mx-auto w-full max-w-[1600px] flex-1 px-6 py-5">
@@ -246,6 +236,7 @@ export default function App() {
           </>
         )}
       </footer>
+      </div>
     </div>
   )
 }
