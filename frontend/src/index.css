@@ -20,8 +20,20 @@
   --color-edge: #30363d;
   --color-edge-bright: #444c56;
   --color-ink: #e6edf3;
-  --color-ink-dim: #8b949e;
-  --color-ink-faint: #6e7681;
+  /* CONTRAST-CHECKED against a real browser, not asserted. The GitHub-dark greys these came from
+   * fail WCAG AA for small text on this page: #6e7681 is 3.77:1 on the panel where 4.5 is needed,
+   * and seventeen elements were using it (stat labels, captions, the search affordance). jsdom
+   * cannot decide contrast at all, so the vitest gate reported nothing.
+   *
+   * Ratios on the three backgrounds here, worst case in brackets:
+   *   ink       #e6edf3   16.02 / 14.64 / 13.68  [13.68]
+   *   ink-dim   #a3adb8    8.32 /  7.60 /  7.10  [7.10]
+   *   ink-faint #848d97    5.62 /  5.14 /  4.80  [4.80]
+   *
+   * Both moved, not just the failing one: lifting faint to the AA threshold alone would have put
+   * it within half a ratio point of dim, and two tones that close stop being a hierarchy. */
+  --color-ink-dim: #a3adb8;
+  --color-ink-faint: #848d97;
 
   --color-accent: #58a6ff;
   --color-good: #3fb950;

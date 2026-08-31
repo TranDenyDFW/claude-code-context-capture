@@ -1,0 +1,159 @@
+/**
+ * Accessibility as a GATE, not as a claim.
+ *
+ * Everything else in this suite asserts a specific thing I thought to check: a landmark exists, a
+ * toggle says which way it goes, the active tab is marked for a screen reader. That catches only
+ * what I already had in mind, and almost every defect in this project came from a check nobody
+ * ran rather than from a check that failed.
+ *
+ * axe runs the rules instead. It catches the ones I did not think of.
+ *
+ * IT DOES NOT CHECK COLOUR CONTRAST HERE, and the first version of this comment claimed it did.
+ * Measured: a paragraph of #0e1218 on #0d1117, which is unreadable, comes back as
+ * `violations: []` and `incomplete: ['color-contrast']`. jsdom does not resolve computed colours
+ * the way a browser does, so axe declines to decide rather than failing, and a gate that reads
+ * only `violations` sees nothing. Contrast has to be checked against a real browser; that is a
+ * separate pass, not this one.
+ *
+ * WHAT ELSE IT CANNOT DO, so nobody reads a green run as more than it is: axe checks a rendered
+ * DOM against a rule set. It cannot tell whether the tab order makes sense, whether a label is
+ * accurate, or whether the page is usable with a screen reader. A pass means no rule was broken.
+ */
+import { describe, expect, it, vi } from 'vitest'
+import { render } from '@testing-library/react'
+import axe from 'axe-core'
+import { Pane } from './components/Pane'
+import { Palette } from './components/Palette'
+import { Sidebar } from './components/Sidebar'
+import type { TabPayload } from './api'
+
+vi.mock('./components/Plot', () => ({ Plot: () => <div data-testid="chart" /> }))
+
+/** The rules worth gating on here, and why the rest are left out. */
+const RULES = {
+  runOnly: {
+    type: 'tag' as const,
+    // WCAG 2 A and AA. `best-practice` is deliberately excluded: it flags things like "all page
+    // content should be inside a landmark", which is true of a whole page and false of a component
+    // rendered on its own, so it would fail every test here for a reason that is not a defect.
+    values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'],
+  },
+}
+
+async function violations(node: HTMLElement) {
+  const result = await axe.run(node, RULES)
+  return result.violations.map((v) => ({
+    id: v.id,
+    impact: v.impact,
+    help: v.help,
+    where: v.nodes.map((n) => n.html.slice(0, 90)),
+  }))
+}
+
+/** Rules axe could not DECIDE here. Reported so an undecided rule is never read as a passing one. */
+async function undecided(node: HTMLElement) {
+  const result = await axe.run(node, RULES)
+  return result.incomplete.map((v) => v.id)
+}
+
+function payload(over: Partial<TabPayload> = {}): TabPayload {
+  return {
+    tab: 'tab-test', session: null, scope: 'main', cohort: null,
+    tables: [], figures: [], text: [], plotly: [], ...over,
+  }
+}
+
+const tabs = [
+  { id: 'tab-summary', label: 'Summary' },
+  { id: 'tab-cost', label: 'Cost' },
+]
+
+describe('axe finds no WCAG A or AA violation in', () => {
+  it('a pane with a table, stats and a scope bar', async () => {
+    const rows = [{ session_id: 'a', turns: 10, est_usd: null }]
+    const { container } = render(
+      <Pane
+        payload={payload({
+          scoped: false,
+          population: 'Store-wide. Not affected by the header selection.',
+          stats: [{ label: 'sessions', value: '1,325', sub: 'in the store' }],
+          tables: [{ id: 't', columns: ['turns', 'est_usd'], rows,
+                     tooltips: { turns: 'what a turn is' } }],
+          meta: [{
+            id: 't', title: 'Sessions', filterable: true, page_size: null,
+            columns: [
+              { id: 'turns', label: 'Turns', numeric: true, specifier: ',', align: 'right',
+                hidden: false, bands: [] },
+              { id: 'est_usd', label: 'Est. USD', numeric: true, specifier: '.2f',
+                align: 'right', hidden: false, bands: [] },
+            ],
+          }],
+          details: [{ summary: 'The query behind this table', body: ['SELECT 1'],
+                      table_index: 0 }],
+        })}
+        onRowClick={() => {}}
+      />,
+    )
+    expect(await violations(container)).toEqual([])
+  })
+
+  it('the sidebar, expanded', async () => {
+    const { container } = render(
+      <Sidebar tabs={tabs} active="tab-summary" collapsed={false} onPick={() => {}}
+               onToggle={() => {}} />,
+    )
+    expect(await violations(container)).toEqual([])
+  })
+
+  it('the sidebar, collapsed to icons', async () => {
+    // The state most likely to fail: labels are gone and the only name is a tooltip.
+    const { container } = render(
+      <Sidebar tabs={tabs} active="tab-summary" collapsed onPick={() => {}} onToggle={() => {}} />,
+    )
+    expect(await violations(container)).toEqual([])
+  })
+
+  it('the command palette', async () => {
+    const { container } = render(
+      <Palette
+        open
+        onClose={() => {}}
+        tabs={tabs}
+        cohorts={[{ value: '__all__', label: 'All sessions (317)' }]}
+        sessions={[{ value: 's1', label: 'F:\\SecDb  ·  A title  ·  2026-08-31 01:47' }]}
+        onPick={() => {}}
+      />,
+    )
+    expect(await violations(container)).toEqual([])
+  })
+})
+
+describe('the gate is honest about what it did not check', () => {
+  it('names colour contrast as UNDECIDED rather than passed', async () => {
+    // If this ever starts coming back decided, the environment gained real colour resolution and
+    // the docstring above needs revisiting. Until then, contrast is not covered by this file.
+    const { container } = render(
+      <div style={{ background: '#0d1117' }}>
+        <p style={{ color: '#0e1218' }}>unreadable on purpose</p>
+      </div>,
+    )
+    expect(await violations(container)).toEqual([])
+    expect(await undecided(container)).toContain('color-contrast')
+  })
+})
+
+describe('the gate itself', () => {
+  it('REPORTS a violation when there is one, so a pass means something', async () => {
+    // A must-fail control for the checker, not for the app. An accessibility suite that cannot
+    // fail is the most reassuring kind of useless.
+    const { container } = render(
+      <div>
+        <img src="x.png" />
+        <button aria-label="" />
+      </div>,
+    )
+    const found = await violations(container)
+    expect(found.length).toBeGreaterThan(0)
+    expect(found.map((v) => v.id)).toContain('image-alt')
+  })
+})
