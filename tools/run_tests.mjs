@@ -180,7 +180,7 @@ for (const rel of nodeTargets()) {
     failed++;
     results.push({ rel, state: 'FAIL',
                    note: run.signal ? `killed after 60s (${run.signal})` : `exit ${run.status}`,
-                   tail: text.trim().split('\n').slice(-3).join(' | ') });
+                   tail: tailOf(text) });
   } else if (!match) {
     failed++;
     results.push({ rel, state: 'FAIL', note: 'exit 0 but printed no check count, so it has no ' +
@@ -218,8 +218,7 @@ if (NODE_ONLY) {
       failed++;
       results.push({ rel: 'tools/make_fixture.mjs --out tmp/suite-fixture.db', state: 'FAIL',
                      note: 'could not build the fixture the suite runs against',
-                     tail: `${built.stdout || ''}${built.stderr || ''}`.trim()
-                       .split('\n').slice(-2).join(' | ') });
+                     tail: tailOf(`${built.stdout || ''}${built.stderr || ''}`) });
     }
   }
 
@@ -257,13 +256,13 @@ if (NODE_ONLY) {
       failed++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
                      note: run.signal ? `killed after 300s (${run.signal})` : `exit ${run.status}`,
-                     tail: text.trim().split('\n').slice(-2).join(' | ') });
+                     tail: tailOf(text) });
     } else if (!text.includes(marker)) {
       // Exit 0 with the marker absent means it did not do what it claims to do.
       failed++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
                      note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
-                     tail: text.trim().split('\n').slice(-2).join(' | ') });
+                     tail: tailOf(text) });
     } else {
       if (count) total += count;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim() + (opts?.fixture ? '  [fixture]' : ''),
@@ -308,17 +307,40 @@ if (!NODE_ONLY) {
       failed++;
       results.push({ rel: label, state: 'FAIL',
                      note: run.signal ? `killed (${run.signal})` : `exit ${run.status}`,
-                     tail: text.trim().split('\n').slice(-3).join(' | ') });
+                     tail: tailOf(text) });
     } else if (marker && !text.includes(marker)) {
       failed++;
       results.push({ rel: label, state: 'FAIL',
                      note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
-                     tail: text.trim().split('\n').slice(-2).join(' | ') });
+                     tail: tailOf(text) });
     } else {
       if (marker && count) total += count;
       results.push({ rel: label, state: 'pass', count: marker ? count ?? null : null,
                      note: marker && count ? '' : what });
     }
+  }
+}
+
+
+// ESLint runs HERE too, for the same reason ruff does above: it was a CI-only step, so a local run
+// could be green while CI was red on lint. That is not hypothetical. `tailOf()` was added to this
+// very file and its call sites were never wired up, so it sat unused; the local suite passed,
+// eslint failed in CI with "'tailOf' is defined but never used", and the fix had to be made twice.
+//
+// A check the machine runs and the developer cannot is a check that fails late and by surprise.
+if (!NODE_ONLY) {
+  const run = spawnSync('npx', ['--yes', 'eslint', '.'], {
+    encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: process.platform === 'win32',
+  });
+  const text = `${run.stdout || ''}${run.stderr || ''}`;
+  if (run.status !== 0 || run.signal) {
+    failed++;
+    results.push({ rel: 'eslint .', state: 'FAIL',
+                   note: run.signal ? `killed (${run.signal})` : `exit ${run.status}`,
+                   tail: tailOf(text) });
+  } else {
+    results.push({ rel: 'eslint .', state: 'pass', count: null,
+                   note: 'the node tools lint clean, the same check CI runs' });
   }
 }
 
