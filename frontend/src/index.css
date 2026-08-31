@@ -1,14 +1,19 @@
 @import 'tailwindcss';
 
-/* The palette the dashboard already uses, named rather than repeated.
+/* The design system, in one place.
  *
- * The Dash app carries these values inline in 136 style dicts, which is the actual reason a
- * restyle was hard enough to prompt a rewrite: there was no one place to change a colour. There is
- * now. Tailwind 4 takes its config from CSS, so this block IS the design system.
+ * The Dash app carried its palette in 136 inline style dicts, which is the actual reason a restyle
+ * was hard enough to prompt a rewrite. Then this file replaced it with colours only, and the sizes
+ * went straight back to being ad-hoc: seven arbitrary pixel values in `App.tsx` alone (11, 11.5,
+ * 12, 12.5, 13, 14, 15), chosen one component at a time. Sizes chosen that way do not compose, and
+ * a page whose text is six almost-identical sizes reads as unconsidered even when every number on
+ * it is right.
  *
- * The hues are GitHub dark, kept deliberately: this tool is read beside a terminal and an editor,
- * and a dashboard that fights them for attention gets closed. */
+ * Tailwind 4 takes its config from CSS, so this block IS the design system. */
 @theme {
+  /* ---- Colour -----------------------------------------------------------
+   * GitHub dark, kept deliberately. This tool is read beside a terminal and an editor, and a
+   * dashboard that fights them for attention gets closed. */
   --color-page: #0d1117;
   --color-panel: #161b22;
   --color-panel-raised: #1c2129;
@@ -23,8 +28,41 @@
   --color-warn: #d29922;
   --color-bad: #f85149;
 
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  /* ---- Type -------------------------------------------------------------
+   * Six steps, and no value between them. Dense on purpose: this is a data tool, and the job of
+   * the scale is to separate levels, not to make anything large.
+   *
+   * The UI stack is the system's own. Inter was the obvious candidate and is not worth its cost
+   * here: this server is local and offline, so a webfont means either a request to Google on every
+   * load or roughly 100 KB of woff2 committed beside a build that is already 4 MB. Segoe UI
+   * Variable on Windows and SF on macOS are what Inter is imitating. */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
+    sans-serif;
+  --font-mono: 'Cascadia Code', 'JetBrains Mono', Consolas, ui-monospace, monospace;
+
+  --text-2xs: 10.5px;   /* stamps and counts that must not compete */
+  --text-xs: 11.5px;    /* labels, footnotes, table meta */
+  --text-sm: 12.5px;    /* table cells, body prose */
+  --text-md: 13.5px;    /* section headings, controls */
+  --text-lg: 16px;      /* panel titles */
+  --text-xl: 22px;      /* the one number on a stat card */
+
+  /* ---- Depth ------------------------------------------------------------
+   * Panels currently read as outlined rectangles. A dark UI gets its depth from a lighter surface
+   * plus a shadow, not from a brighter border, because a brighter border is the loudest thing on
+   * the page and it is furniture. */
+  --radius-sm: 4px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+
+  --shadow-panel: 0 1px 2px rgb(0 0 0 / 0.28), 0 0 0 1px rgb(255 255 255 / 0.04);
+  --shadow-raised: 0 4px 14px rgb(0 0 0 / 0.42), 0 0 0 1px rgb(255 255 255 / 0.06);
+  --shadow-float: 0 18px 48px rgb(0 0 0 / 0.62), 0 0 0 1px rgb(255 255 255 / 0.08);
+
+  /* ---- Motion -----------------------------------------------------------
+   * Short and only on things a pointer touches. Anything longer than ~200ms on a dashboard is felt
+   * as lag rather than as polish. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 html,
@@ -37,7 +75,15 @@ body {
   background: var(--color-page);
   color: var(--color-ink);
   font-family: var(--font-sans);
+  font-size: var(--text-sm);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Numbers line up in columns. `tnum` keeps digits the same width in the UI font, so a column of
+ * figures scans as a column even where it is not set in the monospace face. */
+.tabular {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Scrollbars. Left to the browser they arrive as a bright light-grey strip on a near-black page,
@@ -54,16 +100,42 @@ body {
 
 *::-webkit-scrollbar-thumb {
   background: var(--color-edge-bright);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-faint);
 }
 
 *::-webkit-scrollbar-track {
   background: transparent;
 }
 
-/* A column carrying an explanation is marked, because the only other way to discover a tooltip is
- * to hover every header in turn. Same convention the Dash app settled on. */
+/* A visible focus ring on everything reachable by keyboard, and ONLY for keyboard use.
+ * `:focus-visible` rather than `:focus` so clicking a row does not leave a ring behind it. This is
+ * the whole of keyboard accessibility that CSS can carry, and without it the tab order is
+ * invisible, which makes it untestable by eye. */
+:where(a, button, input, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* A column that carries an explanation is marked, because the only other way to discover a tooltip
+ * is to hover every header in turn. Same convention the Dash app settled on. */
 .has-help {
   border-bottom: 1px dotted var(--color-ink-faint);
   cursor: help;
+}
+
+/* Respect a reader who has asked the system for less movement. Not optional: this is a tool people
+ * keep open, and motion sickness is not a preference to be overridden by a dashboard. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -61,7 +61,7 @@ export function Pane({
       {payload.population && (
         <div
           data-scoped={payload.scoped ? 'true' : 'false'}
-          className={`rounded-lg border px-4 py-2.5 text-[12.5px] ${
+          className={`rounded-lg border px-4 py-2.5 text-sm ${
             payload.scoped
               ? 'border-edge bg-panel text-ink-dim'
               : 'border-warn/40 bg-warn/5 text-warn'
@@ -72,9 +72,9 @@ export function Pane({
       )}
 
       {figures.map((figure, index) => (
-        <section key={index} className="rounded-lg border border-edge bg-panel p-4">
+        <section key={index} className="rounded-lg bg-panel shadow-panel p-4">
           {payload.figures[index]?.title && (
-            <h3 className="mb-2 text-[13px] font-semibold text-ink">
+            <h3 className="mb-2 text-md font-semibold text-ink">
               {payload.figures[index].title}
             </h3>
           )}
@@ -83,9 +83,9 @@ export function Pane({
       ))}
 
       {prose.length > 0 && (
-        <section className="rounded-lg border border-edge bg-panel px-4 py-3">
+        <section className="rounded-lg bg-panel shadow-panel px-4 py-3">
           {prose.map((line, index) => (
-            <p key={index} className="text-[12.5px] leading-relaxed text-ink-dim">
+            <p key={index} className="text-sm leading-relaxed text-ink-dim">
               {line}
             </p>
           ))}
@@ -104,7 +104,7 @@ export function Pane({
               `tbl-` prefix was a naming rule living in the browser, which is the mistake this
               whole pass exists to undo. */}
           {meta[index]?.title && (
-            <h3 className="text-[13px] font-semibold text-ink-dim">{meta[index].title}</h3>
+            <h3 className="text-md font-semibold text-ink-dim">{meta[index].title}</h3>
           )}
           <DataTable table={table} meta={meta[index]} onRowClick={onRowClick} />
           {attached(index).map((section, at) => (
@@ -114,7 +114,7 @@ export function Pane({
       ))}
 
       {figures.length === 0 && payload.tables.length === 0 && (
-        <div className="rounded-lg border border-edge bg-panel p-8 text-center text-ink-dim">
+        <div className="rounded-lg bg-panel shadow-panel p-8 text-center text-ink-dim">
           This tab produced nothing for the current selection.
         </div>
       )}

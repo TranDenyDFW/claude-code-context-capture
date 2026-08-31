@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
+import { Palette, type Choice } from '@/components/Palette'
 
 /**
  * The shell: what is selected, which tab is open, and what the server says about both.
@@ -14,6 +15,7 @@ export default function App() {
   const [tab, setTab] = useState<string | null>(null)
   const [selection, setSelection] = useState<Selection>({ scope: 'main' })
   const [live, setLive] = useState(false)
+  const [palette, setPalette] = useState(false)
 
   const tabs = useQuery({ queryKey: ['tabs'], queryFn: api.tabs })
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 30_000 })
@@ -69,6 +71,26 @@ export default function App() {
     setSelection((was) => ({ ...was, session: found }))
   }
 
+  // Cmd/Ctrl+K anywhere. Registered here rather than inside the palette so the shortcut works
+  // when the palette is closed, which is the only time it matters.
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setPalette((was) => !was)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
+  const pick = (choice: Choice) => {
+    if (choice.kind === 'tab') setTab(choice.id)
+    else if (choice.kind === 'population') {
+      setSelection((was) => ({ ...was, cohort: choice.id === '__all__' ? null : choice.id }))
+    } else setSelection((was) => ({ ...was, session: choice.id }))
+  }
+
   // FROM THE SERVER, not derived here. The previous version built this out of every distinct
   // working directory in the store, which is not what this app means by a project: it filled the
   // picker with per-run temp directories, dropped the four section cohorts, and sent a bare path
@@ -88,7 +110,20 @@ export default function App() {
     <div className="flex min-h-full flex-col">
       <header className="sticky top-0 z-20 border-b border-edge bg-page/95 backdrop-blur">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-6 py-3">
-          <span className="text-[15px] font-semibold tracking-tight text-ink">C4X</span>
+          <span className="text-lg font-semibold tracking-tight text-ink">C4X</span>
+          {/* A keyboard shortcut nobody is told about does not exist. */}
+          <button
+            onClick={() => setPalette(true)}
+            aria-label="Search tabs, populations and sessions"
+            className="flex items-center gap-2 rounded-md bg-panel px-2.5 py-1.5 text-xs
+                       text-ink-faint shadow-panel transition-colors duration-150
+                       hover:text-ink-dim"
+          >
+            <span>Search</span>
+            <kbd className="rounded bg-page px-1.5 py-0.5 text-2xs text-ink-faint">
+              Ctrl K
+            </kbd>
+          </button>
 
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {/*
@@ -102,7 +137,7 @@ export default function App() {
             {selection.session && (
               <span
                 className="flex items-center gap-2 rounded-md border border-accent/60 bg-accent/10
-                           px-2.5 py-1.5 text-[12px] text-accent"
+                           px-2.5 py-1.5 text-sm text-accent"
                 title={selected?.label ?? selection.session}
               >
                 <span className="max-w-[26rem] truncate">{selectedWhen}</span>
@@ -131,7 +166,7 @@ export default function App() {
                 setSelection((was) => ({ ...was, scope: was.scope === 'all' ? 'main' : 'all' }))
               }
               title="Subagent turns run inside a session but are not part of its own context."
-              className={`rounded-md border px-2.5 py-1.5 text-[12px] transition-colors ${
+              className={`rounded-md border px-2.5 py-1.5 text-sm transition-colors ${
                 selection.scope === 'all'
                   ? 'border-accent/60 bg-accent/10 text-accent'
                   : 'border-edge bg-panel text-ink-dim hover:text-ink'
@@ -142,7 +177,7 @@ export default function App() {
             <button
               onClick={() => setLive((was) => !was)}
               title="Re-read this tab every five seconds. Useful while a session is still running."
-              className={`rounded-md border px-2.5 py-1.5 text-[12px] transition-colors ${
+              className={`rounded-md border px-2.5 py-1.5 text-sm transition-colors ${
                 live
                   ? 'border-good/60 bg-good/10 text-good'
                   : 'border-edge bg-panel text-ink-dim hover:text-ink'
@@ -162,7 +197,7 @@ export default function App() {
               // have to learn a second convention when the page underneath it changed.
               id={`btn-${entry.id}`}
               onClick={() => setTab(entry.id)}
-              className={`-mb-px border-b-2 px-3 py-2 text-[13px] whitespace-nowrap
+              className={`-mb-px border-b-2 px-3 py-2 text-md whitespace-nowrap
                           transition-colors ${
                             tab === entry.id
                               ? 'border-accent text-ink'
@@ -193,7 +228,16 @@ export default function App() {
         )}
       </main>
 
-      <footer className="border-t border-edge px-6 py-2 text-[11px] text-ink-faint">
+      <Palette
+        open={palette}
+        onClose={() => setPalette(false)}
+        tabs={tabs.data ?? []}
+        cohorts={cohorts.data ?? []}
+        sessions={sessions.data ?? []}
+        onPick={pick}
+      />
+
+      <footer className="border-t border-edge px-6 py-2 text-xs text-ink-faint">
         {health.data?.read_only && 'read only, this server never writes to the store. '}
         {health.data?.cache && (
           <>
@@ -218,12 +262,12 @@ function Picker({
   options: { value: string; label: string }[]
 }) {
   return (
-    <label className="flex items-center gap-1.5 text-[11px] text-ink-faint">
+    <label className="flex items-center gap-1.5 text-xs text-ink-faint">
       {label}
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="max-w-[22rem] rounded-md border border-edge bg-panel px-2 py-1.5 text-[12px]
+        className="max-w-[22rem] rounded-md border border-edge bg-panel px-2 py-1.5 text-sm
                    text-ink outline-none focus:border-accent"
       >
         {options.map((option) => (
@@ -242,7 +286,7 @@ function Waiting() {
       {[380, 200, 200].map((height, index) => (
         <div
           key={index}
-          className="animate-pulse rounded-lg border border-edge bg-panel"
+          className="animate-pulse rounded-lg bg-panel shadow-panel"
           style={{ height }}
         />
       ))}
@@ -255,18 +299,18 @@ function Failure({ error }: { error: unknown }) {
   const isApi = error instanceof ApiError
   return (
     <div className="rounded-lg border border-bad/40 bg-bad/5 p-5">
-      <h2 className="mb-1 text-[14px] font-semibold text-bad">This tab did not load</h2>
-      <p className="font-mono text-[12px] text-ink-dim">
+      <h2 className="mb-1 text-md font-semibold text-bad">This tab did not load</h2>
+      <p className="font-mono text-sm text-ink-dim">
         {error instanceof Error ? error.message : String(error)}
       </p>
       {!isApi && (
-        <p className="mt-3 text-[12.5px] text-ink-dim">
+        <p className="mt-3 text-sm text-ink-dim">
           Nothing answered on <code className="text-ink">/api</code>. Start the server with{' '}
           <code className="text-ink">python -m c4x.api</code>.
         </p>
       )}
       {isApi && Boolean(error.detail) && (
-        <pre className="mt-3 overflow-auto text-[11.5px] text-ink-faint">
+        <pre className="mt-3 overflow-auto text-xs text-ink-faint">
           {JSON.stringify(error.detail, null, 2)}
         </pre>
       )}
