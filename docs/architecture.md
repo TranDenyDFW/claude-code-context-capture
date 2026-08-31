@@ -102,6 +102,41 @@ one, which is the single failure that design avoids.
 `data/` is gitignored. It holds verbatim conversations, and a private repository is not a good
 enough reason to put that in a history it cannot be removed from.
 
+## Two front ends, one set of numbers
+
+The Dash app (`app.py`, port 8056) and the API (`c4x/api/`, port 8059) both exist. The API is not a
+reimplementation: it renders through `app._render_tab`, the same callback the browser dispatches, so
+agreement between them is true by construction rather than by care. `frontend/` is a React page that
+reads the API and draws it.
+
+What makes that checkable is a shape the repo already had. `c4x/cli/extract.py::describe()` reduces
+a rendered pane to `{tables, figures, text}`, and that IS the API's contract:
+
+| surface | who reads it | shape |
+|---|---|---|
+| `GET /api/tab/{id}` | the CLI, the parity differ, the tests | exactly `describe()`, byte for byte what `c4x.cli dump --json` prints |
+| `GET /api/tab/{id}/render` | the browser | the same, plus full Plotly figures and the collapsible sections |
+
+The verify surface is deliberately frozen. Adding a field to it for a browser's benefit would change
+what the CLI prints and what the differ compares, which is why `details` lives only on `/render`.
+
+The API caches a serialised answer per selection, invalidated on the size and mtime of the database
+and its write-ahead log, and served for at most five seconds after the store moves. That bound is
+what makes the cache hit at all: this store is harvested continuously, so a tab taking 1.5 seconds
+to build is usually invalidated before it can be asked for twice. Nothing here is staler than
+`store.py`, which has always cached `session_rows()` for forty-five seconds.
+
+Three commands keep the two honest, and each is proven able to fail before it is believed:
+
+- `python tools/parity.py` renders all eight tabs from both sides under five selection states and
+  compares them cell by cell. `--must-fail` corrupts an answer on purpose and confirms it is caught.
+- `python tools/bench.py --against` gates render latency; `--via api` measures the API's UNCACHED
+  build against the Dash baseline, because comparing a 3 ms cache hit to a 1.6 s render would call
+  every change an improvement.
+- `python tools/contract_audit.py` applies the data-integrity rules of `table_audit.py` to the API
+  payload, so they outlive Dash. It cannot prove every table-building path was reached, which is
+  what the coverage half of `table_audit.py` instruments construction to do. Both run.
+
 ## Testing
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md). One command, `node tools/run_tests.mjs`, and a synthetic
