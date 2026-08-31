@@ -288,6 +288,114 @@ def test_health_reports_the_cache_so_it_can_be_checked_in_the_wild(client):
     assert set(body["cache"]) >= {"entries", "bytes", "hits", "misses"}
 
 
+def test_the_cohort_list_comes_from_the_store(client):
+    """Not from every distinct working directory, which is what the frontend built for itself.
+
+    That version filled the picker with per-run temp directories, dropped the four SECTION cohorts,
+    and sent the bare path as `cohort=`. `cohort_sessions()` recognises no kind in a bare path and
+    returns an empty list, which means NO RESTRICTION, so choosing a project silently filtered
+    nothing while the header said it had.
+    """
+    from c4x import store
+    served = client.get("/api/cohorts").json()
+    assert served == store.cohort_options()
+    kinds = {v.split("::")[0] for v in (o["value"] for o in served) if "::" in v}
+    assert "section" in kinds, "the section cohorts are missing, which is what was lost before"
+
+
+def test_a_cohort_value_actually_restricts_the_population(client):
+    """The bug was invisible: both the filtered and the unfiltered page look like a list."""
+    from c4x import store
+    project = next((o["value"] for o in store.cohort_options()
+                    if o["value"].startswith("project::")), None)
+    if not project:
+        pytest.skip("this store has no project cohort to restrict to")
+    everything = client.get("/api/tab/tab-sessions").json()
+    restricted = client.get("/api/tab/tab-sessions", params={"cohort": project}).json()
+    rows = lambda body: sum(len(t["rows"]) for t in body["tables"])   # noqa: E731
+    assert rows(restricted) < rows(everything), "the cohort did not narrow anything"
+    # And the bare path, which is what the frontend used to send, must NOT be mistaken for it.
+    bare = client.get("/api/tab/tab-sessions",
+                      params={"cohort": project.split("::", 1)[1]}).json()
+    assert rows(bare) == rows(everything), "a bare path is not a cohort and must not filter"
+
+
+def test_the_session_picker_is_narrowed_to_the_cohort(client):
+    """`selector_options` promises the picker cannot offer a session the population excludes.
+
+    The frontend built its own from a capped session list and ignored the cohort, so it offered
+    sessions the chosen population does not contain and hid seventeen of 317 behind a limit.
+    """
+    from c4x import store
+    project = next((o["value"] for o in store.cohort_options()
+                    if o["value"].startswith("project::")), None)
+    everything = client.get("/api/selector").json()
+    assert len(everything) == len(store.session_rows()), "the picker is not offering every session"
+    if project:
+        narrowed = client.get("/api/selector", params={"cohort": project}).json()
+        assert len(narrowed) < len(everything)
+        allowed = set(store.cohort_sessions(project))
+        assert {o["value"] for o in narrowed} <= allowed
+
+
+def test_render_carries_the_column_contract(client):
+    """Label, type, alignment and d3 format, which `describe()` drops.
+
+    Without it the browser guesses. A column declared `.1f` was rendered 43.30, 2.40, 1.20 and then
+    a bare 1, because the guess asked `Number.isInteger` instead of asking the app.
+    """
+    body = client.get("/api/tab/tab-window/render").json()
+    assert len(body["meta"]) == len(body["tables"])
+    columns = [c for table in body["meta"] for c in table["columns"]]
+    assert columns, "no column metadata at all"
+    for column in columns:
+        assert column["label"], f"{column['id']} has no label"
+        assert column["align"] == ("right" if column["numeric"] else "left")
+    percent = next((c for c in columns if c["id"] == "percent"), None)
+    if percent:
+        assert percent["specifier"] == ".1f", "the declared format did not survive the API"
+
+
+def test_every_column_is_named_for_a_reader(client, session_id):
+    """`ts` is a schema field. "Date & Time" is a column heading."""
+    for tab in ("tab-compactions", "tab-cost", "tab-sessions"):
+        body = client.get(f"/api/tab/{tab}/render", params={"session": session_id}).json()
+        for table in body["meta"]:
+            for column in table["columns"]:
+                assert column["label"] != column["id"] or column["id"][:1].isupper(), \
+                    f"{tab}/{column['id']} is shown as its raw id"
+
+
+def test_the_tab_says_whether_the_selection_applies_to_it(client, session_id):
+    """The answer to "why does this table never change?" has to be ON the tab.
+
+    It always was, as prose line 1 of up to 27 identical grey lines. Promoted to its own field so
+    the page can put it where the question gets asked.
+    """
+    from c4x.ui.layout import SELECTION_SCOPED
+    for tab in ("tab-diagnostics", "tab-session"):
+        body = client.get(f"/api/tab/{tab}/render", params={"session": session_id}).json()
+        assert body["scoped"] is (tab in SELECTION_SCOPED)
+        assert body["population"], f"{tab} does not say which population it describes"
+    unscoped = client.get("/api/tab/tab-diagnostics/render",
+                          params={"session": session_id}).json()
+    assert "Not affected by the header selection" in unscoped["population"]
+
+
+def test_heat_bands_survive_and_keep_their_order(client):
+    """Rank shading is how a 317-row table shows its outliers without being sorted.
+
+    ORDER MATTERS: rules run shallowest to deepest and a top value matches them all, so the LAST
+    match wins. Served out of order, every outlier would be painted the palest colour.
+    """
+    body = client.get("/api/tab/tab-sessions/render").json()
+    banded = [c for table in body["meta"] for c in table["columns"] if c["bands"]]
+    assert banded, "the shading did not survive the API"
+    for column in banded:
+        thresholds = [b["at"] for b in column["bands"]]
+        assert thresholds == sorted(thresholds), f"{column['id']} bands are not shallowest first"
+
+
 def test_the_shutdown_route_refuses_GET(client):
     """It moved here when app.py stopped serving, and the refusal moved with it.
 

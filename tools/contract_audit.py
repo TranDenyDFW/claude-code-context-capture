@@ -110,6 +110,38 @@ def contract_faults(where, payload):
     return out
 
 
+def label_faults(where, payload):
+    """Every column a reader would see named by its database field instead of in English.
+
+    Checked on the RENDER surface, because that is where the labels live: the verify surface is
+    frozen and still carries raw ids, which is what the CLI prints and what `parity.py` compares.
+
+    A missing label is not cosmetic. `ts`, `pre_tokens` and `fitted_window` were on the page for as
+    long as this app has existed, and the reason is that every table declared `name == id`, so there
+    was never anything to show but the schema.
+    """
+    out = []
+    meta = payload.get("meta") or []
+    tables = payload.get("tables") or []
+    if tables and not meta:
+        out.append(f"{where}: {len(tables)} table(s) and no column metadata, so every heading "
+                   "falls back to the raw column id")
+        return out
+    for table in meta:
+        tid = table.get("id") or "(anonymous)"
+        for column in table.get("columns", []):
+            cid, label = column.get("id"), column.get("label")
+            if not label:
+                out.append(f"{where}/{tid}: column {cid!r} has no label")
+            elif label == cid and not str(cid)[:1].isupper():
+                # `A` and `B` are already what a reader should see. A lowercase id equal to its own
+                # label means the naming rule did not reach it.
+                out.append(f"{where}/{tid}: column {cid!r} is shown as its raw id")
+            if column.get("numeric") and column.get("align") != "right":
+                out.append(f"{where}/{tid}: numeric column {cid!r} is not right aligned")
+    return out
+
+
 def help_faults(payloads):
     """Every COLUMN_HELP entry that never reaches a header a reader can hover.
 
@@ -188,6 +220,12 @@ def run(only_tab=None, strict_help=False):
             problems.extend(contract_faults(where, payload))
             for table in payload.get("tables", []):
                 problems.extend(table_faults(where, table))
+            # The render surface too, because the labels and alignment only exist there.
+            drawn = client.get(f"/api/tab/{tab}/render", params={**params, "no_cache": "1"})
+            if drawn.status_code != 200:
+                problems.append(f"{where}: /render returned HTTP {drawn.status_code}")
+            else:
+                problems.extend(label_faults(where, drawn.json()))
 
     # Only meaningful over a FULL run: auditing one tab would report every other tab's help as
     # unreached, which is a wrong answer that looks like 30 findings.
@@ -253,6 +291,26 @@ def self_test():
          len(contract_faults("w", {"tables": []})) == 2),
         ("the rules come from table_audit, not a second copy",
          "-" in PLACEHOLDER and "version" in TEXT_BY_NATURE),
+        # Labels. A column shown as `ts` or `pre_tokens` is the schema leaking onto the page.
+        ("a labelled column is not a fault",
+         label_faults("w", {"tables": [{"id": "t"}], "meta": [
+             {"id": "t", "columns": [{"id": "ts", "label": "Date & Time",
+                                      "numeric": False, "align": "left"}]}]}) == []),
+        ("a column shown as its raw id IS a fault",
+         len(label_faults("w", {"tables": [{"id": "t"}], "meta": [
+             {"id": "t", "columns": [{"id": "ts", "label": "ts",
+                                      "numeric": False, "align": "left"}]}]})) == 1),
+        ("a column with no label at all is a fault",
+         len(label_faults("w", {"tables": [{"id": "t"}], "meta": [
+             {"id": "t", "columns": [{"id": "ts", "numeric": False, "align": "left"}]}]})) == 1),
+        ("a numeric column that is not right aligned is a fault",
+         len(label_faults("w", {"tables": [{"id": "t"}], "meta": [
+             {"id": "t", "columns": [{"id": "n", "label": "N",
+                                      "numeric": True, "align": "left"}]}]})) == 1),
+        ("tables with NO metadata at all is a fault, not a silent pass",
+         len(label_faults("w", {"tables": [{"id": "t"}], "meta": []})) == 1),
+        ("and a payload with no tables needs no metadata",
+         label_faults("w", {"tables": [], "meta": []}) == []),
     ]
     bad = 0
     for what, passed in cases:

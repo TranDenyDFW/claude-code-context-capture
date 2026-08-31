@@ -1,14 +1,20 @@
 import { useMemo, useState } from 'react'
-import type { Table } from '@/api'
+import type { Band, ColumnMeta, Table, TableMeta } from '@/api'
 
 /**
- * One table, with the things the Dash version had and a browser table usually does not: an
- * explanation on every column that carries one, sorting, and a row count that says how much is not
- * on screen.
+ * One table, rendered from what the APP declares about it rather than from what the values happen
+ * to look like at runtime.
  *
- * NUMBERS ARE RIGHT-ALIGNED AND FORMATTED, blanks stay blank. That last part is load-bearing in
- * this app: an unpriced model has no cost, and rendering that as 0 would state something false and
- * cheap-looking rather than something unknown. The API sends null for it; this renders nothing.
+ * Everything below that matters was got wrong once by guessing:
+ *
+ * - NUMBER FORMAT comes from the column's d3 specifier. Guessing from the value with
+ *   `Number.isInteger` rendered a column declared to one decimal as 43.30, 2.40, 1.20 and then a
+ *   bare 1. Three precisions in one column, and the bare 1 reads as a different quantity.
+ * - HEADER ALIGNMENT follows the cells. Right-aligning numbers and left-aligning their headings
+ *   is neither of the two consistent choices.
+ * - COLUMN NAMES come from `column_label()`. The raw ids are schema, not English.
+ * - BLANK STAYS BLANK. An unpriced model has an unknown cost, not a zero one, and a 0 there would
+ *   look more authoritative than the truth.
  */
 
 const PAGE = 100
@@ -17,69 +23,153 @@ function isNumeric(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
-function show(value: unknown): string {
+/**
+ * The d3 specifier subset this app actually uses: `,` for grouped thousands and `.Nf` for a fixed
+ * number of decimals, in either order (`,.2f`).
+ *
+ * A subset ON PURPOSE. Pulling in a full d3-format for three specifiers would add a dependency to
+ * interpret strings this codebase produces from one function, `numeric_columns()`. If a specifier
+ * arrives that this cannot read, the number is rendered plainly rather than wrongly.
+ */
+function applySpecifier(value: number, specifier: string | null): string {
+  if (!specifier) {
+    return Number.isInteger(value) ? value.toLocaleString() : String(value)
+  }
+  const group = specifier.includes(',')
+  const fixed = /\.(\d+)f/.exec(specifier)
+  if (fixed) {
+    const digits = Number(fixed[1])
+    return value.toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+      useGrouping: group,
+    })
+  }
+  if (group) return value.toLocaleString(undefined, { maximumFractionDigits: 20 })
+  return String(value)
+}
+
+function show(value: unknown, meta?: ColumnMeta): string {
   if (value === null || value === undefined) return ''
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) return ''
-    // Integers keep their thousands separators; fractions keep enough digits to stay honest about
-    // small costs, where rounding to two places would print $0.00 for a real charge.
-    if (Number.isInteger(value)) return value.toLocaleString()
-    return Math.abs(value) < 0.01 ? value.toPrecision(2) : value.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })
+    return applySpecifier(value, meta?.specifier ?? null)
   }
   return String(value)
 }
 
+/** The LAST matching band wins: rules run shallowest to deepest and a top value matches them all. */
+function shadeFor(value: unknown, bands: Band[] | undefined): Band | null {
+  if (!bands?.length || !isNumeric(value)) return null
+  let hit: Band | null = null
+  for (const band of bands) {
+    if (band.op === '>=' ? value >= band.at : value <= band.at) hit = band
+  }
+  return hit
+}
+
 export function DataTable({
   table,
+  meta,
   onRowClick,
 }: {
   table: Table
+  meta?: TableMeta
   onRowClick?: (row: Record<string, unknown>) => void
 }) {
   const [sort, setSort] = useState<{ column: string; direction: 1 | -1 } | null>(null)
+  const [query, setQuery] = useState('')
   const [limit, setLimit] = useState(PAGE)
 
+  const byId = useMemo(() => {
+    const out: Record<string, ColumnMeta> = {}
+    for (const column of meta?.columns ?? []) out[column.id] = column
+    return out
+  }, [meta])
+
+  // FILTERED FIRST, then sorted, then paged. Filtering the visible page instead of the whole table
+  // would search the hundred rows that happen to be on screen and report nothing for a value three
+  // hundred rows down, which looks exactly like an empty result.
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return table.rows
+    return table.rows.filter((row) =>
+      table.columns.some((column) => {
+        const value = row[column]
+        if (value === null || value === undefined) return false
+        // Matched against the TEXT ON SCREEN, so typing what you can see finds the row. Searching
+        // the raw value would fail on "1,024" and on a date the reader is looking at.
+        return show(value, byId[column]).toLowerCase().includes(needle)
+      }),
+    )
+  }, [table.rows, table.columns, query, byId])
+
   const rows = useMemo(() => {
-    if (!sort) return table.rows
-    const copy = [...table.rows]
+    if (!sort) return filtered
+    const copy = [...filtered]
     copy.sort((a, b) => {
       const left = a[sort.column]
       const right = b[sort.column]
-      // Blanks sort last in both directions. A column of unknown costs should not push the rows
-      // you can actually read off the top of the table when you sort by it.
+      // Blanks sort last in both directions: a column of unknowns should not push the rows you can
+      // read off the top of the table when you sort by it.
       if (left === null || left === undefined) return 1
       if (right === null || right === undefined) return -1
       if (isNumeric(left) && isNumeric(right)) return (left - right) * sort.direction
       return String(left).localeCompare(String(right)) * sort.direction
     })
     return copy
-  }, [table.rows, sort])
+  }, [filtered, sort])
 
   if (!table.columns.length) return null
 
   const visible = rows.slice(0, limit)
-  // Only a table that identifies a session can be navigated from. Offering a pointer cursor and a
-  // hover state on every row of every table would promise something that does nothing on most of
-  // them, and a control that sometimes silently does nothing is worse than no control.
-  //
-  // Read from the ROW, not from `columns`. The All sessions table carries `session_id` as a HIDDEN
-  // column: it is in every row and absent from the column list, which is how the dashboard passes
-  // an identifier along without showing a uuid in the table. Checking `columns` looked right, type
-  // checked, and made the one table this feature exists for the only table it did not work on.
-  const navigable = Boolean(onRowClick) && rows.length > 0 &&
-    ('session_id' in rows[0] || 'session' in rows[0])
+  // Only a table that identifies a session can be navigated from. `session_id` is a HIDDEN column
+  // on the sessions table: in every row, absent from the column list, which is how the identifier
+  // travels without showing a uuid. Reading `columns` here made the feature do nothing on the one
+  // table it exists for.
+  const navigable = Boolean(onRowClick) && table.rows.length > 0 &&
+    ('session_id' in table.rows[0] || 'session' in table.rows[0])
 
   return (
     <div className="overflow-hidden rounded-lg border border-edge bg-panel">
+      <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
+        <input
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value)
+            setLimit(PAGE)
+          }}
+          placeholder={`Filter ${table.rows.length.toLocaleString()} rows`}
+          className="w-56 rounded border border-edge bg-page px-2 py-1 text-[12px] text-ink
+                     outline-none placeholder:text-ink-faint focus:border-accent"
+        />
+        {query && (
+          <>
+            <button
+              onClick={() => setQuery('')}
+              className="rounded border border-edge px-2 py-1 text-[11px] text-ink-dim
+                         hover:text-ink"
+            >
+              clear
+            </button>
+            {/* Said out loud. A filtered table that only showed its remaining rows would look
+                exactly like a table that never had the others. */}
+            {/* One string, not three interpolations: split across text nodes it reads the same on
+                screen and cannot be found by anything asserting on it. */}
+            <span className="text-[11px] text-ink-faint">
+              {`${rows.length.toLocaleString()} of ${table.rows.length.toLocaleString()} match`}
+            </span>
+          </>
+        )}
+      </div>
+
       <div className="max-h-[32rem] overflow-auto">
         <table className="w-full border-collapse text-[12.5px]">
           <thead className="sticky top-0 z-10 bg-panel-raised">
             <tr>
               {table.columns.map((column) => {
                 const help = table.tooltips?.[column]
+                const info = byId[column]
                 const active = sort?.column === column
                 return (
                   <th
@@ -92,10 +182,11 @@ export function DataTable({
                           : { column, direction: -1 },
                       )
                     }
-                    className="cursor-pointer border-b border-edge px-3 py-2 text-left font-semibold
-                               whitespace-nowrap text-ink-dim select-none hover:text-ink"
+                    className={`cursor-pointer border-b border-edge px-3 py-2 font-semibold
+                                whitespace-nowrap text-ink-dim select-none hover:text-ink
+                                ${info?.align === 'right' ? 'text-right' : 'text-left'}`}
                   >
-                    <span className={help ? 'has-help' : undefined}>{column}</span>
+                    <span className={help ? 'has-help' : undefined}>{info?.label ?? column}</span>
                     {active && (
                       <span className="ml-1 text-accent">{sort.direction === 1 ? '↑' : '↓'}</span>
                     )}
@@ -115,22 +206,38 @@ export function DataTable({
               >
                 {table.columns.map((column) => {
                   const value = row[column]
+                  const info = byId[column]
+                  const band = shadeFor(value, info?.bands)
                   return (
                     <td
                       key={column}
+                      style={band ? { backgroundColor: band.background } : undefined}
                       className={`px-3 py-1.5 whitespace-nowrap ${
-                        isNumeric(value) ? 'text-right font-mono tabular-nums' : ''
+                        info?.align === 'right' || (!info && isNumeric(value))
+                          ? 'text-right font-mono tabular-nums'
+                          : ''
                       } ${value === null || value === undefined ? 'text-ink-faint' : ''}`}
                     >
-                      {show(value)}
+                      {show(value, info)}
                     </td>
                   )
                 })}
               </tr>
             ))}
+            {visible.length === 0 && (
+              <tr>
+                <td
+                  colSpan={table.columns.length}
+                  className="px-3 py-6 text-center text-[12px] text-ink-dim"
+                >
+                  Nothing matches {JSON.stringify(query)}.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
+
       {rows.length > limit && (
         <button
           onClick={() => setLimit((was) => was + PAGE * 5)}
@@ -148,3 +255,5 @@ export function DataTable({
     </div>
   )
 }
+
+export { applySpecifier, shadeFor }

@@ -8,25 +8,11 @@ import { Section } from './Section'
  *
  * This is the payoff from making `extract.describe()` the API contract rather than inventing a new
  * one per page. Every tab in this app is some tables, some charts and some prose, and the server
- * says which. So ONE renderer covers all eight from the first day, and per-tab work is only needed
- * where a tab has an interaction, not merely content. The migration plan budgeted a page per tab;
- * most of that turned out to be unnecessary.
+ * says which. So ONE renderer covers all eight, and per-tab work is only needed where a tab has an
+ * interaction rather than merely content.
  *
- * The order is charts, then prose, then tables, which is not the order the payload lists them in.
- * It is the order they are read in: the shape first, the caveat second, the numbers third.
+ * The order is: what this tab describes, then the shape, then the caveats, then the numbers.
  */
-/**
- * A table's heading, or nothing.
- *
- * `(anonymous)` is not a name. It is what `extract.describe()` prints for a table that has no DOM
- * id, and rendering it would put the word five times down the Cost tab. The real ids are DOM ids
- * (`tbl-compactions`), so the prefix comes off: a heading is for a reader, not for a selector.
- */
-function heading(id: string | null): string | null {
-  if (!id || id === '(anonymous)') return null
-  return id.replace(/^tbl-/, '').replace(/-/g, ' ')
-}
-
 export function Pane({
   payload,
   onRowClick,
@@ -36,19 +22,21 @@ export function Pane({
 }) {
   const figures = payload.plotly ?? []
   const sections = payload.details ?? []
+  const meta = payload.meta ?? []
 
   // A section's body is ALSO in `text`, because `extract.texts()` flattens the whole pane including
-  // what is inside a collapsed block. Rendered naively, every SQL query would appear twice: once as
-  // a wall of prose at the top of the tab and again inside its own section. The prose is filtered
-  // against what the sections already carry rather than the sections being dropped, because the
-  // collapsed version is the one that says which table the query belongs to.
+  // what is inside a collapsed block. Rendered naively every SQL query appears twice: once as a
+  // wall of prose and again inside its own section.
   const claimed = new Set<string>()
   for (const section of sections) {
     for (const line of section.body) claimed.add(line)
     if (section.summary) claimed.add(section.summary)
   }
   const prose = payload.text.filter(
-    (line) => !claimed.has(line) && !sections.some((s) => s.summary.includes(line)),
+    (line) =>
+      line !== payload.population &&
+      !claimed.has(line) &&
+      !sections.some((s) => s.summary.includes(line)),
   )
 
   const attached = (index: number) => sections.filter((s) => s.table_index === index)
@@ -58,6 +46,31 @@ export function Pane({
 
   return (
     <div className="flex flex-col gap-5">
+      {/*
+        WHICH POPULATION THIS TAB DESCRIBES, first and unmistakable.
+
+        The app has always produced this sentence and it always reached the page, as prose line 1
+        of up to 27 identical grey lines. So on Diagnostics, "Store-wide. Not affected by the
+        header selection." sat far above the table being looked at, and the honest answer to "why
+        do these values never change?" was on screen and unfindable. The data was right; the page
+        was not saying so where the question gets asked.
+
+        An unscoped tab is marked differently from a scoped one, because "your selection does
+        nothing here" is the more surprising of the two and the one worth colouring.
+      */}
+      {payload.population && (
+        <div
+          data-scoped={payload.scoped ? 'true' : 'false'}
+          className={`rounded-lg border px-4 py-2.5 text-[12.5px] ${
+            payload.scoped
+              ? 'border-edge bg-panel text-ink-dim'
+              : 'border-warn/40 bg-warn/5 text-warn'
+          }`}
+        >
+          {payload.population}
+        </div>
+      )}
+
       {figures.map((figure, index) => (
         <section key={index} className="rounded-lg border border-edge bg-panel p-4">
           {payload.figures[index]?.title && (
@@ -85,14 +98,15 @@ export function Pane({
 
       {payload.tables.map((table, index) => (
         // Keyed by INDEX, not by id. Five of the Cost tab's six tables report the id
-        // `(anonymous)`, which is what the extractor calls a table that has none, so keying on it
-        // collided four times and React warned about duplicate keys on every render. Index is
-        // stable here because the whole payload is replaced at once rather than reordered.
+        // `(anonymous)`, so keying on it collided four times and React warned on every render.
         <section key={index} className="flex flex-col gap-2">
-          {heading(table.id) && (
-            <h3 className="text-[13px] font-semibold text-ink-dim">{heading(table.id)}</h3>
+          {/* The heading comes from `table_label()` on the server. Deriving it here by stripping a
+              `tbl-` prefix was a naming rule living in the browser, which is the mistake this
+              whole pass exists to undo. */}
+          {meta[index]?.title && (
+            <h3 className="text-[13px] font-semibold text-ink-dim">{meta[index].title}</h3>
           )}
-          <DataTable table={table} onRowClick={onRowClick} />
+          <DataTable table={table} meta={meta[index]} onRowClick={onRowClick} />
           {attached(index).map((section, at) => (
             <Section key={at} section={section} table={table} />
           ))}
