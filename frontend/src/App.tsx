@@ -132,6 +132,10 @@ export default function App() {
           {(tabs.data ?? []).map((entry) => (
             <button
               key={entry.id}
+              // `btn-<tab id>`, the same id the Dash page used. `tools/screenshots.py` selects on
+              // it to regenerate the README's images, and keeping the name means that tool did not
+              // have to learn a second convention when the page underneath it changed.
+              id={`btn-${entry.id}`}
               onClick={() => setTab(entry.id)}
               className={`-mb-px border-b-2 px-3 py-2 text-[13px] whitespace-nowrap
                           transition-colors ${

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Context capture explorer - a local Dash app over data/context.db.
+Context capture explorer - the pane builders behind data/context.db.
 
 Shows what the harvester collected: per-session context growth, every compaction on record
 with the mirror's predicted trigger, and a live threshold calculator.
@@ -8,9 +8,19 @@ with the mirror's predicted trigger, and a live threshold calculator.
 The window math is NOT reimplemented here. It is read from tools/mirror-core.mjs at startup
 and computed by tools/mirror.mjs on demand, so the app and the validated JS cannot drift apart.
 
-Run:  python app.py          then open http://127.0.0.1:8056
-Stop: Ctrl+C. There is no in-app quit: closing this viewer must not look like stopping capture,
-      and it does not - the hooks harvest on their own whether or not this is running.
+HEADLESS. This file no longer serves a page:
+
+    python -m c4x.api      then open http://127.0.0.1:8059
+
+It is still where every pane is built. The API renders through `_render_tab`, the same callback
+the browser used to dispatch, which is what makes `tools/parity.py` a check on the transport
+rather than on twenty reimplemented queries, and what let a React frontend replace the page
+without reimplementing a single query. What ended is the second page: two dashboards on two ports
+over one store is a way to read a stale number and not know it, which happened more than once
+while both existed.
+
+Stop: Ctrl+C on the API. There is no in-app quit: closing the viewer must not look like stopping
+      capture, and it does not, because the hooks harvest whether or not anything is running.
 
 This file is a COMPOSITION ROOT. It creates the Dash instance, attaches the layout, imports the
 callbacks so Dash registers them, and mounts the server routes. Nothing is implemented here:
@@ -53,7 +63,7 @@ if "--read-only" in sys.argv:
 
 from dash import Dash  # noqa: E402 - after the --db handling above, deliberately
 
-from c4x.server import port_from_argv, register_routes, run  # noqa: E402
+from c4x.server import port_from_argv, register_routes  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("C4X_DB") or (ROOT / "data" / "context.db"))
@@ -125,12 +135,34 @@ from c4x.ui.callbacks.window import _window_panel, _window_panel_chosen  # noqa:
 from c4x.ui.header import refresh_store  # noqa: E402, F401
 from c4x.ui.layout import SELECTION_SCOPED, TAB_IDS, TABS, tab_button, tab_style  # noqa: E402, F401
 
-# The route below stays because this environment requires local web apps to expose a shutdown path.
-# It is deliberately undocumented: no button, no README, no docstring. Removing the affordance is
-# the point; removing the mechanism would break a requirement I cannot verify from here. The routes
-# themselves, and why the shutdown one is POST-only, are in c4x/server.py.
+# The routes stay registered on this Flask server even though nothing serves it any more, because
+# removing the mechanism would break a requirement I cannot verify from here: this environment
+# requires local web apps to expose a shutdown path. The app that ACTUALLY listens is now
+# `c4x/api/`, which carries the same routes and imports this same implementation, so the two cannot
+# disagree about what "stopped" means. Deliberately undocumented in both: no button, no link.
 register_routes(server, DB_PATH, PORT)
 
 
+def _headless_notice():
+    """What to run instead. Printed rather than serving a second page.
+
+    THIS FILE NO LONGER SERVES A UI. It is still the composition root, and everything below it is
+    still where the panes are built: the API renders through `_render_tab`, the same callback the
+    browser used to dispatch, which is what makes `tools/parity.py` a check on the transport rather
+    than on twenty reimplemented queries. What changed is that there is one page now instead of two.
+
+    Two dashboards on two ports, drawing the same store, is a way to read a stale number and not
+    know it. That happened repeatedly while both existed.
+    """
+    port = int(os.environ.get("C4X_API_PORT", "8059"))
+    print("app.py no longer serves a page. It is the data source behind the API now.")
+    print()
+    print("  python -m c4x.api")
+    print(f"  then open http://127.0.0.1:{port}")
+    print()
+    print("Capture is unaffected either way: the hooks harvest whether or not anything is running.")
+    return 0
+
+
 if __name__ == "__main__":
-    run(app, PORT, DEBUG)
+    sys.exit(_headless_notice())
