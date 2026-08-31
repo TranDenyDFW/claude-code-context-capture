@@ -71,6 +71,13 @@ export interface TableMeta {
   page_size: number | null
 }
 
+/** A headline figure a tab leads with, built by `theme.stat_card()` and read back by the API. */
+export interface Stat {
+  label: string
+  value: string
+  sub: string
+}
+
 export interface TabPayload {
   tab: string
   session: string | null
@@ -85,6 +92,8 @@ export interface TabPayload {
   details?: Section[]
   /** Only on /render. Paired to `tables` BY INDEX, or empty if the server could not pair them. */
   meta?: TableMeta[]
+  /** Only on /render. The tab's headline figures, already separated into label/value/sub. */
+  stats?: Stat[]
   /** Whether the header selection changes this tab at all. From the app's SELECTION_SCOPED. */
   scoped?: boolean
   /** The one sentence saying which population this tab describes. */

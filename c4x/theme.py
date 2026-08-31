@@ -150,8 +150,15 @@ CODE_BLOCK = {"background": PANEL, "border": f"1px solid {BORDER}", "borderRadiu
 
 
 def stat_card(label: str, value: str, color: str = TEXT, sub: str = "") -> html.Div:
+    # CLASSNAME SO IT CAN BE FOUND AGAIN. `extract.texts()` flattens a pane to a list of strings, so
+    # over the API seven of these arrive as twenty-one loose lines that happen to be in groups of
+    # three. A frontend could infer the triples and would be wrong the moment one card gained a
+    # fourth child, silently and with every later card shifted by one. Marked here instead, so the
+    # server can hand over cards rather than a list to be re-grouped by guesswork.
+    # Inert for Dash, which just puts the class on the div.
     return html.Div(
-        [
+        className="stat-card",
+        children=[
             html.Div(label, style={"color": MUTED, "fontSize": "11px",
                                    "textTransform": "uppercase", "letterSpacing": "0.06em"}),
             html.Div(value, style={"color": color, "fontSize": "26px",

@@ -317,6 +317,29 @@ describe('every table can be filtered', () => {
   })
 })
 
+describe('the headline figures', () => {
+  const stats = [
+    { label: 'sessions', value: '1,325', sub: 'in the store' },
+    { label: 'API calls', value: '158,835', sub: '346,909 transcript rows behind them' },
+  ]
+
+  it('renders one card per stat, with its number', () => {
+    render(<Pane payload={payload({ stats })} />)
+    expect(screen.getByText('1,325')).toBeTruthy()
+    expect(screen.getByText('158,835')).toBeTruthy()
+  })
+
+  it('does NOT also print the same strings as prose', () => {
+    // Every part of a stat card is in `text` as well, because extract.texts() flattens the pane.
+    // Rendered naively the page shows "sessions / 1,325 / in the store" again as body prose,
+    // directly under the card that already says it.
+    const text = stats.flatMap((s) => [s.label, s.value, s.sub])
+    render(<Pane payload={payload({ stats, text: [...text, 'a real caveat'] })} />)
+    expect(screen.getAllByText('1,325')).toHaveLength(1)
+    expect(screen.getByText('a real caveat')).toBeTruthy()
+  })
+})
+
 describe('the tab says which population it describes', () => {
   it('states it once, at the top, and not again in the prose', () => {
     const line = 'Store-wide. Not affected by the header selection.'

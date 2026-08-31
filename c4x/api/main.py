@@ -234,6 +234,8 @@ def tab_render(tab_id: str,
         # somebody was actually looking at, and the honest answer to "why does this never change?"
         # was on screen and unfindable. Promoted to its own field so the page can put it where the
         # question gets asked.
+        payload["stats"] = _stats(pane)
+
         from c4x.ui.layout import SELECTION_SCOPED
         payload["scoped"] = tab_id in SELECTION_SCOPED
         first = payload["text"][0] if payload["text"] else ""
@@ -244,6 +246,47 @@ def tab_render(tab_id: str,
     if no_cache:
         return build()
     return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind), build)
+
+
+def _stats(node, found=None):
+    """The headline figures a tab leads with, as {label, value, sub}, in document order.
+
+    `theme.stat_card()` builds three stacked divs: a label, the number, and a caption. Seven of them
+    reach the API as twenty-one loose strings in `text`, because `extract.texts()` flattens the
+    pane, and a frontend re-grouping those into threes would be inferring a structure rather than
+    reading one. It would also be wrong the first time a card gained a fourth child, quietly, with
+    every later card shifted by one.
+
+    So the cards are marked with a className at the point they are built and read back here. Found
+    by class rather than by shape, because a rule like "a div with exactly three text children"
+    would also match things that are not stat cards.
+    """
+    from c4x.cli import extract
+    found = [] if found is None else found
+
+    def walk(node):
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child)
+            return
+        if not hasattr(node, "_prop_names"):
+            return
+        classes = str(getattr(node, "className", "") or "")
+        if "stat-card" in classes.split():
+            parts = [" ".join(extract.texts(c)) for c in (node.children or [])]
+            found.append({
+                "label": parts[0] if len(parts) > 0 else "",
+                "value": parts[1] if len(parts) > 1 else "",
+                "sub": parts[2] if len(parts) > 2 else "",
+            })
+            return
+        for name in node._prop_names:
+            value = getattr(node, name, None)
+            if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
+                walk(value)
+
+    walk(node)
+    return found
 
 
 def _heat_bands(conditional):
