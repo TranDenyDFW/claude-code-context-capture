@@ -146,8 +146,13 @@ for (const rel of nodeTargets()) {
     results.push({ rel, state: 'exempt', note: EXEMPT.get(rel) });
     continue;
   }
+  // 300s, raised from 60. `harvest.mjs --self-test` takes 52 seconds on an idle machine, which left
+  // eight seconds of headroom and none at all during a full suite run: it was killed at 60s while
+  // passing 84 checks in isolation seconds later. A timeout that fires on a slow machine rather
+  // than a hung process reports a green suite as red, which teaches people to re-run rather than
+  // to read. Still bounded, because a genuinely hung self-test must not stall the suite forever.
   const run = spawnSync(process.execPath, [join(ROOT, rel), '--self-test'],
-                        { encoding: 'utf8', cwd: ROOT, timeout: 60_000 });
+                        { encoding: 'utf8', cwd: ROOT, timeout: 300_000 });
   const text = `${run.stdout || ''}${run.stderr || ''}`;
   const match = text.match(CHECKS);
   const count = match ? Number(match[1]) : 0;
@@ -261,9 +266,7 @@ if (!NODE_ONLY) {
   const installed = existsSync(join(frontend, 'node_modules'));
   const FRONT = [
     [['run', 'typecheck'], 'the frontend still type-checks', null],
-    // `vitest run` prints "Tests  N passed", which CHECKS already matches, so the count joins the
-    // suite total rather than being a silent pass.
-    [['run', 'test'], 'the payload reaches the DOM intact', 'passed'],
+    [['run', 'test'], 'the payload reaches the DOM intact', 'Tests '],
   ];
   for (const [args, what, marker] of FRONT) {
     const label = `frontend npm ${args.join(' ')}`;
@@ -277,8 +280,13 @@ if (!NODE_ONLY) {
       encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: process.platform === 'win32',
     });
     const text = `${run.stdout || ''}${run.stderr || ''}`;
-    const match = text.match(CHECKS);
-    const count = match ? Number(match[1] ?? match[2]) : null;
+    // NOT the shared CHECKS pattern. Vitest prints "Test Files  2 passed (2)" BEFORE
+    // "Tests  22 passed (22)", and CHECKS matches "N passed" anywhere, so it took the file count
+    // and the suite total silently read 20 lower than the number of checks that actually ran.
+    // Exactly the failure this runner already had once, where the total dropped by fourteen while
+    // the run still said PASS.
+    const match = text.match(/Tests\s+(\d+) passed/);
+    const count = match ? Number(match[1]) : null;
     if (run.status !== 0 || run.signal) {
       failed++;
       results.push({ rel: label, state: 'FAIL',
