@@ -381,6 +381,77 @@ COLUMN_HELP = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Human names
+# ---------------------------------------------------------------------------
+# Every table in this app declared `name == id`, so a reader saw `ts`, `pre_tokens` and
+# `fitted_window`. That was never a regression; it was work nobody had done. These are the names a
+# READER sees. The id stays the key for lookups, tooltips and the SQL shown beneath the table.
+#
+# FAITHFUL, NOT REWRITTEN. `pre_tokens` becomes "Pre Tokens", not "Tokens Before". The query that
+# built the table is one click away under every table, and a label that no longer matches the
+# column in that query costs more than the plainer wording buys.
+#
+# Only the ones the generic rule below gets WRONG are listed. Anything absent is formatted by rule,
+# so a new column gets a reasonable name without an edit here.
+COLUMN_LABEL = {
+    # The one that prompted this. A timestamp column called `ts` tells a reader nothing.
+    "ts": "Date & Time",
+    "est_usd": "Est. USD",
+    "duration_ms": "Duration (ms)",
+    "auto_compact_threshold": "Auto-Compact Threshold",
+    "pct_of_kind": "% of Kind",
+    # Identifiers. The suffix is for a schema, not for a person reading a column heading.
+    "session_id": "Session",
+    "probe_id": "Probe",
+    "id": "ID",
+    "ok": "OK",
+    # Already written for a reader; the rule would only mangle the casing.
+    "B vs A": "B vs A",
+    "A": "A",
+    "B": "B",
+}
+
+# Words that stay lowercase inside a title, unless they lead it. Without this the rule produces
+# "Blocked At" and "Goes To", which read as though something was capitalised by a machine.
+_MINOR = {"at", "of", "to", "vs", "in", "for", "and", "on", "per", "by", "a", "an", "the"}
+
+# One heading per table, for the ones that HAVE an id. `tbl-reread` is a DOM id; "Files Read More
+# Than Once" is what the table is. Anonymous tables get no heading rather than an invented one.
+TABLE_LABEL = {
+    "tbl-compactions": "Compactions",
+    "tbl-session": "Sessions",
+    "tbl-messages": "Messages",
+    "tbl-findings": "Findings",
+    "tbl-reread": "Files Read More Than Once",
+}
+
+
+def column_label(column_id) -> str:
+    """The name a reader sees for a column. Never the raw id."""
+    if column_id in COLUMN_LABEL:
+        return COLUMN_LABEL[column_id]
+    words = str(column_id).replace("_", " ").split()
+    if not words:
+        return str(column_id)
+    return " ".join(w.capitalize() if i == 0 or w.lower() not in _MINOR else w.lower()
+                    for i, w in enumerate(words))
+
+
+def table_label(table_id):
+    """The heading for a table, or None for one with no id worth showing.
+
+    `(anonymous)` is what `extract.describe()` calls a table with no DOM id. It is a placeholder,
+    not a name, and printing it would put the word down the page five times on the Cost tab.
+    """
+    if not table_id or table_id == "(anonymous)":
+        return None
+    # The fallback strips the DOM prefix and reads the rest as words, so a table added later gets a
+    # sane heading without an edit here. Hyphens are separators in a DOM id, not punctuation.
+    return TABLE_LABEL.get(table_id) or column_label(
+        table_id.removeprefix("tbl-").replace("-", " "))
+
+
 def header_help(cols, extra=None):
     """tooltip_header for a DataTable, for whichever of `cols` have something worth saying.
 

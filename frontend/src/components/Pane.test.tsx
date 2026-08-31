@@ -14,9 +14,9 @@
  * everything else instead of needing a machine with a display.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { Pane } from './Pane'
-import type { TabPayload } from '@/api'
+import type { Band, ColumnMeta, TableMeta, TabPayload } from '@/api'
 
 // Plotly is 4 MB of canvas rendering that jsdom cannot do and this file is not testing. The chart
 // COUNT still matters, so the stub renders a marker rather than nothing.
@@ -194,14 +194,150 @@ describe('the query behind a table', () => {
   })
 })
 
-describe('headings', () => {
+describe('headings come from the server, not from a rule in here', () => {
+  const meta = (over: Partial<TableMeta> = {}): TableMeta => ({
+    id: 't', title: null, columns: [], filterable: true, page_size: null, ...over,
+  })
+
+  it('shows the title the app gave the table', () => {
+    render(
+      <Pane
+        payload={payload({
+          tables: [table('tbl-reread', [{ a: 1 }])],
+          meta: [meta({ id: 'tbl-reread', title: 'Files Read More Than Once' })],
+        })}
+      />,
+    )
+    expect(screen.getByText('Files Read More Than Once')).toBeTruthy()
+  })
+
+  it('never shows a raw DOM id as a heading', () => {
+    // The previous version derived the heading here by stripping a `tbl-` prefix, which is a
+    // naming rule living in the browser. With no title from the server there is no heading.
+    render(
+      <Pane payload={payload({ tables: [table('tbl-compactions', [{ a: 1 }])], meta: [meta()] })} />,
+    )
+    expect(screen.queryByText(/tbl-/)).toBeNull()
+    expect(screen.queryByText('compactions')).toBeNull()
+  })
+
   it('never shows "(anonymous)", which is a placeholder and not a name', () => {
     render(<Pane payload={payload({ tables: [table('(anonymous)', [{ a: 1 }])] })} />)
     expect(screen.queryByText('(anonymous)')).toBeNull()
   })
+})
 
-  it('shows a real table id without its DOM prefix', () => {
-    render(<Pane payload={payload({ tables: [table('tbl-compactions', [{ a: 1 }])] })} />)
-    expect(screen.getByText('compactions')).toBeTruthy()
+describe('a column is rendered the way the APP declares it', () => {
+  const withMeta = (columns: ColumnMeta[], rows: Record<string, unknown>[]) =>
+    payload({
+      tables: [{ id: 't', columns: columns.map((c) => c.id), rows }],
+      meta: [{ id: 't', title: null, columns, filterable: true, page_size: null }],
+    })
+
+  const column = (over: Partial<ColumnMeta> = {}): ColumnMeta => ({
+    id: 'n', label: 'N', numeric: true, specifier: null, align: 'right', hidden: false, bands: [],
+    ...over,
+  })
+
+  it('honours a fixed-precision specifier instead of guessing from the value', () => {
+    // THE DEFECT THIS EXISTS FOR. `percent` is declared `.1f`, so every row gets one decimal. The
+    // old renderer asked `Number.isInteger` and wrote 43.3, 2.4 and then a bare 1, which reads as
+    // a different quantity from the rows above it.
+    render(
+      <Pane
+        payload={withMeta(
+          [column({ id: 'percent', label: 'Percent', specifier: '.1f' })],
+          [{ percent: 43.3 }, { percent: 1 }, { percent: 0.8 }],
+        )}
+      />,
+    )
+    const cells = [...screen.getByRole('table').querySelectorAll('tbody td')].map((c) => c.textContent)
+    expect(cells).toEqual(['43.3', '1.0', '0.8'])
+  })
+
+  it('groups thousands when the specifier says so', () => {
+    render(<Pane payload={withMeta([column({ specifier: ',' })], [{ n: 1234567 }])} />)
+    expect(screen.getByRole('table').querySelector('tbody td')!.textContent).toBe(
+      (1234567).toLocaleString(),
+    )
+  })
+
+  it('uses the label the server gave, never the raw column id', () => {
+    render(<Pane payload={withMeta([column({ id: 'ts', label: 'Date & Time' })], [{ ts: 'x' }])} />)
+    expect(screen.getByRole('columnheader').textContent).toContain('Date & Time')
+    expect(screen.getByRole('columnheader').textContent).not.toContain('ts')
+  })
+
+  it('aligns a numeric HEADER the same way as its cells', () => {
+    render(<Pane payload={withMeta([column({ align: 'right' })], [{ n: 1 }])} />)
+    expect(screen.getByRole('columnheader').className).toContain('text-right')
+    expect(screen.getByRole('table').querySelector('tbody td')!.className).toContain('text-right')
+  })
+
+  it('shades a cell with the LAST band it matches, not the first', () => {
+    // Bands are emitted shallowest first and a top value matches them all, so stopping at the
+    // first match would paint every outlier the palest colour.
+    const bands: Band[] = [
+      { op: '>=', at: 10, background: '#111111' },
+      { op: '>=', at: 100, background: '#999999' },
+    ]
+    render(<Pane payload={withMeta([column({ bands })], [{ n: 500 }, { n: 12 }, { n: 1 }])} />)
+    const cells = [...screen.getByRole('table').querySelectorAll('tbody td')] as HTMLElement[]
+    expect(cells[0].style.backgroundColor).toBe('rgb(153, 153, 153)')
+    expect(cells[1].style.backgroundColor).toBe('rgb(17, 17, 17)')
+    expect(cells[2].style.backgroundColor).toBe('')
+  })
+})
+
+describe('every table can be filtered', () => {
+  it('narrows the rows and says how many of the whole table matched', () => {
+    const rows = [{ project: 'alpha' }, { project: 'beta' }, { project: 'gamma' }]
+    render(<Pane payload={payload({ tables: [table('t', rows)] })} />)
+    // "ga", not "a". The first version of this used "a" and expected two matches, which was wrong:
+    // alpha, beta and gamma all contain one, so the correct answer was 3 of 3 and the test failed
+    // on its own arithmetic rather than on the code.
+    fireEvent.change(screen.getByPlaceholderText(/Filter 3 rows/), { target: { value: 'ga' } })
+    // The count is stated so a filtered table can never be mistaken for the whole one.
+    expect(screen.getByText('1 of 3 match')).toBeTruthy()
+    expect(screen.getByRole('table').querySelectorAll('tbody tr')).toHaveLength(1)
+  })
+
+  it('filters the WHOLE table, not the page that happens to be on screen', () => {
+    // 100 is the page size. The match is row 250, which is not rendered until it is found.
+    const rows = Array.from({ length: 300 }, (_, index) => ({ name: `row-${index}` }))
+    render(<Pane payload={payload({ tables: [table('t', rows)] })} />)
+    fireEvent.change(screen.getByPlaceholderText(/Filter 300 rows/), { target: { value: 'row-250' } })
+    expect(screen.getByText('1 of 300 match')).toBeTruthy()
+  })
+
+  it('says so when nothing matches, rather than showing an empty table', () => {
+    render(<Pane payload={payload({ tables: [table('t', [{ a: 'x' }])] })} />)
+    fireEvent.change(screen.getByPlaceholderText(/Filter 1 rows/), { target: { value: 'zzz' } })
+    expect(screen.getByText(/Nothing matches/)).toBeTruthy()
+  })
+})
+
+describe('the tab says which population it describes', () => {
+  it('states it once, at the top, and not again in the prose', () => {
+    const line = 'Store-wide. Not affected by the header selection.'
+    render(<Pane payload={payload({ scoped: false, population: line, text: [line, 'other'] })} />)
+    expect(screen.getAllByText(line)).toHaveLength(1)
+    expect(screen.getByText('other')).toBeTruthy()
+  })
+
+  it('marks an UNSCOPED tab differently, because that is the surprising one', () => {
+    // The question that prompted this was "why does this table never change no matter what I
+    // select?". The answer was already on the page and looked like every other grey line.
+    const { container } = render(
+      <Pane payload={payload({ scoped: false, population: 'Store-wide. Not affected.' })} />,
+    )
+    expect(container.querySelector('[data-scoped="false"]')).toBeTruthy()
+  })
+
+  it('and marks a scoped tab as scoped', () => {
+    const { container } = render(
+      <Pane payload={payload({ scoped: true, population: 'Describing 1 session.' })} />,
+    )
+    expect(container.querySelector('[data-scoped="true"]')).toBeTruthy()
   })
 })

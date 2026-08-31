@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
@@ -17,7 +17,14 @@ export default function App() {
 
   const tabs = useQuery({ queryKey: ['tabs'], queryFn: api.tabs })
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 30_000 })
-  const sessions = useQuery({ queryKey: ['sessions'], queryFn: () => api.sessions(300) })
+  // NARROWED TO THE COHORT, by the server. Three things were wrong when this was built here:
+  // it capped at 300 of 317 so seventeen sessions could not be picked, it ignored the cohort
+  // so the picker offered sessions the chosen population excludes, and it sorted by recency
+  // where the app sorts by project path then title so the list reads grouped by project.
+  const sessions = useQuery({
+    queryKey: ['selector', selection.cohort],
+    queryFn: () => api.selector(selection.cohort),
+  })
 
   useEffect(() => {
     if (!tab && tabs.data?.length) setTab(tabs.data[0].id)
@@ -62,43 +69,61 @@ export default function App() {
     setSelection((was) => ({ ...was, session: found }))
   }
 
-  const cohorts = useMemo(() => {
-    const found = new Set<string>()
-    for (const row of sessions.data?.rows ?? []) if (row.project) found.add(row.project)
-    return [...found].sort()
-  }, [sessions.data])
+  // FROM THE SERVER, not derived here. The previous version built this out of every distinct
+  // working directory in the store, which is not what this app means by a project: it filled the
+  // picker with per-run temp directories, dropped the four section cohorts, and sent a bare path
+  // that `cohort_sessions()` does not recognise, so selecting one filtered nothing at all.
+  const cohorts = useQuery({ queryKey: ['cohorts'], queryFn: api.cohorts })
+
+  // The selected session, named the way the app names it. The chip leads with WHEN it ran, because
+  // that is how a session is actually found: `selector_options` builds its label as
+  // "project · title · when", so the last part is the date and time.
+  const selected = (sessions.data ?? []).find((o) => o.value === selection.session)
+  const parts = selected?.label.split('·').map((p) => p.trim()) ?? []
+  const selectedWhen = parts.length >= 3
+    ? `${parts[parts.length - 1]}  ·  ${parts[0]}`
+    : (selected?.label ?? `${selection.session?.slice(0, 8)}…`)
 
   return (
     <div className="flex min-h-full flex-col">
       <header className="sticky top-0 z-20 border-b border-edge bg-page/95 backdrop-blur">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-6 py-3">
-          <span className="text-[15px] font-semibold tracking-tight text-ink">c4x</span>
-          <span className="text-[11px] text-ink-faint">
-            {health.data ? health.data.db.split(/[\\/]/).slice(-2).join('/') : 'connecting'}
-          </span>
+          <span className="text-[15px] font-semibold tracking-tight text-ink">C4X</span>
 
           <div className="ml-auto flex flex-wrap items-center gap-2">
+            {/*
+              NO SESSION DROPDOWN. Nobody remembers a session by name, which is what a list of 317
+              titles asks of a reader. A session is found by WHEN it ran: sort or filter any table
+              by Date & Time and click the row.
+
+              What stays is a chip saying which one is selected and letting you drop it, because a
+              selection you cannot see or undo is worse than no selection at all.
+            */}
+            {selection.session && (
+              <span
+                className="flex items-center gap-2 rounded-md border border-accent/60 bg-accent/10
+                           px-2.5 py-1.5 text-[12px] text-accent"
+                title={selected?.label ?? selection.session}
+              >
+                <span className="max-w-[26rem] truncate">{selectedWhen}</span>
+                <button
+                  onClick={() => setSelection((was) => ({ ...was, session: null }))}
+                  title="Clear the selected session"
+                  className="text-accent/70 hover:text-accent"
+                >
+                  ×
+                </button>
+              </span>
+            )}
             <Picker
-              label="session"
-              value={selection.session ?? ''}
-              onChange={(value) => setSelection((was) => ({ ...was, session: value || null }))}
-              options={[
-                { value: '', label: 'every session' },
-                ...(sessions.data?.rows ?? []).map((row) => ({
-                  value: row.session_id,
-                  label: `${row.title || row.session_id.slice(0, 8)}${
-                    row.turns ? ` (${row.turns.toLocaleString()} turns)` : ''
-                  }`,
-                })),
-              ]}
-            />
-            <Picker
-              label="project"
+              label="population"
               value={selection.cohort ?? ''}
               onChange={(value) => setSelection((was) => ({ ...was, cohort: value || null }))}
+              // Labels and values straight through. Taking a value apart to prettify it is how the
+              // filter broke the first time.
               options={[
-                { value: '', label: 'every project' },
-                ...cohorts.map((name) => ({ value: name, label: name })),
+                { value: '', label: 'no restriction' },
+                ...(cohorts.data ?? []).map((c) => ({ value: c.value, label: c.label })),
               ]}
             />
             <button

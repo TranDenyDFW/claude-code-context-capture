@@ -218,11 +218,145 @@ def tab_render(tab_id: str,
             if not -1 <= section["table_index"] < limit:
                 section["table_index"] = None
         payload["details"] = sections
+
+        # Per-table presentation the verify shape drops. Paired to `payload["tables"]` BY INDEX and
+        # only when both walks saw the same number of tables: a label attached to the wrong table
+        # would rename a column that does not exist on it, which is worse than showing the raw id.
+        meta = _table_meta(pane)
+        payload["meta"] = meta if len(meta) == len(payload["tables"]) else []
+
+        # WHICH POPULATION THIS TAB DESCRIBES, as a field rather than as prose.
+        #
+        # The app has always said it: `_render_tab` puts a banner at the top of every pane, and it
+        # arrives here inside `text` because `extract.texts()` flattens the pane. But it arrives as
+        # one grey line among twenty-seven identical grey lines, so on the Diagnostics tab the
+        # sentence "Store-wide. Not affected by the header selection." sat far above the table
+        # somebody was actually looking at, and the honest answer to "why does this never change?"
+        # was on screen and unfindable. Promoted to its own field so the page can put it where the
+        # question gets asked.
+        from c4x.ui.layout import SELECTION_SCOPED
+        payload["scoped"] = tab_id in SELECTION_SCOPED
+        first = payload["text"][0] if payload["text"] else ""
+        payload["population"] = first if (
+            first.startswith("Describing ") or first.startswith("Store-wide.")) else None
         return _jsonable(payload)
 
     if no_cache:
         return build()
     return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind), build)
+
+
+def _heat_bands(conditional):
+    """The rank-banded cell shading, per column, read off the table's own rules.
+
+    `theme.heat_cells()` shades a numeric column by which band of its own distribution a value
+    falls in, so a 300-row table shows its outliers without being sorted, in whatever order the
+    reader already has it. Dash expresses that as `style_data_conditional` entries; this reads them
+    back rather than recomputing the bands, so there is no second copy of the thresholds to drift.
+
+    ORDER IS LOAD-BEARING and preserved. The rules are emitted shallowest first, and a value in the
+    top band matches every rule below it too, so the LAST match is the one that wins. A consumer
+    that stopped at the first match would shade every outlier the palest colour.
+    """
+    import re
+    out = {}
+    for rule in conditional:
+        test = (rule or {}).get("if") or {}
+        column, query = test.get("column_id"), test.get("filter_query")
+        colour = (rule or {}).get("backgroundColor")
+        if not (column and query and colour):
+            continue
+        found = re.search(r"(>=|<=)\s*(-?[\d.]+)", str(query))
+        if not found:
+            continue
+        try:
+            threshold = float(found.group(2))
+        except ValueError:
+            continue
+        out.setdefault(column, []).append(
+            {"op": found.group(1), "at": threshold, "background": colour,
+             "color": (rule or {}).get("color")})
+    return out
+
+
+def _table_meta(node, found=None):
+    """Everything about a table that `describe()` throws away, in document order.
+
+    `extract.tables()` reduces a column to its ID and stops. The live `DataTable` also declares the
+    column's TYPE, the d3 format its numbers are written with, which columns are hidden, whether the
+    table filters, and how many rows a page holds. All of that is presentation the app already
+    decided, and dropping it did not make the frontend simpler, it made the frontend guess:
+
+    - `percent` is declared `.1f`, so Dash writes 43.3, 2.4, 1.2, 1.0. The browser guessed from the
+      runtime value with `Number.isInteger`, and wrote 43.30, 2.40, 1.20, 1. Three different
+      precisions in one column, and the bare 1 is not a rounding nit: it reads as a different
+      quantity from the rows above it.
+    - `filter_action="native"` was on the tables and the port silently lost filtering entirely.
+    - `session_id` is a HIDDEN column: in every row, absent from the column list. That is how the
+      identifier travels without showing a uuid, and it is why row-click has to read the row.
+
+    THE FORMAT TRAVELS AS ITS d3 SPECIFIER, verbatim, because that is what a Dash `Format` reduces
+    to: `,` for grouped thousands, `.1f` and `.2f` for fixed decimals. Sending the specifier rather
+    than an interpretation of it keeps `numeric_columns()` the one authority on how a number in this
+    app is written.
+
+    Built at RENDER time from the pane, not from a static map, so a table that only appears inside a
+    sub-panel is covered without anybody remembering to register it. Three of this app's explicit
+    formats live in exactly such a panel.
+    """
+    from c4x.cli import extract
+    from c4x.theme import column_label, table_label
+    found = [] if found is None else found
+
+    def walk(node):
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child)
+            return
+        if not hasattr(node, "_prop_names"):
+            return
+        if type(node).__name__ == extract.TABLE_TYPE:
+            hidden = set(getattr(node, "hidden_columns", None) or [])
+            bands = _heat_bands(getattr(node, "style_data_conditional", None) or [])
+            columns = []
+            for spec in (getattr(node, "columns", None) or []):
+                if not isinstance(spec, dict):
+                    continue
+                cid = spec.get("id")
+                specifier = None
+                fmt = spec.get("format")
+                if fmt is not None:
+                    try:
+                        specifier = fmt.to_plotly_json().get("specifier")
+                    except Exception:      # noqa: BLE001 - a format we cannot read is not a crash
+                        specifier = None
+                numeric = spec.get("type") == "numeric"
+                columns.append({
+                    "id": cid,
+                    "label": column_label(cid),
+                    "numeric": numeric,
+                    "specifier": specifier,
+                    # The header follows the cells. Dash left-aligned both, which is consistent and
+                    # hard to read down a column of numbers; aligning only the cells is neither.
+                    "align": "right" if numeric else "left",
+                    "hidden": cid in hidden,
+                    "bands": bands.get(cid, []),
+                })
+            found.append({
+                "id": getattr(node, "id", None) or "(anonymous)",
+                "title": table_label(getattr(node, "id", None)),
+                "columns": columns,
+                "filterable": getattr(node, "filter_action", "none") != "none",
+                "page_size": getattr(node, "page_size", None),
+            })
+            return
+        for name in node._prop_names:
+            value = getattr(node, name, None)
+            if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
+                walk(value)
+
+    walk(node)
+    return found
 
 
 def _details(node, found=None):
@@ -312,6 +446,45 @@ def _figures(node, found=None):
         if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
             _figures(value, found)
     return found
+
+
+@api.get("/api/cohorts")
+def cohorts():
+    """The populations worth asking a question about, from the app rather than derived.
+
+    THIS EXISTS BECAUSE THE FRONTEND GOT IT WRONG BY BUILDING ITS OWN. It listed every distinct
+    working directory in the store, which filled the picker with per-run temp directories nobody
+    would call a project, dropped the four SECTION cohorts entirely, and sent the bare path as
+    `cohort=`. The store expects `project::<path>`: `cohort_sessions()` partitions on `::`,
+    recognises no kind in a bare path, and returns an empty list, which means NO RESTRICTION. So
+    picking a project silently filtered nothing while the header said it had. Measured: 57 sessions
+    under `project::P:\\ClaudeExt\\QuestionExtension`, 0 under the bare path.
+
+    That is the same class of mistake as a hand-written tab list, and it is why `/api/tabs` reads
+    `app.TABS` instead of restating it. Values here are opaque to the caller ON PURPOSE: the label
+    is for a reader and the value is for `cohort_sessions`, and a frontend that takes them apart is
+    inventing a rule the store already owns.
+    """
+    from c4x import store
+    return store.cohort_options()
+
+
+@api.get("/api/selector")
+def selector(cohort: str | None = Query(None)):
+    """The session picker's options, from the app, NARROWED TO THE COHORT.
+
+    Same reasoning as `/api/cohorts`, and the frontend got this one wrong in three ways by building
+    it instead: it capped the list at 300 of 317 so seventeen sessions could not be selected at all,
+    it ignored the cohort so the picker offered sessions the chosen population excludes, and it
+    sorted by recency and labelled by title, where the app sorts by project path then title and
+    labels with the path first so a list scanned top to bottom reads grouped by project.
+
+    None of that is presentation trivia. "The picker cannot offer a session the current population
+    excludes" is an invariant the header relies on, and a picker that breaks it lets a reader select
+    a session and then see a pane describing a population that does not contain it.
+    """
+    from c4x.ui.header import selector_options
+    return selector_options(cohort)
 
 
 @api.get("/api/sessions")

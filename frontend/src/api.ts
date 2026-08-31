@@ -38,6 +38,39 @@ export interface Section {
   table_index: number | null
 }
 
+/** One band of rank-based cell shading. LAST match wins; see `_heat_bands` in the API. */
+export interface Band {
+  op: '>=' | '<='
+  at: number
+  background: string
+  color?: string | null
+}
+
+/**
+ * What the app declares about a column, which `describe()` drops.
+ *
+ * `specifier` is a d3 format string (`,`, `.1f`, `.2f`) taken verbatim from the column's Dash
+ * `Format`. It is the reason this exists: the browser used to guess a number's precision from the
+ * runtime value, so a column declared to one decimal rendered 43.30, 2.40, 1.20 and then a bare 1.
+ */
+export interface ColumnMeta {
+  id: string
+  label: string
+  numeric: boolean
+  specifier: string | null
+  align: 'left' | 'right'
+  hidden: boolean
+  bands: Band[]
+}
+
+export interface TableMeta {
+  id: string
+  title: string | null
+  columns: ColumnMeta[]
+  filterable: boolean
+  page_size: number | null
+}
+
 export interface TabPayload {
   tab: string
   session: string | null
@@ -50,6 +83,12 @@ export interface TabPayload {
   plotly?: PlotlyFigure[]
   /** Only on /render. See `Section`. */
   details?: Section[]
+  /** Only on /render. Paired to `tables` BY INDEX, or empty if the server could not pair them. */
+  meta?: TableMeta[]
+  /** Whether the header selection changes this tab at all. From the app's SELECTION_SCOPED. */
+  scoped?: boolean
+  /** The one sentence saying which population this tab describes. */
+  population?: string | null
 }
 
 /** Deliberately loose. This is handed straight to Plotly, which is the authority on its own shape. */
@@ -61,6 +100,19 @@ export interface PlotlyFigure {
 export interface TabInfo {
   id: string
   label: string
+}
+
+/**
+ * A population to ask a question about: all sessions, a section, or a project.
+ *
+ * `value` is OPAQUE. It is what `cohort_sessions()` parses (`project::<path>`, `section::<name>`,
+ * `__all__`), and it must be passed through untouched. This frontend previously built its own list
+ * out of every distinct working directory and sent the bare path, which the store does not
+ * recognise, so it applied no filter at all while the header said a project was selected.
+ */
+export interface Cohort {
+  label: string
+  value: string
 }
 
 export interface SessionRow {
@@ -121,6 +173,10 @@ async function get<T>(path: string, params: Record<string, unknown> = {}): Promi
 
 export const api = {
   tabs: () => get<TabInfo[]>('/api/tabs'),
+  cohorts: () => get<Cohort[]>('/api/cohorts'),
+  /** The session picker's options, narrowed to the cohort by the SERVER. */
+  selector: (cohort?: string | null) =>
+    get<Cohort[]>('/api/selector', { cohort }),
   health: () => get<{ ok: boolean; db: string; read_only: boolean; cache: Record<string, number> }>(
     '/api/health',
   ),
