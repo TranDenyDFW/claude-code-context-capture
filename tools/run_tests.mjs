@@ -29,6 +29,23 @@ const NODE_ONLY = process.argv.includes('--node-only');
 // as zero made the suite total understate itself by more than a hundred assertions.
 const CHECKS = /\((\d+) checks\)|(\d+) passed/;
 
+// THE LAST TWO LINES ARE OFTEN NOT THE FAILURE. An independent reviewer hit this: a pytest entry
+// failed, and the suite report showed only `RequestsDependencyWarning: urllib3 ...` from stderr,
+// because on Windows that warning is the last thing written. The reviewer had to re-run the entry
+// by hand to find out WHICH two tests failed, which is the one thing the report existed to say.
+//
+// So the tail prefers lines that name a failure, and falls back to the last lines only when it
+// finds none. A report that hides the failure is worse than no report: it looks like information.
+const NOISE = /RequestsDependencyWarning|warnings\.warn|^\s*$/;
+const BLAME = /^(FAILED|ERROR|E\s+|\s*assert |AssertionError|Traceback|\s+File ")|\bFAIL\b/;
+function tailOf(text, keep = 4) {
+  const lines = text.trim().split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => !NOISE.test(l));
+  const blamed = lines.filter((l) => BLAME.test(l));
+  const chosen = (blamed.length ? blamed : lines).slice(-keep);
+  return chosen.join(' | ').slice(0, 600);
+}
+
+
 function nodeTargets() {
   const out = [];
   for (const dir of ['tools', 'hooks']) {
