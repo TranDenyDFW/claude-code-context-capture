@@ -36,6 +36,17 @@ export interface Section {
   summary: string
   body: string[]
   table_index: number | null
+  /**
+   * What the section CONTAINS, which decides whether it is a collapsible at all.
+   *
+   * `theme.accordion()` takes any children, and on the Summary tab it wraps the findings table, the
+   * stat cards and the project chart. `extract.texts()` reads prose only, so all three arrived with
+   * an empty body and the page drew a heading over nothing, twice, and printed the cards' own text
+   * a second time in the third.
+   */
+  wraps?: 'text' | 'table' | 'figure' | 'stats'
+  /** Which table or figure, when `wraps` names one. */
+  wraps_index?: number | null
 }
 
 /** One band of rank-based cell shading. LAST match wins; see `_heat_bands` in the API. */
@@ -109,6 +120,10 @@ export interface PlotlyFigure {
 export interface TabInfo {
   id: string
   label: string
+  /** Whether the header selection reaches this tab. From the app's SELECTION_SCOPED. */
+  scoped?: boolean
+  /** One line saying what the tab answers. A TOOLTIP, not body text. */
+  help?: string
 }
 
 /**

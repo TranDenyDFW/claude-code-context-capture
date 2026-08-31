@@ -135,6 +135,29 @@ export default function App() {
             </kbd>
           </button>
 
+          {/*
+            WHAT THIS TAB IS DESCRIBING, in three words, next to the controls that change it.
+
+            The app produces a sentence for this and it used to be printed across the top of every
+            pane, where it read as one more grey paragraph: on Diagnostics the sentence "Store-wide.
+            Not affected by the header selection." sat above a table somebody was asking why it
+            never changed. It is a property of the current view, not content, so it belongs beside
+            the selection controls. The full sentence is the tooltip.
+          */}
+          {pane.data?.population && (
+            <span
+              data-scoped={pane.data.scoped ? 'true' : 'false'}
+              title={pane.data.population}
+              className={`rounded-md px-2 py-1 text-2xs ${
+                pane.data.scoped
+                  ? 'bg-panel text-ink-faint'
+                  : 'bg-warn/10 text-warn'
+              }`}
+            >
+              {pane.data.scoped ? 'This Selection' : 'Store-Wide'}
+            </span>
+          )}
+
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {/*
               NO SESSION DROPDOWN. Nobody remembers a session by name, which is what a list of 317
@@ -161,13 +184,13 @@ export default function App() {
               </span>
             )}
             <Picker
-              label="population"
+              label="Population"
               value={selection.cohort ?? ''}
               onChange={(value) => setSelection((was) => ({ ...was, cohort: value || null }))}
               // Labels and values straight through. Taking a value apart to prettify it is how the
               // filter broke the first time.
               options={[
-                { value: '', label: 'no restriction' },
+                { value: '', label: 'No restriction' },
                 ...(cohorts.data ?? []).map((c) => ({ value: c.value, label: c.label })),
               ]}
             />
@@ -182,7 +205,7 @@ export default function App() {
                   : 'border-edge bg-panel text-ink-dim hover:text-ink'
               }`}
             >
-              {selection.scope === 'all' ? 'including subagents' : 'main thread only'}
+              {selection.scope === 'all' ? 'Including Subagents' : 'Main Thread Only'}
             </button>
             <button
               onClick={() => setLive((was) => !was)}
@@ -193,7 +216,7 @@ export default function App() {
                   : 'border-edge bg-panel text-ink-dim hover:text-ink'
               }`}
             >
-              {live ? 'live' : 'paused'}
+              {live ? 'Live' : 'Paused'}
             </button>
           </div>
         </div>

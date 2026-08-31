@@ -47,37 +47,23 @@ export function Pane({
       !sections.some((s) => s.summary.includes(line)),
   )
 
-  const attached = (index: number) => sections.filter((s) => s.table_index === index)
-  const loose = sections.filter(
+  // A SECTION IS ONLY A COLLAPSIBLE WHEN IT HOLDS PROSE. One that wraps a table, a chart or the
+  // stat cards has an empty body, because `extract.texts()` reads prose and nothing else, so
+  // rendering it as a collapsible drew a heading over nothing. Instead its title becomes the
+  // heading of the thing it wraps, and a section wrapping the stat cards is dropped outright since
+  // those cards are already at the top of the tab.
+  const isText = (s: (typeof sections)[number]) => (s.wraps ?? 'text') === 'text'
+  const textSections = sections.filter(isText)
+  const titleFor = (wraps: 'table' | 'figure', index: number) =>
+    sections.find((s) => s.wraps === wraps && s.wraps_index === index)?.summary
+
+  const attached = (index: number) => textSections.filter((s) => s.table_index === index)
+  const loose = textSections.filter(
     (s) => s.table_index === null || s.table_index < 0 || s.table_index >= payload.tables.length,
   )
 
   return (
     <div className="flex flex-col gap-5">
-      {/*
-        WHICH POPULATION THIS TAB DESCRIBES, first and unmistakable.
-
-        The app has always produced this sentence and it always reached the page, as prose line 1
-        of up to 27 identical grey lines. So on Diagnostics, "Store-wide. Not affected by the
-        header selection." sat far above the table being looked at, and the honest answer to "why
-        do these values never change?" was on screen and unfindable. The data was right; the page
-        was not saying so where the question gets asked.
-
-        An unscoped tab is marked differently from a scoped one, because "your selection does
-        nothing here" is the more surprising of the two and the one worth colouring.
-      */}
-      {payload.population && (
-        <div
-          data-scoped={payload.scoped ? 'true' : 'false'}
-          className={`rounded-lg border px-4 py-2.5 text-sm ${
-            payload.scoped
-              ? 'border-edge bg-panel text-ink-dim'
-              : 'border-warn/40 bg-warn/5 text-warn'
-          }`}
-        >
-          {payload.population}
-        </div>
-      )}
 
       {stats.length > 0 && (
         // THE NUMBERS FIRST. These are the figures the tab is about, and they arrived as
@@ -88,10 +74,16 @@ export function Pane({
           style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(11rem, 1fr))' }}
         >
           {stats.map((stat, index) => (
-            <div key={index} className="rounded-lg bg-panel px-4 py-3 shadow-panel">
-              <p className="text-2xs tracking-[0.08em] uppercase text-ink-faint">{stat.label}</p>
+            // The caption is the card's TOOLTIP, not a third line. "347,033 transcript rows behind
+            // them" explains the number; it is not itself a number, and printing it under every
+            // card turned a row of figures into a row of paragraphs.
+            <div
+              key={index}
+              title={stat.sub || undefined}
+              className="rounded-lg bg-panel px-4 py-3 shadow-panel"
+            >
+              <p className="text-2xs tracking-[0.06em] text-ink-faint">{stat.label}</p>
               <p className="mt-1 font-mono text-xl font-bold tabular text-ink">{stat.value}</p>
-              {stat.sub && <p className="mt-0.5 text-2xs text-ink-faint">{stat.sub}</p>}
             </div>
           ))}
         </section>
@@ -99,9 +91,9 @@ export function Pane({
 
       {figures.map((figure, index) => (
         <section key={index} className="rounded-lg bg-panel shadow-panel p-4">
-          {payload.figures[index]?.title && (
+          {(titleFor('figure', index) || payload.figures[index]?.title) && (
             <h3 className="mb-2 text-md font-semibold text-ink">
-              {payload.figures[index].title}
+              {titleFor('figure', index) || payload.figures[index]?.title}
             </h3>
           )}
           <Plot figure={figure} />
@@ -129,10 +121,17 @@ export function Pane({
           {/* The heading comes from `table_label()` on the server. Deriving it here by stripping a
               `tbl-` prefix was a naming rule living in the browser, which is the mistake this
               whole pass exists to undo. */}
-          {meta[index]?.title && (
-            <h3 className="text-md font-semibold text-ink-dim">{meta[index].title}</h3>
+          {(titleFor('table', index) || meta[index]?.title) && (
+            <h3 className="text-md font-semibold text-ink-dim">
+              {titleFor('table', index) || meta[index]?.title}
+            </h3>
           )}
-          <DataTable table={table} meta={meta[index]} onRowClick={onRowClick} />
+          <DataTable
+            table={table}
+            meta={meta[index]}
+            title={titleFor('table', index) || meta[index]?.title || undefined}
+            onRowClick={onRowClick}
+          />
           {attached(index).map((section, at) => (
             <Section key={at} section={section} table={table} />
           ))}

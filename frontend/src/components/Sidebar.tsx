@@ -88,8 +88,14 @@ export function Sidebar({
             id={`btn-${tab.id}`}
             onClick={() => onPick(tab.id)}
             aria-current={current ? 'page' : undefined}
-            // The full label is the tooltip when collapsed, so the rail is usable without expanding.
-            title={collapsed ? tab.label : undefined}
+            // WHAT THIS TAB IS, on the tab. The sentence used to be printed across the top of
+            // every pane; it belongs on the thing it describes. When collapsed the label leads,
+            // because the rail shows only an icon.
+            title={[
+              collapsed ? tab.label : '',
+              tab.help,
+              tab.scoped === false ? 'Store-wide: the header selection does not change it.' : '',
+            ].filter(Boolean).join('\n')}
             className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm
                         transition-colors duration-150 ${collapsed ? 'justify-center' : ''} ${
                           current

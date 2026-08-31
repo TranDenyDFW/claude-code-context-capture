@@ -423,6 +423,10 @@ COLUMN_LABEL = {
 # "Blocked At" and "Goes To", which read as though something was capitalised by a machine.
 _MINOR = {"at", "of", "to", "vs", "in", "for", "and", "on", "per", "by", "a", "an", "the"}
 
+# Words that are acronyms, not words. Without this the rule produces "Api Calls" and "Est. Usd",
+# which reads as a machine having capitalised something it did not understand.
+_ACRONYMS = {"api", "id", "ok", "usd", "sql", "cli", "csv", "pdf", "url", "uuid", "mcp", "ms"}
+
 # One heading per table, for the ones that HAVE an id. `tbl-reread` is a DOM id; "Files Read More
 # Than Once" is what the table is. Anonymous tables get no heading rather than an invented one.
 TABLE_LABEL = {
@@ -434,6 +438,28 @@ TABLE_LABEL = {
 }
 
 
+# One line per tab, saying what it answers. Same idea as COLUMN_HELP and the same discipline: it is
+# only worth a line if the label does not already say it.
+#
+# These are TOOLTIPS, not body text. A sentence explaining a tab has no business taking a paragraph
+# of vertical space above the numbers every time the tab is opened; it belongs on the thing it
+# describes, which is the tab itself.
+TAB_HELP = {
+    "tab-summary": "Findings worth acting on, and what the whole store adds up to.",
+    "tab-sessions": "Every session as a row and a point: turns against the peak it reached.",
+    "tab-session": "One session's context growing turn by turn, with every compaction marked.",
+    "tab-compactions": "Every compaction on record, what triggered it, and what it discarded.",
+    "tab-window": "What is in the context window right now, item by item, as area.",
+    "tab-cost": "What was paid for twice: re-reads, repeated inputs, and the estimated cost.",
+    "tab-compare": "Two populations measured the same way, side by side.",
+    "tab-diagnostics": "Is the capture healthy, and does the window model agree with reality.",
+}
+
+
+def tab_help(tab_id) -> str:
+    return TAB_HELP.get(tab_id, "")
+
+
 def column_label(column_id) -> str:
     """The name a reader sees for a column. Never the raw id."""
     if column_id in COLUMN_LABEL:
@@ -441,8 +467,15 @@ def column_label(column_id) -> str:
     words = str(column_id).replace("_", " ").split()
     if not words:
         return str(column_id)
-    return " ".join(w.capitalize() if i == 0 or w.lower() not in _MINOR else w.lower()
-                    for i, w in enumerate(words))
+    def cased(word, first):
+        bare = word.lower().strip(".")
+        if bare in _ACRONYMS:
+            return word.upper()
+        if not first and bare in _MINOR:
+            return word.lower()
+        return word.capitalize()
+
+    return " ".join(cased(w, i == 0) for i, w in enumerate(words))
 
 
 def table_label(table_id):

@@ -1,5 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Band, ColumnMeta, Table, TableMeta } from '@/api'
+import { TableToolbar } from './TableToolbar'
+import type { Sheet } from './exporters'
 
 /**
  * One table, rendered from what the APP declares about it rather than from what the values happen
@@ -15,9 +17,12 @@ import type { Band, ColumnMeta, Table, TableMeta } from '@/api'
  * - COLUMN NAMES come from `column_label()`. The raw ids are schema, not English.
  * - BLANK STAYS BLANK. An unpriced model has an unknown cost, not a zero one, and a 0 there would
  *   look more authoritative than the truth.
+ *
+ * The state (filters, sort, hidden columns, order, page) is deliberately NOT in a table library.
+ * It is six `useState` values over an array already in memory: the largest table here is 317 rows,
+ * so sorting and filtering it is microseconds, and a headless library would add a dependency and an
+ * abstraction to own what fits on one screen.
  */
-
-const PAGE = 100
 
 function isNumeric(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
@@ -71,40 +76,62 @@ function shadeFor(value: unknown, bands: Band[] | undefined): Band | null {
 export function DataTable({
   table,
   meta,
+  title,
   onRowClick,
 }: {
   table: Table
   meta?: TableMeta
+  title?: string
   onRowClick?: (row: Record<string, unknown>) => void
 }) {
   const [sort, setSort] = useState<{ column: string; direction: 1 | -1 } | null>(null)
   const [query, setQuery] = useState('')
-  const [limit, setLimit] = useState(PAGE)
+  const [columnQuery, setColumnQuery] = useState<Record<string, string>>({})
+  const [hidden, setHidden] = useState<Set<string>>(new Set())
+  const [order, setOrder] = useState<string[] | null>(null)
+  const [dragging, setDragging] = useState<string | null>(null)
+  const [pageSize, setPageSize] = useState(meta?.page_size ?? 25)
+  const [page, setPage] = useState(0)
 
-  const byId = useMemo(() => {
-    const out: Record<string, ColumnMeta> = {}
-    for (const column of meta?.columns ?? []) out[column.id] = column
-    return out
-  }, [meta])
+  const columns = useMemo<ColumnMeta[]>(() => {
+    // The server's metadata is the source. A column with none still renders, described as plainly
+    // as possible, rather than disappearing because nobody declared it.
+    const byId = new Map((meta?.columns ?? []).map((c) => [c.id, c]))
+    const base = table.columns.map<ColumnMeta>((id) => byId.get(id) ?? {
+      id, label: id, numeric: false, specifier: null, align: 'left', hidden: false, bands: [],
+    })
+    if (!order) return base
+    const known = new Map(base.map((c) => [c.id, c]))
+    // The reader's arrangement first, with anything they have not touched left where it was.
+    const moved = order.map((id) => known.get(id)).filter(Boolean) as ColumnMeta[]
+    return [...moved, ...base.filter((c) => !order.includes(c.id))]
+  }, [table.columns, meta, order])
+
+  const visible = useMemo(() => columns.filter((c) => !hidden.has(c.id)), [columns, hidden])
 
   // FILTERED FIRST, then sorted, then paged. Filtering the visible page instead of the whole table
-  // would search the hundred rows that happen to be on screen and report nothing for a value three
-  // hundred rows down, which looks exactly like an empty result.
+  // would search the rows that happen to be on screen and report nothing for a value three hundred
+  // rows down, which looks exactly like an empty result.
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
-    if (!needle) return table.rows
-    return table.rows.filter((row) =>
-      table.columns.some((column) => {
-        const value = row[column]
-        if (value === null || value === undefined) return false
-        // Matched against the TEXT ON SCREEN, so typing what you can see finds the row. Searching
-        // the raw value would fail on "1,024" and on a date the reader is looking at.
-        return show(value, byId[column]).toLowerCase().includes(needle)
-      }),
-    )
-  }, [table.rows, table.columns, query, byId])
+    const perColumn = Object.entries(columnQuery)
+      .map(([id, text]) => [id, text.trim().toLowerCase()] as const)
+      .filter(([, text]) => text)
+    if (!needle && !perColumn.length) return table.rows
+    const byId = new Map(columns.map((c) => [c.id, c]))
+    return table.rows.filter((row) => {
+      for (const [id, text] of perColumn) {
+        if (!show(row[id], byId.get(id)).toLowerCase().includes(text)) return false
+      }
+      if (!needle) return true
+      // Matched against the TEXT ON SCREEN, so typing what you can see finds the row. Searching the
+      // raw value would fail on "1,024" and on a date the reader is looking at. Only VISIBLE
+      // columns, so hiding a column also removes it from the search, which is what hiding means.
+      return visible.some((c) => show(row[c.id], c).toLowerCase().includes(needle))
+    })
+  }, [table.rows, columns, visible, query, columnQuery])
 
-  const rows = useMemo(() => {
+  const sorted = useMemo(() => {
     if (!sort) return filtered
     const copy = [...filtered]
     copy.sort((a, b) => {
@@ -120,9 +147,28 @@ export function DataTable({
     return copy
   }, [filtered, sort])
 
+  // Back to the first page whenever the result set changes under it, or a filter leaves the reader
+  // on page 7 of a 2-page result looking at nothing.
+  useEffect(() => setPage(0), [query, columnQuery, pageSize, sort])
+
+  const pages = pageSize < 0 ? 1 : Math.max(1, Math.ceil(sorted.length / pageSize))
+  const atPage = Math.min(page, pages - 1)
+  const rows = pageSize < 0
+    ? sorted
+    : sorted.slice(atPage * pageSize, atPage * pageSize + pageSize)
+
+  const sheet: Sheet = {
+    // Exports what is ON SCREEN: the visible columns, in the reader's order, filtered and sorted,
+    // and every matching row rather than the current page. Exporting the raw payload instead would
+    // quietly undo the work they just did to narrow it.
+    columns: visible,
+    rows: sorted,
+    name: title || table.id || 'table',
+    format: (value, column) => show(value, column),
+  }
+
   if (!table.columns.length) return null
 
-  const visible = rows.slice(0, limit)
   // Only a table that identifies a session can be navigated from. `session_id` is a HIDDEN column
   // on the sessions table: in every row, absent from the column list, which is how the identifier
   // travels without showing a uuid. Reading `columns` here made the feature do nothing on the one
@@ -130,63 +176,97 @@ export function DataTable({
   const navigable = Boolean(onRowClick) && table.rows.length > 0 &&
     ('session_id' in table.rows[0] || 'session' in table.rows[0])
 
+  const filtering = Boolean(query.trim() || Object.values(columnQuery).some((v) => v.trim()))
+
   return (
     <div className="overflow-hidden rounded-lg bg-panel shadow-panel">
-      <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
+      <TableToolbar
+        sheet={sheet}
+        allColumns={columns}
+        hidden={hidden}
+        onToggleColumn={(id) =>
+          setHidden((was) => {
+            const next = new Set(was)
+            if (next.has(id)) next.delete(id)
+            else next.add(id)
+            return next
+          })
+        }
+        onShowAll={() => setHidden(new Set())}
+        onHideAll={() => setHidden(new Set(columns.map((c) => c.id)))}
+        onHideEmpty={() =>
+          setHidden(new Set(columns
+            .filter((c) => table.rows.every((row) => show(row[c.id], c).trim() === ''))
+            .map((c) => c.id)))
+        }
+        pageSize={pageSize}
+        onPageSize={setPageSize}
+      >
         <input
           value={query}
-          onChange={(event) => {
-            setQuery(event.target.value)
-            setLimit(PAGE)
-          }}
-          placeholder={`Filter ${table.rows.length.toLocaleString()} rows`}
-          className="w-56 rounded border border-edge bg-page px-2 py-1 text-sm text-ink
+          onChange={(event) => setQuery(event.target.value)}
+          // Just "Filter". It used to say "Filter 5 rows" while the footer said "5 rows" two
+          // inches below, which is the same number twice.
+          placeholder="Filter"
+          aria-label={`Filter ${sheet.name}`}
+          className="w-56 rounded border border-edge bg-page px-2 py-1 text-xs text-ink
                      outline-none placeholder:text-ink-faint focus:border-accent"
         />
-        {query && (
+        {filtering && (
           <>
             <button
-              onClick={() => setQuery('')}
-              className="rounded border border-edge px-2 py-1 text-xs text-ink-dim
-                         hover:text-ink"
+              onClick={() => { setQuery(''); setColumnQuery({}) }}
+              className="rounded border border-edge px-2 py-1 text-2xs text-ink-dim hover:text-ink"
             >
-              clear
+              Clear
             </button>
-            {/* Said out loud. A filtered table that only showed its remaining rows would look
-                exactly like a table that never had the others. */}
             {/* One string, not three interpolations: split across text nodes it reads the same on
                 screen and cannot be found by anything asserting on it. */}
-            <span className="text-xs text-ink-faint">
-              {`${rows.length.toLocaleString()} of ${table.rows.length.toLocaleString()} match`}
+            <span className="text-2xs text-ink-faint">
+              {`${sorted.length.toLocaleString()} of ${table.rows.length.toLocaleString()} match`}
             </span>
           </>
         )}
-      </div>
+      </TableToolbar>
 
       <div className="max-h-[32rem] overflow-auto">
         <table className="w-full border-collapse text-sm">
           <thead className="sticky top-0 z-10 bg-panel-raised">
             <tr>
-              {table.columns.map((column) => {
-                const help = table.tooltips?.[column]
-                const info = byId[column]
-                const active = sort?.column === column
+              {visible.map((column) => {
+                const help = table.tooltips?.[column.id]
+                const active = sort?.column === column.id
                 return (
                   <th
-                    key={column}
+                    key={column.id}
+                    // Dragged to reorder. The reference calls this ColReorder; here it is four
+                    // native drag handlers, because the browser implements the hard part already.
+                    draggable
+                    onDragStart={() => setDragging(column.id)}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={() => {
+                      if (!dragging || dragging === column.id) return
+                      const ids = columns.map((c) => c.id)
+                      const from = ids.indexOf(dragging)
+                      const to = ids.indexOf(column.id)
+                      if (from < 0 || to < 0) return
+                      ids.splice(to, 0, ids.splice(from, 1)[0])
+                      setOrder(ids)
+                      setDragging(null)
+                    }}
                     title={help}
                     onClick={() =>
                       setSort((was) =>
-                        was?.column === column
-                          ? { column, direction: was.direction === 1 ? -1 : 1 }
-                          : { column, direction: -1 },
+                        was?.column === column.id
+                          ? { column: column.id, direction: was.direction === 1 ? -1 : 1 }
+                          : { column: column.id, direction: -1 },
                       )
                     }
                     className={`cursor-pointer border-b border-edge px-3 py-2 font-semibold
                                 whitespace-nowrap text-ink-dim select-none hover:text-ink
-                                ${info?.align === 'right' ? 'text-right' : 'text-left'}`}
+                                ${column.align === 'right' ? 'text-right' : 'text-left'}`}
                   >
-                    <span className={help ? 'has-help' : undefined}>{info?.label ?? column}</span>
+                    <span className={help ? 'has-help' : undefined}>{column.label}</span>
                     {active && (
                       <span className="ml-1 text-accent">{sort.direction === 1 ? '↑' : '↓'}</span>
                     )}
@@ -194,9 +274,26 @@ export function DataTable({
                 )
               })}
             </tr>
+            <tr>
+              {visible.map((column) => (
+                <th key={column.id} className="border-b border-edge/60 px-2 pb-1.5">
+                  <input
+                    value={columnQuery[column.id] ?? ''}
+                    onChange={(event) =>
+                      setColumnQuery((was) => ({ ...was, [column.id]: event.target.value }))
+                    }
+                    // No placeholder: a row of eight boxes each saying "Filter" is noise, and the
+                    // accessible name says what this one filters.
+                    aria-label={`Filter by ${column.label}`}
+                    className="w-full rounded border border-edge/60 bg-page px-1.5 py-0.5 text-2xs
+                               font-normal text-ink outline-none focus:border-accent"
+                  />
+                </th>
+              ))}
+            </tr>
           </thead>
           <tbody>
-            {visible.map((row, index) => (
+            {rows.map((row, index) => (
               <tr
                 key={index}
                 onClick={navigable ? () => onRowClick!(row) : undefined}
@@ -204,33 +301,34 @@ export function DataTable({
                 className={`border-b border-edge/40 last:border-0 hover:bg-panel-raised
                             ${navigable ? 'cursor-pointer' : ''}`}
               >
-                {table.columns.map((column) => {
-                  const value = row[column]
-                  const info = byId[column]
-                  const band = shadeFor(value, info?.bands)
+                {visible.map((column) => {
+                  const value = row[column.id]
+                  const band = shadeFor(value, column.bands)
+                  const text = show(value, column)
                   return (
                     <td
-                      key={column}
+                      key={column.id}
                       style={band ? { backgroundColor: band.background } : undefined}
+                      // The full value as a tooltip, so a truncated cell is still readable. The
+                      // reference does the same and calls it cheap and reliable.
+                      title={text || undefined}
                       className={`px-3 py-1.5 whitespace-nowrap ${
-                        info?.align === 'right' || (!info && isNumeric(value))
-                          ? 'text-right font-mono tabular-nums'
-                          : ''
+                        column.align === 'right' ? 'text-right font-mono tabular-nums' : ''
                       } ${value === null || value === undefined ? 'text-ink-faint' : ''}`}
                     >
-                      {show(value, info)}
+                      {text}
                     </td>
                   )
                 })}
               </tr>
             ))}
-            {visible.length === 0 && (
+            {rows.length === 0 && (
               <tr>
                 <td
-                  colSpan={table.columns.length}
-                  className="px-3 py-6 text-center text-sm text-ink-dim"
+                  colSpan={Math.max(1, visible.length)}
+                  className="px-3 py-6 text-center text-xs text-ink-dim"
                 >
-                  Nothing matches {JSON.stringify(query)}.
+                  {filtering ? 'Nothing matches that filter.' : 'This table has no rows.'}
                 </td>
               </tr>
             )}
@@ -238,20 +336,40 @@ export function DataTable({
         </table>
       </div>
 
-      {rows.length > limit && (
-        <button
-          onClick={() => setLimit((was) => was + PAGE * 5)}
-          className="w-full border-t border-edge bg-panel-raised px-3 py-2 text-xs text-ink-dim
-                     hover:text-ink"
-        >
-          showing {limit} of {rows.length.toLocaleString()} rows, show more
-        </button>
-      )}
-      {rows.length <= limit && rows.length > 0 && (
-        <div className="border-t border-edge px-3 py-1.5 text-xs text-ink-faint">
-          {rows.length.toLocaleString()} {rows.length === 1 ? 'row' : 'rows'}
-        </div>
-      )}
+      <div className="flex flex-wrap items-center gap-2 border-t border-edge/60 px-3 py-1.5
+                      text-2xs text-ink-faint">
+        <span>
+          {pageSize < 0 || sorted.length === 0
+            ? `${sorted.length.toLocaleString()} ${sorted.length === 1 ? 'row' : 'rows'}`
+            : `${(atPage * pageSize + 1).toLocaleString()} to ` +
+              `${Math.min((atPage + 1) * pageSize, sorted.length).toLocaleString()} of ` +
+              `${sorted.length.toLocaleString()}`}
+        </span>
+        {pages > 1 && (
+          <span className="ml-auto flex items-center gap-1">
+            {/* First and last as well as step, which is what `pagingType: full_numbers` gives and
+                what a 300-row table needs: stepping to the end one page at a time is not paging. */}
+            {[
+              { label: 'First', to: 0, off: atPage === 0 },
+              { label: 'Prev', to: atPage - 1, off: atPage === 0 },
+              { label: 'Next', to: atPage + 1, off: atPage >= pages - 1, after: true },
+              { label: 'Last', to: pages - 1, off: atPage >= pages - 1, after: true },
+            ].map((b) => (
+              <span key={b.label} className="contents">
+                {b.label === 'Next' && <span className="px-1">{`Page ${atPage + 1} of ${pages}`}</span>}
+                <button
+                  onClick={() => setPage(b.to)}
+                  disabled={b.off}
+                  className="rounded border border-edge px-1.5 py-0.5 transition-colors
+                             duration-150 hover:text-ink disabled:opacity-40"
+                >
+                  {b.label}
+                </button>
+              </span>
+            ))}
+          </span>
+        )}
+      </div>
     </div>
   )
 }
