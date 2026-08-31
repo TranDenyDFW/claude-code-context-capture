@@ -437,6 +437,50 @@ def test_heat_bands_survive_and_keep_their_order(client):
         assert thresholds == sorted(thresholds), f"{column['id']} bands are not shallowest first"
 
 
+def test_a_section_says_what_it_wraps(client):
+    """A collapsible is only a collapsible when it holds PROSE.
+
+    `theme.accordion()` takes any children, and the Summary tab uses it three times: around the
+    findings table, around the stat cards, and around the project chart. `extract.texts()` reads
+    prose and nothing else, so all three arrived with an empty body and the page drew a heading over
+    nothing, twice, and printed the stat cards' own text a second time in the third.
+    """
+    body = client.get("/api/tab/tab-summary/render").json()
+    kinds = {s["wraps"] for s in body["details"]}
+    assert kinds == {"table", "stats", "figure"}, f"Summary's sections classified as {kinds}"
+    for section in body["details"]:
+        if section["wraps"] == "table":
+            assert 0 <= section["wraps_index"] < len(body["tables"])
+        if section["wraps"] == "figure":
+            assert 0 <= section["wraps_index"] < len(body["plotly"])
+        if section["wraps"] in ("table", "figure"):
+            # These are exactly the ones that came back empty and drew a box over nothing.
+            assert not section["body"], "a wrapped section should have no prose of its own"
+
+
+def test_a_query_section_is_still_prose(client):
+    """The SQL sections must NOT be swept up by the same rule: they are the feature."""
+    body = client.get("/api/tab/tab-cost/render").json()
+    assert body["details"], "the Cost tab's queries vanished"
+    for section in body["details"]:
+        assert section["wraps"] == "text"
+        assert any("SELECT" in line.upper() for line in section["body"])
+
+
+def test_the_tab_list_says_what_each_tab_is_and_whether_it_is_scoped(client):
+    """So the navigation can carry it as a tooltip WITHOUT rendering eight panes to find out.
+
+    Both facts are already declared, one in `SELECTION_SCOPED` and one in `TAB_HELP`. Rendering
+    every tab to populate every tooltip would cost seconds on this store.
+    """
+    from c4x.ui.layout import SELECTION_SCOPED
+    served = client.get("/api/tabs").json()
+    for tab in served:
+        assert tab["scoped"] is (tab["id"] in SELECTION_SCOPED)
+        assert tab["help"], f"{tab['id']} has no description for its tooltip"
+        assert tab["help"] != tab["label"], f"{tab['id']}'s help just repeats its name"
+
+
 def test_the_shutdown_route_refuses_GET(client):
     """It moved here when app.py stopped serving, and the refusal moved with it.
 

@@ -53,19 +53,30 @@ describe('a pane shows everything the payload carries', () => {
     expect(screen.getAllByRole('table')).toHaveLength(6)
   })
 
-  it('renders every row of a table', () => {
+  it('renders a page of rows, and says which page of what', () => {
+    // 25 is the default page size. The rows NOT shown must be accounted for, because a table that
+    // quietly shows its first page looks exactly like a table with one page of rows.
     const rows = Array.from({ length: 37 }, (_, index) => ({ n: index }))
     render(<Pane payload={payload({ tables: [table('tbl-x', rows)] })} />)
     const body = screen.getByRole('table').querySelector('tbody')!
-    expect(within(body).getAllByRole('row')).toHaveLength(37)
+    expect(within(body).getAllByRole('row')).toHaveLength(25)
+    expect(screen.getByText('1 to 25 of 37')).toBeTruthy()
   })
 
-  it('does not silently drop rows past the first page, it says how many there are', () => {
-    // 100 is the page size. The rows that are not shown must be ANNOUNCED, because a table that
-    // quietly shows its first hundred rows looks exactly like a table with a hundred rows.
+  it('steps to the next page and shows the rest', () => {
+    const rows = Array.from({ length: 37 }, (_, index) => ({ n: index }))
+    render(<Pane payload={payload({ tables: [table('tbl-x', rows)] })} />)
+    fireEvent.click(screen.getByText('Next'))
+    expect(screen.getByText('26 to 37 of 37')).toBeTruthy()
+    const body = screen.getByRole('table').querySelector('tbody')!
+    expect(within(body).getAllByRole('row')).toHaveLength(12)
+  })
+
+  it('never implies the page is the whole table', () => {
     const rows = Array.from({ length: 317 }, (_, index) => ({ n: index }))
     render(<Pane payload={payload({ tables: [table('tbl-x', rows)] })} />)
-    expect(screen.getByText(/showing 100 of 317 rows/)).toBeTruthy()
+    expect(screen.getByText('1 to 25 of 317')).toBeTruthy()
+    expect(screen.getByText('Page 1 of 13')).toBeTruthy()
   })
 
   it('renders one chart per figure', () => {
@@ -264,13 +275,16 @@ describe('a column is rendered the way the APP declares it', () => {
 
   it('uses the label the server gave, never the raw column id', () => {
     render(<Pane payload={withMeta([column({ id: 'ts', label: 'Date & Time' })], [{ ts: 'x' }])} />)
-    expect(screen.getByRole('columnheader').textContent).toContain('Date & Time')
-    expect(screen.getByRole('columnheader').textContent).not.toContain('ts')
+    // Two header rows now: the titles, then the per-column filter inputs.
+    const [title] = screen.getAllByRole('columnheader')
+    expect(title.textContent).toContain('Date & Time')
+    expect(title.textContent).not.toContain('ts')
   })
 
   it('aligns a numeric HEADER the same way as its cells', () => {
     render(<Pane payload={withMeta([column({ align: 'right' })], [{ n: 1 }])} />)
-    expect(screen.getByRole('columnheader').className).toContain('text-right')
+    const [title] = screen.getAllByRole('columnheader')
+    expect(title.className).toContain('text-right')
     expect(screen.getByRole('table').querySelector('tbody td')!.className).toContain('text-right')
   })
 
@@ -296,7 +310,7 @@ describe('every table can be filtered', () => {
     // "ga", not "a". The first version of this used "a" and expected two matches, which was wrong:
     // alpha, beta and gamma all contain one, so the correct answer was 3 of 3 and the test failed
     // on its own arithmetic rather than on the code.
-    fireEvent.change(screen.getByPlaceholderText(/Filter 3 rows/), { target: { value: 'ga' } })
+    fireEvent.change(screen.getByPlaceholderText('Filter'), { target: { value: 'ga' } })
     // The count is stated so a filtered table can never be mistaken for the whole one.
     expect(screen.getByText('1 of 3 match')).toBeTruthy()
     expect(screen.getByRole('table').querySelectorAll('tbody tr')).toHaveLength(1)
@@ -306,13 +320,13 @@ describe('every table can be filtered', () => {
     // 100 is the page size. The match is row 250, which is not rendered until it is found.
     const rows = Array.from({ length: 300 }, (_, index) => ({ name: `row-${index}` }))
     render(<Pane payload={payload({ tables: [table('t', rows)] })} />)
-    fireEvent.change(screen.getByPlaceholderText(/Filter 300 rows/), { target: { value: 'row-250' } })
+    fireEvent.change(screen.getByPlaceholderText('Filter'), { target: { value: 'row-250' } })
     expect(screen.getByText('1 of 300 match')).toBeTruthy()
   })
 
   it('says so when nothing matches, rather than showing an empty table', () => {
     render(<Pane payload={payload({ tables: [table('t', [{ a: 'x' }])] })} />)
-    fireEvent.change(screen.getByPlaceholderText(/Filter 1 rows/), { target: { value: 'zzz' } })
+    fireEvent.change(screen.getByPlaceholderText('Filter'), { target: { value: 'zzz' } })
     expect(screen.getByText(/Nothing matches/)).toBeTruthy()
   })
 })
@@ -340,27 +354,119 @@ describe('the headline figures', () => {
   })
 })
 
-describe('the tab says which population it describes', () => {
-  it('states it once, at the top, and not again in the prose', () => {
-    const line = 'Store-wide. Not affected by the header selection.'
+describe('the population sentence is NOT body text', () => {
+  const line = 'Store-wide. Not affected by the header selection.'
+
+  it('is kept out of the pane entirely', () => {
+    // It moved to a chip beside the selection controls, with the sentence as its tooltip. As body
+    // text it read as one more grey paragraph: on Diagnostics it sat above a table somebody was
+    // asking why it never changed.
     render(<Pane payload={payload({ scoped: false, population: line, text: [line, 'other'] })} />)
-    expect(screen.getAllByText(line)).toHaveLength(1)
+    expect(screen.queryByText(line)).toBeNull()
+  })
+
+  it('and does not take the rest of the prose with it', () => {
+    render(<Pane payload={payload({ scoped: false, population: line, text: [line, 'other'] })} />)
     expect(screen.getByText('other')).toBeTruthy()
   })
+})
 
-  it('marks an UNSCOPED tab differently, because that is the surprising one', () => {
-    // The question that prompted this was "why does this table never change no matter what I
-    // select?". The answer was already on the page and looked like every other grey line.
-    const { container } = render(
-      <Pane payload={payload({ scoped: false, population: 'Store-wide. Not affected.' })} />,
-    )
-    expect(container.querySelector('[data-scoped="false"]')).toBeTruthy()
+describe('a section renders what it WRAPS, not an empty box', () => {
+  const meta = (id: string, title: string | null): TableMeta => ({
+    id, title, columns: [], filterable: true, page_size: null,
   })
 
-  it('and marks a scoped tab as scoped', () => {
-    const { container } = render(
-      <Pane payload={payload({ scoped: true, population: 'Describing 1 session.' })} />,
+  it('a section wrapping a table becomes that table heading', () => {
+    // "What to do about it" wraps the findings DataTable. `extract.texts()` reads prose only, so
+    // its body came back empty and the page drew a collapsible with nothing inside it.
+    render(
+      <Pane
+        payload={payload({
+          tables: [table('tbl-findings', [{ finding: 'x' }])],
+          meta: [meta('tbl-findings', 'Findings')],
+          details: [{ summary: 'What to do about it 5 finding(s)', body: [],
+                      table_index: -1, wraps: 'table', wraps_index: 0 }],
+        })}
+      />,
     )
-    expect(container.querySelector('[data-scoped="true"]')).toBeTruthy()
+    expect(screen.getByText('What to do about it 5 finding(s)')).toBeTruthy()
+    expect(document.querySelectorAll('details')).toHaveLength(0)
+  })
+
+  it('a section wrapping a figure becomes that chart heading', () => {
+    render(
+      <Pane
+        payload={payload({
+          figures: [{ title: 'raw title', traces: [] }],
+          plotly: [{ data: [] }],
+          details: [{ summary: 'Where the tokens went, top 15', body: [],
+                      table_index: 0, wraps: 'figure', wraps_index: 0 }],
+        })}
+      />,
+    )
+    expect(screen.getByText('Where the tokens went, top 15')).toBeTruthy()
+    expect(document.querySelectorAll('details')).toHaveLength(0)
+  })
+
+  it('a section wrapping the stat cards is DROPPED, because the cards already say it', () => {
+    render(
+      <Pane
+        payload={payload({
+          stats: [{ label: 'sessions', value: '1,325', sub: 'in the store' }],
+          details: [{ summary: 'Store totals', body: ['sessions', '1,325', 'in the store'],
+                      table_index: 0, wraps: 'stats', wraps_index: null }],
+        })}
+      />,
+    )
+    expect(document.querySelectorAll('details')).toHaveLength(0)
+    expect(screen.queryByText('Store totals')).toBeNull()
+    expect(screen.getAllByText('1,325')).toHaveLength(1)
+  })
+
+  it('a section wrapping PROSE is still a collapsible', () => {
+    render(
+      <Pane
+        payload={payload({
+          tables: [table('t', [{ a: 1 }])],
+          details: [{ summary: 'The query behind this table', body: ['SELECT 1'],
+                      table_index: 0, wraps: 'text', wraps_index: null }],
+        })}
+      />,
+    )
+    expect(document.querySelectorAll('details')).toHaveLength(1)
+  })
+})
+
+describe('the table controls every table now has', () => {
+  const rows = [{ project: 'alpha', turns: 3 }, { project: 'beta', turns: 4 }]
+
+  it('offers export on a table with no SQL section at all', () => {
+    // The defect this fixes: CSV lived inside the SQL accordion, and only two of eight tabs have
+    // one, so eleven of seventeen tables had no way to get the data out.
+    render(<Pane payload={payload({ tables: [table('t', rows)] })} />)
+    expect(screen.getByText('Export')).toBeTruthy()
+    expect(screen.getByText('Columns')).toBeTruthy()
+  })
+
+  it('filters by ONE column without touching the others', () => {
+    render(<Pane payload={payload({ tables: [table('t', rows)] })} />)
+    fireEvent.change(screen.getByLabelText('Filter by project'), { target: { value: 'alph' } })
+    expect(screen.getByText('1 of 2 match')).toBeTruthy()
+  })
+
+  it('hides a column, and the hidden column leaves the search with it', () => {
+    render(<Pane payload={payload({ tables: [table('t', rows)] })} />)
+    fireEvent.click(screen.getByText('Columns'))
+    fireEvent.click(screen.getByText('Hide All'))
+    // Every column hidden means nothing left to match, so a global search finds nothing rather
+    // than matching text the reader can no longer see.
+    fireEvent.change(screen.getByPlaceholderText('Filter'), { target: { value: 'alpha' } })
+    expect(screen.getByText('0 of 2 match')).toBeTruthy()
+  })
+
+  it('carries the full value as a cell tooltip, so a truncated cell is still readable', () => {
+    const long = 'P:\ClaudeExt\ccx-engineering-work\tmp\fidpool\F2-p6'
+    render(<Pane payload={payload({ tables: [table('t', [{ project: long }])] })} />)
+    expect(screen.getByRole('table').querySelector('tbody td')!.getAttribute('title')).toBe(long)
   })
 })

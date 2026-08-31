@@ -158,8 +158,17 @@ def tabs():
 
     A hand-written list in this file would be a second source of truth for something that already
     has one, and it would go stale exactly the way the migration proposal did.
+
+    `scoped` and `help` ride along so the navigation can say what a tab is and whether the header
+    selection reaches it WITHOUT rendering that tab. Rendering eight panes to populate eight
+    tooltips would cost seconds; both facts are static and already declared, one in
+    `SELECTION_SCOPED` and one in `TAB_HELP`.
     """
-    return [{"id": t[0], "label": t[1]} for t in _app().TABS]
+    from c4x.theme import tab_help
+    from c4x.ui.layout import SELECTION_SCOPED
+    return [{"id": t[0], "label": t[1],
+             "scoped": t[0] in SELECTION_SCOPED,
+             "help": tab_help(t[0])} for t in _app().TABS]
 
 
 @api.get("/api/tab/{tab_id}")
@@ -273,9 +282,14 @@ def _stats(node, found=None):
             return
         classes = str(getattr(node, "className", "") or "")
         if "stat-card" in classes.split():
+            from c4x.theme import column_label
             parts = [" ".join(extract.texts(c)) for c in (node.children or [])]
             found.append({
-                "label": parts[0] if len(parts) > 0 else "",
+                # Through the SAME naming rule the columns use, so "api calls" and "Turns" are
+                # capitalised the one way rather than each by whoever wrote them. The card labels
+                # were authored lowercase and the page used to shout them in CSS instead, which is
+                # a third casing.
+                "label": column_label(parts[0]) if parts else "",
                 "value": parts[1] if len(parts) > 1 else "",
                 "sub": parts[2] if len(parts) > 2 else "",
             })
@@ -402,6 +416,43 @@ def _table_meta(node, found=None):
     return found
 
 
+def _wrapped_kind(children):
+    """What a collapsible section actually contains: a table, a chart, stat cards, or prose.
+
+    The whole point is that a section is NOT always prose. `theme.accordion()` takes any children,
+    and on the Summary tab it is used three times: around the findings table, around the stat cards,
+    and around the project chart. `extract.texts()` reads prose and nothing else, so all three came
+    back with an empty body and the page drew a heading over nothing, twice, and printed the stat
+    cards' text a second time in the third.
+
+    Checked in order of specificity. A section holding both a table and prose is a table section:
+    the prose is its caption, and the table is the thing.
+    """
+    from c4x.cli import extract
+
+    def contains(node, wanted):
+        if isinstance(node, (list, tuple)):
+            return any(contains(child, wanted) for child in node)
+        if not hasattr(node, "_prop_names"):
+            return False
+        if type(node).__name__ == wanted:
+            return True
+        if "stat-card" in str(getattr(node, "className", "") or "").split() and wanted == "@stat":
+            return True
+        return any(contains(getattr(node, name, None), wanted)
+                   for name in node._prop_names
+                   if isinstance(getattr(node, name, None), (list, tuple))
+                   or hasattr(getattr(node, name, None), "_prop_names"))
+
+    if contains(children, extract.TABLE_TYPE):
+        return "table"
+    if contains(children, "Graph"):
+        return "figure"
+    if contains(children, "@stat"):
+        return "stats"
+    return "text"
+
+
 def _details(node, found=None):
     """Every collapsible section in a pane, as {summary, body}, in document order.
 
@@ -429,7 +480,7 @@ def _details(node, found=None):
     """
     from c4x.cli import extract
     found = [] if found is None else found
-    state = {"seen": 0}
+    state = {"seen": 0, "figures": 0}
 
     def walk(node, inside_details=False):
         if isinstance(node, (list, tuple)):
@@ -442,6 +493,11 @@ def _details(node, found=None):
         if kind == extract.TABLE_TYPE:
             state["seen"] += 1
             return
+        if kind == "Graph":
+            # Counted the same way `_figures()` counts, so a section that wraps a chart can name
+            # which chart by the index the frontend already uses to pair `figures` with `plotly`.
+            state["figures"] += 1
+            return
         if kind == "Details" and not inside_details:
             children = list(node.children) if isinstance(node.children, (list, tuple)) \
                 else [node.children]
@@ -451,8 +507,21 @@ def _details(node, found=None):
                     summary = " ".join(extract.texts(child.children)) if child.children else ""
                 else:
                     body.extend(extract.texts(child))
-            # The index of the table this section follows. -1 before any table has been seen.
-            found.append({"summary": summary, "body": body, "table_index": state["seen"] - 1})
+            # WHAT THIS SECTION WRAPS, which is the difference between a useful collapsible and an
+            # empty box. `extract.texts()` reads prose and nothing else, so a section wrapping a
+            # table, a chart or the stat cards came back with `body: []` and the page drew a heading
+            # with nothing under it. On the Summary tab that was two of the three sections, and the
+            # third returned the stat cards' own text and printed it a second time.
+            #
+            # Named rather than guessed: the tree is right here, so it is read.
+            inner = _wrapped_kind([c for c in children
+                                  if not (hasattr(c, "_prop_names")
+                                          and type(c).__name__ == "Summary")])
+            found.append({"summary": summary, "body": body, "table_index": state["seen"] - 1,
+                          "wraps": inner,
+                          # Which table or figure, counted the same way the extractor counts them.
+                          "wraps_index": state["seen"] if inner == "table" else (
+                              state["figures"] if inner == "figure" else None)})
             # Descended into anyway, so tables inside a collapsed section still advance the count
             # and every later section points at the right one. Nested Details are not collected.
             walk(node.children, inside_details=True)
