@@ -30,6 +30,13 @@ DEFAULT_URL = "http://127.0.0.1:8059"
 # A full-page capture of a tab that is 2,700px tall is unreadable at README width, so each entry
 # says which BAND of the page is worth showing. `scroll` is where the interesting part begins;
 # `height` is how much of it to keep. Both are in CSS pixels at the viewport width below.
+#
+# THESE OFFSETS WERE TUNED AGAINST THE DASH LAYOUT and have not been re-tuned for the React page,
+# which has a shorter header and different section spacing. A smoke run of `compactions` came back
+# with the top of the chart clipped. They are left as they are on purpose: `docs/images/` was
+# reviewed and chosen, and quietly regenerating eight images with the wrong crop would replace
+# curated pictures with worse ones. Re-tune the band per tab before the next regeneration, one tab
+# at a time with --only, and look at each result.
 SHOTS = [
     ("tab-summary",     "summary",     0,    980, "findings with actions, store totals"),
     ("tab-sessions",    "sessions",    260,  900, "every session as a point, table shaded by rank"),
