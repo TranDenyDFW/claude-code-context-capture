@@ -339,6 +339,45 @@ def sessions(limit: int = Query(50, ge=1, le=2000), cohort: str | None = Query(N
     return {"rows": frame.head(limit).to_dict("records"), "total": total}
 
 
+@api.get("/__shutdown__")
+def shutdown_refused():
+    """GET is refused, and the refusal is the point.
+
+    Binding to loopback is no defence against a GET route, because the browser is on loopback too:
+    any page the user visits could stop this server with `<img src=".../__shutdown__">`. Without an
+    explicit refusal the request would fall through to the static mount and return 200 with the
+    app's own HTML, which reads as though it was accepted by a process that was never going to stop.
+    """
+    from c4x.server import GET_REFUSED
+    return Response(content=GET_REFUSED, status_code=405, media_type="text/plain")
+
+
+@api.post("/__shutdown__")
+def shutdown(reason: str = Query("user hit /__shutdown__")):
+    """Stop the server.
+
+    This environment requires a local web app to expose a shutdown path, and that requirement moved
+    here when `app.py` stopped serving a page: the affordance has to live on whatever is actually
+    listening. Deliberately undocumented, no button and no link, exactly as it was on the dashboard.
+
+    The implementation is `c4x/server.py`'s, imported rather than rewritten, so the two cannot
+    differ on what "stopped" means or on the order the page is rendered in.
+    """
+    from c4x.server import hardened_shutdown, stopped_page
+    # Rendered BEFORE the kill, so a template fault surfaces as a failed response rather than as a
+    # 500 from a process already on its way out. That exact bug shipped once.
+    page = stopped_page(reason)
+    hardened_shutdown(reason)
+    return Response(content=page, media_type="text/html")
+
+
+@api.get("/__health__")
+def legacy_health():
+    """The dashboard's health shape, kept so anything watching for it still works."""
+    from c4x import store
+    return {"ok": True, "db": str(store.DB_PATH), "port": int(os.environ.get("C4X_API_PORT", 8059))}
+
+
 @api.post("/api/mirror/predict")
 def mirror_predict(tokens: int, window: int = 1_000_000):
     """What the window arithmetic says about a token count.

@@ -8,7 +8,9 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
+# dist is NOT ignored. See the note in the repository root .gitignore: the built page is
+# committed so that running the dashboard needs no npm install, which is a headline promise
+# of this project. npm is for CHANGING the frontend, not for running it.
 dist-ssr
 *.local
 

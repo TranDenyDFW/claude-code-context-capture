@@ -288,6 +288,27 @@ def test_health_reports_the_cache_so_it_can_be_checked_in_the_wild(client):
     assert set(body["cache"]) >= {"entries", "bytes", "hits", "misses"}
 
 
+def test_the_shutdown_route_refuses_GET(client):
+    """It moved here when app.py stopped serving, and the refusal moved with it.
+
+    Loopback is no defence against a GET route: the browser is on loopback too, so any page the
+    user visits could stop this server with `<img src=".../__shutdown__">`. Without the refusal the
+    request falls through to the static mount and returns 200 with the app's own HTML, which reads
+    as accepted by a process that was never going to stop. NOT called with POST here, for reasons
+    that should be obvious from what POST does.
+    """
+    response = client.get("/__shutdown__")
+    assert response.status_code == 405
+    assert "POST" in response.text
+
+
+def test_the_legacy_health_route_still_answers(client):
+    """Anything that watched the dashboard's `/__health__` keeps working."""
+    body = client.get("/__health__").json()
+    assert body["ok"] is True
+    assert body["db"].endswith(".db")
+
+
 def test_the_entry_point_checks_its_own_argument_handling():
     from c4x.api.__main__ import db_from_argv, port_from_argv
     assert port_from_argv(["--port", "9999"]) == 9999

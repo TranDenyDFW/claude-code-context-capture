@@ -6,7 +6,7 @@ photograph. This makes them a build artifact instead of a memory, so refreshing 
 change is one command rather than a manual capture session nobody repeats.
 
     python tools/screenshots.py                     # every tab, into docs/images/
-    python tools/screenshots.py --url http://127.0.0.1:8067   # a dashboard on another machine
+    python tools/screenshots.py --url http://127.0.0.1:8067   # a server on another port
     python tools/screenshots.py --only summary,cost # just the ones that changed
 
 It drives the REAL page rather than rendering components to a canvas, because the thing a README
@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "docs" / "images"
-DEFAULT_URL = "http://127.0.0.1:8057"
+DEFAULT_URL = "http://127.0.0.1:8059"
 
 # The tab id, the file it becomes, and how far down the page to start.
 #
@@ -87,17 +87,30 @@ def capture(url, out_dir, only=None, settle=4500):
             page.evaluate("window.__lastHeight = -1")
             try:
                 page.wait_for_function(
-                    """() => {
+                    """(want) => {
+                        // THE PAGE SAYS WHEN IT IS READY, so this no longer has to infer it.
+                        // The pane carries data-tab and data-loading, so "the tab I asked for is
+                        // finished" is a fact to read rather than a guess from page height. The
+                        // old heuristic was needed because Dash offered nothing better, and it
+                        // photographed the Cost tab mid-render more than once.
+                        const pane = document.querySelector('main [data-tab]');
+                        if (pane) {
+                            return pane.dataset.tab === want
+                                && pane.dataset.loading === 'false';
+                        }
+                        // Fallback, for a page that does not carry the signal: no spinner, some
+                        // content, and a height that stopped changing between two polls. A tab
+                        // still filling in is a tab still growing.
                         const spinning = document.querySelector(
                             '.dash-spinner, ._dash-loading, .dash-loading');
                         const content = document.querySelectorAll(
-                            '.dash-table-container, .js-plotly-plot').length;
+                            '.dash-table-container, .js-plotly-plot, table').length;
                         const h = document.documentElement.scrollHeight;
                         const settled = (h === window.__lastHeight);
                         window.__lastHeight = h;
                         return content > 0 && !spinning && settled;
                     }""",
-                    timeout=90_000, polling=900)
+                    arg=tab_id, timeout=90_000, polling=900)
             except Exception:                       # noqa: BLE001 - reported, not raised
                 print(f"  WARNING {name}: still rendering after 90s, photographing anyway")
             page.wait_for_timeout(settle)
@@ -139,7 +152,7 @@ def main(argv=None):
         written, skipped = capture(args.url, Path(args.out), args.only, args.settle)
     except Exception as exc:                        # noqa: BLE001 - report, do not traceback
         print(f"could not photograph {args.url}: {type(exc).__name__}: {exc}")
-        print("is the dashboard running?  python app.py")
+        print("is the server running?  python -m c4x.api")
         print("is playwright installed?   pip install playwright && playwright install chromium")
         return 1
 

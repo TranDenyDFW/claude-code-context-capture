@@ -49,8 +49,21 @@ Claude Code Context Capture Extension - Analytical UX Report.md
 Claude-Code-Context-Capture Technical Review.md
 React+TypeScript Dashboard.md
 
-# The React frontend's dependencies and build output. 149 MB of node_modules restorable from
-# package-lock.json, and a dist/ that is generated from source in this repo. The lockfile IS
-# tracked, so a clone reproduces the exact tree.
+# The React frontend's dependencies: 149 MB, restorable from the tracked package-lock.json.
 frontend/node_modules/
-frontend/dist/
+
+# frontend/dist IS tracked, which is unusual for build output and is the point.
+#
+# The UI is now the only one, and the README's headline is that install is three commands and pulls
+# NOTHING from npm. If running the dashboard required `npm install` first, that would stop being
+# true: a reader who just wants to look at their own context window would have to fetch 149 MB of
+# build tooling to do it. So the 4.2 MB build is committed and `python -m c4x.api` serves it.
+#
+# npm is needed to CHANGE the frontend, not to run it. The Plotly chunk is content-hashed and only
+# rewrites when Plotly's version does, so ordinary edits add roughly 240 KB per build.
+
+# Generated documentation. `tools/docgen/` is source and IS tracked; these are what it produces.
+# 17 MB of PNG and JSON plus a 6.2 MB .docx, rebuildable from the source beside them, and a git
+# history is a poor place for a 23 MB artifact that changes wholesale on every run.
+docs/docgen/
+docs/c4x-field-guide.docx

@@ -20,7 +20,7 @@ flowchart LR
     DB[("data/context.db<br/>SQLite, WAL")]
 
     subgraph read["read, never write"]
-        APP["app.py + c4x/<br/>Dash, 127.0.0.1"]
+        APP["c4x/api + app.py + c4x/<br/>127.0.0.1:8059"]
         MIR[mirror.mjs<br/>window math]
         SEG[segments.mjs<br/>model segments]
         WST[waste.mjs<br/>re-reads]
@@ -45,11 +45,13 @@ tool that can fail a tool call is worse than one that misses a row.
 transcript and reads only what was appended, so a re-run is cheap and the first run is retroactive,
 going back as far as your transcripts do.
 
-**Read** never writes. The dashboard opens the store read-only, and is five files:
+**Read** never writes. The dashboard opens the store read-only:
 
 | file | holds |
 |---|---|
-| `app.py` | the Dash instance, the header and layout, the `TABS` registry, every callback, the live mirror |
+| `app.py` | the composition root: the Dash instance, the layout, the `TABS` registry, every callback. Headless since the React frontend landed, so it builds panes and serves nothing |
+| `c4x/api/` | the HTTP surface and the response cache. The only thing that listens |
+| `frontend/` | the React page. Reads the API, draws it, holds no queries of its own |
 | `c4x/theme.py` | colours, shared styles, the two formatters, the small shared builders |
 | `c4x/store.py` | every read, the scoping and cohort rules, the window math they depend on |
 | `c4x/panels.py` | the panels several tabs share: evidence blocks, the compare table, the turn diff |
@@ -57,7 +59,7 @@ going back as far as your transcripts do.
 | `c4x/tabs/` | one module per tab, ten of them, with no edges between them |
 
 They layer strictly: theme and store know nothing of each other, panels sits above both, tabs above
-all three, and app.py above everything. Nothing imports upward, so there are no cycles to unpick.
+all three, app.py above those, and the API above app.py. Nothing imports upward, so there are no cycles to unpick.
 
 `app.py` opens the store read-only. The window math lives in
 `mirror-core.mjs` as pure functions with no I/O, and `app.py` reads its constants out of that module
@@ -102,12 +104,18 @@ one, which is the single failure that design avoids.
 `data/` is gitignored. It holds verbatim conversations, and a private repository is not a good
 enough reason to put that in a history it cannot be removed from.
 
-## Two front ends, one set of numbers
+## One page, and how it is kept honest
 
-The Dash app (`app.py`, port 8056) and the API (`c4x/api/`, port 8059) both exist. The API is not a
-reimplementation: it renders through `app._render_tab`, the same callback the browser dispatches, so
-agreement between them is true by construction rather than by care. `frontend/` is a React page that
-reads the API and draws it.
+`app.py` is HEADLESS. It still builds every pane and it serves nothing: `c4x/api/` is the only
+thing that listens, on 8059, and it renders through `app._render_tab`, the same callback the
+browser used to dispatch. So the API is not a reimplementation, agreement is true by
+construction rather than by care, and a React page replaced the old one without a single
+query being rewritten.
+
+Two dashboards over one store is a way to read a stale number and not know it, which is why
+there is one page now. `frontend/dist` is COMMITTED, which is unusual for build output and
+deliberate: install is three commands and pulls nothing from npm, and that would stop being
+true if looking at your own context window required 149 MB of build tooling first.
 
 What makes that checkable is a shape the repo already had. `c4x/cli/extract.py::describe()` reduces
 a rendered pane to `{tables, figures, text}`, and that IS the API's contract:
