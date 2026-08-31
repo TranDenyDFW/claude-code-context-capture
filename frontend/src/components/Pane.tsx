@@ -23,11 +23,19 @@ export function Pane({
   const figures = payload.plotly ?? []
   const sections = payload.details ?? []
   const meta = payload.meta ?? []
+  const stats = payload.stats ?? []
 
   // A section's body is ALSO in `text`, because `extract.texts()` flattens the whole pane including
   // what is inside a collapsed block. Rendered naively every SQL query appears twice: once as a
   // wall of prose and again inside its own section.
   const claimed = new Set<string>()
+  // A stat card's three strings are in `text` too, for the same flattening reason, so without this
+  // the page prints "sessions / 1,325 / in the store" as body prose directly under the card.
+  for (const stat of stats) {
+    claimed.add(stat.label)
+    claimed.add(stat.value)
+    if (stat.sub) claimed.add(stat.sub)
+  }
   for (const section of sections) {
     for (const line of section.body) claimed.add(line)
     if (section.summary) claimed.add(section.summary)
@@ -69,6 +77,24 @@ export function Pane({
         >
           {payload.population}
         </div>
+      )}
+
+      {stats.length > 0 && (
+        // THE NUMBERS FIRST. These are the figures the tab is about, and they arrived as
+        // twenty-one loose strings in the middle of a wall of prose. A dashboard that opens with a
+        // chart and a paragraph makes a reader hunt for the totals it already computed.
+        <section
+          className="grid gap-3"
+          style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(11rem, 1fr))' }}
+        >
+          {stats.map((stat, index) => (
+            <div key={index} className="rounded-lg bg-panel px-4 py-3 shadow-panel">
+              <p className="text-2xs tracking-[0.08em] uppercase text-ink-faint">{stat.label}</p>
+              <p className="mt-1 font-mono text-xl font-bold tabular text-ink">{stat.value}</p>
+              {stat.sub && <p className="mt-0.5 text-2xs text-ink-faint">{stat.sub}</p>}
+            </div>
+          ))}
+        </section>
       )}
 
       {figures.map((figure, index) => (
