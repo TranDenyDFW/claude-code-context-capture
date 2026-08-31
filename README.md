@@ -123,6 +123,13 @@ not stop capture: the hooks keep recording whether or not it is running.
 Every finding is clickable. Clicking one selects the session it names and jumps to the tab that
 proves it, so a claim on the front page is one click from its evidence.
 
+There is a second front end, and it reads the same numbers. `python -m c4x.api` serves the store as
+JSON on `127.0.0.1:8059` and, once `npm run build --prefix frontend` has run, serves a React page
+from the same port. It holds each answer for five seconds, so the second view of a tab costs about
+3 ms against the dashboard's 1.6 seconds. The two cannot disagree: `python tools/parity.py` renders
+all eight tabs from both and compares them cell by cell, and `python -m c4x.cli all --via api` runs
+the same sweep through either one.
+
 ### See where the window went
 
 The Session tab is the chart at the top of this README: growth per turn, every compaction marked in
