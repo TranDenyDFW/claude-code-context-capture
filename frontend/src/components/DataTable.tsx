@@ -131,7 +131,7 @@ export function DataTable({
     ('session_id' in table.rows[0] || 'session' in table.rows[0])
 
   return (
-    <div className="overflow-hidden rounded-lg border border-edge bg-panel">
+    <div className="overflow-hidden rounded-lg bg-panel shadow-panel">
       <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
         <input
           value={query}
@@ -140,14 +140,14 @@ export function DataTable({
             setLimit(PAGE)
           }}
           placeholder={`Filter ${table.rows.length.toLocaleString()} rows`}
-          className="w-56 rounded border border-edge bg-page px-2 py-1 text-[12px] text-ink
+          className="w-56 rounded border border-edge bg-page px-2 py-1 text-sm text-ink
                      outline-none placeholder:text-ink-faint focus:border-accent"
         />
         {query && (
           <>
             <button
               onClick={() => setQuery('')}
-              className="rounded border border-edge px-2 py-1 text-[11px] text-ink-dim
+              className="rounded border border-edge px-2 py-1 text-xs text-ink-dim
                          hover:text-ink"
             >
               clear
@@ -156,7 +156,7 @@ export function DataTable({
                 exactly like a table that never had the others. */}
             {/* One string, not three interpolations: split across text nodes it reads the same on
                 screen and cannot be found by anything asserting on it. */}
-            <span className="text-[11px] text-ink-faint">
+            <span className="text-xs text-ink-faint">
               {`${rows.length.toLocaleString()} of ${table.rows.length.toLocaleString()} match`}
             </span>
           </>
@@ -164,7 +164,7 @@ export function DataTable({
       </div>
 
       <div className="max-h-[32rem] overflow-auto">
-        <table className="w-full border-collapse text-[12.5px]">
+        <table className="w-full border-collapse text-sm">
           <thead className="sticky top-0 z-10 bg-panel-raised">
             <tr>
               {table.columns.map((column) => {
@@ -228,7 +228,7 @@ export function DataTable({
               <tr>
                 <td
                   colSpan={table.columns.length}
-                  className="px-3 py-6 text-center text-[12px] text-ink-dim"
+                  className="px-3 py-6 text-center text-sm text-ink-dim"
                 >
                   Nothing matches {JSON.stringify(query)}.
                 </td>
@@ -248,7 +248,7 @@ export function DataTable({
         </button>
       )}
       {rows.length <= limit && rows.length > 0 && (
-        <div className="border-t border-edge px-3 py-1.5 text-[11px] text-ink-faint">
+        <div className="border-t border-edge px-3 py-1.5 text-xs text-ink-faint">
           {rows.length.toLocaleString()} {rows.length === 1 ? 'row' : 'rows'}
         </div>
       )}

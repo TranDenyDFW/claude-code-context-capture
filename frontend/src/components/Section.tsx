@@ -42,7 +42,7 @@ function Copy({ text, label }: { text: string; label: string }) {
           setDone(false)
         }
       }}
-      className="rounded border border-edge px-2 py-1 text-[11px] text-ink-dim hover:text-ink"
+      className="rounded border border-edge px-2 py-1 text-xs text-ink-dim hover:text-ink"
     >
       {done ? 'copied' : label}
     </button>
@@ -53,9 +53,9 @@ export function Section({ section, table }: { section: SectionData; table?: Tabl
   const body = section.body.join('\n')
   const query = looksLikeQuery(section.body)
   return (
-    <details className="group rounded-lg border border-edge bg-panel">
+    <details className="group rounded-lg bg-panel shadow-panel">
       <summary
-        className="cursor-pointer list-none px-3 py-2 text-[12px] text-ink-dim
+        className="cursor-pointer list-none px-3 py-2 text-sm text-ink-dim
                    marker:content-none hover:text-ink"
       >
         <span className="mr-1.5 inline-block transition-transform group-open:rotate-90">›</span>
@@ -75,7 +75,7 @@ export function Section({ section, table }: { section: SectionData; table?: Tabl
                   link.download = `${table.id && table.id !== '(anonymous)' ? table.id : 'table'}.csv`
                   link.click()
                 }}
-                className="rounded border border-edge px-2 py-1 text-[11px] text-ink-dim
+                className="rounded border border-edge px-2 py-1 text-xs text-ink-dim
                            hover:text-ink"
               >
                 export {table.rows.length.toLocaleString()} rows as CSV
@@ -83,7 +83,7 @@ export function Section({ section, table }: { section: SectionData; table?: Tabl
             )}
           </div>
           <pre
-            className="overflow-auto rounded bg-page px-3 py-2 font-mono text-[11.5px]
+            className="overflow-auto rounded bg-page px-3 py-2 font-mono text-xs
                        leading-relaxed whitespace-pre-wrap text-ink-dim"
           >
             {body}
