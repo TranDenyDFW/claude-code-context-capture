@@ -14,7 +14,7 @@ from c4x.theme import (
     CODE_BLOCK,
     DANGER,
     SECTION_HEAD,
-    SECTION_NOTE,
+    population_note,
 )
 from c4x.ui.layout import SELECTION_SCOPED, TAB_IDS, TABS, tab_style
 
@@ -101,8 +101,9 @@ def _render_tab(idx, session_id, scope, cohort):
         described = session_id
         if tab_id == "tab-session" and not described:
             described = most_recent_session(cohort)
-        banner = html.Div(f"Describing {population_label(described, cohort, scope or 'main')}.",
-                          style=SECTION_NOTE)
+        banner = population_note(
+            f"Describing {population_label(described, cohort, scope or 'main')}.",
+            store_wide=not (described or cohort))
     else:
-        banner = html.Div("Store-wide. Not affected by the header selection.", style=SECTION_NOTE)
+        banner = population_note("Store-wide. Not affected by the header selection.")
     return html.Div([banner, body] if banner is not None else body)

@@ -149,9 +149,36 @@ CODE_BLOCK = {"background": PANEL, "border": f"1px solid {BORDER}", "borderRadiu
               "display": "inline-block"}
 
 
+def population_note(text: str, store_wide: bool = True) -> html.Div:
+    """The one sentence saying what a tab's numbers cover.
+
+    MARKED WITH A CLASSNAME, not recognised by its opening words. The API used to decide whether a
+    line was this one by testing whether it started with "Describing " or "Store-wide.", so the
+    three tabs that state their own population in their own wording reported none at all, and any
+    rewording anywhere would have switched the field off silently.
+
+    Same device as `stat_card`: the server marks what a thing IS rather than leaving a reader of
+    the payload to infer it from the text. Inert for Dash, which just puts the class on the div.
+    """
+    return html.Div(text, className="population-note", style=SECTION_NOTE,
+                    # WHAT IT IS DESCRIBING, carried as data rather than left to be read out of
+                    # the sentence. The page shows a chip for this, and the chip was derived from
+                    # whether the tab RESPONDS to the header selection, which is a different fact:
+                    # with nothing selected, Compactions, Window, Cost and Compare all described
+                    # the whole store while the chip said "This Selection".
+                    **{"data-population": "store" if store_wide else "selection"})
+
+
 def stat_card(label: str, value: str, color: str = TEXT, sub: str = "") -> html.Div:
+    # CLASSNAME SO IT CAN BE FOUND AGAIN. `extract.texts()` flattens a pane to a list of strings, so
+    # over the API seven of these arrive as twenty-one loose lines that happen to be in groups of
+    # three. A frontend could infer the triples and would be wrong the moment one card gained a
+    # fourth child, silently and with every later card shifted by one. Marked here instead, so the
+    # server can hand over cards rather than a list to be re-grouped by guesswork.
+    # Inert for Dash, which just puts the class on the div.
     return html.Div(
-        [
+        className="stat-card",
+        children=[
             html.Div(label, style={"color": MUTED, "fontSize": "11px",
                                    "textTransform": "uppercase", "letterSpacing": "0.06em"}),
             html.Div(value, style={"color": color, "fontSize": "26px",
@@ -303,6 +330,16 @@ def empty_fig(msg: str) -> go.Figure:
 # These are deliberately blunt. A tooltip that hedges is worse than no tooltip, because the reader
 # still has to go and check.
 COLUMN_HELP = {
+    # The Messages table. Both of these had no explanation at all, which is how the first one went
+    # unnoticed: it says "user" for a directory listing.
+    "role": ("The transcript RECORD's own type, which is a transport fact and not authorship. "
+             "Claude Code files a tool result as a record of type `user`, so this column says "
+             "`user` whether a person typed it or a tool produced it. `Written By` is the column "
+             "that answers who."),
+    "type": ("What actually wrote this message: `typed` by a person, `tool_result` produced by a "
+             "tool, `compact_summary` written by the compactor, `attachment` for an image or "
+             "document, or `assistant`. `unknown` means the transcript it came from is no longer "
+             "on this machine, so nothing can say."),
     # All sessions
     "turns": ("Every transcript row for this session, subagent work included, whichever way the "
               "main thread / include subagents radio is set. The Session tab respects that radio, "
@@ -379,6 +416,125 @@ COLUMN_HELP = {
     "pre_tokens": "Resident tokens immediately before the compaction.",
     "post_tokens": "Resident tokens immediately after it.",
 }
+
+
+# ---------------------------------------------------------------------------
+# Human names
+# ---------------------------------------------------------------------------
+# Every table in this app declared `name == id`, so a reader saw `ts`, `pre_tokens` and
+# `fitted_window`. That was never a regression; it was work nobody had done. These are the names a
+# READER sees. The id stays the key for lookups, tooltips and the SQL shown beneath the table.
+#
+# FAITHFUL, NOT REWRITTEN. `pre_tokens` becomes "Pre Tokens", not "Tokens Before". The query that
+# built the table is one click away under every table, and a label that no longer matches the
+# column in that query costs more than the plainer wording buys.
+#
+# Only the ones the generic rule below gets WRONG are listed. Anything absent is formatted by rule,
+# so a new column gets a reasonable name without an edit here.
+COLUMN_LABEL = {
+    # The one that prompted this. A timestamp column called `ts` tells a reader nothing.
+    "ts": "Date & Time",
+    # NOT "Turns". It counts transcript ROWS, and a streamed assistant message is written as
+    # several rows carrying one request id: measured per session it runs 1.86x to 3.98x the number
+    # of API calls. The tooltip always said "every transcript row"; the header said "Turns", and
+    # the header is what a reader takes the number's meaning from.
+    "turns": "Transcript Rows",
+    # NOT "Role" and "Type". Both were the transcript record's own `type` field, so a directory
+    # listing and a question both read "user" and nothing on the page distinguished them.
+    # Measured: 86.5% of the records typed 'user' were tool results.
+    "role": "Record Type",
+    "type": "Written By",
+    "est_usd": "Est. USD",
+    "duration_ms": "Duration (ms)",
+    "auto_compact_threshold": "Auto-Compact Threshold",
+    "pct_of_kind": "% of Kind",
+    # Identifiers. The suffix is for a schema, not for a person reading a column heading.
+    "session_id": "Session",
+    "probe_id": "Probe",
+    # A project IS a working directory in this store, and `cwd` is the schema's word for it, not a
+    # reader's. Every other surface in this app already says "Project".
+    "cwd": "Project",
+    "excluded_at": "Date & Time Excluded",
+    "id": "ID",
+    "ok": "OK",
+    # Already written for a reader; the rule would only mangle the casing.
+    "B vs A": "B vs A",
+    "A": "A",
+    "B": "B",
+}
+
+# Words that stay lowercase inside a title, unless they lead it. Without this the rule produces
+# "Blocked At" and "Goes To", which read as though something was capitalised by a machine.
+_MINOR = {"at", "of", "to", "vs", "in", "for", "and", "on", "per", "by", "a", "an", "the"}
+
+# Words that are acronyms, not words. Without this the rule produces "Api Calls" and "Est. Usd",
+# which reads as a machine having capitalised something it did not understand.
+_ACRONYMS = {"api", "id", "ok", "usd", "sql", "cli", "csv", "pdf", "url", "uuid", "mcp", "ms"}
+
+# One heading per table, for the ones that HAVE an id. `tbl-reread` is a DOM id; "Files Read More
+# Than Once" is what the table is. Anonymous tables get no heading rather than an invented one.
+TABLE_LABEL = {
+    "tbl-compactions": "Compactions",
+    "tbl-session": "Sessions",
+    "tbl-messages": "Messages",
+    "tbl-findings": "Findings",
+    "tbl-reread": "Files Read More Than Once",
+}
+
+
+# One line per tab, saying what it answers. Same idea as COLUMN_HELP and the same discipline: it is
+# only worth a line if the label does not already say it.
+#
+# These are TOOLTIPS, not body text. A sentence explaining a tab has no business taking a paragraph
+# of vertical space above the numbers every time the tab is opened; it belongs on the thing it
+# describes, which is the tab itself.
+TAB_HELP = {
+    "tab-summary": "Findings worth acting on, and what the whole store adds up to.",
+    "tab-sessions": "Each listed session as a row and a point: transcript rows against the peak "
+                    "it reached.",
+    "tab-session": "One session's context growing turn by turn, with every compaction marked.",
+    "tab-compactions": "Every compaction on record, what triggered it, and what it discarded.",
+    "tab-window": "What is in the context window right now, item by item, as area.",
+    "tab-cost": "What was paid for twice: re-reads, repeated inputs, and the estimated cost.",
+    "tab-compare": "Two chats or two populations, measured the same way, side by side.",
+    "tab-diagnostics": "Is the capture healthy, and does the window model agree with reality.",
+}
+
+
+def tab_help(tab_id) -> str:
+    return TAB_HELP.get(tab_id, "")
+
+
+def column_label(column_id) -> str:
+    """The name a reader sees for a column. Never the raw id."""
+    if column_id in COLUMN_LABEL:
+        return COLUMN_LABEL[column_id]
+    words = str(column_id).replace("_", " ").split()
+    if not words:
+        return str(column_id)
+    def cased(word, first):
+        bare = word.lower().strip(".")
+        if bare in _ACRONYMS:
+            return word.upper()
+        if not first and bare in _MINOR:
+            return word.lower()
+        return word.capitalize()
+
+    return " ".join(cased(w, i == 0) for i, w in enumerate(words))
+
+
+def table_label(table_id):
+    """The heading for a table, or None for one with no id worth showing.
+
+    `(anonymous)` is what `extract.describe()` calls a table with no DOM id. It is a placeholder,
+    not a name, and printing it would put the word down the page five times on the Cost tab.
+    """
+    if not table_id or table_id == "(anonymous)":
+        return None
+    # The fallback strips the DOM prefix and reads the rest as words, so a table added later gets a
+    # sane heading without an edit here. Hyphens are separators in a DOM id, not punctuation.
+    return TABLE_LABEL.get(table_id) or column_label(
+        table_id.removeprefix("tbl-").replace("-", " "))
 
 
 def header_help(cols, extra=None):

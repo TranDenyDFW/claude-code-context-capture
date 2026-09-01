@@ -112,16 +112,28 @@ touched 997k earlier, which is the difference the context bar alone cannot show 
 ### Open the dashboard
 
 ```bash
-python app.py
+python -m c4x.api
 ```
 
-Visit `http://127.0.0.1:8056/`. Use `--port` or `C4X_PORT` to move it. Closing the dashboard does
-not stop capture: the hooks keep recording whether or not it is running.
+Visit `http://127.0.0.1:8059/`. Use `--port` or `C4X_API_PORT` to move it. Closing the dashboard
+does not stop capture: the hooks keep recording whether or not it is running.
+
+Still nothing from npm. The page is committed built, so this serves it as-is; npm is needed only to
+change the frontend.
 
 ![The Summary tab: five findings that each name a session and an action, store totals, and cumulative resident tokens by working directory](docs/images/summary.png)
 
 Every finding is clickable. Clicking one selects the session it names and jumps to the tab that
 proves it, so a claim on the front page is one click from its evidence.
+
+The same server serves the data as JSON, so anything you can see you can also fetch:
+`curl 127.0.0.1:8059/api/tab/tab-cost` returns exactly what `python -m c4x.cli dump --tab tab-cost
+--json` prints. It holds each answer for five seconds, so the second view of a tab costs about 3 ms
+rather than 1.6 seconds.
+
+The page is React; the numbers are still built by the Python that always built them, and
+`python tools/parity.py` renders all eight tabs both ways and compares them cell by cell to keep it
+that way.
 
 ### See where the window went
 

@@ -488,7 +488,13 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
         # date, so a figure derived from a stale table cannot look current.
         stat_card("estimated cost", fmt_cost(cost_usd) or "not priced",
                   color=WARN if cost_usd else MUTED,
-                  sub=(f"prices of {PRICE_TABLE_DATE}, {cost_calls:,} of {len(turns):,} calls"
+                  # `_by_model["calls"]`, NOT `len(turns)`. This divided by the transcript row
+                  # count and called the result calls: for one session it read "5,683 of 8,202
+                  # calls", which says a third of the calls went unpriced when every one of them
+                  # was priced. The card two along already calls that same 8,202 "transcript
+                  # rows", so the page contradicted itself in one line.
+                  sub=(f"prices of {PRICE_TABLE_DATE}, {cost_calls:,} of "
+                       f"{int(_by_model['calls'].sum()):,} calls"
                        if cost_calls else
                        f"no price in c4x/pricing.py for "
                        f"{', '.join(real_models(turns['model'])[:2]) or 'this model'}")),
