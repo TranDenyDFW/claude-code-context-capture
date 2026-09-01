@@ -252,7 +252,7 @@ def tab_render(tab_id: str,
 
         from c4x.ui.layout import SELECTION_SCOPED
         payload["scoped"] = tab_id in SELECTION_SCOPED
-        payload["population"] = _population(pane)
+        payload["population"], payload["population_scope"] = _population(pane)
         return _jsonable(payload)
 
     if no_cache:
@@ -261,7 +261,7 @@ def tab_render(tab_id: str,
 
 
 def _population(node):
-    """The one sentence saying what this tab's numbers cover, or None if it states none.
+    """(sentence, scope) for what this tab's numbers cover, or (None, None) if it states none.
 
     FOUND BY ITS CLASSNAME. This used to test whether the pane's first line started with
     "Describing " or "Store-wide.", which meant the three tabs that state their population in their
@@ -281,7 +281,13 @@ def _population(node):
         if not hasattr(item, "_prop_names"):
             return
         if "population-note" in str(getattr(item, "className", "") or "").split():
-            found.append(" ".join(extract.texts(item)).strip())
+            # The scope rides on the node as data, because the chip on the page needs to say what
+            # this tab is describing RIGHT NOW and was deriving it from whether the tab responds to
+            # the selection at all. Four tabs said "This Selection" over the whole store.
+            scope = getattr(item, "data-population", None)
+            if scope is None:
+                scope = (item.to_plotly_json().get("props", {}) or {}).get("data-population")
+            found.append((" ".join(extract.texts(item)).strip(), scope or "store"))
             return
         for name in item._prop_names:
             value = getattr(item, name, None)
@@ -289,7 +295,7 @@ def _population(node):
                 walk(value)
 
     walk(node)
-    return found[0] if found else None
+    return found[0] if found else (None, None)
 
 
 def _stats(node, found=None):

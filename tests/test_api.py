@@ -542,6 +542,79 @@ def test_the_page_says_how_many_sessions_it_is_listing(client):
         "All sessions still claims to show every session while showing a subset"
 
 
+def test_the_population_picker_offers_the_projects_with_the_most_work_in_them():
+    """It offered the ones with the most SESSIONS, which is not the same question.
+
+    A benchmark harness spawned one short run per scratch directory, so measured on this store 22
+    of the 40 projects offered sat under a tmp folder and between them held 210 API calls of the
+    151,403 on the list, while 23 real projects were left off because each had only two or three
+    sessions.
+
+    Asserted as an ordering property rather than against a path pattern: nothing in the app knows
+    that "tmp" means scratch, and it should not start now.
+    """
+    from c4x.store import cohort_options, q, session_rows
+    df = session_rows()
+    if df.empty or df["project"].nunique() <= 40:
+        pytest.skip("this store has 40 projects or fewer, so nothing is being ranked out")
+
+    calls = q("SELECT session_id, COUNT(*) AS n FROM api_calls GROUP BY session_id")
+    per_session = dict(zip(calls["session_id"], calls["n"], strict=True))
+    work = (df.assign(_c=[per_session.get(s, 0) for s in df["session_id"]])
+              .groupby("project")["_c"].sum())
+
+    offered = [o["value"].split("::", 1)[1] for o in cohort_options()
+               if o["value"].startswith("project::")]
+    assert offered, "the picker offers no projects at all"
+    left_out = [p for p in work.index if p not in offered]
+    if not left_out:
+        return
+    # Nothing offered may have done less work than the busiest thing left off the list.
+    busiest_omitted = work[left_out].max()
+    weakest_offered = min(work.get(p, 0) for p in offered)
+    assert weakest_offered >= busiest_omitted, (
+        f"the picker offers a project with {weakest_offered:,} API calls while leaving out one "
+        f"with {busiest_omitted:,}")
+
+
+def test_the_summary_warns_that_the_session_count_is_not_a_divisor():
+    """Two headline cards invite one arithmetic, and on this store it describes no session.
+
+    Total over count gives 128 API calls per session; the median session made 2. The distribution
+    is two populations, a few long working sessions and a long tail of one-shot runs, and an
+    average of the two is a number nothing in the store resembles.
+    """
+    from c4x.store import q
+    from c4x.tabs.summary import decisions
+    ranked = q("SELECT COUNT(*) AS n FROM api_calls GROUP BY session_id ORDER BY n DESC")
+    if len(ranked) <= 20:
+        pytest.skip("too few sessions for concentration to mean anything")
+    found = [d for d in decisions() if "handful" in d["finding"]]
+    assert found, "the Summary never says how concentrated the work is"
+    evidence = found[0]["evidence"]
+    assert "median" in evidence, f"the finding states no median: {evidence!r}"
+
+
+def test_the_population_scope_matches_the_sentence_it_labels(client, tab_ids, session_id):
+    """The chip on the page says what the tab is describing. It was saying something else.
+
+    It was derived from `scoped`, which is whether the header selection REACHES a tab, not what
+    the tab is showing. With nothing selected, Compactions, Window, Cost and Compare each describe
+    the whole store, and all four were labelled "This Selection". `population_scope` now comes off
+    the same node the sentence does.
+    """
+    for label, params in (("nothing selected", {}), ("a session", {"session": session_id})):
+        for tab in tab_ids:
+            body = client.get(f"/api/tab/{tab}/render", params=params).json()
+            sentence = (body["population"] or "").lower()
+            scope = body.get("population_scope")
+            assert scope in ("store", "selection"), f"{tab}/{label} states no scope: {scope!r}"
+            says_store = "whole store" in sentence or "store-wide" in sentence
+            assert (scope == "store") == says_store, (
+                f"{tab} with {label} is labelled {scope!r} while its own sentence reads "
+                f"{body['population']!r}")
+
+
 def test_the_cost_card_counts_calls_not_transcript_rows(client, session_id):
     """It divided by the wrong denominator and called the result calls.
 

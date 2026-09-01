@@ -70,6 +70,10 @@ def _cmp_render(kind, target, session_id, cohort, scope):
     # blocks stay: they are the colour key for the table's two columns. This is what travels with
     # an export, and it is what makes the population field non-null here like everywhere else.
     return html.Div([
-        population_note(f"Comparing A, {a_label}, against B, {b_label}."),
+        # Arm A is the header selection, so the chip follows arm A: with nothing selected this
+        # tab compares the whole store against one session, and saying "This Selection" would name
+        # a selection that was never made.
+        population_note(f"Comparing A, {a_label}, against B, {b_label}.",
+                        store_wide=not (session_id or cohort)),
         compare_table(a_label, a, b_label, b),
     ])

@@ -333,7 +333,7 @@ describe('every table can be filtered', () => {
 
 describe('the headline figures', () => {
   const stats = [
-    { label: 'sessions', value: '1,325', sub: 'in the store' },
+    { label: 'sessions', value: '1,325', sub: 'in the store, 317 listed on All sessions' },
     { label: 'API calls', value: '158,835', sub: '346,909 transcript rows behind them' },
   ]
 
@@ -468,5 +468,23 @@ describe('the table controls every table now has', () => {
     const long = 'P:\ClaudeExt\ccx-engineering-work\tmp\fidpool\F2-p6'
     render(<Pane payload={payload({ tables: [table('t', [{ project: long }])] })} />)
     expect(screen.getByRole('table').querySelector('tbody td')!.getAttribute('title')).toBe(long)
+  })
+})
+
+describe('a card caption', () => {
+  it('is SHOWN, not left to a hover', () => {
+    /**
+     * On at least half of these the caption is what the number MEANS: "Peak Resident" is the
+     * largest single API call in the store and not any session's peak, "Sessions" counts every
+     * session while only some are listed on All sessions, and "API Calls" exists to be told apart
+     * from the transcript row count that its own caption gives. A reader cannot hover for a
+     * qualifier they have no reason to suspect is there.
+     */
+    render(<Pane payload={payload({ stats: [
+      { label: 'Sessions', value: '1,325', sub: 'in the store, 317 listed on All sessions' },
+      { label: 'Peak Resident', value: '999.8k', sub: 'largest single API call, any session' },
+    ] })} />)
+    expect(screen.getByText('in the store, 317 listed on All sessions')).toBeTruthy()
+    expect(screen.getByText('largest single API call, any session')).toBeTruthy()
   })
 })

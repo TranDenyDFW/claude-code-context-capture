@@ -152,17 +152,26 @@ export default function App() {
             the selection controls. The full sentence is the tooltip.
           */}
           {pane.data?.population && (
-            <span
-              data-scoped={pane.data.scoped ? 'true' : 'false'}
-              title={pane.data.population}
-              className={`rounded-md px-2 py-1 text-2xs ${
-                pane.data.scoped
-                  ? 'bg-panel text-ink-faint'
-                  : 'bg-warn/10 text-warn'
-              }`}
-            >
-              {pane.data.scoped ? 'This Selection' : 'Store-Wide'}
-            </span>
+            // FROM WHAT THE TAB IS DESCRIBING, not from whether it COULD respond to a selection.
+            // Those are different facts and the chip used the wrong one: with nothing selected,
+            // Compactions, Window, Cost and Compare each described the whole store while the chip
+            // said "This Selection". `scoped` stays on the element for anything measuring which
+            // tabs answer to the header.
+            (() => {
+              const onSelection = (pane.data.population_scope ?? 'store') === 'selection'
+              return (
+                <span
+                  data-scoped={pane.data.scoped ? 'true' : 'false'}
+                  data-population={pane.data.population_scope ?? 'store'}
+                  title={pane.data.population}
+                  className={`rounded-md px-2 py-1 text-2xs ${
+                    onSelection ? 'bg-panel text-ink-faint' : 'bg-warn/10 text-warn'
+                  }`}
+                >
+                  {onSelection ? 'This Selection' : 'Store-Wide'}
+                </span>
+              )
+            })()
           )}
 
           <div className="ml-auto flex flex-wrap items-center gap-2">

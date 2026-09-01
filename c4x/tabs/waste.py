@@ -351,7 +351,8 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         ("Describing this session. " if session_id else
          "Describing this cohort. " if cohort else
          "Describing the whole store. ")
-        + "Every tool call, subagent work included, whichever way the scope radio is set.")
+        + "Every tool call, subagent work included, whichever way the scope radio is set.",
+        store_wide=not (session_id or cohort))
 
     return html.Div([
         scope_note,
