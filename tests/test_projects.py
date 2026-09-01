@@ -154,13 +154,32 @@ def build_store(path, project=r"P:\Alpha", rows=3, extra_project=r"P:\Beta"):
     return path
 
 
+def forget_cached_rows():
+    """Empty every module-level cache in `c4x.store` that outlives a monkeypatched DB_PATH.
+
+    NOT OPTIONAL, and it was found the hard way. `session_rows()` caches for 45 seconds in a
+    module-level dict, so pointing DB_PATH at a synthetic store and reading it leaves that store's
+    rows behind after the fixture tears down. A later test in another FILE then asked the app for a
+    cohort and got ``project::P:\\Alpha``, which exists only here, and failed for a reason that had
+    nothing to do with what it was testing. Clearing on the way IN and the way OUT, because either
+    direction of leak makes a test depend on the order the suite happened to run in.
+    """
+    from c4x import store
+    store._rows_cache.update({"at": 0.0, "df": None})
+    store._archived_cache.update({"map": None, "at": 0.0, "root": None})
+    if hasattr(store.q, "cache_clear"):
+        store.q.cache_clear()
+
+
 @pytest.fixture
 def store_at(tmp_path, monkeypatch):
     """A fresh store per test, with `c4x.store` pointed at it."""
     from c4x import store
     path = build_store(tmp_path / "store.db")
     monkeypatch.setattr(store, "DB_PATH", path)
-    return path
+    forget_cached_rows()
+    yield path
+    forget_cached_rows()
 
 
 def rows_of(path, table):

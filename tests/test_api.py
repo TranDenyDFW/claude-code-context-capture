@@ -430,6 +430,43 @@ def test_compare_actually_answers_to_the_selection_it_claims_to(client, session_
         "compare_with did not change the pane, so the page cannot choose arm B at all")
 
 
+def test_compare_names_the_two_chats_rather_than_counting_them(client, session_id,
+                                                              other_session_id, cohort):
+    """An export has to say what it compared.
+
+    Both arms read "1 session, main thread only", which is true of either one and identifies
+    neither. On screen the pickers above carry the names; in a CSV or a PDF of this table they do
+    not travel at all, so an exported comparison could not say what it had compared.
+    """
+    from c4x import store
+    body = client.get("/api/tab/tab-compare/render",
+                      params={"session": session_id, "compare_with": other_session_id,
+                              "compare_kind": "session"}).json()
+    text = " ".join(body["text"])
+    for sid in (session_id, other_session_id):
+        name = store.session_name(sid)
+        assert name, f"no name for {sid}, so this test would pass on an empty string"
+        assert name in text, f"the pane does not name arm {sid}"
+    # The count is kept beside the name, not replaced by it: a name says WHICH, a count says how
+    # much of the store the number covers, and the second question is the one this app exists for.
+    assert "1 session" in text
+
+    # A population arm keeps the plain sentence. Naming applies to a single chat, and every other
+    # tab describes one population and is untouched.
+    #
+    # THE COHORT COMES FROM THE FIXTURE, not from a value written here. An earlier version of this
+    # named "section::Projects", which exists in the real store and in no fixture, so the check
+    # passed on this machine and failed in the suite's second pytest run. That is the third time
+    # this session a test has been written against a store rather than against a fixture.
+    assert cohort, "no cohort in this store, so the population arm is untested"
+    against_cohort = client.get("/api/tab/tab-compare/render",
+                                params={"session": session_id, "compare_with": cohort,
+                                        "compare_kind": "cohort"}).json()
+    kind = cohort.split("::")[0]
+    assert any(f"sessions in {kind}" in line for line in against_cohort["text"]), \
+        f"the population arm lost its plain sentence: {against_cohort['text'][:4]}"
+
+
 def test_the_tab_says_whether_the_selection_applies_to_it(client, session_id):
     """The answer to "why does this table never change?" has to be ON the tab.
 

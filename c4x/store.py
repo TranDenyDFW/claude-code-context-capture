@@ -580,6 +580,29 @@ def cohort_sessions(cohort, ttl: float = 45.0) -> list:
     return list(df.loc[df[col] == value, "session_id"])
 
 
+def session_name(session_id) -> str:
+    """One chat, said the way the pickers say it: project, title, and when it last ran.
+
+    The same three parts and the same order as `selector_options`, so a name read off a comparison
+    can be found again in the list it was chosen from without translating between two formats.
+
+    Returns "" for an unknown id rather than raising. A caller that has a stale selection should
+    still render, and the population sentence beside this one already says how many sessions there
+    are, so an empty name degrades to exactly the wording that was there before.
+    """
+    if not session_id:
+        return ""
+    df = session_rows()
+    if df.empty:
+        return ""
+    row = df[df["session_id"] == session_id]
+    if row.empty:
+        return ""
+    r = row.iloc[0]
+    when = str(r.get("last_ts") or "")[:16].replace("T", " ")
+    return f"{r.get('project')}  ·  {str(r.get('title'))[:60]}  ·  {when}"
+
+
 def population_label(session_id, cohort, scope) -> str:
     """One sentence naming exactly what is being described, for the page to print.
 
