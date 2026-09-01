@@ -400,6 +400,32 @@ class TestImport:
         con.close()
         assert got == 999999, "the re-import overwrote a row that was already present"
 
+    def test_it_says_the_project_is_still_excluded(self, store_at, tmp_path):
+        """Otherwise the rows come back and capture stays off with nothing connecting the two.
+
+        The user restores a project, keeps working in that directory, and every session since is
+        dropped. Reported rather than lifted here: an export from another machine can name a
+        working directory this machine excluded on purpose.
+        """
+        out = tmp_path / "out.db"
+        projects.export(r"P:\Alpha", out)
+        projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)
+        assert projects.import_(out)["still_excluded"] is True
+
+    def test_it_does_not_lift_the_exclusion_by_itself(self, store_at, tmp_path):
+        out = tmp_path / "out.db"
+        projects.export(r"P:\Alpha", out)
+        projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)
+        projects.import_(out)
+        assert [e["cwd"] for e in projects.excluded()] == [r"P:\Alpha"]
+
+    def test_it_says_nothing_when_the_project_was_never_excluded(self, store_at, tmp_path):
+        out = tmp_path / "out.db"
+        projects.export(r"P:\Alpha", out)
+        projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path,
+                        keep_capturing=True)
+        assert projects.import_(out)["still_excluded"] is False
+
     def test_it_refuses_an_export_that_does_not_verify(self, store_at, tmp_path):
         out = tmp_path / "out.db"
         projects.export(r"P:\Alpha", out)
