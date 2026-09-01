@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
 import { Palette, type Choice } from '@/components/Palette'
+import { ProjectMoves } from '@/components/ProjectMoves'
 import { Sidebar, useCollapsed } from '@/components/Sidebar'
 
 /**
@@ -19,6 +20,7 @@ export default function App() {
   const [palette, setPalette] = useState(false)
   const [collapsed, setCollapsed] = useCollapsed()
 
+  const client = useQueryClient()
   const tabs = useQuery({ queryKey: ['tabs'], queryFn: api.tabs })
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 30_000 })
   // NARROWED TO THE COHORT, by the server. Three things were wrong when this was built here:
@@ -193,6 +195,21 @@ export default function App() {
                 { value: '', label: 'No restriction' },
                 ...(cohorts.data ?? []).map((c) => ({ value: c.value, label: c.label })),
               ]}
+            />
+            <ProjectMoves
+              cohort={selection.cohort ?? null}
+              cohorts={cohorts.data ?? []}
+              // Two facts, kept apart. `read_only` means this server never harvests and is always
+              // true; `writes_enabled` is whether these three routes answer. Reading the wrong one
+              // would disable the controls on every server.
+              writesEnabled={health.data?.writes_enabled ?? false}
+              // A delete or an import changes what every pane describes, and the cohort list
+              // itself: a deleted project must stop appearing under Population. Invalidate rather
+              // than reload, so the open tab refetches and nothing else is thrown away.
+              onChanged={() => {
+                void client.invalidateQueries()
+                setSelection((was) => ({ ...was, session: null }))
+              }}
             />
             <button
               onClick={() =>

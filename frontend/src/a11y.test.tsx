@@ -24,6 +24,7 @@ import { render } from '@testing-library/react'
 import axe from 'axe-core'
 import { Pane } from './components/Pane'
 import { Palette } from './components/Palette'
+import { ProjectMoves } from './components/ProjectMoves'
 import { Sidebar } from './components/Sidebar'
 import type { TabPayload } from './api'
 
@@ -125,6 +126,22 @@ describe('axe finds no WCAG A or AA violation in', () => {
       />,
     )
     expect(await violations(container)).toEqual([])
+  })
+
+  // The dialog that can delete a project. It is the densest set of form controls in the app: a
+  // file input, a checkbox, a text field and three buttons, and every one of them used to be
+  // unlabelled until this ran.
+  it('the project dialog', async () => {
+    const { container } = render(
+      <ProjectMoves
+        cohort="project::F:\SecDb"
+        cohorts={[{ value: 'project::F:\SecDb', label: 'Project: F:\SecDb (12)' }]}
+        writesEnabled
+        onChanged={() => {}}
+      />,
+    )
+    container.querySelector('button')?.click()
+    expect(await violations(container.ownerDocument.body)).toEqual([])
   })
 })
 
