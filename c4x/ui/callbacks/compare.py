@@ -13,6 +13,7 @@ from c4x.panels import (
 from c4x.store import (
     cohort_options,
     population_label,
+    session_name,
 )
 from c4x.theme import (
     SECTION_NOTE,
@@ -42,14 +43,25 @@ def _cmp_render(kind, target, session_id, cohort, scope):
     if not target:
         return html.Div("Pick something to compare against.", style=SECTION_NOTE)
     scope = scope or "main"
+    # NAMED, not just counted, and only on this tab.
+    #
+    # Both arms said "1 session, main thread only", which is true of either one and identifies
+    # neither. On screen the pickers above carry the names; in a CSV or a PDF of this table they do
+    # not travel at all, so an exported comparison could not say what it had compared. Every other
+    # tab describes ONE population and keeps the plain sentence.
+    def arm(sid, coh):
+        said = population_label(sid, coh, scope)
+        name = session_name(sid)
+        return f"{name}  ({said})" if name else said
+
     a = selection_metrics(session_id, cohort, scope)
-    a_label = population_label(session_id, cohort, scope)
+    a_label = arm(session_id, cohort)
     if kind == "cohort":
         b = selection_metrics(None, target, scope)
-        b_label = population_label(None, target, scope)
+        b_label = arm(None, target)
     else:
         b = selection_metrics(target, None, scope)
-        b_label = population_label(target, None, scope)
+        b_label = arm(target, None)
     if not a["calls"] and not b["calls"]:
         return html.Div("Neither arm has any API calls under this scope.", style=SECTION_NOTE)
     return compare_table(a_label, a, b_label, b)

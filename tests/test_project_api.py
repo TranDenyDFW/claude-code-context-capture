@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from c4x import projects, store
 from c4x.api.main import api
-from tests.test_projects import build_store
+from tests.test_projects import build_store, forget_cached_rows
 
 ALPHA = r"P:\Alpha"
 BETA = r"P:\Beta"
@@ -23,8 +23,9 @@ def client(tmp_path, monkeypatch):
     build_store(tmp_path / "store.db")
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "store.db")
     monkeypatch.delenv("C4X_NO_WRITES", raising=False)
-    store.q.cache_clear() if hasattr(store.q, "cache_clear") else None
-    return TestClient(api)
+    forget_cached_rows()
+    yield TestClient(api)
+    forget_cached_rows()
 
 
 def count(project):
