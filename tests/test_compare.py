@@ -140,7 +140,12 @@ def test_every_metric_declares_whether_it_scales_with_population(compared):
     """
     for metric, row in compared.items():
         assert row.get("basis"), f"{metric} states no basis"
-        assert row["basis"] in ("per unit", "total, scales with population"), row["basis"]
+        # The wording changed once already, when a total started saying WHETHER the two arms
+        # were the same size rather than only that it scaled. Asserting the meaning rather than
+        # the exact sentence, so improving the wording is not a failure while a row that stops
+        # declaring its kind still is.
+        basis = row["basis"]
+        assert basis == "per unit" or basis.startswith("total,"), basis
 
 
 def test_comparing_a_session_with_itself_is_a_flat_one(two_sessions, has_store):
@@ -192,3 +197,73 @@ def test_the_sweep_reports_compare_as_a_working_tab(has_store):
     payload = commands._compare_by_default(_Args())
     assert payload["tables"], "the sweep still reports Compare as empty"
     assert sum(len(t["rows"]) for t in payload["tables"]) > 0
+
+
+def verdicts_from(a_calls, b_calls, **overrides):
+    """Run compare_table over two arms and return {metric: (verdict, basis)}.
+
+    Built from metric dicts rather than from the store, so the only thing that varies between
+    cases is the one being tested. Reading two real sessions would vary a dozen things at once.
+    """
+    from c4x.panels import compare_table
+
+    def arm(calls, cache):
+        return {"sessions": 1, "calls": calls, "cache_read": cache, "peak": 1_000_000,
+                "rebill_multiple": cache / 1_000_000, "cache_per_call": cache / calls,
+                "mean_resident": 500_000, "output": calls * 10, "thinking": 0,
+                "compactions": 1, "tool_calls": calls, "tool_bytes": calls * 100,
+                "cost_usd": calls * 0.1, "cost_calls": calls, **overrides}
+
+    node = compare_table("A", arm(a_calls, a_calls * 500_000),
+                         "B", arm(b_calls, b_calls * 900_000))
+    rows = None
+    stack = [node]
+    while stack and rows is None:
+        item = stack.pop()
+        if isinstance(item, (list, tuple)):
+            stack.extend(item)
+            continue
+        if type(item).__name__ == "DataTable":
+            rows = item.data
+        kids = getattr(item, "children", None)
+        if kids is not None:
+            stack.append(kids)
+    return {r["metric"]: (r["verdict"], r["basis"]) for r in rows}
+
+
+class TestWhenATotalMayCarryAVerdict:
+    """"Same size" has to mean the same amount of WORK, not the same number of sessions.
+
+    It meant session count, and a chat compared against its own fork is 1 session either way. Those
+    two were 4,618 API calls against 88, fifty-two times apart, and "cache re-reads" came back
+    "B better" purely because B was shorter, while "cache read per call" said "B worse" for the
+    same behaviour. The table contradicted itself and the total was the half that was wrong.
+    """
+
+    def test_a_total_is_not_judged_when_the_arms_did_different_amounts_of_work(self):
+        v = verdicts_from(4618, 88)
+        assert v["cache re-reads"][0] == "", "a total was judged across arms 52x apart"
+        assert "different sizes" in v["cache re-reads"][1]
+
+    def test_a_total_is_judged_when_the_arms_really_are_the_same_size(self):
+        # Within ten per cent. The verdict is the point of the row, so it must still appear.
+        v = verdicts_from(1000, 1050)
+        assert v["cache re-reads"][0] == "B worse", v["cache re-reads"]
+        assert "same size" in v["cache re-reads"][1]
+
+    def test_the_per_unit_rows_are_judged_either_way(self):
+        # They are the ones that compare unequal arms honestly, which is the whole reason the
+        # distinction exists.
+        assert verdicts_from(4618, 88)["cache read per call"][0] == "B worse"
+        assert verdicts_from(1000, 1050)["cache read per call"][0] == "B worse"
+
+    def test_the_re_billed_multiple_is_not_treated_as_size_independent(self):
+        """Its numerator is a running total and its denominator a single high-water mark.
+
+        Flagged per-unit it produced "B better" on the shorter arm while cache-read-per-call said
+        "B worse" for the same behaviour. Scaled to equal work B's multiple would be about 4,275
+        against A's 2,399, so the per-call row was right.
+        """
+        v = verdicts_from(4618, 88)
+        assert v["re-billed, as a multiple of peak"][0] == "", \
+            "the re-billed multiple was judged across arms of different sizes"
