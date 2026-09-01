@@ -9,6 +9,10 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { api } from '@/api'
 import { ProjectMoves, pathOf } from './ProjectMoves'
+// Vite's ?raw import, not node:fs. The app tsconfig types `vite/client` and NOT `node`, so
+// readFileSync/process do not type-check here at all: `npm run typecheck` reported three
+// TS2591s that a bare `tsc --noEmit` never ran.
+import appSource from '../App.tsx?raw'
 
 const PROJECT = 'F:\\SecDb'
 const COHORT = `project::${PROJECT}`
@@ -166,16 +170,10 @@ describe('how App wires it up', () => {
    * cleanly and disables every control on every server, or enables them on a server that will
    * refuse. Nothing in the type system can tell one boolean from the other.
    */
-  it('passes writes_enabled, not read_only', async () => {
-    const { readFileSync } = await import('node:fs')
-    const { resolve } = await import('node:path')
-    // Off process.cwd(), which vitest sets to the frontend directory. `import.meta.url` is not a
-    // file: URL under this runner, and readFileSync rejects it with "The URL must be of scheme
-    // file" rather than anything naming the test.
-    const source = readFileSync(resolve(process.cwd(), 'src/App.tsx'), 'utf8')
-    const at = source.indexOf('<ProjectMoves')
+  it('passes writes_enabled, not read_only', () => {
+    const at = appSource.indexOf('<ProjectMoves')
     expect(at).toBeGreaterThan(-1)
-    const element = source.slice(at, source.indexOf('/>', at))
+    const element = appSource.slice(at, appSource.indexOf('/>', at))
     // The ASSIGNMENT, not the whole element: the comment beside it names both fields on purpose,
     // and a substring check over the block failed on its own explanation.
     expect(element).toMatch(/writesEnabled=\{[^}]*writes_enabled/)
@@ -188,6 +186,7 @@ describe('import', () => {
     vi.spyOn(api.project, 'import').mockResolvedValue({
       project: PROJECT,
       from: 'PONPON',
+      still_excluded: false,
       inserted: { turns: 25964, messages: 22416, files: 0 },
       already_present: { turns: 0, sessions: 17 },
       dropped_columns: { sessions: ['from_the_future'] },
@@ -201,4 +200,33 @@ describe('import', () => {
     expect(screen.getByText(/sessions 17/)).toBeTruthy()
     expect(screen.getByText(/from_the_future/)).toBeTruthy()
   })
+
+  it('offers to resume capturing when the rows are back but the exclusion is not', async () => {
+    // Restoring a project and leaving harvest skipping the directory means every session run
+    // there since is dropped, with nothing on the page connecting the two facts.
+    vi.spyOn(api.project, 'import').mockResolvedValue({
+      project: PROJECT, from: 'PONPON', still_excluded: true,
+      inserted: { turns: 10 }, already_present: {}, dropped_columns: {},
+    })
+    const lift = vi.spyOn(api.project, 'include').mockResolvedValue({ project: PROJECT, removed: 1 })
+    vi.spyOn(api.project, 'excluded').mockResolvedValue({ excluded: [], writes_enabled: true })
+    show()
+    fireEvent.change(fileField(), { target: { files: [new File(['x'], 'x.db')] } })
+    fireEvent.click(await screen.findByRole('button', { name: /resume capturing/i }))
+    await vi.waitFor(() =>
+      expect(screen.queryByRole('button', { name: /resume capturing/i })).toBeNull())
+    expect(lift).toHaveBeenCalledWith(PROJECT)
+  })
+
+  it('offers nothing to resume when the project is not excluded', async () => {
+    vi.spyOn(api.project, 'import').mockResolvedValue({
+      project: PROJECT, from: 'PONPON', still_excluded: false,
+      inserted: { turns: 10 }, already_present: {}, dropped_columns: {},
+    })
+    show()
+    fireEvent.change(fileField(), { target: { files: [new File(['x'], 'x.db')] } })
+    await screen.findByText(/Imported/)
+    expect(screen.queryByRole('button', { name: /resume capturing/i })).toBeNull()
+  })
 })
+

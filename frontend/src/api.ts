@@ -168,6 +168,13 @@ export interface Exclusion {
 export interface ImportReport {
   project: string | null
   from: string | null
+  /**
+   * The rows are back but harvest is still skipping the directory.
+   *
+   * Reported rather than fixed by the server: an export from another machine can name a working
+   * directory this machine excluded on purpose. The page offers to lift it.
+   */
+  still_excluded: boolean
   inserted: Record<string, number>
   already_present: Record<string, number>
   dropped_columns: Record<string, string[]>

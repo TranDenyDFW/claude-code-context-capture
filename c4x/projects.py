@@ -325,7 +325,15 @@ def import_(path):
                          + "; ".join(problems))
     manifest = read_manifest(path)
 
+    # STILL EXCLUDED? Say so rather than fixing it silently. Importing a project the store is
+    # excluding puts every row back and leaves harvest skipping the directory, so the sessions the
+    # user has since run are never captured and nothing on the page connects the two facts.
+    #
+    # Reported, not lifted. An export from another machine can name a working directory that this
+    # machine has deliberately excluded, and quietly resuming capture of a local directory because
+    # a file mentioned it is a decision this function is not entitled to make. The caller offers it.
     report = {"project": manifest.get("project"), "from": manifest.get("source_machine"),
+              "still_excluded": any(e["cwd"] == manifest.get("project") for e in excluded()),
               "inserted": {}, "already_present": {}, "dropped_columns": {}}
     with store.write() as con:
         con.execute("ATTACH DATABASE ? AS src", (str(path),))

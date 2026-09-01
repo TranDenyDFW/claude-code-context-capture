@@ -63,7 +63,7 @@ export function ProjectMoves({
   const [open, setOpen] = useState(false)
   const [typed, setTyped] = useState('')
   const [keepCapturing, setKeepCapturing] = useState(false)
-  const [busy, setBusy] = useState<'import' | 'delete' | null>(null)
+  const [busy, setBusy] = useState<'import' | 'delete' | 'include' | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [imported, setImported] = useState<ImportReport | null>(null)
   const [deleted, setDeleted] = useState<DeleteReport | null>(null)
@@ -93,6 +93,24 @@ export function ProjectMoves({
       setBusy(null)
       // Cleared so choosing the SAME file again still fires a change event.
       if (upload.current) upload.current.value = ''
+    }
+  }
+
+  const doInclude = async (project: string) => {
+    setBusy('include')
+    setError(null)
+    try {
+      await api.project.include(project)
+      // Re-read rather than assume. The button disappears because the SERVER says the exclusion is
+      // gone, not because this component decided it should be.
+      const listed = await api.project.excluded()
+      setImported((was) =>
+        was ? { ...was, still_excluded: listed.excluded.some((e) => e.cwd === project) } : was)
+      onChanged()
+    } catch (problem) {
+      setError(problem)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -135,9 +153,14 @@ export function ProjectMoves({
             role="dialog"
             aria-modal="true"
             aria-label="Move a project in or out of this store"
-            className="w-full max-w-[44rem] overflow-hidden rounded-lg bg-panel shadow-float"
+            // A COLUMN WITH A HEIGHT CAP, so the middle scrolls and the header and footer do not.
+            // Without the cap the dialog simply ran off the bottom of a 720px viewport: the delete
+            // report, which is the only place the backup path is shown, was rendered where nobody
+            // could read it and nothing scrolled to reach it.
+            className="flex max-h-[80vh] w-full max-w-[44rem] flex-col overflow-hidden rounded-lg
+                       bg-panel shadow-float"
           >
-            <div className="border-b border-edge px-5 py-3">
+            <div className="shrink-0 border-b border-edge px-5 py-3">
               <h2 className="text-md font-semibold text-ink">Move a project</h2>
               <p className="mt-0.5 text-xs text-ink-faint">
                 A project is a working directory. Everything belonging to it travels together:
@@ -145,7 +168,7 @@ export function ProjectMoves({
               </p>
             </div>
 
-            <div className="space-y-5 px-5 py-4">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
               {!writesEnabled && (
                 <p className="rounded-md border border-warn/40 bg-warn/5 px-3 py-2 text-sm
                               text-warn">
@@ -233,6 +256,27 @@ export function ProjectMoves({
                     <p className="mt-0.5 text-xs">
                       Already here: <Counts counts={imported.already_present} />
                     </p>
+                    {imported.still_excluded && imported.project && (
+                      // The rows are back and harvest is still skipping the directory, so every
+                      // session run there since is being dropped. Offered rather than done for
+                      // them: an export from another machine can name a directory this machine
+                      // excluded on purpose.
+                      <div className="mt-2 rounded-md border border-warn/40 bg-warn/5 px-3 py-2
+                                      text-xs text-warn">
+                        <p>
+                          The rows are back, but this project is still excluded, so nothing new in{' '}
+                          <code>{imported.project}</code> will be captured.
+                        </p>
+                        <button
+                          onClick={() => void doInclude(imported.project!)}
+                          disabled={busy !== null}
+                          className="mt-1.5 rounded-md border border-warn/60 bg-warn/10 px-2 py-1
+                                     text-xs text-warn hover:bg-warn/20 disabled:opacity-50"
+                        >
+                          {busy === 'include' ? 'Resuming…' : 'Resume capturing it'}
+                        </button>
+                      </div>
+                    )}
                     {Object.keys(imported.dropped_columns).length > 0 && (
                       <p className="mt-1 text-xs text-warn">
                         Columns this build does not have, so their values were not loaded:{' '}
@@ -316,7 +360,7 @@ export function ProjectMoves({
               {error !== null && <Problem error={error} />}
             </div>
 
-            <div className="flex justify-end border-t border-edge px-5 py-3">
+            <div className="flex shrink-0 justify-end border-t border-edge px-5 py-3">
               <button
                 onClick={close}
                 className="rounded-md border border-edge bg-page px-2.5 py-1.5 text-sm text-ink-dim
