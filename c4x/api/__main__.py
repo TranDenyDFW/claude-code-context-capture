@@ -92,6 +92,10 @@ def main(argv=None):
     print(f"c4x api on http://127.0.0.1:{port}/api/docs")
     print(f"  store: {store.DB_PATH}")
     print("  read-only: this server never harvests, unlike the dashboard")
+    # The shutdown token, printed here and nowhere else. No route reports it, so a page the browser
+    # visits cannot read it, and it dies with the process.
+    from c4x.server import announce_shutdown_token
+    announce_shutdown_token(port)
     print("  project export/import/delete: "
           + ("OFF (--no-writes)" if os.environ.get("C4X_NO_WRITES") else "on"))
     if reload:

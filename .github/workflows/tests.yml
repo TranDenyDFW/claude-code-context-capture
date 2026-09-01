@@ -23,6 +23,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          # Keyed on the lockfile this job now installs from. Without a cache the frontend install
+          # below is a fresh network fetch on every run.
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - uses: actions/setup-python@v5
         with:
@@ -32,6 +36,13 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+
+      # WITHOUT THIS THE FRONTEND CHECKS DO NOT RUN. tools/run_tests.mjs skips the typecheck and
+      # Vitest when frontend/node_modules is absent, and this job never installed it, so those two
+      # gates were skipped on every run CI ever made while the job reported success. `ci` rather
+      # than `install` because frontend/package-lock.json is committed.
+      - name: Install the frontend
+        run: npm ci --prefix frontend
 
       # Synthetic, and it says so in every row it writes. Nothing here came from a conversation.
       - name: Build the fixture store
@@ -45,8 +56,10 @@ jobs:
       - name: Lint the node tools
         run: npx --yes eslint .
 
+      # --strict, so a check that did not run fails the job. The runner has always SAID a skip
+      # means "NOT A FULL RUN" and then exited 0, which is the half GitHub reads.
       - name: Run the suite
-        run: node tools/run_tests.mjs
+        run: node tools/run_tests.mjs --strict
 
       # The fixture is a database of made-up rows, but it is still a database that looks like the
       # real one. Nothing should carry it out of the job.
