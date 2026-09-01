@@ -163,6 +163,12 @@ def overview_stats() -> dict:
     """
     small = q("""
         SELECT (SELECT COUNT(*) FROM sessions)                     AS sessions,
+               -- How many of those the picker and All sessions actually LIST. Shown beside the
+               -- total because the page shows both numbers and called them both "sessions",
+               -- leaving a reader to reconcile 1,325 against 317 with nothing to go on. Same
+               -- threshold as session_rows(), where it is explained.
+               (SELECT COUNT(*) FROM (SELECT session_id FROM turns
+                                       GROUP BY session_id HAVING COUNT(*) >= 5)) AS listed,
                (SELECT COUNT(*) FROM turns)                        AS turn_rows,
                (SELECT COUNT(*) FROM compactions)                  AS compactions,
                (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
@@ -414,6 +420,15 @@ def _session_rows_uncached() -> pd.DataFrame:
         -- and the fixture now contains streamed messages, so the comparison had something to
         -- disagree about.
         GROUP BY t.session_id
+        -- FEWER THAN FIVE TRANSCRIPT ROWS AND A SESSION IS NOT LISTED. This is why the picker
+        -- offers 317 sessions while the store holds 1,325: 1,008 are below the line, 985 of them
+        -- with between one and four rows, and most are one-shot runs from a benchmark harness that
+        -- would bury every real session in the list.
+        --
+        -- It is a PRESENTATION rule and nothing else may treat it as the population. Anything
+        -- that has to cover every session, an export or a delete, must union this with the
+        -- sessions it cannot see; c4x/projects.py does, and it was carrying 58 of one project's
+        -- 137 sessions until it did.
         HAVING COUNT(*) >= 5
     """)
     if df.empty:
@@ -536,7 +551,9 @@ def cohort_options() -> list:
     does not list, and the counts shown here are the counts a tab will describe.
     """
     df = session_rows()
-    opts = [{"label": f"All sessions ({len(df):,})", "value": COHORT_ALL}]
+    # Says what the number counts. "All sessions (317)" beside a Summary card reading 1,325 is
+    # two numbers for one word with nothing to reconcile them.
+    opts = [{"label": f"All sessions ({len(df):,} listed)", "value": COHORT_ALL}]
     if df.empty:
         return opts
     for sec, n in df["section"].value_counts().items():

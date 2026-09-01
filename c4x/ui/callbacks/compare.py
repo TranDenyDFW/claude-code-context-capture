@@ -17,6 +17,7 @@ from c4x.store import (
 )
 from c4x.theme import (
     SECTION_NOTE,
+    population_note,
 )
 from c4x.ui.header import selector_options
 
@@ -64,4 +65,11 @@ def _cmp_render(kind, target, session_id, cohort, scope):
         b_label = arm(target, None)
     if not a["calls"] and not b["calls"]:
         return html.Div("Neither arm has any API calls under this scope.", style=SECTION_NOTE)
-    return compare_table(a_label, a, b_label, b)
+    # THE ONE TAB THAT DESCRIBES TWO POPULATIONS, so it states both in one sentence rather
+    # than leaving the A and B blocks below to serve as the only record of what was compared. The
+    # blocks stay: they are the colour key for the table's two columns. This is what travels with
+    # an export, and it is what makes the population field non-null here like everywhere else.
+    return html.Div([
+        population_note(f"Comparing A, {a_label}, against B, {b_label}."),
+        compare_table(a_label, a, b_label, b),
+    ])

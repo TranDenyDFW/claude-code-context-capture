@@ -252,14 +252,44 @@ def tab_render(tab_id: str,
 
         from c4x.ui.layout import SELECTION_SCOPED
         payload["scoped"] = tab_id in SELECTION_SCOPED
-        first = payload["text"][0] if payload["text"] else ""
-        payload["population"] = first if (
-            first.startswith("Describing ") or first.startswith("Store-wide.")) else None
+        payload["population"] = _population(pane)
         return _jsonable(payload)
 
     if no_cache:
         return build()
     return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind), build)
+
+
+def _population(node):
+    """The one sentence saying what this tab's numbers cover, or None if it states none.
+
+    FOUND BY ITS CLASSNAME. This used to test whether the pane's first line started with
+    "Describing " or "Store-wide.", which meant the three tabs that state their population in their
+    own wording reported none at all, and any rewording anywhere would have switched the field off
+    with nothing failing. `theme.population_note` marks the line at the point it is written.
+    """
+    from c4x.cli import extract
+    found = []
+
+    def walk(item):
+        if found:
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                walk(child)
+            return
+        if not hasattr(item, "_prop_names"):
+            return
+        if "population-note" in str(getattr(item, "className", "") or "").split():
+            found.append(" ".join(extract.texts(item)).strip())
+            return
+        for name in item._prop_names:
+            value = getattr(item, name, None)
+            if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
+                walk(value)
+
+    walk(node)
+    return found[0] if found else None
 
 
 def _stats(node, found=None):

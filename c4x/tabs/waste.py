@@ -22,6 +22,7 @@ from c4x.theme import (
     fmt_cost,
     fmt_tokens,
     numeric_columns,
+    population_note,
     stat_card,
 )
 
@@ -346,11 +347,11 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
     # Why subagents are counted is on the `reads` column tooltip. What stays here is the one thing
     # a tooltip cannot say: which population this page is describing right now.
-    scope_note = html.Div(
-        "Every tool call, subagent work included, whichever way the scope radio is set. "
-        + (f"Narrowed to {'this session' if session_id else 'this cohort'}."
-           if (session_id or cohort) else "Describing the whole store."),
-        style=SECTION_NOTE)
+    scope_note = population_note(
+        ("Describing this session. " if session_id else
+         "Describing this cohort. " if cohort else
+         "Describing the whole store. ")
+        + "Every tool call, subagent work included, whichever way the scope radio is set.")
 
     return html.Div([
         scope_note,

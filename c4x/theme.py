@@ -149,6 +149,20 @@ CODE_BLOCK = {"background": PANEL, "border": f"1px solid {BORDER}", "borderRadiu
               "display": "inline-block"}
 
 
+def population_note(text: str) -> html.Div:
+    """The one sentence saying what a tab's numbers cover.
+
+    MARKED WITH A CLASSNAME, not recognised by its opening words. The API used to decide whether a
+    line was this one by testing whether it started with "Describing " or "Store-wide.", so the
+    three tabs that state their own population in their own wording reported none at all, and any
+    rewording anywhere would have switched the field off silently.
+
+    Same device as `stat_card`: the server marks what a thing IS rather than leaving a reader of
+    the payload to infer it from the text. Inert for Dash, which just puts the class on the div.
+    """
+    return html.Div(text, className="population-note", style=SECTION_NOTE)
+
+
 def stat_card(label: str, value: str, color: str = TEXT, sub: str = "") -> html.Div:
     # CLASSNAME SO IT CAN BE FOUND AGAIN. `extract.texts()` flattens a pane to a list of strings, so
     # over the API seven of these arrive as twenty-one loose lines that happen to be in groups of
@@ -404,6 +418,11 @@ COLUMN_HELP = {
 COLUMN_LABEL = {
     # The one that prompted this. A timestamp column called `ts` tells a reader nothing.
     "ts": "Date & Time",
+    # NOT "Turns". It counts transcript ROWS, and a streamed assistant message is written as
+    # several rows carrying one request id: measured per session it runs 1.86x to 3.98x the number
+    # of API calls. The tooltip always said "every transcript row"; the header said "Turns", and
+    # the header is what a reader takes the number's meaning from.
+    "turns": "Transcript Rows",
     "est_usd": "Est. USD",
     "duration_ms": "Duration (ms)",
     "auto_compact_threshold": "Auto-Compact Threshold",
@@ -450,7 +469,8 @@ TABLE_LABEL = {
 # describes, which is the tab itself.
 TAB_HELP = {
     "tab-summary": "Findings worth acting on, and what the whole store adds up to.",
-    "tab-sessions": "Every session as a row and a point: turns against the peak it reached.",
+    "tab-sessions": "Each listed session as a row and a point: transcript rows against the peak "
+                    "it reached.",
     "tab-session": "One session's context growing turn by turn, with every compaction marked.",
     "tab-compactions": "Every compaction on record, what triggered it, and what it discarded.",
     "tab-window": "What is in the context window right now, item by item, as area.",
