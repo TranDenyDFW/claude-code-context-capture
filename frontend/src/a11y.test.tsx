@@ -24,6 +24,7 @@ import { render } from '@testing-library/react'
 import axe from 'axe-core'
 import { Pane } from './components/Pane'
 import { Palette } from './components/Palette'
+import { CompareArms } from './components/CompareArms'
 import { ProjectMoves } from './components/ProjectMoves'
 import { Sidebar } from './components/Sidebar'
 import type { TabPayload } from './api'
@@ -123,6 +124,21 @@ describe('axe finds no WCAG A or AA violation in', () => {
         cohorts={[{ value: '__all__', label: 'All sessions (317)' }]}
         sessions={[{ value: 's1', label: 'F:\\SecDb  ·  A title  ·  2026-08-31 01:47' }]}
         onPick={() => {}}
+      />,
+    )
+    expect(await violations(container)).toEqual([])
+  })
+
+  // Two selects and a pair of toggles. Both selects carry a visible label element, which is
+  // what a screen reader reads out as "Arm A" rather than "combo box".
+  it('the compare arms', async () => {
+    const { container } = render(
+      <CompareArms
+        selection={{ session: 's1' }}
+        sessions={[{ value: 's1', label: 'P:\\x  ·  A title  ·  2026-08-31 01:47' },
+                   { value: 's2', label: 'P:\\x  ·  A title (fork)  ·  2026-08-30 21:08' }]}
+        cohorts={[{ value: '__all__', label: 'All sessions (317)' }]}
+        onChange={() => {}}
       />,
     )
     expect(await violations(container)).toEqual([])

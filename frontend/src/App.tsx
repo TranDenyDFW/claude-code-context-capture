@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
 import { Palette, type Choice } from '@/components/Palette'
+import { CompareArms } from '@/components/CompareArms'
 import { ProjectMoves } from '@/components/ProjectMoves'
 import { Sidebar, useCollapsed } from '@/components/Sidebar'
 
@@ -37,7 +38,11 @@ export default function App() {
   }, [tab, tabs.data])
 
   const pane = useQuery({
-    queryKey: ['tab', tab, selection.session, selection.scope, selection.cohort],
+    // EVERY FIELD `api.tab` SENDS. A key that omits one caches two different requests under one
+    // entry, so the arm-B picker would move and the pane would keep showing the previous answer,
+    // with nothing on screen saying it was stale.
+    queryKey: ['tab', tab, selection.session, selection.scope, selection.cohort,
+               selection.compareWith, selection.compareKind],
     queryFn: () => api.tab(tab!, selection),
     enabled: Boolean(tab),
     // The server holds an answer for five seconds; asking again inside that window would spend a
@@ -241,6 +246,19 @@ export default function App() {
       </header>
 
       <main className="mx-auto w-full max-w-[1600px] flex-1 px-6 py-5">
+        {/*
+          Compare is the one tab whose question needs TWO selections, and it is the only place a
+          chat picker belongs. The header has none on purpose: nobody recalls a session by name out
+          of 317. Here the reader already knows which two they mean.
+        */}
+        {tab === 'tab-compare' && (
+          <CompareArms
+            selection={selection}
+            sessions={sessions.data ?? []}
+            cohorts={cohorts.data ?? []}
+            onChange={(next) => setSelection((was) => ({ ...was, ...next }))}
+          />
+        )}
         {pane.isError && <Failure error={pane.error} />}
         {!pane.data && !pane.isError && <Waiting />}
         {pane.data && (

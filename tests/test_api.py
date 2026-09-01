@@ -403,6 +403,33 @@ def test_every_column_is_named_for_a_reader(client, session_id):
                     f"{tab}/{column['id']} is shown as its raw id"
 
 
+def test_compare_actually_answers_to_the_selection_it_claims_to(client, session_id,
+                                                               other_session_id):
+    """Not a restatement of SELECTION_SCOPED. Measured against what the pane returns.
+
+    Compare was in neither the scoped set nor the help text, so the page told the reader "the
+    header selection does not change this tab" while `compare_layout()` was taking arm A straight
+    off it. Measured on the real store, the pane goes from 1,292 sessions to 1 the moment a session
+    is chosen. Asserting membership in the set proves nothing; asserting that the payload MOVES is
+    what would have caught it.
+    """
+    def pane(**params):
+        return client.get("/api/tab/tab-compare/render", params=params).json()
+
+    whole = pane()
+    one = pane(session=session_id)
+    assert whole["tables"] != one["tables"], (
+        "choosing a session did not change Compare, so calling it scoped would be the false "
+        "statement this test exists to prevent")
+    assert one["scoped"] is True, "Compare answers to the selection but does not say so"
+
+    # And arm B is steerable, which is the whole reason a fork can be compared to its parent.
+    default_b = pane(session=session_id)
+    chosen_b = pane(session=session_id, compare_with=other_session_id, compare_kind="session")
+    assert default_b["tables"] != chosen_b["tables"], (
+        "compare_with did not change the pane, so the page cannot choose arm B at all")
+
+
 def test_the_tab_says_whether_the_selection_applies_to_it(client, session_id):
     """The answer to "why does this table never change?" has to be ON the tab.
 

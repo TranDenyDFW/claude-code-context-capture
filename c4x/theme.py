@@ -455,7 +455,7 @@ TAB_HELP = {
     "tab-compactions": "Every compaction on record, what triggered it, and what it discarded.",
     "tab-window": "What is in the context window right now, item by item, as area.",
     "tab-cost": "What was paid for twice: re-reads, repeated inputs, and the estimated cost.",
-    "tab-compare": "Two populations measured the same way, side by side.",
+    "tab-compare": "Two chats or two populations, measured the same way, side by side.",
     "tab-diagnostics": "Is the capture healthy, and does the window model agree with reality.",
 }
 
