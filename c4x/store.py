@@ -558,8 +558,26 @@ def cohort_options() -> list:
         return opts
     for sec, n in df["section"].value_counts().items():
         opts.append({"label": f"Section: {sec} ({n:,})", "value": f"section::{sec}"})
-    for proj, n in df["project"].value_counts().head(40).items():
-        opts.append({"label": f"Project: {proj} ({n:,})", "value": f"project::{proj}"})
+    # RANKED BY WORK DONE, not by how many sessions a directory happens to hold.
+    #
+    # Session count put a benchmark harness in charge of this list. It spawned one short run per
+    # scratch directory, so measured on this store 22 of the 40 projects offered sat under a tmp
+    # folder and between them held 210 API calls of the 151,403 on the list. Meanwhile ranking by
+    # calls surfaces 23 projects the old order left out, including one of 2,587 calls and another
+    # of 1,006, hidden because each had only two sessions.
+    #
+    # No path heuristic. Nothing here knows or should know that "tmp" means scratch: a directory
+    # earns its place by the work done in it, which is the same rule for every project.
+    calls = q("SELECT session_id, COUNT(*) AS n FROM api_calls GROUP BY session_id")
+    per_session = dict(zip(calls["session_id"], calls["n"], strict=True))
+    work = (df.assign(_calls=[per_session.get(s, 0) for s in df["session_id"]])
+              .groupby("project")
+              .agg(sessions=("session_id", "count"), calls=("_calls", "sum"))
+              .sort_values(["calls", "sessions"], ascending=False)
+              .head(40))
+    for proj, row in work.iterrows():
+        opts.append({"label": f"Project: {proj} ({int(row['sessions']):,})",
+                     "value": f"project::{proj}"})
     return opts
 
 

@@ -109,6 +109,14 @@ export interface TabPayload {
   scoped?: boolean
   /** The one sentence saying which population this tab describes. */
   population?: string | null
+  /**
+   * What that sentence says it is describing RIGHT NOW: "store" or "selection".
+   *
+   * Not the same fact as `scoped`, which says whether the header selection reaches this tab at
+   * all. With nothing selected, four scoped tabs describe the whole store, and a chip derived from
+   * `scoped` called all four "This Selection".
+   */
+  population_scope?: 'store' | 'selection' | null
 }
 
 /** Deliberately loose. This is handed straight to Plotly, which is the authority on its own shape. */

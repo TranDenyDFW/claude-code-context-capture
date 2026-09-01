@@ -149,7 +149,7 @@ CODE_BLOCK = {"background": PANEL, "border": f"1px solid {BORDER}", "borderRadiu
               "display": "inline-block"}
 
 
-def population_note(text: str) -> html.Div:
+def population_note(text: str, store_wide: bool = True) -> html.Div:
     """The one sentence saying what a tab's numbers cover.
 
     MARKED WITH A CLASSNAME, not recognised by its opening words. The API used to decide whether a
@@ -160,7 +160,13 @@ def population_note(text: str) -> html.Div:
     Same device as `stat_card`: the server marks what a thing IS rather than leaving a reader of
     the payload to infer it from the text. Inert for Dash, which just puts the class on the div.
     """
-    return html.Div(text, className="population-note", style=SECTION_NOTE)
+    return html.Div(text, className="population-note", style=SECTION_NOTE,
+                    # WHAT IT IS DESCRIBING, carried as data rather than left to be read out of
+                    # the sentence. The page shows a chip for this, and the chip was derived from
+                    # whether the tab RESPONDS to the header selection, which is a different fact:
+                    # with nothing selected, Compactions, Window, Cost and Compare all described
+                    # the whole store while the chip said "This Selection".
+                    **{"data-population": "store" if store_wide else "selection"})
 
 
 def stat_card(label: str, value: str, color: str = TEXT, sub: str = "") -> html.Div:
