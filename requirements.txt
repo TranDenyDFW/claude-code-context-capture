@@ -12,6 +12,12 @@ uvicorn>=0.30.0
 # would get past `importorskip` and then die on the import. It is also the client `tools/parity.py`
 # uses to check a running server rather than an in-process one.
 httpx>=0.27.0
+# NOT OPTIONAL, and its absence is not a skip. `/api/project/import` takes `UploadFile = File(...)`
+# and FastAPI refuses to BUILD that route without this package, so the failure is a RuntimeError at
+# import time that takes tools/contract_audit.py and the whole of tests/ with it. This machine had
+# it installed as a transitive dependency, which is exactly why the suite was green here and red in
+# CI. 0.0.9 is the first release without the DoS advisory.
+python-multipart>=0.0.9
 
 # Explorer UI (app.py).
 dash>=4.0.0
