@@ -61,8 +61,23 @@ def build_store(path, project=r"P:\Alpha", rows=3, extra_project=r"P:\Beta"):
         CREATE TABLE compaction_survivors (compaction_uuid TEXT, kind TEXT, uuid TEXT,
                                            PRIMARY KEY (compaction_uuid, uuid));
         CREATE TABLE files (path TEXT PRIMARY KEY, bytes_read INTEGER);
-        CREATE TABLE probes (id INTEGER PRIMARY KEY, note TEXT);
-        CREATE TABLE harvest_runs (ts TEXT);
+        -- Store-wide tables, with the real columns rather than a stub. They must survive a delete
+        -- untouched, and the Diagnostics tab reads them, so a two-column stand-in would make the
+        -- one test that renders that tab fail for a reason having nothing to do with exclusions.
+        CREATE TABLE probes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, ok INTEGER, error TEXT,
+          model TEXT, max_tokens INTEGER, total_tokens INTEGER, percentage INTEGER,
+          autocompact_source TEXT, auto_compact_threshold INTEGER, is_auto_compact_enabled INTEGER,
+          raw_json TEXT);
+        CREATE TABLE probe_categories (probe_id INTEGER, name TEXT, tokens INTEGER, color TEXT,
+                                       is_deferred INTEGER);
+        CREATE TABLE probe_details (probe_id INTEGER, kind TEXT, name TEXT, extra TEXT,
+                                    tokens INTEGER, loaded INTEGER);
+        CREATE TABLE probe_message_breakdown (probe_id INTEGER, name TEXT, tokens INTEGER);
+        CREATE TABLE harvest_runs (
+          ts TEXT, mode TEXT, files_seen INTEGER, files_read INTEGER, rewrites INTEGER,
+          lines INTEGER, mb REAL, turns INTEGER, compactions INTEGER, unpaired INTEGER,
+          ms INTEGER);
     """)
     for which, cwd in ((0, project), (1, extra_project)):
         for n in range(rows):
@@ -83,8 +98,11 @@ def build_store(path, project=r"P:\Alpha", rows=3, extra_project=r"P:\Beta"):
             con.execute("INSERT INTO compactions VALUES (?,?)", (f"{sid}-c", sid))
             con.execute("INSERT INTO compaction_survivors VALUES (?,?,?)",
                         (f"{sid}-c", "turn", f"{sid}-t0"))
-    con.execute("INSERT INTO probes VALUES (1, 'store-wide, not a project')")
-    con.execute("INSERT INTO harvest_runs VALUES ('2026-01-01')")
+    con.execute("""INSERT INTO probes (id, ts, ok, model, total_tokens, percentage,
+                     auto_compact_threshold, is_auto_compact_enabled)
+                   VALUES (1, '2026-01-01T00:00:00Z', 1, 'claude-opus-5', 12345, 3, 800000, 1)""")
+    con.execute("""INSERT INTO harvest_runs VALUES
+                   ('2026-01-01T00:00:00Z','incremental',2,2,0,10,0.1,5,0,0,7)""")
     con.commit()
     con.close()
     return path
@@ -387,6 +405,59 @@ class TestDelete:
         projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)
         assert projects.include(r"P:\Alpha") == 1
         assert projects.excluded() == []
+
+
+# ---------------------------------------------------------------------------
+# The one place a user can find out this happened
+# ---------------------------------------------------------------------------
+class TestDiagnosticsShowsIt:
+    """An excluded project looks exactly like a project nobody has touched lately.
+
+    The session count simply stops rising. If Diagnostics does not name it, there is no way to
+    tell the two apart, and the delete becomes a silent change to what this store means.
+    """
+
+    @staticmethod
+    def table_rows(node):
+        """Every DataTable's data under a node.
+
+        Read off the component, not off `str(node)`. Dash truncates a long repr, so a check
+        against the printed form silently stopped seeing the rows once the table grew, and a
+        substring match would also pass on a project name that appeared only in a tooltip.
+        """
+        found = []
+        stack = [node]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, (list, tuple)):
+                stack.extend(item)
+                continue
+            data = getattr(item, "data", None)
+            if data is not None and type(item).__name__ == "DataTable":
+                found.extend(data)
+            kids = getattr(item, "children", None)
+            if kids is not None:
+                stack.append(kids)
+        return found
+
+    def test_it_says_so_when_nothing_is_excluded(self, store_at):
+        from c4x.tabs.diagnostics import exclusions_layout
+        assert self.table_rows(exclusions_layout()) == []
+        assert "None." in str(exclusions_layout()[1].children)
+
+    def test_the_excluded_project_is_named(self, store_at, tmp_path):
+        from c4x.tabs.diagnostics import exclusions_layout
+        projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)
+        rows = self.table_rows(exclusions_layout())
+        assert [r["cwd"] for r in rows] == [r"P:\Alpha"], \
+            "the tab does not name the project it stopped capturing"
+
+    def test_the_whole_tab_carries_it_through(self, store_at, tmp_path):
+        from c4x.tabs.diagnostics import diagnostics_layout
+        projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)
+        rows = self.table_rows(diagnostics_layout())
+        assert any(r.get("cwd") == r"P:\Alpha" for r in rows), \
+            "the section renders alone but is missing once composed into the tab"
 
 
 # ---------------------------------------------------------------------------
