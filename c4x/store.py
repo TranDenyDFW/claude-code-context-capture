@@ -546,6 +546,21 @@ def cohort_options() -> list:
     return opts
 
 
+def cohort_parts(cohort) -> tuple:
+    """Split a cohort string into (kind, value), or ("", "") if it names nothing.
+
+    Pulled out of `cohort_sessions` so that anything needing to know WHICH project a cohort refers
+    to reads the same rule rather than splitting the string again. That mattered once already: the
+    frontend sent a bare path with no `project::` prefix, which resolves here to no restriction, and
+    the difference between "this project" and "everything" showed up only as a wrong session count.
+    A delete cannot afford the same mistake.
+    """
+    kind, sep, value = str(cohort or "").partition("::")
+    if not sep or kind not in ("section", "project") or not value:
+        return "", ""
+    return kind, value
+
+
 def cohort_sessions(cohort) -> list:
     """Resolve a cohort to the session ids it contains. Empty list means 'no restriction'."""
     if not cohort or cohort == COHORT_ALL:
@@ -553,7 +568,7 @@ def cohort_sessions(cohort) -> list:
     df = session_rows()
     if df.empty:
         return []
-    kind, _, value = str(cohort).partition("::")
+    kind, value = cohort_parts(cohort)
     col = {"section": "section", "project": "project"}.get(kind)
     if not col:
         return []

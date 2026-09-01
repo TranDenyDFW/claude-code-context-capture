@@ -4,6 +4,7 @@
     python -m c4x.api --port 8060
     python -m c4x.api --db tmp/demo-store.db
     python -m c4x.api --reload              # restart on source changes, for development
+    python -m c4x.api --no-writes           # refuse project export, import and delete
     python -m c4x.api --self-test           # no network, no store
 
 Port 8059 by default, beside the dashboard's 8056 rather than on top of it, because both are meant
@@ -77,6 +78,11 @@ def main(argv=None):
     if chosen:
         os.environ["C4X_DB"] = chosen
 
+    # Set before the app is imported, like C4X_DB, because the routes read it per request but
+    # /api/health is what the frontend asks once at startup to decide whether to show the controls.
+    if "--no-writes" in argv:
+        os.environ["C4X_NO_WRITES"] = "1"
+
     import uvicorn
 
     port = port_from_argv(argv)
@@ -86,6 +92,8 @@ def main(argv=None):
     print(f"c4x api on http://127.0.0.1:{port}/api/docs")
     print(f"  store: {store.DB_PATH}")
     print("  read-only: this server never harvests, unlike the dashboard")
+    print("  project export/import/delete: "
+          + ("OFF (--no-writes)" if os.environ.get("C4X_NO_WRITES") else "on"))
     if reload:
         print("  reloading on source changes")
 
