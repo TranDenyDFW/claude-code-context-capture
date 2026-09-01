@@ -46,7 +46,11 @@ def summary_layout(session_id=None, scope="main", cohort=None):
     rows = decisions()
 
     totals = [
-        ("sessions", f"{int(s['sessions']):,}", "in the store"),
+        # Both numbers, because they answer different questions and the page shows both
+        # elsewhere: this card counts every session in the store, the picker and All sessions list
+        # only those with five or more transcript rows.
+        ("sessions", f"{int(s['sessions']):,}",
+         f"in the store, {int(s['listed'] or 0):,} listed on All sessions"),
         ("API calls", f"{api_calls:,}", f"{int(s['turn_rows']):,} transcript rows behind them"),
         ("subagent share", f"{(100.0 * sub_calls / api_calls) if api_calls else 0:.0f}%",
          f"{sub_calls:,} of {api_calls:,} are sidechain"),
@@ -58,9 +62,13 @@ def summary_layout(session_id=None, scope="main", cohort=None):
     ]
 
     return html.Div([
+        # Already the right sentence, now MARKED as the population line so the API reports it.
+        # It keeps its warning colour, which the shared style does not carry, because this is the
+        # one tab where a reader is most likely to assume the header selection applies.
         html.Div("Everything on this tab describes the WHOLE store, every session, all time. "
                  "The header selection changes nothing here. Every other tab describes only the "
-                 "selection.", style={**SECTION_NOTE, "color": WARN}),
+                 "selection.",
+                 className="population-note", style={**SECTION_NOTE, "color": WARN}),
 
         accordion("What to do about it", f"{len(rows)} finding(s), each with an action",
                   dash_table.DataTable(

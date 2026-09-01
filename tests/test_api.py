@@ -501,6 +501,47 @@ def test_no_column_tooltip_describes_a_different_table(client, tab_ids):
         "something else: " + " | ".join(offenders))
 
 
+def test_every_tab_states_which_population_it_describes(client, tab_ids, session_id):
+    """The app's own rule, applied to all eight rather than to the five that got a banner.
+
+    Summary, Cost and Compare are exempt from the shared banner because they state their population
+    in their own wording, which was the right call and stopped being visible: the API decided
+    whether a line WAS that statement by testing for the prefixes "Describing " and "Store-wide.",
+    so those three reported nothing and any rewording anywhere would have switched the field off
+    with no test failing. `theme.population_note` marks the line where it is written.
+    """
+    for tab in tab_ids:
+        for label, params in (("nothing selected", {}), ("a session", {"session": session_id})):
+            body = client.get(f"/api/tab/{tab}/render", params=params).json()
+            assert body["population"], f"{tab} with {label} does not say what it describes"
+
+
+def test_the_page_says_how_many_sessions_it_is_listing(client):
+    """One word for three numbers was the whole problem.
+
+    The Summary card counts every session in the store, the picker and All sessions list only those
+    with five or more transcript rows, and Compare's own row counts sessions with at least one API
+    call. Measured here: 1,325, 317 and 1,292, all labelled "sessions" with nothing reconciling
+    them, and the tab whose help read "Every session as a row and a point" was showing 317.
+    """
+    from c4x.store import cohort_options, overview_stats
+    stats = overview_stats()
+    assert stats["listed"] <= stats["sessions"]
+    if stats["listed"] == stats["sessions"]:
+        pytest.skip("this store lists every session, so there is no gap to disclose")
+
+    card = next(c for c in client.get("/api/tab/tab-summary/render").json()["stats"]
+                if c["label"].lower() == "sessions")
+    assert f"{stats['listed']:,}" in card["sub"], (
+        f"the Sessions card counts {stats['sessions']:,} and never says only "
+        f"{stats['listed']:,} are listed: {card['sub']!r}")
+    assert "listed" in cohort_options()[0]["label"], "the picker does not say what its count counts"
+
+    from c4x.theme import tab_help
+    assert "Every session" not in tab_help("tab-sessions"), \
+        "All sessions still claims to show every session while showing a subset"
+
+
 def test_the_cost_card_counts_calls_not_transcript_rows(client, session_id):
     """It divided by the wrong denominator and called the result calls.
 
