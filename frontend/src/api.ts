@@ -157,6 +157,29 @@ export interface Selection {
   cohort?: string | null
 }
 
+/** A project harvest has been told to stop capturing. */
+export interface Exclusion {
+  cwd: string
+  excluded_at: string | null
+  note: string | null
+}
+
+/** What `/api/project/import` reports back, per table. */
+export interface ImportReport {
+  project: string | null
+  from: string | null
+  inserted: Record<string, number>
+  already_present: Record<string, number>
+  dropped_columns: Record<string, string[]>
+}
+
+export interface DeleteReport {
+  project: string
+  backup: string
+  removed: Record<string, number>
+  excluded: boolean
+}
+
 export class ApiError extends Error {
   // Declared as fields rather than constructor parameter properties: this project builds with
   // `erasableSyntaxOnly`, which rejects the shorthand because it emits runtime code from what looks
@@ -195,15 +218,44 @@ async function get<T>(path: string, params: Record<string, unknown> = {}): Promi
   return response.json() as Promise<T>
 }
 
+async function post<T>(path: string, body: unknown): Promise<T> {
+  // FormData sets its own multipart boundary. Setting Content-Type by hand here strips the
+  // boundary and the server reads an empty upload, which it then correctly reports as an invalid
+  // export, blaming the file rather than the request.
+  const isForm = body instanceof FormData
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: isForm ? undefined : { 'Content-Type': 'application/json' },
+    body: isForm ? body : JSON.stringify(body),
+  })
+  if (!response.ok) {
+    let detail: unknown
+    try {
+      detail = (await response.json())?.detail
+    } catch {
+      detail = await response.text().catch(() => undefined)
+    }
+    throw new ApiError(`${response.status} from ${path}`, response.status, detail)
+  }
+  return response.json() as Promise<T>
+}
+
 export const api = {
   tabs: () => get<TabInfo[]>('/api/tabs'),
   cohorts: () => get<Cohort[]>('/api/cohorts'),
   /** The session picker's options, narrowed to the cohort by the SERVER. */
   selector: (cohort?: string | null) =>
     get<Cohort[]>('/api/selector', { cohort }),
-  health: () => get<{ ok: boolean; db: string; read_only: boolean; cache: Record<string, number> }>(
-    '/api/health',
-  ),
+  health: () =>
+    get<{
+      ok: boolean
+      db: string
+      /** This process never harvests. Always true on the API server. */
+      read_only: boolean
+      /** The project export/import/delete routes will answer. Off with `--no-writes`. */
+      writes_enabled: boolean
+      cache: Record<string, number>
+    }>('/api/health'),
   sessions: (limit = 200) =>
     get<{ rows: SessionRow[]; total: number }>('/api/sessions', { limit }),
   /** The drawing shape: tables, plus every chart as full Plotly JSON. */
@@ -213,4 +265,38 @@ export const api = {
       scope: selection.scope ?? 'main',
       cohort: selection.cohort,
     }),
+
+  /**
+   * Moving a project in and out of the store.
+   *
+   * EVERY ONE OF THESE TAKES THE COHORT VALUE UNCHANGED. It is `project::<path>`, and the server
+   * refuses anything that does not name a project, because a bare path resolves to no restriction:
+   * for a read that was a wrong session count this app already shipped once, and for a delete it
+   * would be the whole store. Do not take the value apart here to make it look nicer.
+   */
+  project: {
+    excluded: () =>
+      get<{ excluded: Exclusion[]; writes_enabled: boolean }>('/api/project/excluded'),
+
+    /** The download URL, not a fetch. The browser saves the file; nothing passes through JS. */
+    exportUrl: (cohort: string) =>
+      `/api/project/export?cohort=${encodeURIComponent(cohort)}`,
+
+    import: (file: File) => {
+      const body = new FormData()
+      body.append('file', file)
+      return post<ImportReport>('/api/project/import', body)
+    },
+
+    /** `confirm` must be the project path exactly. The server checks it; this does not. */
+    delete: (cohort: string, confirm: string, keepCapturing = false) =>
+      post<DeleteReport>('/api/project/delete', {
+        cohort,
+        confirm,
+        keep_capturing: keepCapturing,
+      }),
+
+    include: (project: string) =>
+      post<{ project: string; removed: number }>('/api/project/include', { project }),
+  },
 }
