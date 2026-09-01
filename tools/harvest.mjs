@@ -319,13 +319,37 @@ export function messageText(d) {
   return parts.join('\n');
 }
 
-// The record's own label, kept distinct from role so a compact summary stays findable. It arrives
-// as type:'user' with isCompactSummary:true, which would otherwise be indistinguishable from a
-// prompt the user typed.
+// WHAT WROTE THIS RECORD, which is not the same as what type of record it is.
+//
+// Claude Code files a TOOL RESULT as a record of type 'user'. Measured across every transcript on
+// this machine, 86.5% of the 31,666 records typed 'user' were tool results and 13.0% were typed by
+// a person; store-wide the 'user' rows hold 563M characters against the assistant's 69M, which no
+// one types. This function used to return the record's `type`, so a directory listing and a
+// question were stored identically and the Session tab labelled both "user".
+//
+// The block types are the evidence, and `messageText` already walks past them. Order matters: a
+// compact summary is a 'user' record whose content is a plain STRING, so it has to be recognised
+// before the string case claims it.
 export function messageKind(d) {
   if (d?.isCompactSummary === true) return 'compact_summary';
   if (d?.type === 'system' && d?.subtype) return `system/${d.subtype}`;
-  return typeof d?.type === 'string' ? d.type : 'unknown';
+  if (d?.type === 'assistant') return 'assistant';
+  if (d?.type !== 'user') return typeof d?.type === 'string' ? d.type : 'unknown';
+
+  const c = d?.message?.content;
+  if (typeof c === 'string') return 'typed';
+  if (!Array.isArray(c)) return 'unknown';
+  const kinds = new Set();
+  for (const b of c) {
+    if (typeof b === 'string') { kinds.add('text'); continue; }
+    if (b && typeof b === 'object' && typeof b.type === 'string') kinds.add(b.type);
+  }
+  // A tool result decides the record even when a text block rides along with it: the bulk is the
+  // tool's output and calling it typed would be the whole defect again.
+  if (kinds.has('tool_result')) return 'tool_result';
+  if (kinds.has('image') || kinds.has('document')) return 'attachment';
+  if (kinds.has('text')) return 'typed';
+  return 'unknown';
 }
 
 // Exported so tools/make_fixture.mjs can build a synthetic store through the SAME schema and
@@ -546,6 +570,114 @@ export async function backfillAgents(dbPath = DB_PATH, { quiet = false } = {}) {
   db.close();
   // A backfill that changed a row count did something it is not allowed to do, and the exit code
   // has to say so: this runs unattended from a script as often as it runs by hand.
+  return report.rows_unchanged ? 0 : 1;
+}
+
+/**
+ * Fill in WHAT WROTE each stored message, for rows captured before the harvester recorded it.
+ *
+ * `messageKind` used to return the record's `type`, and Claude Code files a tool result as a
+ * record of type 'user'. So 190,936 rows on this machine say "user" whether a person typed them or
+ * a tool produced them, and the distinction cannot be recovered from the stored text: `messageText`
+ * folds a tool_result's content into the same field as prose. Only the transcripts still have it.
+ *
+ * UPDATE ONLY. It may change `messages.type` and nothing else, and the report proves that with a
+ * row count taken over rows that already existed rather than over the whole table, because three
+ * writers exist by design and a concurrent INSERT is not this tool's doing. Same guard, and for
+ * the same reason, as backfillAgents above.
+ *
+ * ROWS IT CANNOT REACH ARE MARKED AND COUNTED. A transcript that has been deleted or came from
+ * another machine cannot say what wrote its messages, and leaving those rows reading "user" would
+ * make them look like something a person typed. They are set to 'unknown' instead, which is what
+ * this store actually knows about them.
+ */
+export async function backfillMessageSource(dbPath = DB_PATH,
+                                            { quiet = false, projects = PROJECTS } = {}) {
+  const db = openDb(dbPath);
+  const setKind = db.prepare('UPDATE messages SET type = ? WHERE uuid = ? AND type <> ?');
+
+  const highWater = db.prepare('SELECT COALESCE(MAX(rowid), 0) n FROM messages').get().n;
+  const existing = () => db.prepare(
+    'SELECT COUNT(*) n FROM messages WHERE rowid <= ?').get(highWater).n;
+  const census = () => db.prepare(
+    'SELECT type, COUNT(*) n FROM messages GROUP BY 1 ORDER BY n DESC').all();
+  const before = {
+    rows: existing(),
+    total: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
+    by_type: census(),
+  };
+
+  const files = listTranscripts(projects);
+  let scanned = 0, unreadable = 0, updated = 0;
+  const perFile = [];
+  for (const path of files) {
+    scanned++;
+    let text;
+    try { text = readFileSync(path, 'utf8'); } catch { unreadable++; continue; }
+    let changed = 0;
+    for (const line of text.split('\n')) {
+      // A cheap string test before JSON.parse, like the backfills above: parsing every line of
+      // 10 GB to read two fields is the cost this approach exists to avoid.
+      if (!line || !line.includes('"uuid"')) continue;
+      let d;
+      try { d = JSON.parse(line); } catch { continue; }
+      if (typeof d?.uuid !== 'string') continue;
+      const kind = messageKind(d);
+      changed += setKind.run(kind, d.uuid, kind).changes;
+    }
+    updated += changed;
+    if (changed) perFile.push({ file: path, updated: changed });
+    if (!quiet && scanned % 1000 === 0) {
+      console.error(`  ${scanned}/${files.length} files, ${updated} messages relabelled`);
+    }
+  }
+
+  // The rows no transcript could speak for. Found by asking the store which files it recorded and
+  // which of those are gone, rather than by assuming the scan above covered everything: a file
+  // outside ~/.claude/projects is in `messages` and not in `listTranscripts`.
+  const stale = [];
+  for (const row of db.prepare(
+    'SELECT DISTINCT file_path FROM messages WHERE file_path IS NOT NULL').all()) {
+    if (!existsSync(row.file_path)) stale.push(row.file_path);
+  }
+  // ONLY the rows that are genuinely ambiguous. An assistant record is already classified by
+  // its own record type, so marking it unknown because its transcript is gone would destroy a
+  // label this store does have. Found by running the backfill twice: the second pass relabelled
+  // 185 assistant rows it had no business touching.
+  const markUnknown = db.prepare(
+    "UPDATE messages SET type = 'unknown' WHERE file_path = ? AND type = 'user'");
+  let unreachable = 0;
+  for (const path of stale) unreachable += markUnknown.run(path).changes;
+
+  const after = {
+    rows: existing(),
+    total: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
+    by_type: census(),
+  };
+  const report = {
+    files_scanned: scanned,
+    files_unreadable: unreadable,
+    files_that_contributed: perFile.length,
+    messages_relabelled: updated,
+    transcripts_gone: stale.length,
+    // Not a warning. These rows can never be classified, and saying so is the difference between
+    // a gap and a silent one.
+    messages_marked_unknown_because_their_transcript_is_gone: unreachable,
+    rows_before: before.rows,
+    rows_after: after.rows,
+    rows_unchanged: before.rows === after.rows,
+    written_by_other_writers_meanwhile: after.total - before.total,
+    by_type_before: before.by_type,
+    by_type_after: after.by_type,
+    // Rows still carrying the old record-type label. 'assistant' is NOT in this count: it is
+    // the correct final answer for an assistant message, and counting it made a working backfill
+    // report 92,146 failures.
+    still_unclassified: db.prepare(
+      "SELECT COUNT(*) n FROM messages WHERE type = 'user'").get().n,
+    busiest_files: perFile.sort((a, b) => b.updated - a.updated).slice(0, 5),
+  };
+  if (!quiet) console.log(JSON.stringify(report, null, 2));
+  db.close();
   return report.rows_unchanged ? 0 : 1;
 }
 
@@ -1113,6 +1245,107 @@ async function selfTest() {
     checks.push(['the removed C4X_NO_TEXT opt-out no longer suppresses capture (gate can fail)', n > 0]);
   }
 
+  // WHAT WROTE A MESSAGE, which the store used to answer with the record's type.
+  //
+  // Claude Code files a tool result as a record of type 'user'. Measured across every transcript on
+  // this machine, 86.5% of the records typed 'user' were tool results and 13.0% were typed by a
+  // person, and both were stored as "user". Every shape below is one the transcripts really
+  // contain; the ones marked as gates are the classifications that were wrong before.
+  {
+    const user = (content, extra = {}) => ({ type: 'user', message: { content }, ...extra });
+    checks.push(['a typed string is typed', messageKind(user('hello')) === 'typed']);
+    checks.push(['a text block is typed',
+      messageKind(user([{ type: 'text', text: 'hi' }])) === 'typed']);
+    checks.push(['a tool result is NOT typed (gate can fail)',
+      messageKind(user([{ type: 'tool_result', content: 'ls output' }])) === 'tool_result']);
+    // A tool result usually arrives alone, but a text block can ride along. The bulk is still the
+    // tool's output, and calling that typed is the whole defect again.
+    checks.push(['a tool result beside a text block is still a tool result (gate can fail)',
+      messageKind(user([{ type: 'tool_result', content: 'x' }, { type: 'text', text: 'y' }]))
+        === 'tool_result']);
+    checks.push(['an image is an attachment',
+      messageKind(user([{ type: 'image', source: {} }])) === 'attachment']);
+    checks.push(['a document is an attachment',
+      messageKind(user([{ type: 'document', source: {} }])) === 'attachment']);
+    // ORDER MATTERS: a compact summary is a 'user' record whose content is a plain string, so the
+    // string case would claim it if it were tested first.
+    checks.push(['a compact summary is not mistaken for typing',
+      messageKind(user('This session is being continued', { isCompactSummary: true }))
+        === 'compact_summary']);
+    checks.push(['an assistant record is assistant',
+      messageKind({ type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] } })
+        === 'assistant']);
+    checks.push(['a system record keeps its subtype',
+      messageKind({ type: 'system', subtype: 'compact_boundary' }) === 'system/compact_boundary']);
+  }
+
+  // The backfill, against a store seeded the way the OLD harvester wrote one.
+  {
+    const dir = join(tmp, 'backfill');
+    mkdirSync(join(dir, 'projects', 'P--x'), { recursive: true });
+    const tf2 = join(dir, 'projects', 'P--x', 'sess.jsonl');
+    const rows2 = [
+      { type: 'user', uuid: 'b-typed', sessionId: 'bs', timestamp: '2026-08-20T00:00:00Z',
+        message: { role: 'user', content: 'a question' } },
+      { type: 'user', uuid: 'b-tool', sessionId: 'bs', timestamp: '2026-08-20T00:00:01Z',
+        message: { role: 'user',
+                   content: [{ type: 'tool_result', tool_use_id: 'tu', content: 'a listing' }] } },
+      { type: 'assistant', uuid: 'b-asst', sessionId: 'bs', timestamp: '2026-08-20T00:00:02Z',
+        message: { model: 'claude-opus-5', content: [{ type: 'text', text: 'an answer' }] } },
+    ];
+    writeFileSync(tf2, rows2.map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+    const dbFile = join(dir, 'store.db');
+    rmSync(dbFile, { force: true });
+    const seed = openDb(dbFile);
+    const ins = seed.prepare(`INSERT INTO messages (uuid,session_id,ts,role,type,text,chars,file_path)
+                              VALUES (?,?,?,?,?,?,?,?)`);
+    ins.run('b-typed', 'bs', '2026-08-20T00:00:00Z', 'user', 'user', 'a question', 10, tf2);
+    ins.run('b-tool', 'bs', '2026-08-20T00:00:01Z', 'user', 'user', 'a listing', 9, tf2);
+    ins.run('b-asst', 'bs', '2026-08-20T00:00:02Z', 'assistant', 'assistant', 'an answer', 9, tf2);
+    // A row whose transcript is gone. It can never be classified, and must not keep a label that
+    // reads as something a person typed.
+    ins.run('b-orphan', 'bs', '2026-08-20T00:00:03Z', 'user', 'user', 'lost', 4,
+            join(dir, 'gone.jsonl'));
+    // An ASSISTANT row whose transcript is also gone. Without this shape the fixture cannot tell a
+    // correct backfill from one that sweeps 'assistant' into 'unknown', which is the bug the real
+    // store exposed on a second pass and which this self-test failed to catch until the row
+    // existed. Its label is already known from the record type and must survive.
+    ins.run('b-asst-gone', 'bs', '2026-08-20T00:00:04Z', 'assistant', 'assistant', 'said', 4,
+            join(dir, 'gone.jsonl'));
+    const seeded = seed.prepare('SELECT COUNT(*) n FROM messages').get().n;
+    seed.close();
+
+    const code2 = await backfillMessageSource(dbFile,
+      { quiet: true, projects: join(dir, 'projects') });
+
+    const check = openDb(dbFile);
+    const typeOf = (uuid) => check.prepare('SELECT type FROM messages WHERE uuid = ?').get(uuid).type;
+    checks.push(['backfill: it exits 0', code2 === 0]);
+    checks.push(['backfill: a typed message is relabelled typed', typeOf('b-typed') === 'typed']);
+    checks.push(['backfill: a tool result is relabelled tool_result (gate can fail)',
+      typeOf('b-tool') === 'tool_result']);
+    checks.push(['backfill: an assistant message stays assistant', typeOf('b-asst') === 'assistant']);
+    checks.push(['backfill: a row whose transcript is gone is marked unknown, not left as user',
+      typeOf('b-orphan') === 'unknown']);
+    checks.push(['backfill: it created no row',
+      check.prepare('SELECT COUNT(*) n FROM messages').get().n === seeded]);
+    // Running it again must change nothing. The first version relabelled 185 assistant rows on
+    // every pass, because the unknown-marking swept 'assistant' as well as 'user'.
+    const again = await backfillMessageSource(dbFile,
+      { quiet: true, projects: join(dir, 'projects') });
+    const after2 = openDb(dbFile);
+    checks.push(['backfill: a second run changes nothing (gate can fail)',
+      again === 0
+        && after2.prepare("SELECT COUNT(*) n FROM messages WHERE type = 'unknown'").get().n === 1
+        && after2.prepare("SELECT type FROM messages WHERE uuid = 'b-asst'").get().type === 'assistant'
+        // The one that matters: its transcript is gone, and it is still an assistant message.
+        && after2.prepare("SELECT type FROM messages WHERE uuid = 'b-asst-gone'").get().type
+             === 'assistant']);
+    after2.close();
+    check.close();
+  }
+
   // The exclusion, and the defect it exists to prevent.
   //
   // Both transcripts live in the SAME slug directory and have DIFFERENT working directories, which
@@ -1444,5 +1677,7 @@ else if (argv.includes('--stats')) code = stats();
 else if (argv.includes('--backfill-survivors')) code = backfillSurvivors(DB_PATH) ? 0 : 1;
 else if (argv.includes('--backfill-titles')) code = await backfillTitles();
 else if (argv.includes('--backfill-agents')) code = await backfillAgents(resolveDbPath(argv));
+else if (argv.includes('--backfill-message-source'))
+  code = await backfillMessageSource(resolveDbPath(argv));
 else code = await run({ full: argv.includes('--full') });
 if (IS_ENTRY) process.exit(code);
