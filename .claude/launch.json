@@ -4,13 +4,21 @@
     {
       "name": "c4x-frontend",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--prefix",
+        "frontend"
+      ],
       "port": 5173
     },
     {
-      "name": "c4x-api-on-a-copy",
+      "name": "c4x-api",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "c4x.api", "--db", "tmp/rt/copy.db"],
+      "runtimeArgs": [
+        "-m",
+        "c4x.api"
+      ],
       "port": 8059
     }
   ]
