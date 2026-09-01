@@ -88,20 +88,30 @@ def session_ids(con, project):
 
     `ttl=0` because a 45-second-old answer would be a set from before the last import.
 
-    THE SECOND HALF IS NOT REDUNDANT. `session_rows()` reads FROM turns, so a session with no turn
-    at all is invisible to it: 23 of 1,325 here, 5 of them holding messages. Those cannot have been
-    attributed to some other project by the archived rule, because they are not in that table under
-    any label, so their own cwd is the only evidence there is and it is safe to use.
+    THE SECOND HALF IS NOT REDUNDANT, and getting its condition wrong cost 79 sessions.
+
+    `session_rows()` does not merely read FROM turns, it also drops any session with fewer than
+    FIVE of them (`HAVING COUNT(*) >= 5`). Measured on this store that is 1,008 of 1,325 sessions,
+    985 of which have between one and four turns. An earlier version of this asked for sessions
+    with NO turns, so those 985 were in neither half: exporting one 137-session project carried 58
+    of them and said nothing, and a delete would have left the other 79 behind with their project
+    already marked excluded.
+
+    So the test is "not in session_rows AT ALL", not "has no turns". A session the page cannot see
+    under any label cannot have been attributed to another project by the archived rule, so its own
+    cwd is the only evidence there is and it is safe to use.
     """
     from c4x import store
+    # ONE uncached read, not two. `ttl=0` here refreshes the shared cache, so the `session_rows()`
+    # below is served from what this call just put there. Asking for ttl=0 twice runs the GROUP BY
+    # over every turn in the store a second time, which turned a sweep of 515 projects into
+    # something that did not finish in ten minutes.
     ids = list(store.cohort_sessions(f"project::{project}", ttl=0))
     known = set(ids)
-    invisible = con.execute(
-        """SELECT session_id FROM sessions
-            WHERE cwd = ?
-              AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id = sessions.session_id)""",
-        (project,)).fetchall()
-    ids.extend(r[0] for r in invisible if r[0] not in known)
+    seen = store.session_rows()
+    visible = set(seen["session_id"]) if not seen.empty else set()
+    unseen = con.execute("SELECT session_id FROM sessions WHERE cwd = ?", (project,)).fetchall()
+    ids.extend(r[0] for r in unseen if r[0] not in known and r[0] not in visible)
     return ids
 
 
