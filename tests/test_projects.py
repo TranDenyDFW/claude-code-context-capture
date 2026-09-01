@@ -288,6 +288,52 @@ class TestWhichSessionsAProjectOwns:
         con.close()
         assert left == len(AWKWARD), "an archived session was deleted with the plain project"
 
+    def test_a_session_the_page_cannot_see_is_still_found(self, store_at):
+        """The gap that cost 79 sessions.
+
+        `session_rows()` does not just read FROM turns, it drops any session with fewer than FIVE
+        of them. A session with one turn is invisible to the page and has turns, so a fallback
+        asking for sessions with NO turns missed it. On the real store that is 985 sessions, and
+        one 137-session project exported 58 of them without a word.
+        """
+        con = sqlite3.connect(str(store_at))
+        con.execute("INSERT INTO sessions (session_id, cwd) VALUES ('faint', ?)", (r"P:\Alpha",))
+        for i in range(4):                      # four turns: below the page's threshold of five
+            con.execute("""INSERT INTO turns (uuid, session_id, ts, total_resident)
+                           VALUES (?, 'faint', '2026-08-01T00:00:00Z', 1)""", (f"faint-t{i}",))
+        con.commit()
+        assert "faint" in projects.session_ids(con, r"P:\Alpha"), \
+            "a session the page cannot see was left out of its own project"
+        con.close()
+
+    def test_every_session_belongs_to_exactly_one_project(self, store_at, monkeypatch):
+        """A partition, checked over every project at once.
+
+        Not "does project X have all its sessions", which is the check that got this wrong: an
+        archived chat keeps its cwd and moves to `<cwd>rchived`, so counting by cwd reported 13
+        false misses. What has to hold is that no session is lost and none is claimed twice.
+        """
+        from c4x import store
+        TestWhichSessionsAProjectOwns.mark_archived(monkeypatch, ["s0-0"])
+        con = sqlite3.connect(str(store_at))
+        con.execute("INSERT INTO sessions (session_id, cwd) VALUES ('faint', ?)", (r"P:\Alpha",))
+        con.execute("""INSERT INTO turns (uuid, session_id, ts, total_resident)
+                       VALUES ('faint-t', 'faint', '2026-08-01T00:00:00Z', 1)""")
+        con.commit()
+
+        names = {str(p) for p in store.session_rows(0)["project"]}
+        names |= {r[0] for r in con.execute(
+            "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL").fetchall()}
+        claimed = {}
+        for name in names:
+            for sid in projects.session_ids(con, name):
+                claimed[sid] = claimed.get(sid, 0) + 1
+        every = {r[0] for r in con.execute("SELECT session_id FROM sessions").fetchall()}
+        con.close()
+
+        assert [s for s, n in claimed.items() if n > 1] == [], "a session belongs to two projects"
+        assert sorted(every - set(claimed)) == [], "a session belongs to no project at all"
+
     def test_a_session_with_no_turns_is_still_found(self, store_at):
         """`session_rows()` reads FROM turns, so it cannot see one. 23 of 1,325 in the real store.
 
