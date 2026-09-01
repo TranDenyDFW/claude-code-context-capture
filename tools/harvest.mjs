@@ -880,6 +880,10 @@ async function run({ full }) {
   const out = {
     mode: full ? 'full' : 'incremental',
     files_seen: h.stats.filesSeen, files_read: h.stats.filesRead, rewritten_files: h.stats.rewrites,
+    // REPORTED, not merely counted. A run that quietly reads fewer files than it saw is
+    // indistinguishable from a run where nothing was there, and the whole point of an exclusion
+    // is that the absence afterwards is deliberate rather than a fault.
+    excluded_files: h.stats.excludedFiles,
     lines: h.stats.lines, mb: +(h.stats.bytes / 1048576).toFixed(1),
     turn_records_seen: h.stats.turns, turn_rows_stored: rowTurns,
     // Only comparable on a full run: records_seen is per-run, rows_stored is cumulative.
@@ -893,6 +897,7 @@ async function run({ full }) {
   };
   console.log(JSON.stringify(out, null, 2));
   if (h.stats.rewrites > 0) process.stderr.write(`WARNING: ${h.stats.rewrites} transcript(s) shrank since last harvest (local GC?). Re-read in full.\n`);
+  if (h.stats.excludedFiles > 0) process.stderr.write(`NOTE: ${h.stats.excludedFiles} transcript(s) skipped, their project is in excluded_projects. Diagnostics lists them.\n`);
   db.close();
   return 0;
 }
