@@ -198,9 +198,18 @@ for (const session of SESSIONS) {
       }
     }
 
+    // THE VOCABULARY THE HARVESTER USES, not a placeholder. This wrote 'message' for every row,
+    // which is a value `messageKind` never produces, so a test asserting anything about who wrote
+    // a message passed against the real store and failed against the fixture. A fixture that
+    // cannot produce the app's own values is green against a database the app would never open.
+    //
+    // Two thirds of the user-side rows are tool results, which is the shape of a real store: the
+    // live one is 178,041 tool results against 12,964 typed.
+    const role = turn % 2 === 0 ? 'user' : 'assistant';
+    const wroteIt = role === 'assistant' ? 'assistant' : (turn % 3 === 0 ? 'typed' : 'tool_result');
     const text = `Fixture message ${turn} for ${session.id}. Synthetic text, not a real conversation.`;
-    insertMessage.run(`${uuid}-msg`, session.id, ts, turn % 2 === 0 ? 'user' : 'assistant',
-                      'message', text, text.length, model, requestId,
+    insertMessage.run(`${uuid}-msg`, session.id, ts, role,
+                      wroteIt, text, text.length, model, requestId,
                       'fixture://transcript.jsonl', turn + 1);
     uuidsSinceCompaction.push(`${uuid}-msg`);
 

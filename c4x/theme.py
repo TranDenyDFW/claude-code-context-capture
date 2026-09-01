@@ -330,6 +330,16 @@ def empty_fig(msg: str) -> go.Figure:
 # These are deliberately blunt. A tooltip that hedges is worse than no tooltip, because the reader
 # still has to go and check.
 COLUMN_HELP = {
+    # The Messages table. Both of these had no explanation at all, which is how the first one went
+    # unnoticed: it says "user" for a directory listing.
+    "role": ("The transcript RECORD's own type, which is a transport fact and not authorship. "
+             "Claude Code files a tool result as a record of type `user`, so this column says "
+             "`user` whether a person typed it or a tool produced it. `Written By` is the column "
+             "that answers who."),
+    "type": ("What actually wrote this message: `typed` by a person, `tool_result` produced by a "
+             "tool, `compact_summary` written by the compactor, `attachment` for an image or "
+             "document, or `assistant`. `unknown` means the transcript it came from is no longer "
+             "on this machine, so nothing can say."),
     # All sessions
     "turns": ("Every transcript row for this session, subagent work included, whichever way the "
               "main thread / include subagents radio is set. The Session tab respects that radio, "
@@ -429,6 +439,11 @@ COLUMN_LABEL = {
     # of API calls. The tooltip always said "every transcript row"; the header said "Turns", and
     # the header is what a reader takes the number's meaning from.
     "turns": "Transcript Rows",
+    # NOT "Role" and "Type". Both were the transcript record's own `type` field, so a directory
+    # listing and a question both read "user" and nothing on the page distinguished them.
+    # Measured: 86.5% of the records typed 'user' were tool results.
+    "role": "Record Type",
+    "type": "Written By",
     "est_usd": "Est. USD",
     "duration_ms": "Duration (ms)",
     "auto_compact_threshold": "Auto-Compact Threshold",

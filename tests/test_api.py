@@ -615,6 +615,47 @@ def test_the_population_scope_matches_the_sentence_it_labels(client, tab_ids, se
                 f"{body['population']!r}")
 
 
+def test_the_messages_table_says_who_wrote_each_message(client, session_id):
+    """It said "user" for a directory listing.
+
+    Claude Code files a tool result as a transcript record of type `user`, and the store kept that
+    field in BOTH the role and type columns, so a tool's output and a typed question were
+    indistinguishable. Measured store-wide after the backfill: of 193,102 rows that read `user`,
+    178,041 were tool results, 12,964 were typed and 2,016 came from transcripts no longer on this
+    machine. `role` still carries the record type, which is a transport fact; `type` now carries
+    authorship.
+    """
+    from c4x.store import q
+    from c4x.theme import COLUMN_HELP, column_label
+
+    assert column_label("role") != "Role", "the record type column still reads as authorship"
+    assert column_label("type") == "Written By"
+    assert COLUMN_HELP.get("role"), "the record type column has no explanation"
+    assert COLUMN_HELP.get("type"), "the authorship column has no explanation"
+
+    # THE INVARIANT, which holds on any store: nothing may still be labelled with the record type.
+    kinds = set(q("SELECT DISTINCT type FROM messages")["type"])
+    assert "user" not in kinds, (
+        "messages still carry the record type as their authorship. Run "
+        "`node tools/harvest.mjs --backfill-message-source`.")
+    # And the vocabulary is real, not a placeholder. This is asserted against the values the
+    # harvester can produce rather than against a count, so it says the same thing on the fixture
+    # store and on the real one. The fixture used to write "message" for every row, which
+    # `messageKind` never produces, and that is what made the first version of this check pass
+    # here and fail in the suite's second pytest run.
+    KNOWN = {"typed", "tool_result", "attachment", "compact_summary", "assistant", "unknown"}
+    unexpected = {k for k in kinds if k and not str(k).startswith("system/")} - KNOWN
+    assert not unexpected, f"messages carry a label nothing produces: {sorted(unexpected)}"
+    assert kinds & {"typed", "tool_result"}, "no message is attributed to a person or a tool"
+
+    body = client.get("/api/tab/tab-session/render", params={"session": session_id}).json()
+    table = next((t for t in body["tables"]
+                  if "type" in (t["columns"] or []) and "preview" in (t["columns"] or [])), None)
+    assert table, "the Session tab has no messages table"
+    shown = {r["type"] for r in table["rows"]}
+    assert "user" not in shown, f"the table still labels a message 'user': {sorted(shown)}"
+
+
 def test_the_cost_card_counts_calls_not_transcript_rows(client, session_id):
     """It divided by the wrong denominator and called the result calls.
 
