@@ -10,6 +10,7 @@ The one thing to know before changing a query here: **sum api_calls, never turns
 assistant message is written as several transcript rows sharing one request id, so summing turns
 counts the same API call two to eight times.
 """
+import contextlib
 import glob
 import json
 import os
@@ -100,8 +101,39 @@ def predict(tokens: int, window: int):
 
 
 # ---------------------------------------------------------------------------
-# Data access. Read-only; the app never writes to the store.
+# Data access. Reads go through q(), which is read-only. Writes go through write(), which is not,
+# and that is the entire list of ways this package can change the store.
 # ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def write():
+    """A read-write connection, for the few operations that are allowed to change the store.
+
+    SEPARATE FROM `q` ON PURPOSE, and not merely because the mode string differs. Every read in this
+    package opens `mode=ro`, so until now "does anything here write?" was answerable by reading one
+    function. Keeping the write path its own named function keeps that property: `store.write` is
+    greppable, and anything that does not call it cannot write.
+
+    Used by `c4x/projects.py` and nothing else. Deleting a project and importing one are deliberate,
+    user-initiated operations; the refresh tick is not one of them, which is what `C4X_READ_ONLY`
+    governs and why that flag is about HARVESTING rather than about writing in general.
+
+    Committed on a clean exit and rolled back on any exception, because the operations that use this
+    span several tables with no foreign keys to tidy up after a half-finished one.
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"No store at {DB_PATH}.")
+    con = sqlite3.connect(str(DB_PATH))
+    try:
+        con.execute("PRAGMA foreign_keys = ON")
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def q(sql: str, params=()) -> pd.DataFrame:
     if not DB_PATH.exists():
         raise FileNotFoundError(
