@@ -179,6 +179,12 @@ CREATE TABLE IF NOT EXISTS session_titles (
   line_no INTEGER,
   PRIMARY KEY (session_id, kind)
 );
+-- A project the user deleted and asked to stop capturing. Keyed on cwd, not on the transcript
+-- directory: the mapping is many-to-many, the 'subagents' slug alone covers 30 different working
+-- directories, and excluding one of those by slug would silently stop capturing the other 29.
+CREATE TABLE IF NOT EXISTS excluded_projects (
+  cwd TEXT PRIMARY KEY, excluded_at TEXT, note TEXT
+);
 CREATE TABLE IF NOT EXISTS record_types (type TEXT PRIMARY KEY, n INTEGER);
 CREATE TABLE IF NOT EXISTS harvest_runs (
   ts TEXT, mode TEXT, files_seen INTEGER, files_read INTEGER, rewrites INTEGER,
@@ -626,7 +632,24 @@ class Harvest {
     };
     this.typeCounts = new Map();
     this.unknownSeen = new Set();
-    this.stats = { filesSeen: 0, filesRead: 0, rewrites: 0, lines: 0, bytes: 0, turns: 0, compactions: 0, paired: 0, toolCalls: 0, toolResults: 0, messages: 0, messageChars: 0 };
+    this.stats = { filesSeen: 0, filesRead: 0, rewrites: 0, lines: 0, bytes: 0, turns: 0, compactions: 0, paired: 0, toolCalls: 0, toolResults: 0, messages: 0, messageChars: 0, excludedFiles: 0 };
+    this.loadExclusions();
+  }
+
+  // Two lookups, both built once per run rather than queried per file.
+  //
+  // `excludedCwds` is the real rule. `excludedPaths` is only a shortcut for the case where the
+  // rows are still here: excluding a project WITHOUT deleting it leaves sessions.cwd in place, so
+  // the transcript can be recognised before it is opened. After a delete there is no session row
+  // and no offset row, so the file is re-read from byte 0 and caught by the in-loop check instead.
+  loadExclusions() {
+    this.excludedCwds = new Set(
+      this.db.prepare('SELECT cwd FROM excluded_projects').all().map((r) => r.cwd));
+    this.excludedPaths = this.excludedCwds.size === 0 ? new Set() : new Set(
+      this.db.prepare(`SELECT DISTINCT transcript_path FROM sessions
+                        WHERE transcript_path IS NOT NULL
+                          AND cwd IN (SELECT cwd FROM excluded_projects)`)
+        .all().map((r) => r.transcript_path));
   }
 
   countType(t) { this.typeCounts.set(t, (this.typeCounts.get(t) || 0) + 1); }
@@ -644,6 +667,7 @@ class Harvest {
   }
 
   async file(path, full) {
+    if (this.excludedPaths.has(path)) { this.stats.excludedFiles++; return; }
     const st = statSync(path);
     const prev = full ? null : this.stmt.getFile.get(path);
     let start = 0, lineNo = 0, rewritten = false;
@@ -674,6 +698,21 @@ class Harvest {
       const type = typeof d.type === 'string' ? d.type : 'NO_TYPE_FIELD';
       this.countType(d.type === 'system' && d.subtype ? `system/${d.subtype}` : type);
       if (!KNOWN_TYPES.has(type) && type !== 'NO_TYPE_FIELD') this.noteUnknown(type, line);
+
+      // The first record carrying a cwd decides whether this file is read at all. Abandoning here
+      // costs one parsed record for an excluded transcript, and nothing is written: no rows, and
+      // no `files` offset either. An offset would make the exclusion permanent, because lifting it
+      // would resume from the end of a file whose earlier half was never stored.
+      //
+      // A transcript whose records never carry a cwd cannot be attributed to a project, so it is
+      // never excluded. That is a real gap and it is deliberate: the alternative is guessing from
+      // the slug, which is the many-to-many mistake this design exists to avoid.
+      if (d.cwd && this.excludedCwds.has(d.cwd)) {
+        rl.close();
+        this.stats.excludedFiles++;
+        this.stats.filesRead--;
+        return;
+      }
 
       if (d.sessionId) {
         this.stmt.putSession.run(d.sessionId, projectSlug, d.cwd ?? null, d.gitBranch ?? null,
@@ -1067,6 +1106,52 @@ async function selfTest() {
     }
     const n = t.prepare('SELECT COUNT(*) n FROM messages').get().n;
     checks.push(['the removed C4X_NO_TEXT opt-out no longer suppresses capture (gate can fail)', n > 0]);
+  }
+
+  // The exclusion, and the defect it exists to prevent.
+  //
+  // Both transcripts live in the SAME slug directory and have DIFFERENT working directories, which
+  // is the real shape of this store: the 'subagents' slug alone covers 30 of them. Excluding by
+  // slug would take out both, so the check is that the OTHER one still lands.
+  //
+  // The second half is the must-fail control. Without it this only proves harvest did nothing,
+  // which is indistinguishable from a harvester that is simply broken.
+  {
+    const shared = join(tmp, 'projects', 'shared-slug');
+    mkdirSync(shared, { recursive: true });
+    const gone = join(shared, 'gone.jsonl');
+    const stays = join(shared, 'stays.jsonl');
+    const rec = (sid, cwd, uuid) => JSON.stringify({
+      type: 'assistant', uuid, sessionId: sid, timestamp: '2026-08-20T00:00:00Z',
+      requestId: `r-${uuid}`, isSidechain: false, cwd,
+      message: { model: 'claude-opus-5', usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 } },
+    }) + '\n';
+    writeFileSync(gone, rec('x-gone', 'P:\\Excluded', 'g1'));
+    writeFileSync(stays, rec('x-stays', 'P:\\Kept', 'k1'));
+
+    const t = new DatabaseSync(':memory:');
+    t.exec(SCHEMA);
+    t.prepare('INSERT INTO excluded_projects (cwd,excluded_at,note) VALUES (?,?,?)')
+      .run('P:\\Excluded', '2026-08-31T00:00:00Z', 'self-test');
+
+    const hx = new Harvest(t);
+    await hx.file(gone, true);
+    await hx.file(stays, true);
+    const seen = (cwd) => t.prepare('SELECT COUNT(*) n FROM sessions WHERE cwd = ?').get(cwd).n;
+    checks.push(['excluded cwd is not captured', seen('P:\\Excluded') === 0]);
+    checks.push(['a project sharing the slug IS still captured', seen('P:\\Kept') === 1]);
+    checks.push(['no turns stored for the excluded transcript',
+      t.prepare('SELECT COUNT(*) n FROM turns WHERE uuid = ?').get('g1').n === 0]);
+    // No offset row, or lifting the exclusion would resume past everything it skipped.
+    checks.push(['no harvest offset written for the excluded transcript',
+      t.prepare('SELECT COUNT(*) n FROM files WHERE path = ?').get(gone).n === 0]);
+    checks.push(['the excluded file is counted, not silently ignored', hx.stats.excludedFiles === 1]);
+
+    // Must-fail control: lift it and the same file must now land.
+    t.prepare('DELETE FROM excluded_projects').run();
+    const hy = new Harvest(t);
+    await hy.file(gone, true);
+    checks.push(['lifting the exclusion lets it back in (gate can fail)', seen('P:\\Excluded') === 1]);
   }
 
   // api_calls: one row per API call, not per transcript entry.
