@@ -10,6 +10,7 @@ The one thing to know before changing a query here: **sum api_calls, never turns
 assistant message is written as several transcript rows sharing one request id, so summing turns
 counts the same API call two to eight times.
 """
+import contextlib
 import glob
 import json
 import os
@@ -100,8 +101,39 @@ def predict(tokens: int, window: int):
 
 
 # ---------------------------------------------------------------------------
-# Data access. Read-only; the app never writes to the store.
+# Data access. Reads go through q(), which is read-only. Writes go through write(), which is not,
+# and that is the entire list of ways this package can change the store.
 # ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def write():
+    """A read-write connection, for the few operations that are allowed to change the store.
+
+    SEPARATE FROM `q` ON PURPOSE, and not merely because the mode string differs. Every read in this
+    package opens `mode=ro`, so until now "does anything here write?" was answerable by reading one
+    function. Keeping the write path its own named function keeps that property: `store.write` is
+    greppable, and anything that does not call it cannot write.
+
+    Used by `c4x/projects.py` and nothing else. Deleting a project and importing one are deliberate,
+    user-initiated operations; the refresh tick is not one of them, which is what `C4X_READ_ONLY`
+    governs and why that flag is about HARVESTING rather than about writing in general.
+
+    Committed on a clean exit and rolled back on any exception, because the operations that use this
+    span several tables with no foreign keys to tidy up after a half-finished one.
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"No store at {DB_PATH}.")
+    con = sqlite3.connect(str(DB_PATH))
+    try:
+        con.execute("PRAGMA foreign_keys = ON")
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
 def q(sql: str, params=()) -> pd.DataFrame:
     if not DB_PATH.exists():
         raise FileNotFoundError(
@@ -131,6 +163,12 @@ def overview_stats() -> dict:
     """
     small = q("""
         SELECT (SELECT COUNT(*) FROM sessions)                     AS sessions,
+               -- How many of those the picker and All sessions actually LIST. Shown beside the
+               -- total because the page shows both numbers and called them both "sessions",
+               -- leaving a reader to reconcile 1,325 against 317 with nothing to go on. Same
+               -- threshold as session_rows(), where it is explained.
+               (SELECT COUNT(*) FROM (SELECT session_id FROM turns
+                                       GROUP BY session_id HAVING COUNT(*) >= 5)) AS listed,
                (SELECT COUNT(*) FROM turns)                        AS turn_rows,
                (SELECT COUNT(*) FROM compactions)                  AS compactions,
                (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
@@ -382,6 +420,15 @@ def _session_rows_uncached() -> pd.DataFrame:
         -- and the fixture now contains streamed messages, so the comparison had something to
         -- disagree about.
         GROUP BY t.session_id
+        -- FEWER THAN FIVE TRANSCRIPT ROWS AND A SESSION IS NOT LISTED. This is why the picker
+        -- offers 317 sessions while the store holds 1,325: 1,008 are below the line, 985 of them
+        -- with between one and four rows, and most are one-shot runs from a benchmark harness that
+        -- would bury every real session in the list.
+        --
+        -- It is a PRESENTATION rule and nothing else may treat it as the population. Anything
+        -- that has to cover every session, an export or a delete, must union this with the
+        -- sessions it cannot see; c4x/projects.py does, and it was carrying 58 of one project's
+        -- 137 sessions until it did.
         HAVING COUNT(*) >= 5
     """)
     if df.empty:
@@ -504,28 +551,91 @@ def cohort_options() -> list:
     does not list, and the counts shown here are the counts a tab will describe.
     """
     df = session_rows()
-    opts = [{"label": f"All sessions ({len(df):,})", "value": COHORT_ALL}]
+    # Says what the number counts. "All sessions (317)" beside a Summary card reading 1,325 is
+    # two numbers for one word with nothing to reconcile them.
+    opts = [{"label": f"All sessions ({len(df):,} listed)", "value": COHORT_ALL}]
     if df.empty:
         return opts
     for sec, n in df["section"].value_counts().items():
         opts.append({"label": f"Section: {sec} ({n:,})", "value": f"section::{sec}"})
-    for proj, n in df["project"].value_counts().head(40).items():
-        opts.append({"label": f"Project: {proj} ({n:,})", "value": f"project::{proj}"})
+    # RANKED BY WORK DONE, not by how many sessions a directory happens to hold.
+    #
+    # Session count put a benchmark harness in charge of this list. It spawned one short run per
+    # scratch directory, so measured on this store 22 of the 40 projects offered sat under a tmp
+    # folder and between them held 210 API calls of the 151,403 on the list. Meanwhile ranking by
+    # calls surfaces 23 projects the old order left out, including one of 2,587 calls and another
+    # of 1,006, hidden because each had only two sessions.
+    #
+    # No path heuristic. Nothing here knows or should know that "tmp" means scratch: a directory
+    # earns its place by the work done in it, which is the same rule for every project.
+    calls = q("SELECT session_id, COUNT(*) AS n FROM api_calls GROUP BY session_id")
+    per_session = dict(zip(calls["session_id"], calls["n"], strict=True))
+    work = (df.assign(_calls=[per_session.get(s, 0) for s in df["session_id"]])
+              .groupby("project")
+              .agg(sessions=("session_id", "count"), calls=("_calls", "sum"))
+              .sort_values(["calls", "sessions"], ascending=False)
+              .head(40))
+    for proj, row in work.iterrows():
+        opts.append({"label": f"Project: {proj} ({int(row['sessions']):,})",
+                     "value": f"project::{proj}"})
     return opts
 
 
-def cohort_sessions(cohort) -> list:
-    """Resolve a cohort to the session ids it contains. Empty list means 'no restriction'."""
+def cohort_parts(cohort) -> tuple:
+    """Split a cohort string into (kind, value), or ("", "") if it names nothing.
+
+    Pulled out of `cohort_sessions` so that anything needing to know WHICH project a cohort refers
+    to reads the same rule rather than splitting the string again. That mattered once already: the
+    frontend sent a bare path with no `project::` prefix, which resolves here to no restriction, and
+    the difference between "this project" and "everything" showed up only as a wrong session count.
+    A delete cannot afford the same mistake.
+    """
+    kind, sep, value = str(cohort or "").partition("::")
+    if not sep or kind not in ("section", "project") or not value:
+        return "", ""
+    return kind, value
+
+
+def cohort_sessions(cohort, ttl: float = 45.0) -> list:
+    """Resolve a cohort to the session ids it contains. Empty list means 'no restriction'.
+
+    `ttl` is passed through to `session_rows`. A page render wants the cache; anything about to
+    WRITE wants `ttl=0`, because a set that predates the last import would export or delete the
+    wrong sessions while looking entirely ordinary.
+    """
     if not cohort or cohort == COHORT_ALL:
         return []
-    df = session_rows()
+    df = session_rows(ttl)
     if df.empty:
         return []
-    kind, _, value = str(cohort).partition("::")
+    kind, value = cohort_parts(cohort)
     col = {"section": "section", "project": "project"}.get(kind)
     if not col:
         return []
     return list(df.loc[df[col] == value, "session_id"])
+
+
+def session_name(session_id) -> str:
+    """One chat, said the way the pickers say it: project, title, and when it last ran.
+
+    The same three parts and the same order as `selector_options`, so a name read off a comparison
+    can be found again in the list it was chosen from without translating between two formats.
+
+    Returns "" for an unknown id rather than raising. A caller that has a stale selection should
+    still render, and the population sentence beside this one already says how many sessions there
+    are, so an empty name degrades to exactly the wording that was there before.
+    """
+    if not session_id:
+        return ""
+    df = session_rows()
+    if df.empty:
+        return ""
+    row = df[df["session_id"] == session_id]
+    if row.empty:
+        return ""
+    r = row.iloc[0]
+    when = str(r.get("last_ts") or "")[:16].replace("T", " ")
+    return f"{r.get('project')}  ·  {str(r.get('title'))[:60]}  ·  {when}"
 
 
 def population_label(session_id, cohort, scope) -> str:

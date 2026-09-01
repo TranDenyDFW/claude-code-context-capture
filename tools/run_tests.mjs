@@ -29,6 +29,23 @@ const NODE_ONLY = process.argv.includes('--node-only');
 // as zero made the suite total understate itself by more than a hundred assertions.
 const CHECKS = /\((\d+) checks\)|(\d+) passed/;
 
+// THE LAST TWO LINES ARE OFTEN NOT THE FAILURE. An independent reviewer hit this: a pytest entry
+// failed, and the suite report showed only `RequestsDependencyWarning: urllib3 ...` from stderr,
+// because on Windows that warning is the last thing written. The reviewer had to re-run the entry
+// by hand to find out WHICH two tests failed, which is the one thing the report existed to say.
+//
+// So the tail prefers lines that name a failure, and falls back to the last lines only when it
+// finds none. A report that hides the failure is worse than no report: it looks like information.
+const NOISE = /RequestsDependencyWarning|warnings\.warn|^\s*$/;
+const BLAME = /^(FAILED|ERROR|E\s+|\s*assert |AssertionError|Traceback|\s+File ")|\bFAIL\b/;
+function tailOf(text, keep = 4) {
+  const lines = text.trim().split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => !NOISE.test(l));
+  const blamed = lines.filter((l) => BLAME.test(l));
+  const chosen = (blamed.length ? blamed : lines).slice(-keep);
+  return chosen.join(' | ').slice(0, 600);
+}
+
+
 function nodeTargets() {
   const out = [];
   for (const dir of ['tools', 'hooks']) {
@@ -51,7 +68,37 @@ function nodeTargets() {
 // quietly dropped by fourteen while the run still said PASS.
 const PY = [
   ['tools/table_audit.py', ['--self-test'], 'gate self-test', 'SELF-TEST PASS'],
+  // The latency gate's own checks. Pure logic, no store, so it runs anywhere the suite does.
+  //
+  // The gate ITSELF is not in this suite on purpose: it needs a real store and a baseline
+  // recorded on that store, and CI runs against a synthetic fixture three orders of magnitude
+  // smaller, where it correctly refuses to compare. It is a phase-boundary gate, run by hand.
+  // What belongs here is proof that it can still tell a regression from noise.
+  ['tools/bench.py', ['--self-test'], 'latency gate self-test', 'SELF-TEST PASS',
+   { noStore: true }],
+  // The parity differ's own checks, and the source switch's. Same reasoning as bench.py: the FULL
+  // parity run needs a store with enough in it to compare, so it is a phase-boundary gate run by
+  // hand. What runs here is proof that the differ can still spot a difference, which is the only
+  // property that makes a passing parity run mean anything.
+  ['tools/parity.py', ['--self-test'], 'API-vs-dashboard differ self-test', 'SELF-TEST PASS',
+   { noStore: true }],
+  ['-m', ['c4x.cli', '--self-test'], 'CLI backend switch self-test', 'SELF-TEST PASS',
+   { noStore: true }],
+  // The response cache, which is the only reason the migration can meet "don't make it slower".
+  // Its checks are about correctness, not speed: a stale entry served past the age bound would be
+  // a wrong pane that looks entirely right, which is the one failure a latency gate cannot see.
+  ['-m', ['c4x.api.cache', '--self-test'], 'API response cache self-test', 'SELF-TEST PASS',
+   { noStore: true }],
   ['tools/table_audit.py', [], 'audit of the live app', 'AUDIT PASS'],
+  // The same DATA rules, applied to the API payload instead of a Dash component tree, so they
+  // outlive Dash. Store-dependent, and not marked noStore: importing table_audit for its rule
+  // definitions pulls in c4x.store, which refuses to run without one.
+  //
+  // BOTH audits run while both frontends exist. The new one cannot prove every table-building code
+  // path was reached, which is what the old one instruments construction to do, so retiring the old
+  // one early would lose that quietly.
+  ['tools/contract_audit.py', ['--self-test'], 'API contract audit self-test', 'SELF-TEST PASS'],
+  ['tools/contract_audit.py', [], 'audit of the API payloads', 'AUDIT PASS'],
   // The pytest suite in tests/ replaced tools/session_checks.py, which checked three Session-tab
   // features by hand. Those checks were migrated into tests/test_session.py rather than deleted,
   // and the suite now covers every tab. `-q` still prints the "N passed" line the marker needs.
@@ -116,8 +163,13 @@ for (const rel of nodeTargets()) {
     results.push({ rel, state: 'exempt', note: EXEMPT.get(rel) });
     continue;
   }
+  // 300s, raised from 60. `harvest.mjs --self-test` takes 52 seconds on an idle machine, which left
+  // eight seconds of headroom and none at all during a full suite run: it was killed at 60s while
+  // passing 84 checks in isolation seconds later. A timeout that fires on a slow machine rather
+  // than a hung process reports a green suite as red, which teaches people to re-run rather than
+  // to read. Still bounded, because a genuinely hung self-test must not stall the suite forever.
   const run = spawnSync(process.execPath, [join(ROOT, rel), '--self-test'],
-                        { encoding: 'utf8', cwd: ROOT, timeout: 60_000 });
+                        { encoding: 'utf8', cwd: ROOT, timeout: 300_000 });
   const text = `${run.stdout || ''}${run.stderr || ''}`;
   const match = text.match(CHECKS);
   const count = match ? Number(match[1]) : 0;
@@ -128,7 +180,7 @@ for (const rel of nodeTargets()) {
     failed++;
     results.push({ rel, state: 'FAIL',
                    note: run.signal ? `killed after 60s (${run.signal})` : `exit ${run.status}`,
-                   tail: text.trim().split('\n').slice(-3).join(' | ') });
+                   tail: tailOf(text) });
   } else if (!match) {
     failed++;
     results.push({ rel, state: 'FAIL', note: 'exit 0 but printed no check count, so it has no ' +
@@ -166,8 +218,7 @@ if (NODE_ONLY) {
       failed++;
       results.push({ rel: 'tools/make_fixture.mjs --out tmp/suite-fixture.db', state: 'FAIL',
                      note: 'could not build the fixture the suite runs against',
-                     tail: `${built.stdout || ''}${built.stderr || ''}`.trim()
-                       .split('\n').slice(-2).join(' | ') });
+                     tail: tailOf(`${built.stdout || ''}${built.stderr || ''}`) });
     }
   }
 
@@ -178,7 +229,11 @@ if (NODE_ONLY) {
                      note: `the fixture could not be built, so this did not run (${what})` });
       continue;
     }
-    if (!existsSync(store)) {
+    // A self-test that touches no store runs everywhere, including a fresh clone. Without this
+    // exemption the store gate below skipped the parity differ's and the latency gate's OWN checks
+    // on any machine without data/context.db, which is every clone: the two checks that prove
+    // those gates can still fail were the ones sitting out.
+    if (!opts?.noStore && !existsSync(store)) {
       skipped++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
                      note: `needs data/context.db, which is gitignored and absent here (${what})` });
@@ -201,18 +256,91 @@ if (NODE_ONLY) {
       failed++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
                      note: run.signal ? `killed after 300s (${run.signal})` : `exit ${run.status}`,
-                     tail: text.trim().split('\n').slice(-2).join(' | ') });
+                     tail: tailOf(text) });
     } else if (!text.includes(marker)) {
       // Exit 0 with the marker absent means it did not do what it claims to do.
       failed++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
                      note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
-                     tail: text.trim().split('\n').slice(-2).join(' | ') });
+                     tail: tailOf(text) });
     } else {
       if (count) total += count;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim() + (opts?.fixture ? '  [fixture]' : ''),
                      state: 'pass', count: count ?? null, note: count ? '' : what });
     }
+  }
+}
+
+// The React frontend. Same rules as everything above: exit 0 is not enough, the run has to print
+// the line a real run prints, and a skip is stated rather than absorbed into the total.
+//
+// It is SKIPPED, not failed, when node_modules is absent. The frontend is 149 MB of dependencies
+// that a clone does not have until `npm install --prefix frontend`, and failing the whole suite
+// over that would mean the Python and capture checks could not be run without it.
+if (!NODE_ONLY) {
+  const frontend = join(ROOT, 'frontend');
+  const installed = existsSync(join(frontend, 'node_modules'));
+  const FRONT = [
+    [['run', 'typecheck'], 'the frontend still type-checks', null],
+    [['run', 'test'], 'the payload reaches the DOM intact', 'Tests '],
+  ];
+  for (const [args, what, marker] of FRONT) {
+    const label = `frontend npm ${args.join(' ')}`;
+    if (!installed) {
+      skipped++;
+      results.push({ rel: label, state: 'SKIPPED',
+                     note: `frontend/node_modules is absent; run npm install --prefix frontend (${what})` });
+      continue;
+    }
+    const run = spawnSync('npm', [...args, '--prefix', frontend], {
+      encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: process.platform === 'win32',
+    });
+    const text = `${run.stdout || ''}${run.stderr || ''}`;
+    // NOT the shared CHECKS pattern. Vitest prints "Test Files  2 passed (2)" BEFORE
+    // "Tests  22 passed (22)", and CHECKS matches "N passed" anywhere, so it took the file count
+    // and the suite total silently read 20 lower than the number of checks that actually ran.
+    // Exactly the failure this runner already had once, where the total dropped by fourteen while
+    // the run still said PASS.
+    const match = text.match(/Tests\s+(\d+) passed/);
+    const count = match ? Number(match[1]) : null;
+    if (run.status !== 0 || run.signal) {
+      failed++;
+      results.push({ rel: label, state: 'FAIL',
+                     note: run.signal ? `killed (${run.signal})` : `exit ${run.status}`,
+                     tail: tailOf(text) });
+    } else if (marker && !text.includes(marker)) {
+      failed++;
+      results.push({ rel: label, state: 'FAIL',
+                     note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
+                     tail: tailOf(text) });
+    } else {
+      if (marker && count) total += count;
+      results.push({ rel: label, state: 'pass', count: marker ? count ?? null : null,
+                     note: marker && count ? '' : what });
+    }
+  }
+}
+
+
+// ESLint runs HERE too, for the same reason ruff does above: it was a CI-only step, so a local run
+// could be green while CI was red on lint. That is not hypothetical. `tailOf()` was added to this
+// very file and its call sites were never wired up, so it sat unused; the local suite passed,
+// eslint failed in CI with "'tailOf' is defined but never used", and the fix had to be made twice.
+//
+// A check the machine runs and the developer cannot is a check that fails late and by surprise.
+if (!NODE_ONLY) {
+  const run = spawnSync('npx', ['--yes', 'eslint', '.'], {
+    encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: process.platform === 'win32',
+  });
+  const text = `${run.stdout || ''}${run.stderr || ''}`;
+  if (run.status !== 0 || run.signal) {
+    failed++;
+    results.push({ rel: 'eslint .', state: 'FAIL',
+                   note: run.signal ? `killed (${run.signal})` : `exit ${run.status}`,
+                   tail: tailOf(text) });
+  } else {
+    results.push({ rel: 'eslint .', state: 'pass', count: null,
+                   note: 'the node tools lint clean, the same check CI runs' });
   }
 }
 

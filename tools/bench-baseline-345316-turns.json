@@ -1,0 +1,59 @@
+{
+  "store": {
+    "sessions": 1325,
+    "turns": 345316,
+    "tool_calls": 193619
+  },
+  "session": "3d6ee47a-ca81-4df5-af5f-4cfa49fe9d94",
+  "repeats": 5,
+  "tabs": {
+    "tab-summary": {
+      "cold_ms": 1679.0,
+      "warm_ms": 1581.3,
+      "warm_min_ms": 1539.7,
+      "warm_max_ms": 1642.7
+    },
+    "tab-sessions": {
+      "cold_ms": 524.3,
+      "warm_ms": 15.3,
+      "warm_min_ms": 15.1,
+      "warm_max_ms": 16.9
+    },
+    "tab-session": {
+      "cold_ms": 1424.3,
+      "warm_ms": 1158.1,
+      "warm_min_ms": 1061.5,
+      "warm_max_ms": 1216.8
+    },
+    "tab-compactions": {
+      "cold_ms": 17.0,
+      "warm_ms": 23.9,
+      "warm_min_ms": 15.0,
+      "warm_max_ms": 116.8
+    },
+    "tab-window": {
+      "cold_ms": 503.7,
+      "warm_ms": 453.8,
+      "warm_min_ms": 448.5,
+      "warm_max_ms": 481.9
+    },
+    "tab-cost": {
+      "cold_ms": 971.7,
+      "warm_ms": 1011.7,
+      "warm_min_ms": 971.4,
+      "warm_max_ms": 1065.0
+    },
+    "tab-compare": {
+      "cold_ms": 87.0,
+      "warm_ms": 82.6,
+      "warm_min_ms": 74.4,
+      "warm_max_ms": 90.0
+    },
+    "tab-diagnostics": {
+      "cold_ms": 13.4,
+      "warm_ms": 12.1,
+      "warm_min_ms": 10.9,
+      "warm_max_ms": 12.6
+    }
+  }
+}

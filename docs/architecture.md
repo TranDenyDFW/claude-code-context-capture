@@ -20,7 +20,7 @@ flowchart LR
     DB[("data/context.db<br/>SQLite, WAL")]
 
     subgraph read["read, never write"]
-        APP["app.py + c4x/<br/>Dash, 127.0.0.1"]
+        APP["c4x/api + app.py + c4x/<br/>127.0.0.1:8059"]
         MIR[mirror.mjs<br/>window math]
         SEG[segments.mjs<br/>model segments]
         WST[waste.mjs<br/>re-reads]
@@ -45,11 +45,13 @@ tool that can fail a tool call is worse than one that misses a row.
 transcript and reads only what was appended, so a re-run is cheap and the first run is retroactive,
 going back as far as your transcripts do.
 
-**Read** never writes. The dashboard opens the store read-only, and is five files:
+**Read** never writes. The dashboard opens the store read-only:
 
 | file | holds |
 |---|---|
-| `app.py` | the Dash instance, the header and layout, the `TABS` registry, every callback, the live mirror |
+| `app.py` | the composition root: the Dash instance, the layout, the `TABS` registry, every callback. Headless since the React frontend landed, so it builds panes and serves nothing |
+| `c4x/api/` | the HTTP surface and the response cache. The only thing that listens |
+| `frontend/` | the React page. Reads the API, draws it, holds no queries of its own |
 | `c4x/theme.py` | colours, shared styles, the two formatters, the small shared builders |
 | `c4x/store.py` | every read, the scoping and cohort rules, the window math they depend on |
 | `c4x/panels.py` | the panels several tabs share: evidence blocks, the compare table, the turn diff |
@@ -57,7 +59,7 @@ going back as far as your transcripts do.
 | `c4x/tabs/` | one module per tab, ten of them, with no edges between them |
 
 They layer strictly: theme and store know nothing of each other, panels sits above both, tabs above
-all three, and app.py above everything. Nothing imports upward, so there are no cycles to unpick.
+all three, app.py above those, and the API above app.py. Nothing imports upward, so there are no cycles to unpick.
 
 `app.py` opens the store read-only. The window math lives in
 `mirror-core.mjs` as pure functions with no I/O, and `app.py` reads its constants out of that module
@@ -101,6 +103,47 @@ one, which is the single failure that design avoids.
 
 `data/` is gitignored. It holds verbatim conversations, and a private repository is not a good
 enough reason to put that in a history it cannot be removed from.
+
+## One page, and how it is kept honest
+
+`app.py` is HEADLESS. It still builds every pane and it serves nothing: `c4x/api/` is the only
+thing that listens, on 8059, and it renders through `app._render_tab`, the same callback the
+browser used to dispatch. So the API is not a reimplementation, agreement is true by
+construction rather than by care, and a React page replaced the old one without a single
+query being rewritten.
+
+Two dashboards over one store is a way to read a stale number and not know it, which is why
+there is one page now. `frontend/dist` is COMMITTED, which is unusual for build output and
+deliberate: install is three commands and pulls nothing from npm, and that would stop being
+true if looking at your own context window required 149 MB of build tooling first.
+
+What makes that checkable is a shape the repo already had. `c4x/cli/extract.py::describe()` reduces
+a rendered pane to `{tables, figures, text}`, and that IS the API's contract:
+
+| surface | who reads it | shape |
+|---|---|---|
+| `GET /api/tab/{id}` | the CLI, the parity differ, the tests | exactly `describe()`, byte for byte what `c4x.cli dump --json` prints |
+| `GET /api/tab/{id}/render` | the browser | the same, plus full Plotly figures and the collapsible sections |
+
+The verify surface is deliberately frozen. Adding a field to it for a browser's benefit would change
+what the CLI prints and what the differ compares, which is why `details` lives only on `/render`.
+
+The API caches a serialised answer per selection, invalidated on the size and mtime of the database
+and its write-ahead log, and served for at most five seconds after the store moves. That bound is
+what makes the cache hit at all: this store is harvested continuously, so a tab taking 1.5 seconds
+to build is usually invalidated before it can be asked for twice. Nothing here is staler than
+`store.py`, which has always cached `session_rows()` for forty-five seconds.
+
+Three commands keep the two honest, and each is proven able to fail before it is believed:
+
+- `python tools/parity.py` renders all eight tabs from both sides under five selection states and
+  compares them cell by cell. `--must-fail` corrupts an answer on purpose and confirms it is caught.
+- `python tools/bench.py --against` gates render latency; `--via api` measures the API's UNCACHED
+  build against the Dash baseline, because comparing a 3 ms cache hit to a 1.6 s render would call
+  every change an improvement.
+- `python tools/contract_audit.py` applies the data-integrity rules of `table_audit.py` to the API
+  payload, so they outlive Dash. It cannot prove every table-building path was reached, which is
+  what the coverage half of `table_audit.py` instruments construction to do. Both run.
 
 ## Testing
 

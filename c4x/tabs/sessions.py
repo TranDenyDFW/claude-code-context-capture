@@ -82,7 +82,10 @@ def sessions_scatter(rows):
                           "%{x:,} turns, peak %{y:,}<br>"
                           "%{customdata[2]} compactions<extra></extra>",
         ))
-    fig.update_layout(title=f"{len(rows):,} sessions: turns against peak resident tokens",
+    # "sessions" alone read as all of them. It is the LISTED ones, and the chart is the surface
+    # where a reader is most likely to take the count as the population.
+    fig.update_layout(title=f"{len(rows):,} listed sessions: transcript rows against peak "
+                            f"resident tokens",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="turns (log)", yaxis_title="peak resident tokens (log)")
     fig.update_xaxes(type="log")

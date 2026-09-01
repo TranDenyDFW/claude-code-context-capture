@@ -14,6 +14,10 @@ tmp/
 # The launch config IS source: it is how the app gets started.
 .claude/*
 !.claude/launch.json
+# And anywhere else a tool drops one. A hook wrote its per-session state into
+# frontend/.claude/hooks/ and it was staged before anyone noticed; the rule above only
+# covered the repository root.
+**/.claude/
 
 # Python bytecode
 __pycache__/
@@ -36,8 +40,30 @@ desktop.ini
 # minified identifier may never anchor a claim. Read them before changing behaviour they explain.
 .md/
 
-# Research notes dropped in for review. Working documents about OTHER tools, not this extension's
-# source, and they carry third-party product descriptions verbatim. They stay on disk, out of git.
+# Notes and proposals dropped in for review. Some are working documents about OTHER tools, carrying
+# third-party product descriptions verbatim; others are proposals about THIS extension that were
+# written against a snapshot of it and are already wrong in specifics. Neither kind is source, and a
+# stale proposal in the repo reads like a decision. They stay on disk, out of git.
 Extension Features and Context Capture.md
 Claude Code Context Capture Extension - Analytical UX Report.md
 Claude-Code-Context-Capture Technical Review.md
+React+TypeScript Dashboard.md
+
+# The React frontend's dependencies: 149 MB, restorable from the tracked package-lock.json.
+frontend/node_modules/
+
+# frontend/dist IS tracked, which is unusual for build output and is the point.
+#
+# The UI is now the only one, and the README's headline is that install is three commands and pulls
+# NOTHING from npm. If running the dashboard required `npm install` first, that would stop being
+# true: a reader who just wants to look at their own context window would have to fetch 149 MB of
+# build tooling to do it. So the 4.2 MB build is committed and `python -m c4x.api` serves it.
+#
+# npm is needed to CHANGE the frontend, not to run it. The Plotly chunk is content-hashed and only
+# rewrites when Plotly's version does, so ordinary edits add roughly 240 KB per build.
+
+# Generated documentation. `tools/docgen/` is source and IS tracked; these are what it produces.
+# 17 MB of PNG and JSON plus a 6.2 MB .docx, rebuildable from the source beside them, and a git
+# history is a poor place for a 23 MB artifact that changes wholesale on every run.
+docs/docgen/
+docs/c4x-field-guide.docx

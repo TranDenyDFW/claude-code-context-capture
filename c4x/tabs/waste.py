@@ -22,6 +22,7 @@ from c4x.theme import (
     fmt_cost,
     fmt_tokens,
     numeric_columns,
+    population_note,
     stat_card,
 )
 
@@ -135,6 +136,7 @@ def _estimated_cost(where, args):
                  "cache_creation_input_tokens", "est_usd"},
                 {"est_usd": Format(precision=2, scheme=Scheme.fixed)}),
             heat=["est_usd", "cache_read_input_tokens"], page_size=10,
+            help_for={"calls": "Every API call this model answered in this population."},
             note=coverage_note(missing, priced_calls)),
     ])
 
@@ -174,6 +176,10 @@ def _subagent_types(where, args):
             {"calls", "sessions", "bytes", "errors"},
             {"bytes": Format(precision=1, scheme=Scheme.fixed)}),
         heat=["calls", "bytes"], page_size=10,
+        help_for={
+            "calls": "Agent calls that asked for this subagent type.",
+            "sessions": "How many different sessions used this subagent type.",
+        },
         note="Read from the Agent call's own input, which this store began keeping in the "
              "harvest and backfilled over every transcript already on disk. "
              + (f"{unknown:,} calls named no type and are reported as such rather than assumed to "
@@ -341,11 +347,12 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
     # Why subagents are counted is on the `reads` column tooltip. What stays here is the one thing
     # a tooltip cannot say: which population this page is describing right now.
-    scope_note = html.Div(
-        "Every tool call, subagent work included, whichever way the scope radio is set. "
-        + (f"Narrowed to {'this session' if session_id else 'this cohort'}."
-           if (session_id or cohort) else "Describing the whole store."),
-        style=SECTION_NOTE)
+    scope_note = population_note(
+        ("Describing this session. " if session_id else
+         "Describing this cohort. " if cohort else
+         "Describing the whole store. ")
+        + "Every tool call, subagent work included, whichever way the scope radio is set.",
+        store_wide=not (session_id or cohort))
 
     return html.Div([
         scope_note,
@@ -387,11 +394,15 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         evidence_block(
             "MCP servers by invocation count", srv, sql_srv, wargs,
             columns=["server", "calls", "bytes", "last_call"],
+            # The shared help for "calls" was written for the repeated-inputs table and says these
+            # count calls "with this exact input". Here they count every call to the server.
+            help_for={"calls": "Every call to this server, whatever the input."},
             note="Invocation count alone is a PROXY for cost. The measured price of a server is "
                  "the sum of its tools' schema bytes, which tools/otel-ingest.mjs puts in the "
                  "store and tools/waste.mjs --servers reports. This is invocations only."),
 
         evidence_block(
             "Tool invocations", tools, sql_tools, wargs,
-            columns=["tool", "calls", "bytes", "errors"], heat=["calls", "bytes", "errors"]),
+            columns=["tool", "calls", "bytes", "errors"], heat=["calls", "bytes", "errors"],
+            help_for={"calls": "Every call to this tool, whatever the input."}),
     ])

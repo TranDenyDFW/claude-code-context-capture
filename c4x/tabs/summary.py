@@ -46,7 +46,11 @@ def summary_layout(session_id=None, scope="main", cohort=None):
     rows = decisions()
 
     totals = [
-        ("sessions", f"{int(s['sessions']):,}", "in the store"),
+        # Both numbers, because they answer different questions and the page shows both
+        # elsewhere: this card counts every session in the store, the picker and All sessions list
+        # only those with five or more transcript rows.
+        ("sessions", f"{int(s['sessions']):,}",
+         f"in the store, {int(s['listed'] or 0):,} listed on All sessions"),
         ("API calls", f"{api_calls:,}", f"{int(s['turn_rows']):,} transcript rows behind them"),
         ("subagent share", f"{(100.0 * sub_calls / api_calls) if api_calls else 0:.0f}%",
          f"{sub_calls:,} of {api_calls:,} are sidechain"),
@@ -58,9 +62,14 @@ def summary_layout(session_id=None, scope="main", cohort=None):
     ]
 
     return html.Div([
+        # Already the right sentence, now MARKED as the population line so the API reports it.
+        # It keeps its warning colour, which the shared style does not carry, because this is the
+        # one tab where a reader is most likely to assume the header selection applies.
         html.Div("Everything on this tab describes the WHOLE store, every session, all time. "
                  "The header selection changes nothing here. Every other tab describes only the "
-                 "selection.", style={**SECTION_NOTE, "color": WARN}),
+                 "selection.",
+                 className="population-note", style={**SECTION_NOTE, "color": WARN},
+                 **{"data-population": "store"}),
 
         accordion("What to do about it", f"{len(rows)} finding(s), each with an action",
                   dash_table.DataTable(
@@ -260,6 +269,38 @@ def decisions() -> list:
             # its evidence and then makes the reader navigate by hand is half a finding.
             "session_id": str(r["session_id"]),
             "goes to": "tab-compactions",
+        })
+
+    # 6. The session count is not a number to divide by.
+    #
+    # This exists because the two headline cards invite exactly one arithmetic, total over count,
+    # and on this store that gives 128 calls per session while the median session made 2. The
+    # distribution is not merely skewed, it is two populations: a handful of long working sessions
+    # and a long tail of one-shot runs. Saying so is more useful than any average of the two.
+    shape = q("""
+        SELECT COUNT(*) AS sessions, SUM(n) AS calls
+          FROM (SELECT session_id, COUNT(*) AS n FROM api_calls GROUP BY session_id)
+    """).iloc[0]
+    if int(shape["sessions"] or 0) > 20:
+        ranked = q("""
+            SELECT COUNT(*) AS n FROM api_calls GROUP BY session_id ORDER BY n DESC
+        """)["n"].tolist()
+        total = sum(ranked)
+        running, few = 0, 0
+        for value in ranked:
+            running += value
+            few += 1
+            if running >= total / 2:
+                break
+        median = ranked[len(ranked) // 2]
+        out.append({
+            "finding": "Almost all of the work is in a handful of sessions",
+            "evidence": f"half of all {total:,} API calls come from {few} of "
+                        f"{len(ranked):,} sessions; the median session made {median}",
+            "do this": "Read the totals above as store-wide sums, not as anything divided by the "
+                       "session count. Sort All sessions by transcript rows to find the few that "
+                       "matter.",
+            "goes to": "tab-sessions",
         })
 
     return out

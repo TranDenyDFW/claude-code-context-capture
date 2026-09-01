@@ -2,22 +2,24 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "context-capture",
-      "runtimeExecutable": "python",
+      "name": "c4x-frontend",
+      "runtimeExecutable": "npm",
       "runtimeArgs": [
-        "app.py"
+        "run",
+        "dev",
+        "--prefix",
+        "frontend"
       ],
-      "port": 8056
+      "port": 5173
     },
     {
-      "name": "context-capture-c4x",
+      "name": "c4x-api",
       "runtimeExecutable": "python",
       "runtimeArgs": [
-        "app.py",
-        "--port",
-        "8057"
+        "-m",
+        "c4x.api"
       ],
-      "port": 8057
+      "port": 8059
     }
   ]
 }

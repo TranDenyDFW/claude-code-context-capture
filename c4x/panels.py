@@ -57,7 +57,8 @@ def sql_preview(sql: str, params=()) -> str:
 
 
 def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size: int = 12,
-                   note: str = None, style_data_conditional=None, heat=(), table_id=None):
+                   note: str = None, style_data_conditional=None, heat=(), table_id=None,
+                   help_for=None):
     """A table, the query that produced it, and a way to take the rows away.
 
     Every figure on this page should be reproducible by someone who does not have this app open.
@@ -66,6 +67,12 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
 
     The row count is stated on the table itself, so a filtered or truncated view can never be read
     as the whole population.
+
+    `help_for` OVERRIDES the shared column help, and exists because the shared map is keyed on a
+    bare column id. "calls" and "sessions" were written for the repeated-inputs table, so every
+    other table with a column of either name told the reader its number counted calls "with this
+    exact input" and sessions that "issued this identical input". That was false on the per-model
+    table, the MCP server table, the tool table and the subagent-type table at once.
     """
     if df is None or (hasattr(df, "empty") and df.empty):
         return html.Div([
@@ -94,7 +101,7 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
             # page filters this table" rather than being decoration.
             **({"id": table_id} if table_id else {}),
             columns=(_cols := cols),
-            tooltip_header=header_help(_cols),
+            tooltip_header=header_help(_cols, help_for),
             data=records,
             page_size=page_size,
             sort_action="native",
@@ -225,7 +232,13 @@ COMPARE_ROWS = [
     ("sessions", "sessions", "count", None, False),
     ("calls", "API calls", "count", None, False),
     ("cache_read", "cache re-reads", "tokens", "higher", False),
-    ("rebill_multiple", "re-billed, as a multiple of peak", "multiple", "higher", True),
+    # NOT per unit, despite looking like a ratio. Its numerator is a RUNNING TOTAL of cache reads
+    # and its denominator is a single high-water mark, so it grows with the length of the session
+    # rather than describing behaviour. Measured on one chat against its own fork: A 2,399 and B
+    # 81, which read as "B better" while `cache read per call` said "B worse" for the same
+    # behaviour. Scaled to equal work B's multiple would be about 4,275 against A's 2,399, so the
+    # per-call row was right and this one was reporting the length difference.
+    ("rebill_multiple", "re-billed, as a multiple of peak", "multiple", "higher", False),
     ("cache_per_call", "cache read per call", "tokens", "higher", True),
     ("peak", "peak resident", "tokens", None, True),
     ("mean_resident", "mean resident", "tokens", "higher", True),
@@ -252,7 +265,21 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
     comparison were display text: they sorted lexicographically and the CSV export, which is the
     point of the tab, received the labels instead of the numbers.
     """
-    same_size = a.get("sessions") == b.get("sessions")
+    # SAME SIZE MEANS SAME AMOUNT OF WORK, not the same number of sessions.
+    #
+    # This used to compare session COUNTS, and a session count is not what a total scales with.
+    # Measured on a real pair: one chat against its own fork, 1 session each, so the old test said
+    # "same size" and marked the totals. They were 4,573 API calls against 88, fifty-two times
+    # apart, and "cache re-reads" came out "B better" purely because B was a shorter session while
+    # the per-unit row for the same behaviour said "B worse". The table contradicted itself and the
+    # total was the half that was wrong.
+    #
+    # Ten per cent, and the number is a judgement rather than a measurement: close enough that a
+    # total's ratio is about behaviour, far enough apart that it is about size. It sits beside the
+    # existing five per cent below, which decides when a ratio is worth calling a difference at all.
+    a_calls, b_calls = a.get("calls") or 0, b.get("calls") or 0
+    bigger = max(a_calls, b_calls)
+    same_size = bool(bigger) and abs(a_calls - b_calls) / bigger <= 0.10
     rows = []
     for key, label, kind, worse, per_unit in COMPARE_ROWS:
         av, bv = a.get(key, 0), b.get(key, 0)
@@ -273,7 +300,9 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
         rows.append({"metric": label, "unit": kind,
                      "A": round(av, 1), "B": round(bv, 1),
                      "B vs A": None if ratio is None else round(ratio, 2), "verdict": verdict,
-                     "basis": "per unit" if per_unit else "total, scales with population"})
+                     "basis": ("per unit" if per_unit else
+                               "total, arms are the same size" if same_size else
+                               "total, arms are different sizes")})
     return html.Div([
         html.Div([
             html.Div([html.Div("A", style={"color": ACCENT, "fontWeight": 700, "fontFamily": MONO}),
@@ -305,10 +334,13 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
                  "rather than labels. Only rows where a bigger number is unambiguously worse are "
                  "marked, and only "
                  "where the comparison means something. Peak resident and output tokens carry no "
-                 "direction, since a longer session is not a worse one. Rows marked \"total\" "
-                 "scale with how many sessions each arm holds, so when the arms are different "
-                 "sizes their ratio describes the populations rather than the behaviour; the "
-                 "per-unit rows are the ones that compare unequal arms honestly.",
+                 "direction, since a longer session is not a worse one. A row marked \"total\" "
+                 f"scales with how much work each arm did, and these two arms made "
+                 f"{a.get('calls', 0):,} and {b.get('calls', 0):,} API calls, so those rows are "
+                 + ("comparable here. " if same_size else
+                    "left unmarked: their ratio would describe that difference rather than "
+                    "anything either arm did. ")
+                 + "The per-unit rows compare unequal arms honestly and are marked either way.",
                  style=SECTION_NOTE),
     ])
 
