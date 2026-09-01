@@ -411,6 +411,10 @@ COLUMN_LABEL = {
     # Identifiers. The suffix is for a schema, not for a person reading a column heading.
     "session_id": "Session",
     "probe_id": "Probe",
+    # A project IS a working directory in this store, and `cwd` is the schema's word for it, not a
+    # reader's. Every other surface in this app already says "Project".
+    "cwd": "Project",
+    "excluded_at": "Date & Time Excluded",
     "id": "ID",
     "ok": "OK",
     # Already written for a reader; the rule would only mangle the casing.

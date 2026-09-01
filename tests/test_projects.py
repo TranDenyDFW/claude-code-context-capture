@@ -9,11 +9,16 @@ So these build a real SQLite store per test, put deliberately awkward VALUES in 
 what comes back out. Row counts are the weakest possible check here: a shifted column, a NULL that
 became an empty string, or an integer that went through a float all preserve the count exactly.
 """
+import shutil
 import sqlite3
+import subprocess
+from pathlib import Path
 
 import pytest
 
 from c4x import projects
+
+ROOT = Path(__file__).resolve().parent.parent
 
 # The awkward values, and why each one is here. Every one of these has broken a data export
 # somewhere: they are not decoration.
@@ -39,63 +44,104 @@ AWKWARD = [
 ]
 
 
-def build_store(path, project=r"P:\Alpha", rows=3, extra_project=r"P:\Beta"):
-    """A store with the columns this module touches, two projects, and awkward values.
+SCHEMA_CACHE = ROOT / "tmp" / "test-schema.db"
 
-    Its own schema rather than a copy of the real one, so these tests run anywhere and say what
-    they mean. The integration test at the bottom uses the real store.
+
+def schema_store():
+    """An empty store with the REAL schema, built once and reused.
+
+    Through `harvest.mjs`'s own `openDb`, which is what `tools/make_fixture.mjs` does and for the
+    same reason: a fixture carrying its own copy of the schema drifts from the thing under test,
+    and then the suite is green against a database the app would never open.
+
+    It was not optional here. `projects.session_ids()` resolves a project through
+    `store.session_rows()`, which reads `turns`, `session_titles`, `compactions` and the
+    `api_calls` view. A hand-written stub with three columns per table made twenty-eight tests
+    fail on missing columns, which says nothing about whether an export is correct.
     """
+    fresh = (SCHEMA_CACHE.exists()
+             and SCHEMA_CACHE.stat().st_mtime > (ROOT / "tools" / "harvest.mjs").stat().st_mtime)
+    if not fresh:
+        SCHEMA_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        SCHEMA_CACHE.unlink(missing_ok=True)
+        # All three, in the order `tools/make_fixture.mjs` uses them. `openDb` alone leaves out the
+        # probe and baseline tables, which are exactly the store-wide ones a delete must not touch,
+        # so the check that it does not touch them would have had nothing to check.
+        out = subprocess.run(
+            ["node", "-e", """
+             Promise.all([import('./tools/harvest.mjs'), import('./tools/probe.mjs'),
+                          import('./tools/breakdown.mjs')]).then(([h, p, b]) => {
+               const db = h.openDb(process.argv[1]);
+               p.ensureProbeSchema(db);
+               b.ensureBaselineSchema(db);
+               db.close();
+             })""", str(SCHEMA_CACHE)],
+            cwd=str(ROOT), capture_output=True, text=True)
+        if not SCHEMA_CACHE.exists():
+            raise RuntimeError(f"could not build the schema store: {out.stderr[-800:]}")
+    return SCHEMA_CACHE
+
+
+def build_store(path, project=r"P:\Alpha", rows=3, extra_project=r"P:\Beta"):
+    """The real schema, two projects, and a deliberately awkward value in every text column."""
+    shutil.copy(schema_store(), path)
     con = sqlite3.connect(str(path))
-    con.executescript("""
-        CREATE TABLE sessions (session_id TEXT PRIMARY KEY, project_slug TEXT, cwd TEXT,
-                               transcript_path TEXT, note TEXT, big INTEGER, ratio REAL);
-        CREATE TABLE turns (uuid TEXT PRIMARY KEY, session_id TEXT, total_resident INTEGER,
-                            text TEXT);
-        CREATE TABLE messages (uuid TEXT PRIMARY KEY, session_id TEXT, text TEXT);
-        CREATE TABLE tool_calls (uuid TEXT PRIMARY KEY, session_id TEXT);
-        CREATE TABLE attachments (uuid TEXT PRIMARY KEY, session_id TEXT);
-        CREATE TABLE hook_events (uuid TEXT PRIMARY KEY, session_id TEXT);
-        CREATE TABLE session_titles (session_id TEXT, kind TEXT, title TEXT,
-                                     PRIMARY KEY (session_id, kind));
-        CREATE TABLE compactions (uuid TEXT PRIMARY KEY, session_id TEXT);
-        CREATE TABLE compaction_survivors (compaction_uuid TEXT, kind TEXT, uuid TEXT,
-                                           PRIMARY KEY (compaction_uuid, uuid));
-        CREATE TABLE files (path TEXT PRIMARY KEY, bytes_read INTEGER);
-        -- Store-wide tables, with the real columns rather than a stub. They must survive a delete
-        -- untouched, and the Diagnostics tab reads them, so a two-column stand-in would make the
-        -- one test that renders that tab fail for a reason having nothing to do with exclusions.
-        CREATE TABLE probes (
-          id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, ok INTEGER, error TEXT,
-          model TEXT, max_tokens INTEGER, total_tokens INTEGER, percentage INTEGER,
-          autocompact_source TEXT, auto_compact_threshold INTEGER, is_auto_compact_enabled INTEGER,
-          raw_json TEXT);
-        CREATE TABLE probe_categories (probe_id INTEGER, name TEXT, tokens INTEGER, color TEXT,
-                                       is_deferred INTEGER);
-        CREATE TABLE probe_details (probe_id INTEGER, kind TEXT, name TEXT, extra TEXT,
-                                    tokens INTEGER, loaded INTEGER);
-        CREATE TABLE probe_message_breakdown (probe_id INTEGER, name TEXT, tokens INTEGER);
-        CREATE TABLE harvest_runs (
-          ts TEXT, mode TEXT, files_seen INTEGER, files_read INTEGER, rewrites INTEGER,
-          lines INTEGER, mb REAL, turns INTEGER, compactions INTEGER, unpaired INTEGER,
-          ms INTEGER);
-    """)
     for which, cwd in ((0, project), (1, extra_project)):
         for n in range(rows):
             sid = f"s{which}-{n}"
             label, value = AWKWARD[(which * rows + n) % len(AWKWARD)]
-            con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)",
-                        (sid, f"slug-{which}", cwd, rf"C:\t\{sid}.jsonl", value,
-                         9007199254740993, 0.1 + 0.2))
-            con.execute("INSERT INTO files VALUES (?,?)", (rf"C:\t\{sid}.jsonl", 1234))
+            con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                        (sid, f"slug-{which}", cwd, value, "2.1.229", "cli",
+                         "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z", rf"C:\t\{sid}.jsonl"))
+            con.execute("INSERT INTO files (path,size,mtime_ms,bytes_read,lines_read,rewrites,"
+                        "last_harvest_ts) VALUES (?,?,?,?,?,?,?)",
+                        (rf"C:\t\{sid}.jsonl", 4096, 0, 1234, 12, 0, "2026-08-02T00:00:00Z"))
             for i, (_, awkward) in enumerate(AWKWARD):
-                con.execute("INSERT INTO turns VALUES (?,?,?,?)",
-                            (f"{sid}-t{i}", sid, i * 1000, awkward))
-                con.execute("INSERT INTO messages VALUES (?,?,?)", (f"{sid}-m{i}", sid, awkward))
-            con.execute("INSERT INTO tool_calls VALUES (?,?)", (f"{sid}-tc", sid))
-            con.execute("INSERT INTO attachments VALUES (?,?)", (f"{sid}-a", sid))
-            con.execute("INSERT INTO hook_events VALUES (?,?)", (f"{sid}-h", sid))
-            con.execute("INSERT INTO session_titles VALUES (?,?,?)", (sid, "custom", label))
-            con.execute("INSERT INTO compactions VALUES (?,?)", (f"{sid}-c", sid))
+                con.execute(
+                    """INSERT INTO turns (uuid,session_id,ts,model,request_id,input_tokens,
+                         cache_creation_input_tokens,cache_read_input_tokens,output_tokens,
+                         thinking_tokens,eph_1h,eph_5m,service_tier,total_resident,is_sidechain,
+                         file_path,line_no,parent_uuid)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (f"{sid}-t{i}", sid, f"2026-08-01T00:{i:02d}:00Z", "claude-opus-5",
+                     f"req-{sid}-{i}", 1, 2, 3, 4, 0, 0, 0, awkward,
+                     # Past 2^53: a value that survives SQLite and JSON but not a float round trip.
+                     9007199254740993 if i == 0 else i * 1000,
+                     0, rf"C:\t\{sid}.jsonl", i, None))
+                con.execute(
+                    """INSERT INTO messages (uuid,session_id,ts,role,type,text,chars,model,
+                         request_id,is_sidechain,file_path,line_no)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (f"{sid}-m{i}", sid, f"2026-08-01T00:{i:02d}:01Z", "assistant", "assistant",
+                     awkward, len(awkward) if isinstance(awkward, str) else 0, "claude-opus-5",
+                     f"req-{sid}-{i}", 0, rf"C:\t\{sid}.jsonl", i))
+            con.execute(
+                """INSERT INTO tool_calls (tool_use_id,session_id,turn_uuid,ts,tool_name,
+                     server_name,target,input_sha1,input_bytes,result_bytes,is_error,is_sidechain,
+                     file_path,line_no,subagent_type)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"{sid}-tc", sid, f"{sid}-t0", "2026-08-01T00:00:02Z", "Read", None, value,
+                 "sha", 10, 20, 0, 0, rf"C:\t\{sid}.jsonl", 1, None))
+            con.execute("INSERT INTO attachments VALUES (?,?,?)", (sid, "hook_success", 1))
+            con.execute(
+                """INSERT INTO hook_events (captured_at,probe,event,known,session_id,
+                     transcript_path,cwd,permission_mode,tool_name,tool_input_bytes,
+                     tool_response_bytes,prompt_chars,source,reason,agent_id,agent_type,
+                     truncated,extra)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ("2026-08-01T00:00:03Z", 0, "PreToolUse", 1, sid, rf"C:\t\{sid}.jsonl", cwd,
+                 "default", "Read", 1, 2, 3, None, None, None, None, 0, None))
+            con.execute("INSERT INTO session_titles VALUES (?,?,?,?,?)",
+                        (sid, "custom", label, rf"C:\t\{sid}.jsonl", 1))
+            con.execute(
+                """INSERT INTO compactions (uuid,session_id,ts,trigger,version,entrypoint,
+                     pre_tokens,post_tokens,duration_ms,cumulative_dropped_tokens,
+                     messages_summarized,discovered_tools_json,preserved_json,summary_uuid,
+                     summary_chars,file_path,line_no)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"{sid}-c", sid, "2026-08-01T00:30:00Z", "auto", "2.1.229", "cli",
+                 970058, 30226, 147304, 939832, 12, None, None, None, 0,
+                 rf"C:\t\{sid}.jsonl", 30))
             con.execute("INSERT INTO compaction_survivors VALUES (?,?,?)",
                         (f"{sid}-c", "turn", f"{sid}-t0"))
     con.execute("""INSERT INTO probes (id, ts, ok, model, total_tokens, percentage,
@@ -182,6 +228,66 @@ class TestDigest:
         con.commit()
         assert projects.digest(con, "t") != was
         con.close()
+
+
+# ---------------------------------------------------------------------------
+# Which sessions a project actually owns
+# ---------------------------------------------------------------------------
+class TestWhichSessionsAProjectOwns:
+    """A project is not a bare working directory, and assuming it was made this wrong twice.
+
+    `store.session_rows()` appends `\\archived` to a project label when the desktop app has
+    archived the chat. Measured on the real store: one session with cwd `P:\\Books` is shown,
+    counted and selectable under `P:\\Books\\archived`, and NO cwd anywhere in that store literally
+    ends in `\\archived`. So keying on cwd alone exported four sessions for a cohort the header
+    said held three, and made every archived cohort impossible to export at all.
+    """
+
+    @staticmethod
+    def mark_archived(monkeypatch, ids):
+        from c4x import store
+        store._rows_cache["df"] = None
+        monkeypatch.setattr(store, "archived_sessions", lambda: dict.fromkeys(ids, True))
+
+    def test_an_archived_session_belongs_to_the_archived_project_not_the_plain_one(
+            self, store_at, monkeypatch):
+        self.mark_archived(monkeypatch, ["s0-0"])
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        plain = projects.session_ids(con, r"P:\Alpha")
+        archived = projects.session_ids(con, r"P:\Alpha\archived")
+        con.close()
+        assert "s0-0" not in plain, "the archived session was taken with the plain project"
+        assert archived == ["s0-0"], f"the archived cohort resolved to {archived}"
+
+    def test_deleting_the_plain_project_leaves_the_archived_session(
+            self, store_at, tmp_path, monkeypatch):
+        """The consequence, stated as data loss rather than as a count."""
+        self.mark_archived(monkeypatch, ["s0-0"])
+        projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        left = con.execute("SELECT COUNT(*) FROM turns WHERE session_id = 's0-0'").fetchone()[0]
+        con.close()
+        assert left == len(AWKWARD), "an archived session was deleted with the plain project"
+
+    def test_a_session_with_no_turns_is_still_found(self, store_at):
+        """`session_rows()` reads FROM turns, so it cannot see one. 23 of 1,325 in the real store.
+
+        Such a session cannot have been filed under some other label, because it is not in that
+        table under any label, so its own cwd is the only evidence there is.
+        """
+        con = sqlite3.connect(str(store_at))
+        con.execute("INSERT INTO sessions (session_id, cwd) VALUES ('quiet', ?)", (r"P:\Alpha",))
+        con.execute("""INSERT INTO messages (uuid, session_id, text)
+                       VALUES ('quiet-m', 'quiet', 'it had messages but never a turn')""")
+        con.commit()
+        assert "quiet" in projects.session_ids(con, r"P:\Alpha")
+        con.close()
+        projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=store_at.parent)
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        orphan = con.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = 'quiet'").fetchone()[0]
+        con.close()
+        assert orphan == 0, "a turnless session's messages were left behind with no session row"
 
 
 # ---------------------------------------------------------------------------

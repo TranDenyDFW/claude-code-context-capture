@@ -75,8 +75,34 @@ def projects():
 
 
 def session_ids(con, project):
-    rows = con.execute("SELECT session_id FROM sessions WHERE cwd = ?", (project,)).fetchall()
-    return [r[0] for r in rows]
+    """The sessions a project owns, as the PAGE resolves it, plus the ones the page cannot see.
+
+    NOT `WHERE cwd = ?`, which is what this did first and what made it wrong. A project in this app
+    is not a bare working directory: `store.session_rows()` appends `\\archived` to the label when
+    the desktop app has archived the chat. Measured on this store, one session with cwd `P:\\Books`
+    is shown, counted and selectable under `P:\\Books\\archived`, so keying on cwd exported four
+    sessions for a cohort the header said held three, and would have deleted the archived one
+    without ever naming it. In the other direction it was worse: NO cwd in this store literally
+    ends in `\\archived`, so every archived cohort resolved to nothing and could not be exported at
+    all.
+
+    `ttl=0` because a 45-second-old answer would be a set from before the last import.
+
+    THE SECOND HALF IS NOT REDUNDANT. `session_rows()` reads FROM turns, so a session with no turn
+    at all is invisible to it: 23 of 1,325 here, 5 of them holding messages. Those cannot have been
+    attributed to some other project by the archived rule, because they are not in that table under
+    any label, so their own cwd is the only evidence there is and it is safe to use.
+    """
+    from c4x import store
+    ids = list(store.cohort_sessions(f"project::{project}", ttl=0))
+    known = set(ids)
+    invisible = con.execute(
+        """SELECT session_id FROM sessions
+            WHERE cwd = ?
+              AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.session_id = sessions.session_id)""",
+        (project,)).fetchall()
+    ids.extend(r[0] for r in invisible if r[0] not in known)
+    return ids
 
 
 def footprint(con, project):

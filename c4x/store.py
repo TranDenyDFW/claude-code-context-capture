@@ -561,11 +561,16 @@ def cohort_parts(cohort) -> tuple:
     return kind, value
 
 
-def cohort_sessions(cohort) -> list:
-    """Resolve a cohort to the session ids it contains. Empty list means 'no restriction'."""
+def cohort_sessions(cohort, ttl: float = 45.0) -> list:
+    """Resolve a cohort to the session ids it contains. Empty list means 'no restriction'.
+
+    `ttl` is passed through to `session_rows`. A page render wants the cache; anything about to
+    WRITE wants `ttl=0`, because a set that predates the last import would export or delete the
+    wrong sessions while looking entirely ordinary.
+    """
     if not cohort or cohort == COHORT_ALL:
         return []
-    df = session_rows()
+    df = session_rows(ttl)
     if df.empty:
         return []
     kind, value = cohort_parts(cohort)
