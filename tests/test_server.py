@@ -50,8 +50,12 @@ def test_a_reason_containing_braces_does_not_break_the_page(reason):
 
 def test_a_get_on_the_shutdown_route_is_refused(app):
     """Loopback binding is no defence: the browser is on loopback too, so a GET route could be
-    triggered by any page the user visited with an img tag. A form post cannot be made
-    cross-origin without the user's involvement."""
+    triggered by any page the user visited with an img tag.
+
+    This used to add "a form post cannot be made cross-origin without the user's involvement",
+    which is wrong and was the belief the POST-only defence rested on. A cross-origin form POST is
+    a simple request and a script can submit one; the token and origin checks below are what
+    actually close it."""
     client = app.server.test_client()
     response = client.get("/__shutdown__")
     assert response.status_code == 405
@@ -72,3 +76,94 @@ def test_the_port_flag_beats_the_environment():
     assert server.port_from_argv(["app.py"], 8056) == 8056
     assert server.port_from_argv(["app.py", "--port"], 8056) == 8056
     assert server.port_from_argv(["app.py", "--port", "notanumber"], 8056) == 8056
+
+
+# ---------------------------------------------------------------------------
+# The guard on the route that ends the process
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def no_kill(monkeypatch):
+    """Record the shutdown instead of performing it.
+
+    The accepted case genuinely calls os._exit, which would take the test runner with it. This is
+    why the POST route went untested for as long as it did, and why the guard has to be tested
+    through the route rather than only through `shutdown_allowed`.
+    """
+    calls = []
+    monkeypatch.setattr(server, "hardened_shutdown", lambda reason: calls.append(reason))
+    return calls
+
+
+def post(app, *, origin=None, token=None, query_token=None):
+    headers = {}
+    if origin is not None:
+        headers["Origin"] = origin
+    if token is not None:
+        headers["X-C4X-Shutdown"] = token
+    path = "/__shutdown__" + (f"?token={query_token}" if query_token else "")
+    return app.server.test_client().post(path, headers=headers)
+
+
+def test_a_page_on_another_site_cannot_stop_the_server(app, no_kill):
+    """The attack POST-only never stopped.
+
+    A cross-origin form POST is a SIMPLE request: CORS does not stop it being sent, it only stops
+    the response being read. So any page the browser visited could end this process with a form and
+    a script, and the route's own docstring said as much while relying on POST-only anyway.
+    """
+    response = post(app, origin="https://evil.example", token=server.SHUTDOWN_TOKEN)
+    assert response.status_code == 403
+    assert no_kill == [], "a foreign origin stopped the server"
+
+
+def test_a_sandboxed_or_file_page_cannot_stop_it_either(app, no_kill):
+    """`null` is what a sandboxed iframe and a file:// page send, and neither should qualify."""
+    assert post(app, origin="null", token=server.SHUTDOWN_TOKEN).status_code == 403
+    assert no_kill == []
+
+
+def test_a_hostname_that_merely_starts_with_a_loopback_address_is_refused(app, no_kill):
+    """`127.0.0.1.evil.com` is a domain somebody else controls. A prefix test would pass it."""
+    assert post(app, origin="http://127.0.0.1.evil.com",
+                token=server.SHUTDOWN_TOKEN).status_code == 403
+    assert no_kill == []
+
+
+def test_the_right_origin_without_the_token_is_refused(app, no_kill):
+    assert post(app, token="not-the-token").status_code == 403
+    assert post(app).status_code == 403
+    assert no_kill == []
+
+
+def test_the_token_from_this_process_is_accepted(app, no_kill):
+    """The positive control. Without it the checks above would pass on a route that refuses
+    everything, which is not a working shutdown."""
+    response = post(app, token=server.SHUTDOWN_TOKEN)
+    assert response.status_code == 200
+    assert b"Stopped" in response.data
+    assert len(no_kill) == 1
+
+
+def test_the_token_may_also_arrive_as_a_query_parameter(app, no_kill):
+    assert post(app, query_token=server.SHUTDOWN_TOKEN).status_code == 200
+    assert len(no_kill) == 1
+
+
+def test_a_refusal_gives_nothing_away(app, no_kill):
+    """It must not say WHICH half failed, or an attacker learns which one to work on, and it must
+    not echo the token, or it hands it over."""
+    body = post(app, origin="https://evil.example").data.decode()
+    assert server.SHUTDOWN_TOKEN not in body
+    lowered = body.lower()
+    assert "origin" not in lowered, f"the refusal names the failing half: {body!r}"
+    # Same sentence whichever half failed.
+    assert body == post(app, token="wrong").data.decode()
+
+
+def test_the_token_is_not_served_by_any_route(app):
+    """It is printed to the console and nowhere else. A route that reported it would undo the
+    whole mechanism, because a page the browser visits could then read it."""
+    client = app.server.test_client()
+    for path in ("/__health__", "/"):
+        body = client.get(path).data.decode(errors="replace")
+        assert server.SHUTDOWN_TOKEN not in body, f"{path} discloses the shutdown token"
