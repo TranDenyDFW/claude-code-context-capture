@@ -6,8 +6,10 @@ should not have to scroll past nine hundred lines of layout to find it.
 """
 import html as _html
 import os
+import secrets as _secrets
 import threading as _threading
 import time as _time
+from urllib.parse import urlsplit as _urlsplit
 
 from flask import request as _flask_request
 
@@ -32,6 +34,71 @@ GET_REFUSED = (
     "Use POST. This route stops the capture dashboard, and a GET route can be triggered by "
     "any page your browser visits."
 )
+
+# One sentence for every refusal, whatever the reason.
+#
+# It names neither which half failed nor the token. A message that distinguished "wrong token" from
+# "wrong origin" would tell an attacker which half to work on, and one that echoed the expected
+# value would hand it over.
+REFUSED = (
+    "Refused. This route stops the server and requires the shutdown token this process printed "
+    "when it started, from a request that did not come from another site."
+)
+
+# The token, generated once per process.
+#
+# POST-ONLY WAS NEVER A DEFENCE, and the docstring below used to say so while relying on it: a
+# cross-origin form POST is a SIMPLE request, so CORS does not stop it being sent, it only stops the
+# response being read. Any page the browser visited could stop this server with a form and a script.
+#
+# `token_urlsafe(32)` is 256 bits. It is printed to the console at startup and nowhere else: no
+# route reports it, and nothing in this repository calls the shutdown route, so nothing needed
+# rewiring to carry it.
+SHUTDOWN_TOKEN = _secrets.token_urlsafe(32)
+
+# Where a request is allowed to come FROM. A browser always sends `Origin` on a cross-origin POST,
+# so a foreign one is the attack; curl and scripts send none at all and are unaffected.
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def origin_is_local(origin) -> bool:
+    """True when an Origin header may stop this server.
+
+    Absent or empty passes: a command line client sends no Origin, and refusing those would break
+    the only way anyone actually uses this route while stopping none of the attack.
+
+    "null" is REFUSED. A sandboxed iframe and a file:// page both send it, and neither is something
+    that should be able to end the process.
+    """
+    if origin is None or origin == "":
+        return True
+    if origin == "null":
+        return False
+    parts = _urlsplit(origin)
+    if parts.scheme not in ("http", "https"):
+        return False
+    return (parts.hostname or "").lower() in _LOOPBACK_HOSTS
+
+
+def shutdown_allowed(origin, token) -> bool:
+    """Whether a shutdown request may proceed. Both halves must hold.
+
+    `compare_digest` rather than `==`, so the comparison does not leak the token's length or its
+    matching prefix through timing. It needs str or bytes, and a missing header arrives as None.
+    """
+    if not origin_is_local(origin):
+        return False
+    return _secrets.compare_digest(str(token or ""), SHUTDOWN_TOKEN)
+
+
+def announce_shutdown_token(port) -> None:
+    """Print the token beside the URL at startup.
+
+    The console is the only place it appears. Printed rather than written to a file so it dies with
+    the process, and so a reader who did not start the server cannot pick it up later.
+    """
+    print(f"  stop it with: curl -X POST http://127.0.0.1:{port}/__shutdown__ "
+          f"-H \"X-C4X-Shutdown: {SHUTDOWN_TOKEN}\"", flush=True)
 
 
 def stopped_page(reason: str) -> str:
@@ -97,6 +164,12 @@ def register_routes(server, db_path, port):
 
     @server.route("/__shutdown__", methods=["POST"])
     def _shutdown_route():
+        # BOTH HALVES, before anything else happens. The origin check is what stops a page the
+        # browser visited; the token is what stops everything else that guessed the path.
+        if not shutdown_allowed(_flask_request.headers.get("Origin"),
+                                _flask_request.headers.get("X-C4X-Shutdown")
+                                or _flask_request.args.get("token")):
+            return (REFUSED, 403)
         reason = (_flask_request.form.get("reason")
                   or _flask_request.args.get("reason")
                   or "user hit /__shutdown__")
@@ -120,4 +193,5 @@ def run(app, port, debug=False):
     registering every callback twice.
     """
     print(f"context capture explorer -> http://127.0.0.1:{port}  (debug={debug})", flush=True)
+    announce_shutdown_token(port)
     app.run(host="127.0.0.1", port=port, debug=debug, use_reloader=False)

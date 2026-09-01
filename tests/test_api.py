@@ -792,3 +792,44 @@ def test_the_entry_point_checks_its_own_argument_handling():
     assert port_from_argv(["--port", "9999"]) == 9999
     assert port_from_argv([]) != 8056, "the API must not default to the dashboard's port"
     assert db_from_argv([]) is None
+
+
+def test_the_api_shutdown_route_is_guarded_the_same_way(client, monkeypatch):
+    """The SAME function as the Flask surface, so the two cannot drift on what counts as
+    authorised. Tested separately rather than assumed from the other, because two routes that call
+    one helper can still differ in which headers they read.
+    """
+    from c4x import server
+    calls = []
+    monkeypatch.setattr(server, "hardened_shutdown", lambda reason: calls.append(reason))
+
+    token = server.SHUTDOWN_TOKEN
+    refused = [
+        ("a page on another site", {"Origin": "https://evil.example", "X-C4X-Shutdown": token}),
+        ("a sandboxed or file page", {"Origin": "null", "X-C4X-Shutdown": token}),
+        ("a loopback lookalike", {"Origin": "http://127.0.0.1.evil.com",
+                                  "X-C4X-Shutdown": token}),
+        ("the wrong token", {"X-C4X-Shutdown": "not-the-token"}),
+        ("no token at all", {}),
+    ]
+    for what, headers in refused:
+        response = client.post("/__shutdown__", headers=headers)
+        assert response.status_code == 403, f"{what} was not refused"
+        assert token not in response.text, f"the refusal to {what} echoed the token"
+    assert calls == [], "a refused request stopped the server anyway"
+
+    # The positive control, or every assertion above would hold on a route that refuses everything.
+    ok = client.post("/__shutdown__", headers={"X-C4X-Shutdown": token})
+    assert ok.status_code == 200, ok.text
+    assert "Stopped" in ok.text
+    assert len(calls) == 1
+
+    # And by query parameter, which is what a browser address bar and a plain curl can manage.
+    assert client.post(f"/__shutdown__?token={token}").status_code == 200
+    assert len(calls) == 2
+
+
+def test_no_api_route_discloses_the_shutdown_token(client, tab_ids):
+    from c4x import server
+    for path in ("/api/health", "/__health__", "/api/tabs"):
+        assert server.SHUTDOWN_TOKEN not in client.get(path).text, f"{path} discloses the token"

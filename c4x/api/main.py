@@ -26,7 +26,7 @@ os.environ.setdefault("C4X_READ_ONLY", "1")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile  # noqa: E402
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 
@@ -679,7 +679,8 @@ def shutdown_refused():
 
 
 @api.post("/__shutdown__")
-def shutdown(reason: str = Query("user hit /__shutdown__")):
+def shutdown(request: Request, reason: str = Query("user hit /__shutdown__"),
+             token: str | None = Query(None)):
     """Stop the server.
 
     This environment requires a local web app to expose a shutdown path, and that requirement moved
@@ -689,7 +690,13 @@ def shutdown(reason: str = Query("user hit /__shutdown__")):
     The implementation is `c4x/server.py`'s, imported rather than rewritten, so the two cannot
     differ on what "stopped" means or on the order the page is rendered in.
     """
-    from c4x.server import hardened_shutdown, stopped_page
+    from c4x.server import REFUSED, hardened_shutdown, shutdown_allowed, stopped_page
+    # BOTH HALVES, and the same function the Flask surface calls, so the two cannot drift on what
+    # counts as authorised. POST-only was never a defence: a cross-origin form POST is a simple
+    # request, so CORS does not stop it being sent, only the response being read.
+    if not shutdown_allowed(request.headers.get("origin"),
+                            request.headers.get("x-c4x-shutdown") or token):
+        return Response(content=REFUSED, status_code=403, media_type="text/plain")
     # Rendered BEFORE the kill, so a template fault surfaces as a failed response rather than as a
     # 500 from a process already on its way out. That exact bug shipped once.
     page = stopped_page(reason)

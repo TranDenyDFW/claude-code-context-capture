@@ -24,6 +24,14 @@ import { fileURLToPath } from 'node:url';
 const SELF = fileURLToPath(import.meta.url);
 const ROOT = dirname(dirname(SELF));
 const NODE_ONLY = process.argv.includes('--node-only');
+// A SKIPPED CHECK IS A FAILURE WHERE IT MATTERS. The runner has always SAID so, printing
+// "NOT A FULL RUN" and "SUITE PASS (partial)", and then exited 0, which is the half GitHub reads.
+// CI skipped the frontend typecheck and Vitest on every run it ever made, because it never
+// installed frontend/node_modules, and reported green.
+//
+// A flag rather than a rule, so a fresh clone can still run the Python and capture checks without
+// the frontend installed and get an honest partial. CI passes --strict and gets neither.
+const STRICT = process.argv.includes('--strict');
 
 // "(N checks)" is what every self-test prints. pytest prints "N passed" instead, and counting it
 // as zero made the suite total understate itself by more than a hundred assertions.
@@ -366,5 +374,9 @@ if (skipped) {
   console.log('  NOT A FULL RUN: the skipped checks above did not execute, so this total does not ' +
               'cover the dashboard.');
 }
-console.log(failed ? 'SUITE FAIL' : skipped ? 'SUITE PASS (partial)' : 'SUITE PASS');
-process.exit(failed ? 1 : 0);
+if (skipped && STRICT) {
+  console.log('  --strict: a check that did not run is a failure.');
+}
+console.log(failed || (skipped && STRICT) ? 'SUITE FAIL'
+            : skipped ? 'SUITE PASS (partial)' : 'SUITE PASS');
+process.exit(failed || (skipped && STRICT) ? 1 : 0);
