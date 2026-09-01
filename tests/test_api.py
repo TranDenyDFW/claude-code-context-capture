@@ -467,6 +467,72 @@ def test_compare_names_the_two_chats_rather_than_counting_them(client, session_i
         f"the population arm lost its plain sentence: {against_cohort['text'][:4]}"
 
 
+def test_no_column_tooltip_describes_a_different_table(client, tab_ids):
+    """One shared help map, keyed on a bare column id, so a name means one thing everywhere.
+
+    "calls" and "sessions" were written for the repeated-inputs table and say the number counts
+    calls "with this exact input" and sessions that "issued this identical input". Every other
+    table with a column of either name inherited that: the per-model table, the MCP server table,
+    the tool table and the subagent-type table all told the reader something false about their own
+    number.
+
+    A generic guard rather than four assertions, so the next table to gain a Calls column is
+    covered without anyone remembering to add a case.
+    """
+    # The one table those sentences are TRUE of. Identified by a column only it has, not by an
+    # index or a title, both of which move.
+    OWNER = "Beyond One Each"
+    CLAIMS = ("this exact input", "this identical input")
+    offenders = []
+    for tab in tab_ids:
+        body = client.get(f"/api/tab/{tab}/render").json()
+        metas = body.get("meta") or []
+        for i, table in enumerate(body.get("tables", [])):
+            labels = {c["id"]: c["label"] for c in (metas[i]["columns"] if i < len(metas) else [])}
+            if OWNER in labels.values():
+                continue
+            for col, tip in (table.get("tooltips") or {}).items():
+                text = tip["value"] if isinstance(tip, dict) else str(tip)
+                if any(claim in text for claim in CLAIMS):
+                    offenders.append(
+                        f"{tab} table {i} column {labels.get(col, col)!r}: {text[:70]}")
+    assert offenders == [], (
+        "these columns are explained with the repeated-inputs wording on a table that counts "
+        "something else: " + " | ".join(offenders))
+
+
+def test_the_cost_card_counts_calls_not_transcript_rows(client, session_id):
+    """It divided by the wrong denominator and called the result calls.
+
+    "5,683 of 8,202 calls" reads as a third of the calls going unpriced. 8,202 was the transcript
+    ROW count, which the card two along on the same page correctly calls transcript rows, and
+    every one of the 5,683 calls was priced. A reader acting on that would go looking for a
+    pricing gap that does not exist.
+    """
+    import re
+    body = client.get("/api/tab/tab-session/render", params={"session": session_id}).json()
+    cards = {c["label"].lower(): c for c in body.get("stats", [])}
+    cost = cards.get("estimated cost")
+    assert cost, "the Session tab has no cost card"
+    if "no price" in cost["sub"]:
+        pytest.skip("this session ran an unpriced model, so there is no coverage line to check")
+    m = re.search(r"([\d,]+) of ([\d,]+) calls", cost["sub"])
+    assert m, f"the cost card no longer states its coverage: {cost['sub']!r}"
+    priced, of = (int(g.replace(",", "")) for g in m.groups())
+
+    rows = cards.get("rows")
+    assert rows, "the Session tab has no rows card to compare against"
+    transcript_rows = int(rows["value"].replace(",", ""))
+    assert of != transcript_rows or priced == of, (
+        f"the cost card is dividing by the {transcript_rows:,} transcript rows and calling them "
+        f"calls")
+
+    from c4x import store
+    real_calls = int(store.q("SELECT COUNT(*) AS n FROM api_calls WHERE session_id = ? "
+                             "AND is_sidechain = 0", (session_id,)).iloc[0]["n"])
+    assert of == real_calls, f"the card says {of:,} calls, the store has {real_calls:,}"
+
+
 def test_the_tab_says_whether_the_selection_applies_to_it(client, session_id):
     """The answer to "why does this table never change?" has to be ON the tab.
 
