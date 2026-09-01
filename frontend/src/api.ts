@@ -155,6 +155,15 @@ export interface Selection {
   session?: string | null
   scope?: 'main' | 'all'
   cohort?: string | null
+  /**
+   * Arm B on the Compare tab. Arm A is the rest of this object.
+   *
+   * The server has always accepted these; the page never sent them, so Compare rendered whatever
+   * `default_arm_b()` picked and nothing could steer it. Comparing a session against its own fork,
+   * which is the reason the tab exists, was unreachable from the UI.
+   */
+  compareWith?: string | null
+  compareKind?: 'session' | 'cohort'
 }
 
 /** A project harvest has been told to stop capturing. */
@@ -271,6 +280,8 @@ export const api = {
       session: selection.session,
       scope: selection.scope ?? 'main',
       cohort: selection.cohort,
+      compare_with: selection.compareWith,
+      compare_kind: selection.compareWith ? (selection.compareKind ?? 'session') : undefined,
     }),
 
   /**

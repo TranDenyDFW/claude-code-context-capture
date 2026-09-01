@@ -163,7 +163,11 @@ TAB_IDS = [t[0] for t in TABS]
 
 # Summary is store-wide. Everything after it describes the header selection, and each tab says so
 # on the page rather than leaving the reader to work it out.
-SELECTION_SCOPED = {"tab-session", "tab-compactions", "tab-window", "tab-cost"}
+# tab-compare IS scoped, and saying otherwise was a false statement on the page. Arm A of the
+# comparison is the header selection: measured, the pane goes from 1,292 sessions to 1 the moment a
+# session is chosen. The tab was labelled "the header selection does not change this tab" while
+# being the tab where that selection matters most.
+SELECTION_SCOPED = {"tab-session", "tab-compactions", "tab-window", "tab-cost", "tab-compare"}
 # Probes describes 3 control-protocol runs that belong to no session, and Mirror is a
 # calculator over published constants. Labelling either as scoped would be the same false
 # statement this restructure removed.
