@@ -372,6 +372,19 @@ def include(project):
 # ---------------------------------------------------------------------------
 # Delete
 # ---------------------------------------------------------------------------
+def file_name(project, stamped=False):
+    """A filename for a project's export. One rule, so a download and a delete's backup agree.
+
+    Every non-alphanumeric character goes, which flattens a Windows path to something a browser
+    will accept as a download name. That is lossy on purpose and not a problem: the project path
+    lives in the manifest INSIDE the file, so the name is a label and never the record.
+    """
+    safe = "".join(c if c.isalnum() else "-" for c in str(project)).strip("-")[:80] or "project"
+    if not stamped:
+        return f"{safe}.db"
+    return f"{safe}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.db"
+
+
 def delete(project, confirm, out_dir=None, keep_capturing=False):
     """Export, verify, then remove, then stop capturing. It stops at the first thing that fails.
 
@@ -387,9 +400,7 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
         raise ValueError("confirmation does not match the project path; nothing was deleted")
 
     out_dir = Path(out_dir or (ROOT / "tmp" / "exports"))
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    safe = "".join(c if c.isalnum() else "-" for c in project).strip("-")[:80] or "project"
-    backup = out_dir / f"{safe}-{stamp}.db"
+    backup = out_dir / file_name(project, stamped=True)
     manifest = export(project, backup)             # raises if it cannot be verified
 
     with store.write() as con:

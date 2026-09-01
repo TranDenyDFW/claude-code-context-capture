@@ -26,7 +26,7 @@ os.environ.setdefault("C4X_READ_ONLY", "1")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import FastAPI, HTTPException, Query  # noqa: E402
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 
@@ -145,7 +145,12 @@ def health():
     from c4x import store
     return {"ok": True,
             "db": str(store.DB_PATH),
+            # TWO SEPARATE FACTS, reported separately on purpose. `read_only` means this process
+            # never harvests and is always true here. `writes_enabled` means the export, import and
+            # delete routes will answer. Collapsing them into one flag would leave the UI unable to
+            # say WHY a control is disabled, so it would fail on click instead.
             "read_only": bool(os.environ.get("C4X_READ_ONLY")),
+            "writes_enabled": _writes_enabled(),
             # Reported so the cache can be checked on a running server rather than trusted. A hit
             # rate of zero in the wild would mean the version stamp is moving on every request,
             # which is a failure that costs nothing visible and undoes the whole of phase 3.
@@ -677,6 +682,137 @@ def mirror_predict(tokens: int, window: int = 1_000_000):
         raise HTTPException(
             status_code=503,
             detail={"error": "mirror unavailable", "cause": str(exc)[:200]}) from exc
+
+
+# ---------------------------------------------------------------------------
+# Moving a project in and out of the store.
+#
+# THE ONLY ROUTES IN THIS FILE THAT WRITE, and they get their own switch rather than borrowing
+# `C4X_READ_ONLY`. That variable means "this process never harvests", which is what stopped two
+# harvesters fighting over one store, and it is set unconditionally at the top of this module.
+# Writing is a different thing. Reusing the harvest flag would make `--no-writes` also claim the
+# server harvests, and `/api/health` would have no way to say which of the two is true.
+# ---------------------------------------------------------------------------
+
+
+def _writes_enabled():
+    return not os.environ.get("C4X_NO_WRITES")
+
+
+def _require_writes():
+    if not _writes_enabled():
+        raise HTTPException(status_code=403, detail={
+            "error": "this server was started with --no-writes",
+            "fix": "restart it without that flag to export, import or delete"})
+
+
+def _project_of(cohort):
+    """The working directory a cohort names, refusing anything that does not name one.
+
+    `store.cohort_parts` rather than another `partition("::")` here. A bare path with no prefix
+    resolves to NO RESTRICTION, which for a read is a wrong session count and for a delete would be
+    the entire store, so the two callers must not be allowed to disagree about it.
+    """
+    from c4x import store
+    kind, value = store.cohort_parts(cohort)
+    if kind != "project":
+        raise HTTPException(status_code=400, detail={
+            "error": "that cohort does not name a project",
+            "got": cohort,
+            "want": "project::<the working directory>"})
+    return value
+
+
+@api.get("/api/project/excluded")
+def project_excluded():
+    """Projects harvest has been told to stop capturing.
+
+    A GET, and readable with writes turned off, because a project that has silently stopped being
+    captured is exactly the kind of fact this app exists to surface.
+    """
+    from c4x import projects
+    return {"excluded": projects.excluded(), "writes_enabled": _writes_enabled()}
+
+
+@api.get("/api/project/export")
+def project_export(cohort: str = Query(..., description="project::<the working directory>")):
+    """The whole project as one SQLite file, with its manifest inside it.
+
+    A read, but it writes the file it serves, so it is gated with the others: on a server started
+    with --no-writes there is nowhere to put it.
+    """
+    from fastapi.responses import FileResponse
+
+    from c4x import projects
+    _require_writes()
+    project = _project_of(cohort)
+    out_dir = ROOT / "tmp" / "exports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / projects.file_name(project)
+    try:
+        manifest = projects.export(project, out)
+    except ValueError as exc:
+        raise HTTPException(status_code=404,
+                            detail={"error": str(exc), "project": project}) from exc
+    return FileResponse(
+        out, media_type="application/vnd.sqlite3", filename=out.name,
+        # The counts are in the file too. They are repeated in headers so a caller that streams the
+        # download straight to disk can check what it got without opening it.
+        headers={"X-C4X-Project": project,
+                 "X-C4X-Sessions": str(manifest["sessions"]),
+                 "X-C4X-Exported-At": str(manifest["exported_at"])})
+
+
+@api.post("/api/project/import")
+async def project_import(file: UploadFile = File(...)):
+    """Load an exported project. Verified before a single row is written."""
+    from c4x import projects
+    _require_writes()
+    staged = ROOT / "tmp" / "imports"
+    staged.mkdir(parents=True, exist_ok=True)
+    # Staged to disk rather than held in memory: the largest project in this store exports to
+    # 180 MB, and ATTACH needs a path in any case.
+    path = staged / (Path(file.filename or "upload.db").name or "upload.db")
+    with open(path, "wb") as fh:
+        while chunk := await file.read(1 << 20):
+            fh.write(chunk)
+    try:
+        return projects.import_(path)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400,
+                            detail={"error": str(exc), "file": path.name}) from exc
+
+
+@api.post("/api/project/delete")
+def project_delete(body: dict):
+    """Export, verify, remove, then stop capturing. It stops at the first thing that fails.
+
+    `confirm` must be the project path exactly. A boolean cannot tell the wrong project from the
+    right one, and that is the entire risk here.
+    """
+    from c4x import projects
+    _require_writes()
+    project = _project_of(body.get("cohort"))
+    try:
+        return projects.delete(project,
+                               confirm=str(body.get("confirm", "")),
+                               keep_capturing=bool(body.get("keep_capturing")))
+    except ValueError as exc:
+        # 409, not 400: the request was well formed and the server refused it. A wrong confirmation
+        # string is the guard working, and it should read differently from a malformed cohort.
+        raise HTTPException(status_code=409,
+                            detail={"error": str(exc), "project": project}) from exc
+
+
+@api.post("/api/project/include")
+def project_include(body: dict):
+    """Lift an exclusion so harvest picks the project up again."""
+    from c4x import projects
+    _require_writes()
+    project = str(body.get("project") or "")
+    if not project:
+        raise HTTPException(status_code=400, detail={"error": "no project given"})
+    return {"project": project, "removed": projects.include(project)}
 
 
 # The built frontend, served by this same process when it exists.
