@@ -37,6 +37,20 @@ const STRICT = process.argv.includes('--strict');
 // as zero made the suite total understate itself by more than a hundred assertions.
 const CHECKS = /\((\d+) checks\)|(\d+) passed/;
 
+// EVERY captured output goes through this before it is matched.
+//
+// Vitest colours its summary when CI is set, so on GitHub the line arrives as
+// `\x1b[2m      Tests \x1b[22m \x1b[1m\x1b[32m99 passed\x1b[39m`, and `/Tests\s+(\d+) passed/`
+// cannot match it: `\s+` does not match an escape sequence. Locally there is no colour and the
+// same regex matched, so the frontend row passed with no count and the CI total silently
+// understated by 99 checks while reading as though it had covered them.
+//
+// Applied to ALL of them rather than to the one that bit, because every other count here is read
+// out of a tool's stdout the same way and any of them can start colouring on a whim. The pattern
+// is the standard control-sequence shape: ESC [ ... final-byte.
+const ANSI = /\u001B\[[0-9;]*[A-Za-z]/g;
+const plain = (out) => String(out || '').replace(ANSI, '');
+
 // THE LAST TWO LINES ARE OFTEN NOT THE FAILURE. An independent reviewer hit this: a pytest entry
 // failed, and the suite report showed only `RequestsDependencyWarning: urllib3 ...` from stderr,
 // because on Windows that warning is the last thing written. The reviewer had to re-run the entry
@@ -178,7 +192,7 @@ for (const rel of nodeTargets()) {
   // to read. Still bounded, because a genuinely hung self-test must not stall the suite forever.
   const run = spawnSync(process.execPath, [join(ROOT, rel), '--self-test'],
                         { encoding: 'utf8', cwd: ROOT, timeout: 300_000 });
-  const text = `${run.stdout || ''}${run.stderr || ''}`;
+  const text = plain(run.stdout) + plain(run.stderr);
   const match = text.match(CHECKS);
   const count = match ? Number(match[1]) : 0;
 
@@ -257,7 +271,7 @@ if (NODE_ONLY) {
       // support anywhere else in the codebase.
       env: opts?.fixture ? { ...process.env, C4X_DB: fixture } : process.env,
     });
-    const text = `${run.stdout || ''}${run.stderr || ''}`;
+    const text = plain(run.stdout) + plain(run.stderr);
     const match = text.match(CHECKS);
     const count = match ? Number(match[1] ?? match[2]) : null;
     if (run.status !== 0 || run.signal) {
@@ -303,7 +317,7 @@ if (!NODE_ONLY) {
     const run = spawnSync('npm', [...args, '--prefix', frontend], {
       encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: process.platform === 'win32',
     });
-    const text = `${run.stdout || ''}${run.stderr || ''}`;
+    const text = plain(run.stdout) + plain(run.stderr);
     // NOT the shared CHECKS pattern. Vitest prints "Test Files  2 passed (2)" BEFORE
     // "Tests  22 passed (22)", and CHECKS matches "N passed" anywhere, so it took the file count
     // and the suite total silently read 20 lower than the number of checks that actually ran.
@@ -321,10 +335,24 @@ if (!NODE_ONLY) {
       results.push({ rel: label, state: 'FAIL',
                      note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
                      tail: tailOf(text) });
+    } else if (marker && !count) {
+      // A CHECK WHOSE RESULT CANNOT BE COUNTED HAS NOT DEMONSTRABLY RUN, which is the rule this
+      // runner already applies to the node self-tests above. It did not apply it here, so on CI
+      // this row passed with no number and the suite total silently understated by the whole of
+      // the frontend: 99 locally, nothing there. The tail is printed because the text is the only
+      // evidence of why, and the runner captures it rather than letting it through.
+      failed++;
+      results.push({ rel: label, state: 'FAIL',
+                     note: `exit 0 and printed ${JSON.stringify(marker)}, but no check count `
+                           + `could be read from the output, so the total would understate`,
+                     // STDOUT, not the combined text. Vitest prints its summary to stdout and
+                     // jsdom prints its warnings to stderr, so `tailOf(stdout + stderr)` is always
+                     // the jsdom noise and never the line this failure is about.
+                     tail: tailOf(plain(run.stdout) || '(stdout was empty)') });
     } else {
-      if (marker && count) total += count;
-      results.push({ rel: label, state: 'pass', count: marker ? count ?? null : null,
-                     note: marker && count ? '' : what });
+      if (count) total += count;
+      results.push({ rel: label, state: 'pass', count: marker ? count : null,
+                     note: marker ? '' : what });
     }
   }
 }
@@ -340,7 +368,7 @@ if (!NODE_ONLY) {
   const run = spawnSync('npx', ['--yes', 'eslint', '.'], {
     encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: process.platform === 'win32',
   });
-  const text = `${run.stdout || ''}${run.stderr || ''}`;
+  const text = plain(run.stdout) + plain(run.stderr);
   if (run.status !== 0 || run.signal) {
     failed++;
     results.push({ rel: 'eslint .', state: 'FAIL',
