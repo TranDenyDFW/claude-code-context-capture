@@ -3,41 +3,43 @@
 # file carries the tool configuration.
 
 [tool.mypy]
-# OVER c4x/ ONLY, and non-blocking in CI to start with.
+# OVER c4x/ ONLY, and BLOCKING in CI.
 #
 # The surface worth typing is the one where a wrong type becomes a wrong NUMBER: the store, the
 # project export and delete, and the API that serves them. app.py and tools/ are scripts and are
 # checked by the suite instead.
 #
-# The backlog this started with is cleared and the step BLOCKS. It opened at 20 errors under the
-# loose settings below, and turning on check_untyped_defs surfaced 25 more that the loose reading
-# had hidden. Both sets are at zero. Four suppressions remain, each commented where it sits, and
-# all three are for the same kind of thing: a dash component the library types wrongly or not
-# at all. Counted with `git grep -c 'type: ignore' -- c4x`, not from memory: this line said
-# FOUR until an independent review counted them, because the number was taken before the
-# refactor that collapsed three DataTable suppressions into one accessor.
+# The backlog this started with is cleared, and what that pass found is worth keeping, since
+# "clearing type errors" sounds cosmetic and two of them were not: `_harvest_state["error"][:60]`
+# was slicing a float on the line that renders in the header whenever a refresh fails, and
+# `PANELLED` carried an annotation written from memory that claimed a shape its only writer does
+# not produce. The stricter setting below is what caught the second one.
 #
-# What that pass actually found, since "clearing type errors" sounds cosmetic and two of these were
-# not: `_harvest_state["error"][:60]` was slicing a float on the line that renders in the header
-# whenever a refresh fails, and `PANELLED` had an annotation I had written from memory that claimed
-# a shape the only writer does not produce. The stricter setting is what caught the second one.
+# NO COUNTS IN THIS BLOCK, deliberately. Do not add any. It used to say how many errors each pass
+# cleared and how many suppressions remain, and every one of those numbers went stale: two
+# independent reviews found them wrong, including one number that had been corrected in the line
+# below it and left standing in the line above. A count written once and then repeated is a claim
+# nobody re-derives. `git grep -c "type: ignore" -- c4x` answers the suppression question in less
+# time than it takes to read a sentence about it, and it cannot be out of date.
 python_version = "3.12"
 files = ["c4x"]
 ignore_missing_imports = true      # pandas, dash and plotly ship partial or no stubs
 # Types come FROM app.py and tools/ where c4x imports them, but their own errors are not this
 # gate's business. Without this the report includes app.py, which is not the surface being typed.
 follow_imports = "silent"
-check_untyped_defs = true          # was false; the 25 errors it had been hiding are fixed
-warn_unused_ignores = true         # so the three report themselves once dash publishes types
+check_untyped_defs = true          # was false, and what it had been hiding is fixed
+warn_unused_ignores = true         # so a suppression reports itself once dash publishes types
 warn_redundant_casts = true
 show_error_codes = true
-# NOT set: disallow_untyped_defs, which requires an annotation on every function. Measured at 253
-# errors across 36 files under the pinned mypy, so it is a separate piece of work and not a setting
-# to flip quietly; left off deliberately, with the number, rather than omitted and rediscovered.
+# NOT set: disallow_untyped_defs, which requires an annotation on every function. Separate work
+# rather than a setting to flip quietly, and the size of it is worth knowing before anyone starts:
 #
-# The version matters and is stated for that reason. This line read 278, a figure taken before the
-# check_untyped_defs backlog was fixed and never re-measured, against a mypy that was not pinned at
-# the time. A count like this is only meaningful beside the checker that produced it.
+#     python -m mypy --disallow-untyped-defs
+#
+# 253 errors across 36 files under mypy 2.3.1, the version constraints-ci.txt pins. This count
+# survives the rule above because it decides something, and it carries the command and the checker
+# because a figure without either is how the number that stood here before (278, measured before
+# the backlog was cleared) stayed wrong through two commits.
 
 [tool.ruff]
 line-length = 100          # what app.py and the checks are already written to

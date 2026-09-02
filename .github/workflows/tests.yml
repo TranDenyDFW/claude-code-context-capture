@@ -65,13 +65,13 @@ jobs:
       - name: Lint the Python side
         run: python -m ruff check app.py tools/
 
-      # BLOCKING. This step was added non-blocking with a 20-error backlog and the promise that it
-      # would become blocking once the number was worked down. It is: 20 under the loose settings,
-      # then 25 more that turning on `check_untyped_defs` revealed, all at zero. `continue-on-error`
-      # is gone, so a type error fails the job rather than being reported into an already-green run.
+      # BLOCKING. This step was added non-blocking, with a backlog and a promise that it would
+      # become blocking once that backlog was worked down. It was, so it is: `continue-on-error` is
+      # gone and a type error fails the job rather than being reported into an already-green run.
       #
-      # Settings and the three remaining suppressions are in pyproject.toml, next to the count of
-      # what `disallow_untyped_defs` would still cost.
+      # The settings, the suppressions and what `disallow_untyped_defs` would still cost are in
+      # pyproject.toml. Sizes are not repeated here: this comment carried three counts and every one
+      # of them went stale, which is the whole argument for reading them where they are measured.
       - name: Type-check the store, the API and the project moves
         run: python -m mypy
 

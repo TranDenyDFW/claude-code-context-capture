@@ -23,3 +23,8 @@ ruff>=0.6.0
 # matters more for this package than the others, because it is the one whose output can fail the
 # job. It was NOT pinned there until that same review found it.
 mypy>=1.11.0
+
+# Used by tools/make_constraints.py to compare requirement names PEP 503 style and to check that a
+# pin satisfies the floor beside it. It arrived as a transitive of pip and pytest; naming it here
+# makes that dependency deliberate rather than something the tool relies on by luck.
+packaging>=24.0
