@@ -90,6 +90,12 @@ function nodeTargets() {
 // quietly dropped by fourteen while the run still said PASS.
 const PY = [
   ['tools/table_audit.py', ['--self-test'], 'gate self-test', 'SELF-TEST PASS'],
+  // Does constraints-ci.txt still pin everything the requirements files name? Offline, so it
+  // runs anywhere. It exists because mypy sat unpinned in that file from the commit that
+  // created it through the commit that made the mypy step blocking, and the file's own
+  // instructions did not catch it. An independent review did.
+  ['tools/make_constraints.py', ['--self-test'], 'CI dependency pins cover the requirements',
+   'SELF-TEST PASS', { noStore: true }],
   // The latency gate's own checks. Pure logic, no store, so it runs anywhere the suite does.
   //
   // The gate ITSELF is not in this suite on purpose: it needs a real store and a baseline

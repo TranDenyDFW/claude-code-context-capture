@@ -70,7 +70,7 @@ jobs:
       # then 25 more that turning on `check_untyped_defs` revealed, all at zero. `continue-on-error`
       # is gone, so a type error fails the job rather than being reported into an already-green run.
       #
-      # Settings and the four remaining suppressions are in pyproject.toml, next to the count of
+      # Settings and the three remaining suppressions are in pyproject.toml, next to the count of
       # what `disallow_untyped_defs` would still cost.
       - name: Type-check the store, the API and the project moves
         run: python -m mypy
