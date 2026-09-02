@@ -50,6 +50,10 @@ Claude-Code-Context-Capture Technical Review.md
 React+TypeScript Dashboard.md
 
 # The React frontend's dependencies: 149 MB, restorable from the tracked package-lock.json.
+# The linter's, at the root. It appeared the moment `npx --yes eslint .` ran and left the tree
+# dirty after every suite run; now it is a real `npm ci` target and belongs here for the same
+# reason the frontend's does.
+/node_modules/
 frontend/node_modules/
 
 # frontend/dist IS tracked, which is unusual for build output and is the point.

@@ -16,31 +16,43 @@ jobs:
   suite:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4, v4.4.0
 
       # Node 24: every tool opens the store through the built-in node:sqlite, which earlier majors
       # shipped behind an experimental flag.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # actions/setup-node@v4, v4.4.0
         with:
           node-version: '24'
           # Keyed on the lockfile this job now installs from. Without a cache the frontend install
           # below is a fresh network fetch on every run.
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          # BOTH lockfiles. The root one pins eslint, the frontend one pins the build and test
+          # toolchain, and a cache keyed on only one of them goes stale the moment the other moves.
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # actions/setup-python@v5, v5.6.0
         with:
           python-version: '3.12'
 
+      # `-c constraints-ci.txt` pins everything including transitives, so a run six months from
+      # now installs the graph today's green run installed. The requirements files keep their lower
+      # bounds, because they are what someone installing this to look at their own context gets.
       - name: Install Python dependencies
         run: |
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          pip install -c constraints-ci.txt -r requirements.txt -r requirements-dev.txt
+          pip check
 
       # WITHOUT THIS THE FRONTEND CHECKS DO NOT RUN. tools/run_tests.mjs skips the typecheck and
       # Vitest when frontend/node_modules is absent, and this job never installed it, so those two
       # gates were skipped on every run CI ever made while the job reported success. `ci` rather
       # than `install` because frontend/package-lock.json is committed.
+      # `ci`, not `install`: it installs exactly the lockfile and fails if package.json and the
+      # lockfile disagree, which is the whole point of committing one.
+      - name: Install the linter
+        run: npm ci
+
       - name: Install the frontend
         run: npm ci --prefix frontend
 
@@ -53,8 +65,21 @@ jobs:
       - name: Lint the Python side
         run: python -m ruff check app.py tools/
 
+      # NON-BLOCKING, on purpose and temporarily. This codebase has never been type-checked; at
+      # the time this step was added mypy found 20 errors across 6 files in c4x/. Making that
+      # blocking on day one would stop every unrelated change until the backlog cleared, so the
+      # step reports the count and the job stays green. It becomes blocking once the number is
+      # worked down, and `continue-on-error` means a red step is still visible in the run rather
+      # than swallowed by `|| true`.
+      - name: Type-check the store, the API and the project moves
+        continue-on-error: true
+        run: python -m mypy
+
+      # The PINNED eslint from the root lockfile. This was `npx --yes eslint .`, which fetches
+      # whatever is newest that minute, so what counted as an error could change between two runs
+      # of the same commit.
       - name: Lint the node tools
-        run: npx --yes eslint .
+        run: npm run lint
 
       # --strict, so a check that did not run fails the job. The runner has always SAID a skip
       # means "NOT A FULL RUN" and then exited 0, which is the half GitHub reads.

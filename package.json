@@ -15,15 +15,28 @@
     "harvest": "node tools/harvest.mjs",
     "install-hooks": "node tools/install.mjs install",
     "uninstall-hooks": "node tools/install.mjs uninstall",
-    "app": "python app.py"
+    "app": "python app.py",
+    "lint": "eslint ."
   },
   "comments": {
     "no-dependencies": [
-      "This file exists for `engines` and script aliases. It is NOT a place to add packages.",
-      "Every tool here runs on Node built-ins alone, node:sqlite included, which is why installing",
-      "this extension pulls nothing and why there is no lockfile to audit. That is a property worth",
-      "keeping deliberately rather than losing to the first convenient dependency.",
-      "The Python side is requirements.txt, and it covers the dashboard only."
+      "ONE devDependency, and it took a deliberate decision to add it. Everything that RUNS here",
+      "still needs nothing: every tool uses node built-ins alone, node:sqlite included, so installing",
+      "this extension pulls nothing and a clone can harvest and read its store with an empty",
+      "node_modules. That property is intact and worth keeping.",
+      "",
+      "What changed is the LINTER, which is not part of what runs. It was invoked as",
+      "`npx --yes eslint .`, which resolves whatever is newest at the moment CI happens to run, so a",
+      "release could change what lints between two runs of the same commit. A pinned devDependency",
+      "and a committed lockfile make that reproducible. The cost is a root node_modules for anyone",
+      "who wants to lint, and `npm ci` in CI; the cost is not paid by anyone who only wants to use",
+      "the tool.",
+      "",
+      "The Python side is requirements.txt for what runs, requirements-dev.txt for the checks, and",
+      "constraints-ci.txt for the exact versions CI resolves."
     ]
+  },
+  "devDependencies": {
+    "eslint": "10.9.1"
   }
 }
