@@ -9,20 +9,28 @@
 # project export and delete, and the API that serves them. app.py and tools/ are scripts and are
 # checked by the suite instead.
 #
-# This codebase has never been type-checked, so the settings below are the honest starting point
-# rather than the destination: third-party stubs are not required to exist, and untyped function
-# bodies are not checked. Tightening them is the work; pretending they are already tight would
-# mean a gate that fails for reasons nobody chose.
+# The backlog this started with is cleared and the step BLOCKS. It opened at 20 errors under the
+# loose settings below, and turning on check_untyped_defs surfaced 25 more that the loose reading
+# had hidden. Both sets are at zero. Four suppressions remain, each commented where it sits, and
+# all four are for the same kind of thing: a dash component the library types wrongly or not at all.
+#
+# What that pass actually found, since "clearing type errors" sounds cosmetic and two of these were
+# not: `_harvest_state["error"][:60]` was slicing a float on the line that renders in the header
+# whenever a refresh fails, and `PANELLED` had an annotation I had written from memory that claimed
+# a shape the only writer does not produce. The stricter setting is what caught the second one.
 python_version = "3.12"
 files = ["c4x"]
 ignore_missing_imports = true      # pandas, dash and plotly ship partial or no stubs
 # Types come FROM app.py and tools/ where c4x imports them, but their own errors are not this
 # gate's business. Without this the report includes app.py, which is not the surface being typed.
 follow_imports = "silent"
-check_untyped_defs = false         # the backlog to work down, not a permanent setting
-warn_unused_ignores = true
+check_untyped_defs = true          # was false; the 25 errors it had been hiding are fixed
+warn_unused_ignores = true         # so the four ignores report themselves once dash publishes types
 warn_redundant_casts = true
 show_error_codes = true
+# NOT set: disallow_untyped_defs, which requires an annotation on every function. Measured at 278
+# errors across 36 files, so it is a separate piece of work and not a setting to flip quietly; left
+# off deliberately, with the number, rather than omitted and rediscovered.
 
 [tool.ruff]
 line-length = 100          # what app.py and the checks are already written to

@@ -15,6 +15,7 @@ away the one shape the whole test suite already knows how to read.
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -269,7 +270,7 @@ def _population(node):
     with nothing failing. `theme.population_note` marks the line at the point it is written.
     """
     from c4x.cli import extract
-    found = []
+    found: list[tuple[str, str]] = []   # (text, scope), first match wins
 
     def walk(item):
         if found:
@@ -357,7 +358,7 @@ def _heat_bands(conditional):
     that stopped at the first match would shade every outlier the palest colour.
     """
     import re
-    out = {}
+    out: dict[str, list[dict[str, Any]]] = {}
     for rule in conditional:
         test = (rule or {}).get("if") or {}
         column, query = test.get("column_id"), test.get("filter_query")

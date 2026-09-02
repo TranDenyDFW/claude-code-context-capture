@@ -558,8 +558,12 @@ def main(argv=None):
     p_include.add_argument("project")
 
     args = ap.parse_args(argv)
-    if args.self_test or not args.command:
-        return self_test() if args.self_test else (ap.print_help() or 0)
+    if args.self_test:
+        return self_test()
+    if not args.command:
+        # Was `ap.print_help() or 0`, which reads as though print_help returned something.
+        ap.print_help()
+        return 0
 
     if args.command == "list":
         for row in projects():

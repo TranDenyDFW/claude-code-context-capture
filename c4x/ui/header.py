@@ -14,6 +14,7 @@ import os
 import subprocess
 import threading as _threading
 import time as _time
+from typing import TypedDict
 
 from dash import dcc, html
 
@@ -108,7 +109,20 @@ def scope_radio(component_id: str, value: str = "main") -> dcc.RadioItems:
 # question from the same numbers.
 # ---------------------------------------------------------------------------
 _harvest_lock = _threading.Lock()
-_harvest_state = {"ts": 0.0, "error": None, "runs": 0}
+class _HarvestState(TypedDict):
+    """When the refresh tick last harvested, and what went wrong if anything did.
+
+    Typed for the same reason as store's caches: inferred from the literal, `error` was a float and
+    `_harvest_state["error"][:60]` was slicing one. That line renders in the header on every failed
+    refresh, so the mistyping sat directly under the message a reader sees when something breaks.
+    """
+
+    ts: float
+    error: str | None
+    runs: int
+
+
+_harvest_state: _HarvestState = {"ts": 0.0, "error": None, "runs": 0}
 
 
 def refresh_store(min_interval: float = 4.0) -> None:
@@ -156,7 +170,7 @@ _window_cache: dict = {}
 
 
 
-def live_context(session_id: str = None):
+def live_context(session_id: str | None = None):
     """The newest API call, expressed the way the desktop expresses it.
 
     Reads api_calls rather than turns: a streamed assistant message is several turn rows sharing

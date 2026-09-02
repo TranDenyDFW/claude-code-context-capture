@@ -74,7 +74,9 @@ def stamp(db_path):
     file and the main database's mtime does not move for some time afterwards, so watching only the
     database would serve stale panes for exactly as long as the harvester was busy.
     """
-    parts = []
+    # The None is deliberate and documented below, so the type says so rather than the reader
+    # having to reach the except clause to find out.
+    parts: list[tuple[int, int] | None] = []
     for path in (db_path, f"{db_path}-wal"):
         try:
             info = os.stat(path)
