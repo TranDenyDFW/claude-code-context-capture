@@ -8,12 +8,13 @@ between them they occupied 2.6 screens across two tabs a reader had no reason to
 No sub-panel strip here. The combined page is under three screens, and a strip over two short
 sections is navigation for its own sake.
 """
-from dash import dash_table, html
+from dash import html
 
 # AT MODULE LEVEL, not inside the function that uses it. `tools/table_audit.py` reads the app's
 # import graph before it walks the layouts, so a module that only appears once a function has run
 # makes the audit read a different set of files than the one that executed, and it says so.
 from c4x import projects
+from c4x.dash_compat import DataTable
 from c4x.tabs.mirror import mirror_layout
 from c4x.tabs.probes import probes_layout
 from c4x.theme import SECTION_HEAD, SECTION_NOTE, TABLE_STYLE, header_help
@@ -45,7 +46,7 @@ def exclusions_layout():
                  "one folder can hold several projects, so excluding by folder would stop "
                  "capturing unrelated work. Lifting an exclusion re-reads the transcript from the "
                  "beginning.", style=SECTION_NOTE),
-        dash_table.DataTable(columns=cols, tooltip_header=header_help(cols),
+        DataTable(columns=cols, tooltip_header=header_help(cols),
                              data=rows, page_size=10,
                              style_table={"overflowX": "auto"}, **TABLE_STYLE),
     ]

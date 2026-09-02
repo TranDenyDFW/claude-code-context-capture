@@ -3,8 +3,9 @@
 Every compaction, and how far past its own threshold each one fired.
 """
 import plotly.graph_objects as go
-from dash import dash_table, dcc, html
+from dash import dcc, html
 
+from c4x.dash_compat import DataTable
 from c4x.store import COMPACTION_WINDOWS, THRESHOLDS, all_compactions, fit_window
 from c4x.theme import (
     BORDER,
@@ -69,7 +70,7 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
             "column says on what evidence, and token-fit means segmentation could not resolve it.",
             style={"color": MUTED, "fontSize": "11.5px", "margin": "8px 0 14px 0"},
         ),
-        dash_table.DataTable(
+        DataTable(
             id="tbl-compactions",
             columns=(_cols :=
                 numeric_columns(cols, {"pre_tokens", "post_tokens", "dropped", "survivors",

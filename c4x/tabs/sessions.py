@@ -3,8 +3,9 @@
 Every session as a sortable, filterable table. Clicking a row sets the header selection.
 """
 import plotly.graph_objects as go
-from dash import dash_table, dcc, html
+from dash import dcc, html
 
+from c4x.dash_compat import DataTable
 from c4x.store import cohort_sessions, session_rows
 from c4x.theme import (
     ACCENT,
@@ -145,7 +146,7 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
         # would make each selection narrow the previous one and never widen.
         dcc.Store(id="sessions-rows", data=rows),
         html.Div(id="sessions-filter-note"),
-        dash_table.DataTable(
+        DataTable(
             id="tbl-session",
             columns=(_cols := numeric_columns(
                 ["section", "title", "project", "last active", "turns", "current", "peak",

@@ -11,9 +11,11 @@ baseline, both are shown side by side rather than one being quietly preferred.
 """
 import pandas as pd
 import plotly.graph_objects as go
-from dash import dash_table, dcc, html
+from dash import dcc, html
 from dash.dash_table.Format import Format, Scheme
+from dash.development.base_component import Component
 
+from c4x.dash_compat import DataTable
 from c4x.panels import evidence_block
 from c4x.store import q
 from c4x.theme import (
@@ -234,7 +236,9 @@ def probe_detail_blocks(baseline=None):
     pid = int(probe["id"])
     when = str(probe["ts"])[:19].replace("T", " ")
     cats, names = probe_completeness(pid)
-    blocks = [
+    # Annotated because the first element is a Div and a dcc.Graph is appended later; inferred
+    # from the literal this is a list[Div] and that append is an error.
+    blocks: list[Component] = [
         html.Div("What is in the window, item by item", style=SECTION_HEAD),
         html.Div(
             f"Read directly from Claude Code by probe {pid} at {when} on {probe['model']}. This is "
@@ -261,7 +265,7 @@ def probe_detail_blocks(baseline=None):
         blocks += [
             html.Div("Recorded against calibrated, per category",
                      style={"color": MUTED, "fontSize": "11.5px", "margin": "10px 0 6px 0"}),
-            dash_table.DataTable(
+            DataTable(
                 columns=(_cols := numeric_columns(
                     ["category", "items recorded", "items in baseline", "tokens recorded",
                      "tokens in baseline", "not loaded"],

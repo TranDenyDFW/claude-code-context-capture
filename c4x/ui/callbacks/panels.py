@@ -7,9 +7,10 @@ Registered by importing this module. Dash's `callback` decorator writes into a g
 these attach wherever they are defined; app.py imports them and re-exports the names, because the
 tests and the table audit reach them as app._name and should not have to know where each one lives.
 """
-from dash import Input, Output, State, callback, dash_table, html
+from dash import Input, Output, State, callback, html
 from dash.exceptions import PreventUpdate
 
+from c4x.dash_compat import DataTable
 from c4x.panels import (
     text_panel,
     turn_diff_panel,
@@ -130,7 +131,7 @@ def _compaction_clicked(active_cell, rows):
                 f"survived.",
                 style={"color": MUTED, "fontSize": "11.5px", "margin": "14px 0 6px 0"},
             ),
-            dash_table.DataTable(
+            DataTable(
                 columns=(_cols :=
                     numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"})),
                 tooltip_header=header_help(_cols),

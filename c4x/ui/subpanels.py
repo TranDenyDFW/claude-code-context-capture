@@ -12,9 +12,20 @@ the same way for both.
 Panels are rendered ON DEMAND, like the tabs. Building all three of Window's panels on every render
 would cost the probe queries and the history chart whether or not anyone looked at them.
 """
+from collections.abc import Callable
+from typing import Any, TypedDict
+
 from dash import dcc, html
 
 from c4x.theme import ACCENT, BORDER, MONO, MUTED, PANEL, TEXT
+
+
+class _Panelled(TypedDict):
+    """One panelled tab: its panels as (key, label, description), and its body builder."""
+
+    panels: list[tuple[str, str, str]]
+    body: Callable[..., Any]
+
 
 # Every tab that carries sub-panels, so a checker can walk them the way it walks TABS.
 #
@@ -22,7 +33,7 @@ from c4x.theme import ACCENT, BORDER, MONO, MUTED, PANEL, TEXT
 # panelled tab and reports the rest as absent. The table audit found exactly that: 40 tables where
 # there had been 74. Registering here means the next panelled tab is covered the moment it exists,
 # rather than when someone remembers to add it to a checker.
-PANELLED = {}
+PANELLED: dict[str, _Panelled] = {}
 
 
 def register(prefix, panels, body):

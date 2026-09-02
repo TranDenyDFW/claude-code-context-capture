@@ -4,9 +4,10 @@ Everything here builds a component from data the store returned, so it sits abov
 store.py and below the tabs. `evidence_block` is the busiest thing in the app, built from eight
 different callers, which is why the audit measures coverage per CALLER rather than per line.
 """
-from dash import dash_table, html
+from dash import html
 from dash.dash_table.Format import Format, Scheme
 
+from c4x.dash_compat import DataTable
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     q,
@@ -57,7 +58,8 @@ def sql_preview(sql: str, params=()) -> str:
 
 
 def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size: int = 12,
-                   note: str = None, style_data_conditional=None, heat=(), table_id=None,
+                   note: str | None = None, style_data_conditional=None, heat=(),
+                   table_id=None,
                    help_for=None):
     """A table, the query that produced it, and a way to take the rows away.
 
@@ -96,7 +98,7 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
         html.Div(title, style=SECTION_HEAD),
         html.Div(f"{len(records):,} rows.{truncated}" + (f" {note}" if note else ""),
                  style=SECTION_NOTE),
-        dash_table.DataTable(
+        DataTable(
             # Only the tables a callback drives carry one, so an id here means "something on this
             # page filters this table" rather than being decoration.
             **({"id": table_id} if table_id else {}),
@@ -312,7 +314,7 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
                       html.Div(b_label, style={"color": MUTED, "fontSize": "11px"})],
                      style={"flex": "1"}),
         ], style={"display": "flex", "gap": "16px", "marginBottom": "10px"}),
-        dash_table.DataTable(
+        DataTable(
             columns=(_cols := numeric_columns(
                 ["metric", "unit", "A", "B", "B vs A", "verdict", "basis"],
                 {"A", "B", "B vs A"},

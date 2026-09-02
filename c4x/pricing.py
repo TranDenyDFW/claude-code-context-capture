@@ -148,7 +148,8 @@ def cost_of_rows(rows):
     can render a figure and, beside it, say what the figure leaves out. A total that silently
     skipped its unpriced rows would be a smaller number wearing the same label.
     """
-    total, priced, missing = 0.0, 0, {}
+    total, priced = 0.0, 0
+    missing: dict[str, int] = {}   # model name -> the calls it could not price
     for row in rows:
         model = row.get("model")
         value = cost_of(model,
