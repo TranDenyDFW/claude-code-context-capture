@@ -149,11 +149,15 @@ def hardened_shutdown(reason: str) -> None:
 def register_routes(server, db_path, port):
     """Attach the shutdown and health routes to a Flask server.
 
-    POST only on the shutdown route. It used to accept GET, and nothing in the UI calls it at all,
-    since the Quit button was removed on purpose. Binding to 127.0.0.1 is no defence against a GET
-    route, because the browser is on loopback too: any page the user visited could have stopped the
-    capture dashboard with <img src="http://127.0.0.1:8056/__shutdown__">. A form post cannot be
-    made cross-origin without the user's involvement, and a script can still call it.
+    POST only on the shutdown route, AND an origin check AND a token, because POST alone is not a
+    defence. Binding to 127.0.0.1 does not help either: the browser is on loopback too, so any page
+    the user visited could have stopped the dashboard with
+    <img src="http://127.0.0.1:8056/__shutdown__">, which is why GET is refused.
+
+    This used to end "a form post cannot be made cross-origin without the user's involvement", and
+    that is false. A cross-origin form POST is a SIMPLE request: CORS does not stop it being sent,
+    only the response being read, and a script can submit one without the user doing anything. See
+    `shutdown_allowed` for what actually closes it.
     """
     @server.route("/__shutdown__", methods=["GET"])
     def _shutdown_get():
