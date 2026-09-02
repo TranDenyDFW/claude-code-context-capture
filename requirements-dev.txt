@@ -13,9 +13,13 @@ pytest>=8.0.0
 # The Python linter. Configuration lives in pyproject.toml.
 ruff>=0.6.0
 
-# The type checker, over c4x/ only. NON-BLOCKING in CI to begin with: this codebase has never been
-# type-checked, so a blocking gate on day one would stop every other change until an unknown
-# backlog was cleared. The step reports the count so the backlog is visible, and it becomes
-# blocking once that number is known and worked down. A gate nobody can pass is a gate nobody
-# keeps.
+# The type checker, over c4x/ only. It was added NON-BLOCKING, because this codebase had never
+# been type-checked and a blocking gate on day one would have stopped every other change until an
+# unknown backlog cleared. That backlog is cleared and the step BLOCKS; this comment said otherwise
+# until an independent review read it.
+#
+# The floor stays a floor here, deliberately, for the same reason every other line in this file
+# does. CI does not install from this range: constraints-ci.txt pins the exact version, which
+# matters more for this package than the others, because it is the one whose output can fail the
+# job. It was NOT pinned there until that same review found it.
 mypy>=1.11.0

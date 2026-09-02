@@ -8,27 +8,29 @@
 #
 # So CI installs with `-c constraints-ci.txt`, which pins everything including transitives, and the
 # published requirements stay flexible. A `-c` file constrains what IS installed; it does not
-# install anything itself, which is why the Windows-only entry below is harmless on Linux.
+# install anything itself, which is why a platform-specific entry below is harmless elsewhere.
 #
-# HOW THIS WAS GENERATED, so it can be regenerated rather than edited by hand:
+# GENERATED. Do not hand-edit: run `python tools/make_constraints.py --regenerate`, which re-runs
+# the resolve and rewrites this file whole. Editing one line turns the set from a resolve into a
+# guess, and the guess will be wrong in a way nothing here can detect.
 #
-#   python -m pip install --dry-run --report resolve.json --python-version 3.12 \
-#       --only-binary=:all: --target <throwaway> -r requirements.txt -r requirements-dev.txt
+# `python tools/make_constraints.py --self-test` runs in the suite and answers the narrower
+# question offline: does every package NAMED in the requirements files carry an exact pin here? It
+# was added because mypy did not, for as long as the mypy step was non-blocking and then for the
+# commit that made it blocking, which meant the one tool that could fail the job was the one tool
+# free to change underneath it.
 #
-# then every name==version from the report's `install` list. Resolved for Python 3.12 to match the
-# workflow's setup-python. The environment markers came from the machine that ran it, so a
-# platform-specific package can appear here that Linux never installs; that is why CI is the
-# authority on whether these pins are satisfiable, and a wrong pin fails the install loudly rather
-# than being quietly ignored.
+# Resolved for Python 3.12, matching the workflow's setup-python. Environment markers
+# come from the machine that ran the resolve, so a platform-specific package can appear that
+# another platform never installs; CI is the authority on whether these pins are satisfiable,
+# and a wrong pin fails the install loudly rather than being quietly ignored.
 #
-# TO REFRESH: re-run the command above and replace this file wholesale. Do not hand-edit a single
-# line, or the set stops being a resolve and becomes a guess.
-#
-# 50 packages, of which 11 are named in the requirements files.
+# 55 packages, of which 12 are named in the requirements files.
 
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.14.2
+ast_serialize==0.8.0
 blinker==1.9.0
 certifi==2026.7.22
 charset-normalizer==3.5.1
@@ -47,12 +49,16 @@ iniconfig==2.3.0
 itsdangerous==2.2.0
 janus==2.0.0
 jinja2==3.1.6
+librt==0.15.0
 markupsafe==3.0.3
+mypy==2.3.1  # direct
+mypy_extensions==1.1.0
 narwhals==2.25.0
 nest-asyncio==1.6.0
 numpy==2.5.2
 packaging==26.3
 pandas==3.0.5  # direct
+pathspec==1.1.1
 plotly==7.0.0  # direct
 pluggy==1.6.0
 psutil==7.2.2  # direct
