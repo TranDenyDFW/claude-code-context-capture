@@ -6,8 +6,13 @@
 node tools/run_tests.mjs
 ```
 
-384 checks across 16 files. It runs every `--self-test` in `tools/` and `hooks/`, plus the three
-Python checks over the dashboard, and prints one total.
+It runs every `--self-test` in `tools/` and `hooks/`, plus the Python checks over the dashboard,
+and prints one total.
+
+The total is not quoted here on purpose. It moves whenever a check is added, and it is not the same
+everywhere: CI and a Windows checkout collect different numbers of pytest cases from the same
+commit. A figure in a guide that nobody re-runs is worse than no figure, which this line learned the
+hard way. Run it and read the last line.
 
 Two things it does that a plain loop does not, both because a plain loop got them wrong:
 
