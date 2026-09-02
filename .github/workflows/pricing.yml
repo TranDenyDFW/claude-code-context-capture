@@ -25,6 +25,9 @@ on:
 
 permissions:
   contents: write
+  # A pull request needs this. The job no longer pushes to main, so `contents: write` is now only
+  # for the branch it pushes the change onto.
+  pull-requests: write
 
 jobs:
   refresh:
@@ -45,18 +48,43 @@ jobs:
         id: refresh
         run: node tools/fetch-pricing.mjs --write
 
-      - name: Commit any change
+      # A PULL REQUEST, NOT A PUSH TO MAIN.
+      #
+      # This used to `git push` straight to main. That predates branch protection, and it is
+      # exactly the hole protection exists to close: a commit lands on main that the required
+      # `suite` check never evaluated, because a push made with GITHUB_TOKEN does not trigger
+      # workflows. GitHub also enforces required checks on direct pushes, so once main was
+      # protected this step was going to start failing the next time prices actually moved.
+      #
+      # Opening a PR puts the price table through the same gate as everything else. The branch name
+      # is fixed, so a second run updates the same PR rather than opening another.
+      - name: Open a pull request if the prices moved
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if git diff --quiet -- c4x/prices.json; then
             echo "prices unchanged"
             exit 0
           fi
+          BRANCH=chore/published-prices
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
           git add c4x/prices.json
           git commit -m "chore: published prices moved
 
           Written by tools/fetch-pricing.mjs from the two pricing pages it parses. The docs table
           supplies the numbers and claude.com/pricing audits them; this commit exists because they
           agreed with each other and disagreed with the committed table."
-          git push
+          # --force, because this branch is a rolling snapshot of one file and nothing else ever
+          # commits to it. A rejected push here would leave the run green with nothing opened.
+          git push --force origin "$BRANCH"
+          if gh pr view "$BRANCH" --json state --jq .state 2>/dev/null | grep -q OPEN; then
+            echo "the pull request already exists and now carries the newer prices"
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "chore: published prices moved" \
+              --body "Opened by .github/workflows/pricing.yml. tools/fetch-pricing.mjs read the two pricing pages, they agreed with each other and disagreed with the committed table.
+
+          This is a pull request rather than a push to main so that the price table goes through the same \`suite\` check as every other change."
+          fi
