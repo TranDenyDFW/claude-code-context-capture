@@ -1,10 +1,16 @@
-// Flat config with NO imports, deliberately.
+// Flat config with NO imports, still deliberately, but no longer for the reason it once was.
 //
-// Extending eslint's recommended set would mean a devDependency, a lockfile and a node_modules in a
-// repo whose whole install story is that it pulls nothing. The rules below are written out instead,
-// so `npx --yes eslint` works with nothing checked in and nothing installed.
+// The original reason was that extending eslint's recommended set would mean a devDependency, a
+// lockfile and a node_modules in a repo whose install story is that it pulls nothing. Half of that
+// is now spent: eslint IS a pinned devDependency, because `npx --yes eslint` resolves whatever is
+// newest at the moment it runs, so a release could change what lints between two runs of the same
+// commit and CI would have no way to tell you.
 //
-// Run: npx --yes eslint .
+// Writing the rules out is still the right call, for the half that remains. Every plugin added
+// here is another package in the lockfile whose own releases decide what this repo considers an
+// error, and the rules below are few enough to read in one sitting.
+//
+// Run: npm run lint  (or `npx eslint .` once `npm ci` has run)
 
 export default [
   {

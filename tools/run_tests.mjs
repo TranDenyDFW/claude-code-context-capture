@@ -365,7 +365,9 @@ if (!NODE_ONLY) {
 //
 // A check the machine runs and the developer cannot is a check that fails late and by surprise.
 if (!NODE_ONLY) {
-  const run = spawnSync('npx', ['--yes', 'eslint', '.'], {
+  // The pinned eslint from the root lockfile, via the `lint` script, so the suite and CI run
+  // the same version. `npx --yes` fetched whatever was newest at that moment.
+  const run = spawnSync('npm', ['run', 'lint'], {
     encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: process.platform === 'win32',
   });
   const text = plain(run.stdout) + plain(run.stderr);

@@ -1,0 +1,78 @@
+# The exact versions CI installs. NOT the public requirements.
+#
+# requirements.txt and requirements-dev.txt state lower bounds on purpose: someone installing this
+# to look at their own context should get a working modern set, and pinning them would make this
+# repo dictate the versions of a dashboard it does not own. But a lower bound means a CI run six
+# months from now resolves a different graph than today's green one, and when it goes red the
+# question "did the code change or did a dependency?" has no answer.
+#
+# So CI installs with `-c constraints-ci.txt`, which pins everything including transitives, and the
+# published requirements stay flexible. A `-c` file constrains what IS installed; it does not
+# install anything itself, which is why the Windows-only entry below is harmless on Linux.
+#
+# HOW THIS WAS GENERATED, so it can be regenerated rather than edited by hand:
+#
+#   python -m pip install --dry-run --report resolve.json --python-version 3.12 \
+#       --only-binary=:all: --target <throwaway> -r requirements.txt -r requirements-dev.txt
+#
+# then every name==version from the report's `install` list. Resolved for Python 3.12 to match the
+# workflow's setup-python. The environment markers came from the machine that ran it, so a
+# platform-specific package can appear here that Linux never installs; that is why CI is the
+# authority on whether these pins are satisfiable, and a wrong pin fails the install loudly rather
+# than being quietly ignored.
+#
+# TO REFRESH: re-run the command above and replace this file wholesale. Do not hand-edit a single
+# line, or the set stops being a resolve and becomes a guess.
+#
+# 50 packages, of which 11 are named in the requirements files.
+
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.14.2
+blinker==1.9.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
+click==8.5.0
+colorama==0.4.6
+comm==0.2.3
+dash==4.4.1  # direct
+fastapi==0.141.1  # direct
+flask==3.1.3
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1  # direct
+idna==3.19
+importlib_metadata==9.0.1
+iniconfig==2.3.0
+itsdangerous==2.2.0
+janus==2.0.0
+jinja2==3.1.6
+markupsafe==3.0.3
+narwhals==2.25.0
+nest-asyncio==1.6.0
+numpy==2.5.2
+packaging==26.3
+pandas==3.0.5  # direct
+plotly==7.0.0  # direct
+pluggy==1.6.0
+psutil==7.2.2  # direct
+pydantic==2.13.5
+pydantic_core==2.46.5
+pygments==2.21.0
+pytest==9.1.1  # direct
+python-dateutil==2.9.0.post0
+python-multipart==0.0.32  # direct
+pywinpty==3.0.5  # direct
+requests==2.34.2
+retrying==1.4.2
+ruff==0.16.5  # direct
+setuptools==84.0.0
+six==1.17.0
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.3
+urllib3==2.7.0
+uvicorn==0.52.4  # direct
+werkzeug==3.1.8
+zipp==4.1.0
