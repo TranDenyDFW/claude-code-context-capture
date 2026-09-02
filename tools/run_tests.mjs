@@ -321,10 +321,24 @@ if (!NODE_ONLY) {
       results.push({ rel: label, state: 'FAIL',
                      note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
                      tail: tailOf(text) });
+    } else if (marker && !count) {
+      // A CHECK WHOSE RESULT CANNOT BE COUNTED HAS NOT DEMONSTRABLY RUN, which is the rule this
+      // runner already applies to the node self-tests above. It did not apply it here, so on CI
+      // this row passed with no number and the suite total silently understated by the whole of
+      // the frontend: 99 locally, nothing there. The tail is printed because the text is the only
+      // evidence of why, and the runner captures it rather than letting it through.
+      failed++;
+      results.push({ rel: label, state: 'FAIL',
+                     note: `exit 0 and printed ${JSON.stringify(marker)}, but no check count `
+                           + `could be read from the output, so the total would understate`,
+                     // STDOUT, not the combined text. Vitest prints its summary to stdout and
+                     // jsdom prints its warnings to stderr, so `tailOf(stdout + stderr)` is always
+                     // the jsdom noise and never the line this failure is about.
+                     tail: tailOf(run.stdout || '(stdout was empty)') });
     } else {
-      if (marker && count) total += count;
-      results.push({ rel: label, state: 'pass', count: marker ? count ?? null : null,
-                     note: marker && count ? '' : what });
+      if (count) total += count;
+      results.push({ rel: label, state: 'pass', count: marker ? count : null,
+                     note: marker ? '' : what });
     }
   }
 }
