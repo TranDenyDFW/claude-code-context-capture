@@ -22,7 +22,10 @@ tool would stop being read. Tables and figure extents are the payload a frontend
 stable within a run; those are compared in full.
 """
 import argparse
+import contextlib
 import json
+import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -177,7 +180,71 @@ def fetch_dash(module, tab, params):
     return extract.describe(module._render_tab(ids.index(tab), session, scope, cohort))
 
 
+@contextlib.contextmanager
+def pinned_store(store, url=None):
+    """Hold the store still for one run, so both sides read the same bytes by construction.
+
+    THE RACE THIS CLOSES. Every comparison here asks the API and then asks Dash, one after the
+    other, and both read a store that hooks and the dashboard's own refresh loop append to
+    continuously. A harvest landing between the two reads changes the answer, and the tool reports
+    a difference that is not a disagreement. That is worse than a missing check: a verification
+    tool that cries wolf gets re-run until it is quiet, which is hard to tell apart from being
+    ignored. It was observed once differing and twice clean on re-run, with six harvest runs in the
+    surrounding sixteen minutes, both differing rows cumulative aggregates over the whole store.
+
+    A COPY, NOT A HELD TRANSACTION. One connection left open in a read transaction would pin the
+    same view for free, but the in-process API runs under FastAPI's TestClient, which serves from
+    its own thread, and a single sqlite3 connection shared across threads is its own defect waiting
+    to be written. The copy costs a full write of the store per run, 1.2 GB and a few seconds
+    today, and is bought for that deliberately: this tool is manual and occasional, and being right
+    under threads is worth more here than the seconds.
+
+    `--url` cannot be pinned at all. The server is a separate process that resolved its own path
+    from C4X_DB before this ran, so repointing anything here would move only this side and compare
+    two different stores, which is worse than the race. That mode stays live and SAYS so in the
+    summary, rather than being pinned in a way that only looks pinned.
+    """
+    if url:
+        yield None
+        return
+
+    live = store.DB_PATH
+    (ROOT / "tmp").mkdir(exist_ok=True)
+    # Per-process, so two runs at once cannot read each other's half-written copy.
+    snapshot = ROOT / "tmp" / f"parity-snapshot-{os.getpid()}.db"
+    # sqlite's own backup, not a file copy: it takes a consistent page image and includes whatever
+    # is still in the write-ahead log. Copying context.db alone would silently drop the newest
+    # turns, which is the same class of wrongness this exists to remove.
+    source = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
+    target = sqlite3.connect(str(snapshot))
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+
+    store.DB_PATH = snapshot
+    # q() reads DB_PATH per call, but session_rows() caches its frame, so a warm cache would serve
+    # live rows into a pinned run and the pin would be only half applied.
+    store._rows_cache.update({"at": 0.0, "df": None})
+    try:
+        yield snapshot
+    finally:
+        store.DB_PATH = live
+        store._rows_cache.update({"at": 0.0, "df": None})
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(OSError):
+                Path(f"{snapshot}{suffix}").unlink()
+
+
 def run(only_tab=None, url=None, verbose=False):
+    """Pin the store, then compare. Split so the pin also wraps the API client and its cache."""
+    from c4x import store
+    with pinned_store(store, url) as pinned:
+        return compare(only_tab, url, verbose, pinned)
+
+
+def compare(only_tab=None, url=None, verbose=False, pinned=None):
     import app as module
     from c4x import store
 
@@ -236,6 +303,11 @@ def run(only_tab=None, url=None, verbose=False):
     for line in real:
         print(f"  DIFF  {line}")
     print(f"\n  session under test: {session}")
+    # Which store this run actually read. A PASS against a moving store and a PASS against a pinned
+    # one are different claims, and only one of them is repeatable.
+    print(f"  store: pinned copy at {pinned}" if pinned else
+          "  store: LIVE, not pinned, because --url reads its own; a lone difference here may be "
+          "the store moving rather than a disagreement")
     print(f"  {checked} comparison(s) across {len(tabs)} tab(s) "
           f"and {len(STATES)} selection states")
     # Stated, not hidden. A comparison of two empty panes passes without checking anything, and the
@@ -286,6 +358,41 @@ def must_fail(only_tab="tab-compactions"):
     return 1
 
 
+def pin_holds():
+    """Does the pin actually pin? Answered by moving the store under it and reading again.
+
+    Built on a throwaway store rather than the real one, because the only honest way to ask this
+    question is to WRITE during the pinned window, and the real store belongs to the user. Two
+    assertions, and the second one matters as much as the first: a pin that never released would
+    also pass the first, and would then serve a stale copy to everything else in the process.
+    """
+    from c4x import store
+
+    (ROOT / "tmp").mkdir(exist_ok=True)
+    scratch = ROOT / "tmp" / f"parity-pin-check-{os.getpid()}.db"
+    con = sqlite3.connect(str(scratch))
+    con.execute("CREATE TABLE IF NOT EXISTS t (n INTEGER)")
+    con.execute("DELETE FROM t")
+    con.execute("INSERT INTO t VALUES (1)")
+    con.commit()
+
+    real = store.DB_PATH
+    store.DB_PATH = scratch
+    try:
+        with pinned_store(store):
+            # The store moves, exactly as a harvest moves it mid-run.
+            con.execute("INSERT INTO t VALUES (2)")
+            con.commit()
+            during = int(store.q("SELECT COUNT(*) AS n FROM t")["n"].iloc[0])
+        after = int(store.q("SELECT COUNT(*) AS n FROM t")["n"].iloc[0])
+    finally:
+        store.DB_PATH = real
+        con.close()
+        with contextlib.suppress(OSError):
+            scratch.unlink()
+    return during, after
+
+
 def self_test():
     """The differ, fed payloads that MUST be reported as different."""
     same = {"tables": [{"id": "t", "columns": ["a"], "rows": [{"a": 1}], "tooltips": {}}],
@@ -329,6 +436,14 @@ def self_test():
         ("an empty pane is recognised as empty",
          carries_data({"tables": [{"id": "t", "rows": []}], "figures": []}) is False),
         ("the five states are the ones the render tests use", len(STATES) == 5),
+    ]
+
+    # The pin, checked by moving a store under it. Both halves: a read inside the window does not
+    # see the write, and a read after it does. Without the second, a pin that leaked would pass.
+    during, after = pin_holds()
+    cases += [
+        ("a write during the pinned window is not visible to a read inside it", during == 1),
+        ("and the same write IS visible once the pin is released", after == 2),
     ]
     bad = 0
     for what, ok in cases:
