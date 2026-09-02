@@ -10,7 +10,8 @@ someone who did not write it.
 
 ### Added
 
-- **`tools/run_tests.mjs`**, one command for the whole suite: 384 checks across 16 files. Exit 0 is
+- **`tools/run_tests.mjs`**, one command for the whole suite: 384 checks across 16 files at this
+  release, which is a record of that release and not the total today. Exit 0 is
   not treated as a pass, because two tools exit 0 for any argument and a runner that trusts the exit
   code reports a total that is a lie. A file with no self-test fails the run; each Python check
   declares the string its success must print.
