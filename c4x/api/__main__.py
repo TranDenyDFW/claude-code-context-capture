@@ -59,6 +59,9 @@ def self_test():
          Path(db_from_argv(["--db", "tmp/x.db"]) or "").is_absolute()),
         ("no --db means no override", db_from_argv([]) is None),
         ("a missing --db value is not an override", db_from_argv(["--db"]) is None),
+        # The port has to reach `/__health__`, which reads C4X_API_PORT and nothing else. With
+        # --port 8061 and the variable unset it reported 8059 while serving 8061.
+        ("--port is a number main() can export", port_from_argv(["--port", "8061"]) == 8061),
     ]
     bad = 0
     for what, ok in cases:
@@ -86,6 +89,11 @@ def main(argv=None):
     import uvicorn
 
     port = port_from_argv(argv)
+    # EXPORTED, not just used to bind. `/__health__` reports the port from this variable, so with
+    # `--port 8061` and the variable unset it answered 8061 requests by saying 8059. Anything using
+    # that endpoint to find the server got the wrong answer, and the wrong answer looked ordinary.
+    # Same handling as C4X_DB above, and for the same reason: set before the app is imported.
+    os.environ["C4X_API_PORT"] = str(port)
     reload = "--reload" in argv
 
     from c4x import store
