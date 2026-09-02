@@ -5,9 +5,10 @@ the header selection, and it says so in its first line.
 """
 import pandas as pd
 import plotly.graph_objects as go
-from dash import dash_table, dcc, html
+from dash import dcc, html
 
 from c4x.breakdown import latest_baseline
+from c4x.dash_compat import DataTable
 from c4x.store import overview_stats, q
 from c4x.theme import (
     ACCENT,
@@ -69,10 +70,12 @@ def summary_layout(session_id=None, scope="main", cohort=None):
                  "The header selection changes nothing here. Every other tab describes only the "
                  "selection.",
                  className="population-note", style={**SECTION_NOTE, "color": WARN},
-                 **{"data-population": "store"}),
+                 # dash supports data-* at runtime and models it in no signature, so each
+                 # declared keyword is offered this dict and none of them fit. See theme.py.
+                 **{"data-population": "store"}),  # type: ignore[arg-type]
 
         accordion("What to do about it", f"{len(rows)} finding(s), each with an action",
-                  dash_table.DataTable(
+                  DataTable(
                       # Clickable. A finding names the tab that proves it, and usually a session,
                       # so a reader is not left copying an 8-character prefix into a dropdown of
                       # 316. A finding about the whole store, like fixed overhead, names a tab and

@@ -13,9 +13,10 @@ import subprocess
 
 import pandas as pd
 import plotly.graph_objects as go
-from dash import dash_table, dcc, html
+from dash import dcc, html
 from dash.dash_table.Format import Format, Scheme
 
+from c4x.dash_compat import DataTable
 from c4x.store import ROOT, q, scoped
 from c4x.theme import (
     ACCENT,
@@ -322,7 +323,7 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
             "grows and is not. The treemap groups them; the bar cannot.",
             style={"color": MUTED, "fontSize": "11.5px", "margin": "4px 0 14px 0",
                    "maxWidth": "900px", "lineHeight": "1.55"}),
-        dash_table.DataTable(
+        DataTable(
             columns=(_cols := numeric_columns(
                 ["category", "tokens", "percent", "items"], {"tokens", "percent", "items"},
                 {"percent": Format(precision=1, scheme=Scheme.fixed)})),

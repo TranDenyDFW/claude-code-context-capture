@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import time as _time
 from pathlib import Path
+from typing import Any, TypedDict
 
 import pandas as pd
 
@@ -208,7 +209,19 @@ def project_label(cwd, slug) -> str:
     return "(unknown)"
 
 
-_rows_cache = {"at": 0.0, "df": None}
+class _RowsCache(TypedDict):
+    """The session frame and when it was read.
+
+    A TypedDict rather than a bare literal because `{"at": 0.0, "df": None}` infers as
+    `dict[str, float | None]`, which makes `now - _rows_cache["at"]` a float minus an optional and
+    the returned frame a float. Six of this module's type errors were that one inference.
+    """
+
+    at: float
+    df: Any          # pandas.DataFrame, which has no usable stub here
+
+
+_rows_cache: _RowsCache = {"at": 0.0, "df": None}
 
 
 def session_rows(ttl: float = 45.0) -> pd.DataFrame:
@@ -237,7 +250,15 @@ _HEAD_BYTES = 8192
 _CLI_ID = re.compile(r'"cliSessionId"\s*:\s*"([0-9a-fA-F-]{36})"')
 _ARCHIVED = re.compile(r'"isArchived"\s*:\s*(true|false)')
 
-_archived_cache = {"map": None, "at": 0.0, "root": None}
+class _ArchivedCache(TypedDict):
+    """Which chats the desktop app has archived, and where that was read from."""
+
+    map: dict[str, bool] | None
+    at: float
+    root: str | None
+
+
+_archived_cache: _ArchivedCache = {"map": None, "at": 0.0, "root": None}
 
 
 def sessions_root():
@@ -293,7 +314,14 @@ def archived_sessions(root=None, ttl: float = 45.0) -> dict:
     return found
 
 
-_transcript_cache = {"ids": None, "at": 0.0}
+class _TranscriptCache(TypedDict):
+    """Which transcripts are still on this machine, and when that was last scanned."""
+
+    ids: set[str] | None
+    at: float
+
+
+_transcript_cache: _TranscriptCache = {"ids": None, "at": 0.0}
 
 
 def transcript_ids(ttl: float = 45.0):

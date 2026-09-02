@@ -3,8 +3,9 @@
 One session in detail: the resident line, the danger bands, and the turn diff.
 """
 import plotly.graph_objects as go
-from dash import dash_table, dcc, html
+from dash import dcc, html
 
+from c4x.dash_compat import DataTable
 from c4x.panels import baseline_marks
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
@@ -507,7 +508,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
         cols = ["ts", "trigger", "pre_tokens", "post_tokens", "cumulative_dropped_tokens",
                 "duration_ms", "version"]
         cards = html.Div([cards, html.Div(style={"height": "14px"}),
-                          dash_table.DataTable(
+                          DataTable(
                               columns=(_cols := numeric_columns(cols, {"pre_tokens", "post_tokens",
                                                              "cumulative_dropped_tokens",
                                                              "duration_ms"})),
@@ -529,7 +530,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
             cards,
             html.Div(f"{note}, oldest first. Click a row to read it in full.",
                      style={"color": MUTED, "fontSize": "11.5px", "margin": "16px 0 6px 0"}),
-            dash_table.DataTable(
+            DataTable(
                 id="tbl-messages",
                 columns=(_cols :=
                     numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"})),

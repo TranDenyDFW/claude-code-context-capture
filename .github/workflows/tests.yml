@@ -65,14 +65,14 @@ jobs:
       - name: Lint the Python side
         run: python -m ruff check app.py tools/
 
-      # NON-BLOCKING, on purpose and temporarily. This codebase has never been type-checked; at
-      # the time this step was added mypy found 20 errors across 6 files in c4x/. Making that
-      # blocking on day one would stop every unrelated change until the backlog cleared, so the
-      # step reports the count and the job stays green. It becomes blocking once the number is
-      # worked down, and `continue-on-error` means a red step is still visible in the run rather
-      # than swallowed by `|| true`.
+      # BLOCKING. This step was added non-blocking with a 20-error backlog and the promise that it
+      # would become blocking once the number was worked down. It is: 20 under the loose settings,
+      # then 25 more that turning on `check_untyped_defs` revealed, all at zero. `continue-on-error`
+      # is gone, so a type error fails the job rather than being reported into an already-green run.
+      #
+      # Settings and the four remaining suppressions are in pyproject.toml, next to the count of
+      # what `disallow_untyped_defs` would still cost.
       - name: Type-check the store, the API and the project moves
-        continue-on-error: true
         run: python -m mypy
 
       # The PINNED eslint from the root lockfile. This was `npx --yes eslint .`, which fetches

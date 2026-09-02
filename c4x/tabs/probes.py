@@ -2,8 +2,9 @@
 
 What a probe session measured about the fixed overhead of your configuration.
 """
-from dash import dash_table, html
+from dash import html
 
+from c4x.dash_compat import DataTable
 from c4x.store import q
 from c4x.theme import (
     CODE_BLOCK,
@@ -54,7 +55,7 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                      "CLI session is NOT configured like the desktop app, so these numbers "
                      "describe the probe, not your live work. That difference is the finding.",
                      style=SECTION_NOTE),
-            dash_table.DataTable(
+            DataTable(
                 columns=(_cols := [{"name": c, "id": c} for c in
                          ["id", "ts", "ok", "model", "total_tokens", "auto_compact_threshold"]]),
                 tooltip_header=header_help(_cols),
@@ -64,7 +65,7 @@ def probes_layout(session_id=None, scope="main", cohort=None):
             html.Div("A count with zero tokens means the channel named the items but priced none "
                      "of them, which is exactly what makes the per-item cost unrecoverable from "
                      "this route alone.", style=SECTION_NOTE),
-            dash_table.DataTable(
+            DataTable(
                 columns=(_cols :=
                     [{"name": c, "id": c} for c in ["probe_id", "kind", "items", "tokens"]]),
                 tooltip_header=header_help(_cols),
@@ -74,7 +75,7 @@ def probes_layout(session_id=None, scope="main", cohort=None):
         if not named.empty:
             body += [
                 html.Div("The items that carry a price", style=SECTION_HEAD),
-                dash_table.DataTable(
+                DataTable(
                     columns=(_cols :=
                         [{"name": c, "id": c} for c in ["probe_id", "kind", "name", "tokens"]]),
                     tooltip_header=header_help(_cols),
@@ -102,4 +103,5 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                  "hooks already harvest on SessionEnd and UserPromptSubmit. A high percentage "
                  "here is not an error, it is the cost of the tick being shorter than the work.",
                  style=SECTION_NOTE),
-    ] + body)
+        *body,
+    ])
