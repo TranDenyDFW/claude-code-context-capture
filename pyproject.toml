@@ -12,7 +12,10 @@
 # The backlog this started with is cleared and the step BLOCKS. It opened at 20 errors under the
 # loose settings below, and turning on check_untyped_defs surfaced 25 more that the loose reading
 # had hidden. Both sets are at zero. Four suppressions remain, each commented where it sits, and
-# all four are for the same kind of thing: a dash component the library types wrongly or not at all.
+# all three are for the same kind of thing: a dash component the library types wrongly or not
+# at all. Counted with `git grep -c 'type: ignore' -- c4x`, not from memory: this line said
+# FOUR until an independent review counted them, because the number was taken before the
+# refactor that collapsed three DataTable suppressions into one accessor.
 #
 # What that pass actually found, since "clearing type errors" sounds cosmetic and two of these were
 # not: `_harvest_state["error"][:60]` was slicing a float on the line that renders in the header
@@ -25,12 +28,16 @@ ignore_missing_imports = true      # pandas, dash and plotly ship partial or no 
 # gate's business. Without this the report includes app.py, which is not the surface being typed.
 follow_imports = "silent"
 check_untyped_defs = true          # was false; the 25 errors it had been hiding are fixed
-warn_unused_ignores = true         # so the four ignores report themselves once dash publishes types
+warn_unused_ignores = true         # so the three report themselves once dash publishes types
 warn_redundant_casts = true
 show_error_codes = true
-# NOT set: disallow_untyped_defs, which requires an annotation on every function. Measured at 278
-# errors across 36 files, so it is a separate piece of work and not a setting to flip quietly; left
-# off deliberately, with the number, rather than omitted and rediscovered.
+# NOT set: disallow_untyped_defs, which requires an annotation on every function. Measured at 253
+# errors across 36 files under the pinned mypy, so it is a separate piece of work and not a setting
+# to flip quietly; left off deliberately, with the number, rather than omitted and rediscovered.
+#
+# The version matters and is stated for that reason. This line read 278, a figure taken before the
+# check_untyped_defs backlog was fixed and never re-measured, against a mypy that was not pinned at
+# the time. A count like this is only meaningful beside the checker that produced it.
 
 [tool.ruff]
 line-length = 100          # what app.py and the checks are already written to
