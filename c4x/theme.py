@@ -6,6 +6,8 @@ which is what lets every other module import it without a cycle.
 Split out of app.py, which had grown to 3124 lines. The colours were always in one place; the
 builders that use them were scattered through it.
 """
+from typing import Any
+
 import pandas as pd  # fmt_tokens asks pandas whether a value is NA
 import plotly.graph_objects as go
 from dash import html
@@ -166,7 +168,10 @@ def population_note(text: str, store_wide: bool = True) -> html.Div:
                     # whether the tab RESPONDS to the header selection, which is a different fact:
                     # with nothing selected, Compactions, Window, Cost and Compare all described
                     # the whole store while the chip said "This Selection".
-                    **{"data-population": "store" if store_wide else "selection"})
+                    # dash accepts data-* and aria-* attributes at runtime and models neither in
+                    # html.Div's signature, so every declared keyword is offered this dict in turn
+                    # and none of them fit. Three errors, one unsupported-but-supported attribute.
+                    **{"data-population": "store" if store_wide else "selection"})  # type: ignore[arg-type]
 
 
 def stat_card(label: str, value: str, color: str = TEXT, sub: str = "") -> html.Div:
@@ -264,7 +269,10 @@ def heated(rows, *columns, invert=()):
     `style_data_conditional=heat_cells(...)` by hand would silently drop the odd-row striping that
     every other table on the page has, and the table would read as a different component.
     """
-    style = dict(TABLE_STYLE)
+    # TABLE_STYLE's values are a union of several shapes, so `style_data_conditional` reads back
+    # as that whole union rather than as the list it is, making both the read and the write below
+    # errors against it.
+    style: dict[str, Any] = dict(TABLE_STYLE)
     conditional = list(style["style_data_conditional"])
     for column in columns:
         conditional += heat_cells(rows, column, invert=column in invert)

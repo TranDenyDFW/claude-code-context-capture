@@ -341,6 +341,28 @@ def table_sites(module=None):
     return sites, calls, entries, opaque_calls
 
 
+# The ONE bare name this scan accepts as a table construction, and the reason it is not simply
+# "any callable named DataTable".
+#
+# dash ships a `DataTable` submodule and rebinds that name to the component class at import, so
+# mypy reads `dash_table.DataTable` as a module and reports every call. c4x/dash_compat.py holds
+# the one suppression for that, and the eleven modules that build tables import the name from it,
+# which makes every construction a bare `DataTable(...)` rather than an attribute access.
+#
+# Accepting exactly this spelling keeps the anti-alias gate intact. `ALIAS(...)`, `DT(...)`, a dict
+# of handlers or a getattr still resolve to nothing here and are still caught by the
+# "constructed a DataTable that the static scan did not find" error, which is the check that stops
+# a table from being hidden behind a name this scan cannot follow.
+ACCESSOR = "DataTable"
+
+
+def is_table_construction(func):
+    """Whether an ast callee names the DataTable constructor, in either spelling used here."""
+    if isinstance(func, ast.Attribute):
+        return func.attr == ACCESSOR                # dash_table.DataTable(...)
+    return isinstance(func, ast.Name) and func.id == ACCESSOR   # the c4x.dash_compat accessor
+
+
 def scan_one(real, name, sites, edges, entries, opaque, module):
     """Scan ONE app file, appending to the shared collections."""
     tree = ast.parse(open(real, encoding="utf-8").read())
@@ -360,7 +382,7 @@ def scan_one(real, name, sites, edges, entries, opaque, module):
                     and child.col_offset == 0 else fn)
             if isinstance(child, ast.Call):
                 position = (name, child.lineno, child.col_offset)
-                if isinstance(child.func, ast.Attribute) and child.func.attr == "DataTable":
+                if is_table_construction(child.func):
                     sites.append((here, position))
                 # A call whose callee this scan cannot name at all: a dict of handlers, the result
                 # of another call, `getattr`. Those are the two evasions that survived everything
@@ -867,6 +889,17 @@ def self_test():
           any("static scan did not find" in e for e in stray),
           f"recorded app.py:{sorted(built - {p for _, p in sites})}, "
           f"which the static scan does not list")
+
+    # The predicate that gate rests on, fed all three spellings at once. Both forms the codebase
+    # actually uses have to be seen, and a third name has to stay unseen: if ALIAS ever reads as a
+    # construction, the check above can no longer fail and stops being a gate.
+    spellings = {src: is_table_construction(ast.parse(src, mode="eval").body.func)
+                 for src in ("dash_table.DataTable(columns=[], data=[])",
+                             "DataTable(columns=[], data=[])",
+                             "ALIAS(columns=[], data=[])")}
+    check("both spellings seen, a third one not",
+          list(spellings.values()) == [True, True, False],
+          ", ".join(f"{src.split('(')[0]}={seen}" for src, seen in spellings.items()))
 
     # Two calls on ONE line, one taken and one not. The gate compared line numbers and reported
     # both as covered.
