@@ -266,7 +266,13 @@ for (const session of SESSIONS) {
     // live one is 178,041 tool results against 12,964 typed.
     const role = turn % 2 === 0 ? 'user' : 'assistant';
     const wroteIt = role === 'assistant' ? 'assistant' : (turn % 3 === 0 ? 'typed' : 'tool_result');
-    const text = `Fixture message ${turn} for ${session.id}. Synthetic text, not a real conversation.`;
+    // ONE MESSAGE IN SEVEN IS LONGER THAN THE 220-CHARACTER PREVIEW the session tab shows, so the
+    // full-text export path has something to fetch. Every message was one short sentence, and the
+    // check that an export carries the whole message had nothing to exercise on this store.
+    const filler = 'Synthetic text, not a real conversation, repeated until it is longer than the preview. ';
+    const text = turn % 7 === 0
+      ? `Fixture message ${turn} for ${session.id}. ${filler.repeat(4)}`
+      : `Fixture message ${turn} for ${session.id}. Synthetic text, not a real conversation.`;
     insertMessage.run(`${uuid}-msg`, session.id, ts, role,
                       wroteIt, text, text.length, model, requestId,
                       'fixture://transcript.jsonl', turn + 1);
@@ -541,6 +547,7 @@ const repeatBlankTarget = db.prepare(`
 const bashWithTarget = db.prepare(`
   SELECT COUNT(*) n FROM tool_calls WHERE tool_name = 'Bash' AND target IS NOT NULL`).get().n;
 
+const longMessages = db.prepare('SELECT COUNT(*) n FROM messages WHERE chars > 220').get().n;
 db.close();
 
 if (!SELF_TEST) {
@@ -560,6 +567,8 @@ if (!SELF_TEST) {
      distinctModels >= 2],
     ['survivors recorded, so the survivor join is not empty', counts.compaction_survivors > 0],
     ['messages carry text, so the compaction summary renders as prose', counts.messages > 0],
+    ['a message longer than the 220-character preview exists, so a full-text export has something to fetch',
+     longMessages > 0],
     // Where a fixture lands and where it must not, driven through refusal() and defaultOut().
     ['the default output is under tmp/ and is not the store',
      defaultOut().startsWith(join(ROOT, 'tmp') + sep) && resolve(defaultOut()) !== resolve(STORE)],

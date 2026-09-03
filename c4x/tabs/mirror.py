@@ -6,7 +6,16 @@ from dash import dcc, html
 
 from c4x.dash_compat import DataTable
 from c4x.store import MATH
-from c4x.theme import FIELD, MUTED, TABLE_STYLE, fmt_tokens, header_help, numeric_columns
+from c4x.theme import (
+    FIELD,
+    MUTED,
+    SECTION_HEAD,
+    SECTION_NOTE,
+    TABLE_STYLE,
+    fmt_tokens,
+    header_help,
+    numeric_columns,
+)
 
 
 # ---- Mirror ---------------------------------------------------------------
@@ -35,8 +44,9 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
         ], style={"display": "flex", "alignItems": "center", "marginBottom": "16px"}),
         html.Div(id="mirror-out"),
         html.Div([
-            html.Div("Thresholds for every window this build can produce",
-                     style={"color": MUTED, "fontSize": "12px", "margin": "20px 0 8px 0"}),
+            html.Div("Thresholds for every window this build can produce", style=SECTION_HEAD),
+            html.Div("The warn, compact and blocked lines the window math draws for each window "
+                     "size, from the same constants the chart above uses.", style=SECTION_NOTE),
             DataTable(
                 columns=(_cols := numeric_columns(["window", "warn at", "compact at", "blocked at"],
                                         {"window", "warn at", "compact at", "blocked at"})),
