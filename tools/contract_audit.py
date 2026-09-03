@@ -75,6 +75,10 @@ def table_faults(where, table):
 
     for index, row in enumerate(rows):
         for column, value in row.items():
+            if isinstance(value, float) and value != value:
+                out.append(f"{where}/{tid}: row {index} column {column!r} is NaN, which is not "
+                           f"JSON and reads as a value; a missing cell is None")
+                continue
             if column in TEXT_BY_NATURE or column in prose or not isinstance(value, str):
                 continue
             text = value.strip()
@@ -265,6 +269,9 @@ def self_test():
                                 "rows": [{"n": 5}, {"n": ""}]})) == 1),
         # None is how the API says "unknown", and it is CORRECT: it is what keeps an unpriced model
         # blank instead of free. Flagging it would push someone to render a zero.
+        ("a NaN cell IS a fault, because it is the missing value that is not JSON",
+         len(table_faults("w", {"id": "t", "columns": ["target"],
+                                "rows": [{"target": float("nan")}]})) == 1),
         ("a null is NOT a fault, because unknown is a real answer",
          table_faults("w", {"id": "t", "columns": ["n"], "rows": [{"n": 5}, {"n": None}]}) == []),
         ("a version string is not a number", table_faults(

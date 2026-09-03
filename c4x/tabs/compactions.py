@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from dash import dcc, html
 
 from c4x.dash_compat import DataTable
+from c4x.frames import records
 from c4x.store import COMPACTION_WINDOWS, THRESHOLDS, all_compactions, fit_window
 from c4x.theme import (
     BORDER,
@@ -78,7 +79,7 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
             tooltip_header=header_help(_cols),
             # uuid rides along in the data but is not a displayed column, so a click can be traced
             # back to the right compaction even after the user sorts or filters the table.
-            data=show[cols + ["uuid"]].to_dict("records"),
+            data=records(show[cols + ["uuid"]]),
             page_size=15, filter_action="native",  # sort comes from TABLE_STYLE
             style_table={"overflowX": "auto"},
             style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},

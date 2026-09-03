@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from dash import dcc, html
 
 from c4x.dash_compat import DataTable
+from c4x.frames import records
 from c4x.panels import baseline_marks
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
@@ -513,7 +514,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                                                              "cumulative_dropped_tokens",
                                                              "duration_ms"})),
                               tooltip_header=header_help(_cols),
-                              data=show[cols].to_dict("records"), **TABLE_STYLE)])
+                              data=records(show[cols]), **TABLE_STYLE)])
 
     # What was actually said. The chart shows the window filling; this shows what filled it.
     msgs = session_messages(session_id)
@@ -535,7 +536,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                 columns=(_cols :=
                     numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"})),
                 tooltip_header=header_help(_cols),
-                data=m[["ts", "role", "type", "chars", "preview", "uuid"]].to_dict("records"),
+                data=records(m[["ts", "role", "type", "chars", "preview", "uuid"]]),
                 page_size=12, filter_action="native",  # sort comes from TABLE_STYLE
                 style_table={"overflowX": "auto"},
                 style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
