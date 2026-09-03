@@ -81,7 +81,33 @@ const SESSIONS = [
   // the fit to reassign it to, so a wrong buffer turns its overshoot negative and the mutation
   // check can finally tell a good formula from a bad one.
   { id: 'fixture-session-0005', turns: 20, overshoots: [500], small: true },
+  // The shapes below exist because twelve tests SKIPPED against this fixture and nothing said
+  // so: the runner read only pytest's "passed" figure. Each one names the test it unblocks.
+  // A session of 200+ main turns, so a cache-read RATE can be measured (test_anomaly:97).
+  { id: 'fixture-session-0006', turns: 240, overshoots: [2_000, 9_000] },
+  // Three turns: below ANOMALY_MIN (12), so a band cannot be drawn and the tab has to say so
+  // (test_anomaly:223), and below the 5-turn presentation floor, so `listed` is less than
+  // `sessions` and the gap has to be disclosed (test_api:531).
+  // `plain`: no streamed chunks and no subagent rows, because the floor counts turn ROWS, and
+  // turn 0 alone would otherwise write five of them (three chunks plus two subagents).
+  { id: 'fixture-session-0007', turns: 3, overshoots: [], plain: true },
+  // A model no price table knows, so the Cost tab has an unpriced row to explain
+  // (test_pricing:163), and the one session that carries an Agent call with NO subagent_type
+  // (test_subagents:80), inserted after the loop below.
+  { id: 'fixture-session-0008', turns: 8, overshoots: [], model: 'fixture-unpriced-1' },
 ];
+// Forty-two projects, each with one listed session of six turns. More than 40 distinct projects
+// is what the Summary tab needs before it ranks any out (test_api:559); more than 20 sessions with
+// calls is what concentration needs to mean anything (test_api:591); and a project cohort that
+// covers a strict subset of the store is what "narrowing" needs to narrow (test_api:355, :371).
+// Each also carries five files read three times, so the re-read chart's 200-group cap can be
+// exercised (test_charts:220): 42 x 5 = 210 groups.
+for (let k = 1; k <= 42; k++) {
+  const n = String(k).padStart(2, '0');
+  SESSIONS.push({ id: `fixture-project-${n}`, turns: 6, overshoots: [],
+                  cwd: `C:\\fixture\\projects\\p-${n}`, slug: `C--fixture-projects-p-${n}`,
+                  reReads: 5 });
+}
 
 const iso = (minute) => new Date(Date.UTC(2026, 0, 1, 0, 0, 0) + minute * 60_000).toISOString();
 
@@ -116,7 +142,8 @@ const insertTool = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`);
 
 for (const session of SESSIONS) {
-  insertSession.run(session.id, 'C--fixture-project', 'C:\\fixture\\project', 'main', VERSION,
+  insertSession.run(session.id, session.slug ?? 'C--fixture-project',
+                    session.cwd ?? 'C:\\fixture\\project', 'main', VERSION,
                     'claude-desktop', iso(clock + 1), iso(clock + session.turns),
                     'fixture://transcript.jsonl');
 
@@ -124,7 +151,7 @@ for (const session of SESSIONS) {
   // what the mirror validates its fit against and what the Session tab's diff reads as a fall, so a
   // flat ramp would leave both untested.
   const overshoots = session.overshoots;
-  const baseModel = session.small ? SMALL_MODEL : MODEL;
+  const baseModel = session.model ?? (session.small ? SMALL_MODEL : MODEL);
   const ceiling = session.small ? SMALL_COMPACT_AT : COMPACT_AT;
   const startAt = session.small ? 20_000 : 40_000;
   const perCompaction = Math.floor(session.turns / (overshoots.length + 1));
@@ -166,7 +193,7 @@ for (const session of SESSIONS) {
     // columns repeat on each of them while output_tokens accumulates, which is exactly why
     // api_calls takes the max per request id rather than summing. Every fourth turn streams, so the
     // store contains both shapes and a check that confuses them has something to trip on.
-    const chunks = turn % 4 === 0 ? 3 : 1;
+    const chunks = (!session.plain && turn % 4 === 0) ? 3 : 1;
     for (let chunk = 0; chunk < chunks; chunk++) {
       insertTurn.run(chunk ? `${uuid}-c${chunk}` : uuid, session.id, ts, model, requestId,
                      1_200, 18_000, cacheRead,
@@ -179,7 +206,7 @@ for (const session of SESSIONS) {
     // sidechain, the Waste tab overrides the scope radio because of it, and the All sessions
     // table counts it without saying so. A fixture with none of it cannot exercise any of that,
     // and two tests refused to pass rather than report a check that could not run.
-    if (turn % 2 === 0) {
+    if (!session.plain && turn % 2 === 0) {
       // The Agent call that spawned them, and the parent link back to it. Without both, CI cannot
       // exercise anything the subagent-identity capture added: a store with sidechain turns and
       // no parent_uuid looks exactly like a store harvested before the column existed.
@@ -258,12 +285,34 @@ for (const session of SESSIONS) {
   }
 }
 
+// Re-reads for the project sessions: five files, each read three times, on the session's first
+// turn. The chart caps at 200 groups and the cap was never exercised because no fixture reached
+// it (test_charts:220). Real uuids, so a join to turns does not dangle.
+for (const session of SESSIONS) {
+  if (!session.reReads) continue;
+  const turnUuid = `${session.id}-turn-0000`;
+  for (let f = 1; f <= session.reReads; f++) {
+    for (let r = 0; r < 3; r++) {
+      insertTool.run(`${session.id}-read-${f}-${r}`, session.id, turnUuid, iso(clock + f),
+                     'Read', null, `fixture://p/${session.id}/file-${f}.txt`,
+                     `sha-read-${f}`, 80, 2_400, 'fixture://transcript.jsonl', f, null);
+    }
+  }
+}
+// One Agent call that names NO subagent_type. The transcript recorded the omission, so the page
+// must report the omission rather than fill in a default (test_subagents:80).
+insertTool.run('fixture-session-0008-agent-untyped', 'fixture-session-0008',
+               'fixture-session-0008-turn-0001', iso(clock + 1), 'Agent', null, null,
+               'sha-agent-untyped', 120, 4_000, 'fixture://transcript.jsonl', 2, null);
+
 // One baseline, so the derived category breakdown has a calibration to subtract. Values are the
 // shape of a real observation, not a copy of one.
 db.prepare(`
   INSERT INTO context_baselines (ts, source, entrypoint, system_prompt, system_tools, mcp_tools,
-                                 skills, memory_files, custom_agents, static_total, window_size, note)
-  VALUES (?, 'fixture', 'claude-desktop', 3100, 12800, 9400, 9900, 11700, 2100, 49000, ?, ?)`)
+                                 skills, memory_files, custom_agents, static_total, window_size, note,
+                                 mcp_tools_deferred, system_tools_deferred)
+  VALUES (?, 'fixture', 'claude-desktop', 3100, 12800, 9400, 9900, 11700, 2100, 49000, ?, ?,
+          84000, 20900)`)
   .run(iso(1), WINDOW, 'synthetic baseline for CI; not measured from a real configuration');
 
 // The Sources tab returns EARLY when attachments, hook_events and record_types are all empty, so
@@ -367,6 +416,18 @@ for (const probeId of [1, 2]) {
   for (const [name, tokens] of MESSAGE_BREAKDOWN) insertMessageRow.run(probeId, name, tokens);
 }
 
+// One probe that FAILED. No real store on hand had one, so the Diagnostics tab's "a failed probe
+// is shown as failed, not as a reading of zero" path had never run anywhere (test_diagnostics:36).
+// ok = 0, error set, NO window, no totals, no child rows: what a probe that died before printing
+// actually leaves. It is the OLDEST probe on purpose. "Newest probe" is chosen by ts, and a
+// failed probe as the newest made the category-sum test fail for want of categories a dead
+// probe never wrote, which is a fixture artefact and not the defect that test exists to find.
+db.prepare(`
+  INSERT INTO probes (id, ts, ok, error, model, max_tokens, total_tokens, percentage,
+                      autocompact_source, auto_compact_threshold, is_auto_compact_enabled, raw_json)
+  VALUES (3, ?, 0, 'fixture: probe process exited 1 before printing', ?, NULL, NULL, NULL,
+          'fixture', NULL, 1, '{"note":"synthetic failed probe"}')`).run(iso(0), MODEL);
+
 const counts = {};
 for (const table of ['sessions', 'turns', 'messages', 'compactions', 'compaction_survivors',
                      'tool_calls', 'context_baselines', 'probes', 'probe_categories',
@@ -403,6 +464,26 @@ const loadedMcp = db.prepare(
   "SELECT COUNT(*) n FROM probe_details WHERE kind='mcpTool' AND loaded=1 AND tokens>0").get().n;
 const messageRowCount = db.prepare(
   'SELECT COUNT(*) n FROM probe_message_breakdown').get().n;
+// The twelve shapes that used to skip. Queried here, asserted below, one row per unblocked test.
+const longestMain = db.prepare(`
+  SELECT MAX(n) n FROM (SELECT COUNT(*) n FROM turns WHERE COALESCE(is_sidechain,0)=0
+                        GROUP BY session_id)`).get().n;
+const shortest = db.prepare(`
+  SELECT MIN(n) n FROM (SELECT COUNT(*) n FROM turns GROUP BY session_id)`).get().n;
+const listedProjects = db.prepare(`
+  SELECT COUNT(DISTINCT s.cwd) n FROM sessions s
+   WHERE s.session_id IN (SELECT session_id FROM turns GROUP BY session_id HAVING COUNT(*) >= 5)`).get().n;
+const reReadGroups = db.prepare(`
+  SELECT COUNT(*) n FROM (SELECT session_id, target FROM tool_calls
+                          WHERE tool_name IN ('Read','NotebookRead') AND target IS NOT NULL
+                          GROUP BY session_id, target HAVING COUNT(*) >= 3)`).get().n;
+const failedProbes = db.prepare('SELECT COUNT(*) n FROM probes WHERE ok = 0').get().n;
+const untypedAgents = db.prepare(
+  "SELECT COUNT(*) n FROM tool_calls WHERE tool_name IN ('Agent','Task') AND subagent_type IS NULL").get().n;
+const unpricedTurns = db.prepare(
+  "SELECT COUNT(*) n FROM turns WHERE model = 'fixture-unpriced-1'").get().n;
+const deferredBaseline = db.prepare(
+  'SELECT COALESCE(mcp_tools_deferred,0) + COALESCE(system_tools_deferred,0) n FROM context_baselines LIMIT 1').get().n;
 
 db.close();
 
@@ -450,6 +531,21 @@ if (!SELF_TEST) {
     ['streamed messages present, so api_calls dedupes rows away', apiCalls < counts.turns],
     ['and the dedup is per request id, not a blanket drop',
      apiCalls === distinctRequestIds],
+    // The twelve shapes that used to SKIP silently in CI. Each names the test it keeps running.
+    ['a session of 200+ main turns, so a cache-read rate can be measured (test_anomaly:97)',
+     longestMain >= 200],
+    ['a session under ANOMALY_MIN and under the 5-turn floor (test_anomaly:223, test_api:531)',
+     shortest < 5],
+    ['more than 40 projects with a listed session, so ranking-out has something to rank (test_api:559)',
+     listedProjects > 40],
+    ['more than 200 re-read groups, so the chart cap is exercised (test_charts:220)',
+     reReadGroups > 200],
+    ['a probe that failed, so the Diagnostics tab has one to show (test_diagnostics:36)',
+     failedProbes >= 1],
+    ['an Agent call with no subagent_type (test_subagents:80)', untypedAgents >= 1],
+    ['turns on a model no price table knows (test_pricing:163)', unpricedTurns > 0],
+    ['deferred tools in the baseline, so a not-resident row exists (test_window:174)',
+     deferredBaseline > 0],
   ];
   let failed = 0;
   for (const [what, ok] of checks) {

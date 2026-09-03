@@ -14,7 +14,7 @@
 //      could not run is a FAILURE, never a warning, so they are reported as SKIPPED with the reason
 //      and the run says so in its summary rather than printing a total that implies full coverage.
 //
-// Usage: node tools/run_tests.mjs [--node-only] [--self-test]
+// Usage: node tools/run_tests.mjs [--node-only] [--strict] [--self-test]
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
@@ -36,6 +36,44 @@ const STRICT = process.argv.includes('--strict');
 // "(N checks)" is what every self-test prints. pytest prints "N passed" instead, and counting it
 // as zero made the suite total understate itself by more than a hundred assertions.
 const CHECKS = /\((\d+) checks\)|(\d+) passed/;
+
+// pytest's own summary line, e.g. "379 passed, 12 skipped in 181.20s". Until now the runner read
+// only the passed figure, so the 39 data-dependent `pytest.skip` sites in tests/ never reached the
+// suite total: the suite said "0 skipped" about its own entries while pytest was skipping tests
+// underneath it. That is how CI collected 1405 checks where a Windows checkout collected 1417 and
+// nobody could say why.
+const PYTEST_TOKEN = /(\d+) (passed|skipped|failed|xfailed|xpassed|errors?|deselected)\b/g;
+function pytestCounts(text) {
+  const lines = String(text).trim().split('\n');
+  const summary = [...lines].reverse().find((l) => /\d+ (passed|failed|error)/.test(l)) || '';
+  const out = {};
+  for (const m of summary.matchAll(PYTEST_TOKEN)) out[m[2].replace(/s$/, '')] = Number(m[1]);
+  return out;
+}
+const isPytest = (rel, args) => rel === '-m' && args[0] === 'pytest';
+
+// A skip against the FIXTURE is a fixture gap, not data. The fixture is deterministic, so a test
+// that cannot find what it needs there will never find it there, and under --strict that fails.
+// A skip against the live store is allowed and reported by name: that store is whatever it is.
+function judgePytest(text, rel, args, opts, strict) {
+  if (!isPytest(rel, args)) return { fail: false, note: '' };
+  const counts = pytestCounts(text);
+  const skipped = counts.skipped || 0;
+  if (!skipped) return { fail: false, note: '' };
+  const reasons = String(text).split('\n')
+    .filter((l) => /^SKIPPED \[/.test(l))
+    .map((l) => l.replace(/^SKIPPED \[\d+\] /, '').trim());
+  const shape = opts?.fixture ? 'fixture' : 'live store';
+  if (opts?.fixture && strict) {
+    return {
+      fail: true,
+      note: `${skipped} test(s) skipped against the deterministic fixture; a skip there is a ` +
+            `fixture gap, not data`,
+      tail: reasons.slice(0, 20).join('\n'),
+    };
+  }
+  return { fail: false, note: `${skipped} skipped (${shape} shape): ${reasons.slice(0, 3).join(' | ')}` };
+}
 
 // EVERY captured output goes through this before it is matched.
 //
@@ -130,7 +168,7 @@ const PY = [
   // The pytest suite in tests/ replaced tools/session_checks.py, which checked three Session-tab
   // features by hand. Those checks were migrated into tests/test_session.py rather than deleted,
   // and the suite now covers every tab. `-q` still prints the "N passed" line the marker needs.
-  ['-m', ['pytest', 'tests/', '-q', '-p', 'no:warnings'], 'every tab, against SQL written independently', ' passed'],
+  ['-m', ['pytest', 'tests/', '-q', '-rs', '-p', 'no:warnings'], 'every tab, against SQL written independently', ' passed'],
   // AND AGAIN, against a freshly built synthetic fixture.
   //
   // The entry above runs against whatever store is present, which on a developer's machine is a
@@ -140,7 +178,7 @@ const PY = [
   // calls, which the fixture's longest (90) cannot satisfy, and nothing run locally could see it.
   //
   // Running both closes the gap, so a green run here means a green run in CI.
-  ['-m', ['pytest', 'tests/', '-q', '-p', 'no:warnings'],
+  ['-m', ['pytest', 'tests/', '-q', '-rs', '-p', 'no:warnings'],
    'the same suite against the synthetic fixture, which is the shape CI runs', ' passed',
    { fixture: true }],
   // Ruff runs HERE, inside the suite, and not as a command anyone remembers to type.
@@ -171,6 +209,29 @@ if (process.argv.includes('--self-test')) {
     ['and does not match a line with no count', !CHECKS.test('SELF-TEST PASS')],
     ['every python entry declares the marker its success must print',
      PY.every(([, , , marker]) => typeof marker === 'string' && marker.length > 0)],
+    // The pytest summary is read in full, and a skip on the fixture can fail the run. Each of
+    // these is a case that was silently wrong before: the parser only knew "passed".
+    ['pytest summary parsing reads skipped, not only passed',
+     JSON.stringify(pytestCounts('SKIPPED [1] tests/t.py:9: no data\n379 passed, 12 skipped in 181.20s'))
+       === JSON.stringify({ passed: 379, skipped: 12 })],
+    ['pytest summary parsing finds the summary below the skip reasons',
+     pytestCounts('SKIPPED [1] a\nSKIPPED [1] b\n5 passed, 2 skipped, 1 xfailed in 3.0s').xfailed === 1],
+    ['a skip against the fixture FAILS under --strict',
+     judgePytest('SKIPPED [1] tests/t.py:9: no data\n1 passed, 1 skipped in 1.0s',
+                 '-m', ['pytest', 'tests/'], { fixture: true }, true).fail === true],
+    ['and names the reason in its tail',
+     /no data/.test(judgePytest('SKIPPED [1] tests/t.py:9: no data\n1 passed, 1 skipped in 1.0s',
+                                '-m', ['pytest', 'tests/'], { fixture: true }, true).tail)],
+    ['a skip against the fixture is reported, not failed, without --strict',
+     judgePytest('1 passed, 1 skipped in 1.0s', '-m', ['pytest', 'tests/'], { fixture: true }, false).fail === false],
+    ['a skip against the live store is reported, never failed, even under --strict',
+     judgePytest('1 passed, 1 skipped in 1.0s', '-m', ['pytest', 'tests/'], {}, true).fail === false],
+    ['a pytest run with no skips adds no note',
+     judgePytest('5 passed in 1.0s', '-m', ['pytest', 'tests/'], { fixture: true }, true).note === ''],
+    ['a non-pytest entry is never judged as pytest',
+     judgePytest('5 passed, 9 skipped', 'tools/x.py', ['--self-test'], { fixture: true }, true).fail === false],
+    ['both pytest entries ask for skip reasons (-rs), or the tail would be empty',
+     PY.filter(([rel, args]) => isPytest(rel, args)).every(([, args]) => args.includes('-rs'))],
   ];
   let bad = 0;
   for (const [what, ok] of cases) {
@@ -292,9 +353,16 @@ if (NODE_ONLY) {
                      note: `exit 0 but never printed ${JSON.stringify(marker)}, so it did not run`,
                      tail: tailOf(text) });
     } else {
-      if (count) total += count;
-      results.push({ rel: `${rel} ${args.join(' ')}`.trim() + (opts?.fixture ? '  [fixture]' : ''),
-                     state: 'pass', count: count ?? null, note: count ? '' : what });
+      const label = `${rel} ${args.join(' ')}`.trim() + (opts?.fixture ? '  [fixture]' : '');
+      const verdict = judgePytest(text, rel, args, opts, STRICT);
+      if (verdict.fail) {
+        failed++;
+        results.push({ rel: label, state: 'FAIL', note: verdict.note, tail: verdict.tail });
+      } else {
+        if (count) total += count;
+        results.push({ rel: label, state: 'pass', count: count ?? null,
+                       note: verdict.note || (count ? '' : what) });
+      }
     }
   }
 }
