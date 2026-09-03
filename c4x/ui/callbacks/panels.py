@@ -11,6 +11,7 @@ from dash import Input, Output, State, callback, html
 from dash.exceptions import PreventUpdate
 
 from c4x.dash_compat import DataTable
+from c4x.frames import records
 from c4x.panels import (
     text_panel,
     turn_diff_panel,
@@ -135,7 +136,7 @@ def _compaction_clicked(active_cell, rows):
                 columns=(_cols :=
                     numeric_columns(["ts", "role", "type", "chars", "preview"], {"chars"})),
                 tooltip_header=header_help(_cols),
-                data=d.to_dict("records"), page_size=10,
+                data=records(d), page_size=10,
                 style_table={"overflowX": "auto"}, **TABLE_STYLE,
             ),
         ]))

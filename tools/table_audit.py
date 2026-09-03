@@ -74,7 +74,40 @@ from dash import dash_table, dcc, html  # noqa: E402
 from dash._callback import GLOBAL_CALLBACK_LIST, GLOBAL_CALLBACK_MAP  # noqa: E402
 from dash.exceptions import PreventUpdate  # noqa: E402
 
+# THE AUDIT MUST NOT WRITE TO THE STORE IT AUDITS. The dashboard is a writer: `_tick` harvests
+# the live ~/.claude/projects into whatever store C4X_DB names, and a stub on `app.refresh_store`
+# never reached it, because `_tick` lives in c4x/ui/callbacks/selection.py and calls
+# `header.refresh_store()` through the module object. An independent reviewer watched a 1.6 MB
+# fixture become 819 MB of live rows during one audit run; the same thing had silently turned an
+# earlier scratch fixture into a copy of the live store and sent a diagnosis down the wrong path.
+# C4X_READ_ONLY is the switch refresh_store honours first, so it is set here, before app imports.
+os.environ.setdefault("C4X_READ_ONLY", "1")
+
 import app as m  # noqa: E402
+from c4x.ui import header as _header  # noqa: E402
+
+
+def _store_size():
+    from c4x import store
+    try:
+        return os.path.getsize(store.DB_PATH)
+    except OSError:
+        return None
+
+
+_STORE_SIZE_BEFORE = _store_size()
+
+
+def store_changed(before, after):
+    """The guard's whole judgement, as a function so the self-test can feed it a store that
+    really grew and watch it say so. None on either side means the size was unknowable and is
+    reported as unchanged: the audit cannot fail over a file it could not stat."""
+    if before is None or after is None:
+        return None
+    if after == before:
+        return None
+    return (f"the audit CHANGED the store it audited: {before:,} bytes before, {after:,} after; "
+            f"an audit that writes is not an audit")
 
 # Shape, not vocabulary. This listed nine unit suffixes and a reviewer walked "1.4s" through it in
 # under a minute; "ms", "MiB", "$", "e6" and a signed delta were all invisible for the same reason.
@@ -222,6 +255,12 @@ def findings(label, node, walked=None):
                  if isinstance(val, str) and len(val) > PROSE_MIN_LENGTH}
         for row in rows:
             for col, val in row.items():
+                # NaN is the one representation of "missing" that breaks JSON and reads as a
+                # value, and it reached here unseen: a float, so numeric by content, never a
+                # string, so never a placeholder. pandas 3 produces it for any NULL text cell.
+                if isinstance(val, float) and val != val:
+                    out.append(("nan-cell", label, tid, col, "nan"))
+                    continue
                 if col in TEXT_BY_NATURE or col in prose or not isinstance(val, str):
                     continue
                 text = val.strip()
@@ -650,7 +689,8 @@ def main():
 
     # _tick spawns a harvest that WRITES to the store. The rendering half is what can build a table,
     # so it runs and the harvest does not. Stated here and in the output rather than left implied.
-    real_refresh, m.refresh_store = m.refresh_store, lambda *a, **k: None
+    # On `header`, not on `app`: app.py re-exports the name (F401) and nothing calls it there.
+    real_refresh, _header.refresh_store = _header.refresh_store, lambda *a, **k: None
 
     from dash._callback_context import context_value
     from dash._utils import AttributeDict
@@ -777,7 +817,7 @@ def main():
                      hits, walked)
     finally:
         recorder.__exit__(None, None, None)
-        m.refresh_store = real_refresh
+        _header.refresh_store = real_refresh
 
     # A clientside callback is JavaScript. It can set a table's data with no Python involved, and
     # nothing in this process can see it, so it is reported rather than silently uncovered.
@@ -843,6 +883,14 @@ def main():
     print(f"  known-bad fixture fully detected: {fixture_ok}  {sorted(fixture_kinds)}")
 
     ok = not seen and not errors and fixture_ok
+    # The store must be byte-for-byte the size it was. A grown store means something harvested
+    # into it, which is the defect above; a shrunk one means something worse. Measured on the
+    # file rather than trusted from the switch, because the switch is what failed to be enough.
+    grew = store_changed(_STORE_SIZE_BEFORE, _store_size())
+    if grew:
+        errors.append(grew)
+        ok = False
+        print(f"  ERROR  {grew}")
     print("AUDIT PASS" if ok else "AUDIT FAIL")
     return 0 if ok else 1
 
@@ -971,6 +1019,20 @@ def self_test():
     clean = [f for f in findings("fine", html.Div(dash_table.DataTable(
         columns=[{"name": "tool", "id": "tool"}], data=[{"tool": "Read"}])))
         if f[0] == "column-spec"]
+    nan_hits = [f for f in findings("nan", html.Div(dash_table.DataTable(
+        columns=[{"name": "target", "id": "target"}], data=[{"target": float("nan")}])))
+        if f[0] == "nan-cell"]
+    # The size guard, fed a store that grew and one that did not. Without this the guard has
+    # never been seen to fire: the stub on the right object stops every harvest before the guard
+    # gets a size to compare, which is the point of the stub and the reason this case exists.
+    check("the size guard fires on a store that grew",
+          "CHANGED the store" in (store_changed(1_667_072, 819_000_000) or ""),
+          repr(store_changed(1_667_072, 819_000_000))[:80])
+    check("and stays silent on one that did not, or on one it could not measure",
+          store_changed(1_667_072, 1_667_072) is None and store_changed(None, 5) is None,
+          "guard spoke when nothing changed")
+    check("a NaN cell is a fault, since it is the missing value that is not JSON",
+          len(nan_hits) == 1, f"{len(nan_hits)} nan-cell finding(s)")
     check("a well-formed spec raises nothing, so the gate is not simply always on",
           not clean, f"{len(clean)} finding(s) on a good table")
 

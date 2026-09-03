@@ -5,6 +5,8 @@ cannot change what a test sees.
 """
 import json
 
+from c4x.frames import jsonable
+
 MAX_ROWS = 12
 MAX_TEXT = 40
 MAX_CELL = 48
@@ -78,4 +80,10 @@ def human(payload):
 
 
 def as_json(payload):
-    return json.dumps(payload, indent=2, default=str)
+    """The dump as JSON a strict parser accepts.
+
+    Coerced the same way the API coerces, and for the same reason: pandas 3 hands back NaN for a
+    missing cell, `json.dumps` writes it as the literal NaN, and that is not JSON. Python's parser
+    is lenient about it; JSON.parse and jq are not. This used to emit it 32 times on one tab.
+    """
+    return json.dumps(jsonable(payload), indent=2, default=str)

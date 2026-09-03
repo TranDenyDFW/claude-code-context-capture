@@ -8,6 +8,7 @@ from dash import html
 from dash.dash_table.Format import Format, Scheme
 
 from c4x.dash_compat import DataTable
+from c4x.frames import records as frame_records
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     q,
@@ -84,7 +85,7 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
                       html.Pre(sql_preview(sql, params),
                                style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
         ])
-    records = df.to_dict("records") if hasattr(df, "to_dict") else list(df)
+    records = frame_records(df)
     cols = columns or list(df.columns if hasattr(df, "columns") else records[0].keys())
     # A caller may hand over plain names OR ready-made specs from numeric_columns(). Wrapping a
     # spec again put a dict in `name`, dash_table rendered it as a React child, and React threw
