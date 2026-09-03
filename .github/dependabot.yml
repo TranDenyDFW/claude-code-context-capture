@@ -1,20 +1,15 @@
-# Monthly, grouped, and for every ecosystem this repo pins. A pin that never moves is a pin that
+# Monthly, grouped, for the npm roots and the pinned actions. A pin that never moves is a pin that
 # eventually cannot install, and a pin that moves by hand is a guess; these PRs are the third way.
 #
-# pip updates land in the requirements files, which state floors. The exact set CI installs lives in
-# constraints-ci.txt and is regenerated from a resolve (`python tools/make_constraints.py
-# --regenerate`), never edited by a bot or a hand, so a pip update here is a prompt to regenerate,
-# and the make_constraints self-test fails the suite if the two disagree.
+# NO pip ECOSYSTEM HERE, ON PURPOSE. The Python set CI installs lives in constraints-ci.txt, and
+# every line of it depends on the others: pydantic pins pydantic_core exactly, fastapi bounds
+# starlette. Dependabot discovers that file by content and moves one line at a time; its first
+# attempt (PR #49) bumped pydantic_core alone and could not install. Nothing in this file can scope
+# it off one .txt, so Python pins move by re-resolving the whole set instead:
+# .github/workflows/pins.yml runs `python tools/make_constraints.py --regenerate` on the same
+# monthly morning and opens a pull request when a pin moved.
 version: 2
 updates:
-  - package-ecosystem: pip
-    directory: /
-    schedule:
-      interval: monthly
-    groups:
-      python:
-        patterns: ["*"]
-
   - package-ecosystem: npm
     directory: /
     schedule:

@@ -45,6 +45,13 @@ machine, and failed CI twice, because CI's pandas represents a missing cell diff
 one it had. The suite now refuses to pass on a machine whose direct requirements differ from the
 pins, and tells you which. Python 3.12 or newer: the pins do not resolve on 3.11.
 
+The pins move as a set and never one line at a time: `python tools/make_constraints.py
+--regenerate` re-resolves the whole file, and `.github/workflows/pins.yml` runs exactly that on
+the first of every month and opens a pull request when something moved. Do not edit
+`constraints-ci.txt` by hand, and do not accept a bot's one-line bump to it; the self-test in the
+suite fails on a set that no longer covers the requirements, and pip fails on one that no longer
+resolves.
+
 `node tools/run_tests.mjs` runs everything, pytest included, and reports one total. Running pytest
 directly works too, but note that the runner reads pytest's `N passed` summary line to know the
 suite executed at all: an entry that exits 0 without printing its marker is treated as not having

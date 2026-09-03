@@ -24,6 +24,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # By name, for the pull requests the pins and pricing jobs open with GITHUB_TOKEN: a push or a
+  # pull request made with that token starts no workflow, so those jobs ask for this one on their
+  # branch explicitly, and the `suite` check lands on the commit the pull request points at.
+  workflow_dispatch:
 
 jobs:
   checks:
@@ -43,11 +47,11 @@ jobs:
         # runners ship Git Bash; `rm -f` and `$VAR` mean the same thing everywhere below.
         shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # actions/checkout@v4, v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # Node 24: every tool opens the store through the built-in node:sqlite, which earlier majors
       # shipped behind an experimental flag.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # actions/setup-node@v4, v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: '24'
           # Keyed on the lockfile this job now installs from. Without a cache the frontend install
@@ -59,7 +63,7 @@ jobs:
             package-lock.json
             frontend/package-lock.json
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # actions/setup-python@v5, v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python }}
 
