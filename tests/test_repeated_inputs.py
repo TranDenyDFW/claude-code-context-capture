@@ -100,7 +100,8 @@ def test_a_row_with_no_target_says_why_rather_than_looking_broken(table):
     if not blank:
         # The skip reason carries what the table actually held, so a skip on a store that
         # SHOULD have a blank-target row is diagnosable from the runner's tail alone.
-        seen = [(r.get("tool"), repr(r.get("target"))) for r in table["rows"][:6]]
+        seen = [(r.get("tool"), repr(r.get("target")), type(r.get("target")).__name__)
+                for r in table["rows"] if r.get("tool") in ("Agent", "Bash")][:4]
         pytest.skip(f"every repeated input in this store names a target; "
                     f"{len(table['rows'])} rows, first: {seen}")
     from c4x.theme import COLUMN_HELP
