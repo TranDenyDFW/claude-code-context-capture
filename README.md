@@ -22,7 +22,7 @@ and message text replaced by `tools/redact.py`. Every number, chart and finding 
 
 - **Node 24 or newer.** Every tool opens the store through the built-in `node:sqlite`, which
   earlier majors shipped behind a flag.
-- **Python 3.11 or newer**, for the dashboard and the CLI only. Capture itself needs neither.
+- **Python 3.12 or newer**, for the dashboard and the CLI only. Capture itself needs neither.
 - **Nothing from npm.** No dependencies, no lockfile to audit.
 
 ```bash
