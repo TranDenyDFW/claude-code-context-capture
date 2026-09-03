@@ -6,6 +6,7 @@ against a query this file writes rather than against the frame the app built.
 import pytest
 
 from c4x.cli import extract
+from c4x.store import SESSION_TURN_FLOOR
 
 TABLE_ID = "tbl-session"
 
@@ -23,13 +24,14 @@ def test_the_table_has_the_columns_the_page_promises(table):
 
 
 def test_row_count_matches_the_population_the_page_states(table, q, pane):
-    """The tab prints "N sessions with 5 or more turns". That sentence is a claim."""
+    """The tab prints "N sessions with F or more turns". That sentence is a claim, and F is the
+    floor the store applies, not a number this test happens to agree with."""
     expected = int(q("""SELECT COUNT(*) AS n FROM (
-                          SELECT session_id FROM turns GROUP BY session_id HAVING COUNT(*) >= 5)"""
-                     ).iloc[0]["n"])
+                          SELECT session_id FROM turns GROUP BY session_id HAVING COUNT(*) >= ?)""",
+                     (SESSION_TURN_FLOOR,)).iloc[0]["n"])
     assert len(table["rows"]) == expected
     text = "\n".join(extract.texts(pane("tab-sessions")))
-    assert f"{expected:,} sessions with 5 or more turns" in text, (
+    assert f"{expected:,} sessions with {SESSION_TURN_FLOOR} or more turns" in text, (
         "the stated population and the rendered one disagree")
 
 

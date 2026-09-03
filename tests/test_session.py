@@ -7,6 +7,7 @@ those are numbers even though neither is in a table.
 import pytest
 
 from c4x.cli import extract
+from c4x.store import SESSION_TURN_FLOOR
 
 
 @pytest.fixture(scope="module")
@@ -132,7 +133,7 @@ def test_the_tab_renders_for_a_session_with_no_compactions(pane, q, has_store):
     quiet = q("""SELECT t.session_id FROM turns t
                   LEFT JOIN compactions c ON c.session_id = t.session_id
                  WHERE c.session_id IS NULL
-                 GROUP BY t.session_id HAVING COUNT(*) >= 5 LIMIT 1""")
+                 GROUP BY t.session_id HAVING COUNT(*) >= ? LIMIT 1""", (SESSION_TURN_FLOOR,))
     if quiet.empty:
         pytest.fail("every session in this store has compacted, so this could not be exercised")
     body = pane("tab-session", session=quiet.iloc[0]["session_id"])
