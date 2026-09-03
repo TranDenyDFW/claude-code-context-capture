@@ -24,9 +24,9 @@ on:
   push:
     branches: [main]
   pull_request:
-  # By name, for the pull requests the pins and pricing jobs open with GITHUB_TOKEN: a push or a
-  # pull request made with that token starts no workflow, so those jobs ask for this one on their
-  # branch explicitly, and the `suite` check lands on the commit the pull request points at.
+  # Manual runs on any branch. Not how a bot's pull request gets its checks: a run started this
+  # way on the pull request's commit was green on every leg and the merge box ignored it; those
+  # jobs approve the pull request's own held run instead (see pins.yml).
   workflow_dispatch:
 
 jobs:
