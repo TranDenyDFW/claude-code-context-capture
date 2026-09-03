@@ -23,7 +23,7 @@
 //   node event-hook.mjs --self-test
 
 import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, existsSync, renameSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -128,16 +128,37 @@ export function harvestDue(now = Date.now(), stampPath = STAMP, windowMs = HARVE
 }
 
 /**
- * Run an incremental harvest, bounded and silent.
+ * How an event's harvest runs, or null for an event that runs none.
  *
- * execFileSync rather than import: harvest.mjs dispatches when it is the entry point, and importing
- * it would run a harvest inside THIS process. hooks/compact-hook.mjs already shells out the same
- * way for the same reason. Measured at 0.1s or less incrementally, against a 10s hook timeout.
+ * MEASURED, replacing a comment that said "0.1s or less": over the 28,937 incremental harvests the
+ * store's own harvest_runs table holds for 2026-08-26 to 2026-09-03, p50 is 792 ms, p99 is 2.8 s,
+ * and 72 runs exceeded the 8 s this hook allows. An inline run pays that before the event returns.
+ * On UserPromptSubmit the thing waiting is the person's own prompt, so the harvest is DETACHED:
+ * spawned with nothing holding on to it, the hook returns at once, and a slow harvest can neither
+ * delay the prompt nor be killed half way by the hook's timeout. On SessionEnd nothing is waiting
+ * and eventual consistency is the whole point, so it stays inline and bounded.
  */
-function runHarvest() {
-  execFileSync(process.execPath, [join(ROOT, 'tools', 'harvest.mjs')], {
-    stdio: 'ignore', timeout: 8000,
-  });
+export function harvestModeFor(event) {
+  if (event === 'UserPromptSubmit') return 'detached';
+  if (event === 'SessionEnd') return 'inline';
+  return null;
+}
+
+/**
+ * Run an incremental harvest, silent, in the mode harvestModeFor() chose.
+ *
+ * A child process rather than an import: harvest.mjs dispatches when it is the entry point, and
+ * importing it would run a harvest inside THIS process. hooks/compact-hook.mjs already shells out
+ * the same way for the same reason. The stamp marks a harvest STARTED, which is what the debounce
+ * needs; a detached run that then fails leaves the store where it was and the next event retries.
+ */
+function runHarvest(mode = 'inline') {
+  const args = [join(ROOT, 'tools', 'harvest.mjs')];
+  if (mode === 'detached') {
+    spawn(process.execPath, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  } else {
+    execFileSync(process.execPath, args, { stdio: 'ignore', timeout: 8000 });
+  }
   mkdirSync(dirname(STAMP), { recursive: true });
   writeFileSync(STAMP, new Date().toISOString());
 }
@@ -263,6 +284,13 @@ function selfTest() {
     add('SessionStart does NOT: it is the self-heal event, and nothing has happened yet to harvest',
       shouldHarvestAfter('SessionStart') === false);
     add('an unknown event does not trigger one', shouldHarvestAfter('SomethingNew2027') === false);
+    // The mode, per event: the prompt must not wait, the session end may.
+    add('UserPromptSubmit harvests DETACHED, so the prompt does not wait',
+      harvestModeFor('UserPromptSubmit') === 'detached');
+    add('SessionEnd harvests inline and bounded, with nothing waiting on it',
+      harvestModeFor('SessionEnd') === 'inline');
+    add('an event that does not harvest has no mode (gate can fail)',
+      harvestModeFor('PostToolUse') === null);
 
     add('with no stamp at all, a harvest is due', harvestDue(Date.now(), stamp, 15000) === true);
     mkdirSync(dirname(stamp), { recursive: true });
@@ -387,7 +415,7 @@ else if (process.argv.includes('--self-test')) {
         }
 
         if (shouldHarvestAfter(event) && harvestDue()) {
-          try { runHarvest(); } catch { /* a stale store beats a hook that errors in the session */ }
+          try { runHarvest(harvestModeFor(event)); } catch { /* a stale store beats a hook that errors in the session */ }
         }
       }
     }

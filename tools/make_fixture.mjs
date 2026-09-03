@@ -14,9 +14,14 @@
 // itself as fixture text. Nothing here came from a real conversation.
 //
 // Usage: node tools/make_fixture.mjs [--out <path>] [--force]
+//
+// With no --out the fixture lands in a DATED directory under tmp/ and the path is printed. The real
+// store path, data/context.db, is refused without --force even when nothing is there yet: it used
+// to be the default, guarded only by "refuse if it exists", and "never run this bare" was a rule
+// carried in memory rather than in the tool.
 
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ensureBaselineSchema } from './breakdown.mjs';
@@ -31,18 +36,45 @@ function arg(flag, fallback) {
 }
 
 const SELF_TEST = process.argv.includes('--self-test');
+const STORE = join(ROOT, 'data', 'context.db');
+
+/** A dated directory under tmp/, so two fixtures never share a path and none of them is the store. */
+function defaultOut(now = new Date()) {
+  const stamp = now.toISOString().replace(/[-:]/g, '').slice(0, 15);
+  return join(ROOT, 'tmp', `fixture-${stamp}`, 'context.db');
+}
+
+/**
+ * Why this invocation must not write, or null. Pure over its inputs, so the self-test drives every
+ * branch without a store on disk.
+ *
+ * The real store path is refused WITHOUT --force even when nothing is there yet. It used to be the
+ * default output, guarded only by "refuse if it exists", and for weeks "never run this bare" was a
+ * rule carried in memory; a rule in memory is one forgotten invocation from a capture overwritten
+ * by fixture rows.
+ */
+function refusal({ out, force, exists, store = STORE }) {
+  if (resolve(out) === resolve(store) && !force) {
+    return `refusing to write the real store path ${out} without --force; with no --out the fixture goes to a dated directory under tmp/`;
+  }
+  if (exists && !force) {
+    return `refusing to overwrite an existing store at ${out}; pass --force if you are certain, or --out <path> to write elsewhere`;
+  }
+  return null;
+}
+
 // The self-test writes somewhere disposable and never near the real store, so running the suite can
 // never cost anybody their capture.
 const OUT = SELF_TEST
   ? join(ROOT, 'tmp', `fixture-self-test-${process.pid}`, 'context.db')
-  : arg('--out', join(ROOT, 'data', 'context.db'));
+  : arg('--out', defaultOut());
 const FORCE = process.argv.includes('--force') || SELF_TEST;
 
 // A real store is 900 MB of somebody's conversations. Refusing to overwrite one is not politeness,
 // it is the difference between a fixture run and a data loss.
-if (existsSync(OUT) && !FORCE) {
-  console.error(`refusing to overwrite an existing store at ${OUT}`);
-  console.error('pass --force if you are certain, or --out <path> to write elsewhere');
+const why = refusal({ out: OUT, force: FORCE, exists: existsSync(OUT) });
+if (why) {
+  console.error(why);
   process.exit(2);
 }
 if (existsSync(OUT) && FORCE) {
@@ -528,6 +560,19 @@ if (!SELF_TEST) {
      distinctModels >= 2],
     ['survivors recorded, so the survivor join is not empty', counts.compaction_survivors > 0],
     ['messages carry text, so the compaction summary renders as prose', counts.messages > 0],
+    // Where a fixture lands and where it must not, driven through refusal() and defaultOut().
+    ['the default output is under tmp/ and is not the store',
+     defaultOut().startsWith(join(ROOT, 'tmp') + sep) && resolve(defaultOut()) !== resolve(STORE)],
+    ['two default outputs a second apart are two directories',
+     defaultOut(new Date('2026-09-03T07:15:30Z')) !== defaultOut(new Date('2026-09-03T07:15:31Z'))],
+    ['the real store path is refused without --force even when absent (gate can fail)',
+     refusal({ out: STORE, force: false, exists: false }) !== null],
+    ['and allowed when spelled out with --force',
+     refusal({ out: STORE, force: true, exists: false }) === null],
+    ['an existing file elsewhere is refused without --force',
+     refusal({ out: join(ROOT, 'tmp', 'x.db'), force: false, exists: true }) !== null],
+    ['and a fresh path elsewhere is allowed',
+     refusal({ out: join(ROOT, 'tmp', 'x.db'), force: false, exists: false }) === null],
     ['an MCP call, for the Sources server table', mcpCalls > 0],
     ['a file read 3+ times in one session, for the re-read table', maxReReads >= 3],
     ['a baseline, so the derived breakdown has something to subtract', counts.context_baselines > 0],

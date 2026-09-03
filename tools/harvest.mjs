@@ -11,7 +11,9 @@
 //
 // Usage:
 //   node harvest.mjs                 harvest incrementally
-//   node harvest.mjs --full          ignore stored offsets, re-read everything
+//   node harvest.mjs --dry-run       say what an incremental run would read; write nothing
+//   node harvest.mjs --full --yes    ignore stored offsets, re-read everything (--full alone
+//                                    prints the file count and the byte total, and refuses)
 //   node harvest.mjs --self-test     prove the parser detects what it claims to detect
 //   node harvest.mjs --stats         print store contents, harvest nothing
 
@@ -20,6 +22,7 @@ import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { rootFrom, resolveDb } from './paths.mjs';
 import { homedir } from 'node:os';
@@ -694,6 +697,57 @@ function listTranscripts(dir) {
   };
   walk(dir);
   return out;
+}
+
+/**
+ * What an incremental run WOULD read, from the sizes on disk and the offsets the store holds. The
+ * same three-way comparison Harvest.file() makes, without the reading. Pure over (files, getFile)
+ * so the self-test drives it against a scratch store.
+ */
+function plan(files, getFile) {
+  const out = { files_seen: files.length, would_read: 0, bytes_to_read: 0, rewritten: 0, unchanged: 0 };
+  for (const path of files) {
+    let size;
+    try { size = statSync(path).size; } catch { continue; }
+    const prev = getFile(path);
+    if (!prev) { out.would_read++; out.bytes_to_read += size; }
+    else if (size < prev.bytes_read) { out.would_read++; out.rewritten++; out.bytes_to_read += size; }
+    else if (size === prev.bytes_read) { out.unchanged++; }
+    else { out.would_read++; out.bytes_to_read += size - prev.bytes_read; }
+  }
+  return out;
+}
+
+/**
+ * --dry-run: the plan, printed, and nothing written. The store is opened read-only when it exists
+ * and not created when it does not; a missing store means every transcript is new.
+ */
+function dryRun(dbPath = DB_PATH, files = listTranscripts(PROJECTS)) {
+  let getFile = () => null;
+  let db = null;
+  if (existsSync(dbPath)) {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const stmt = db.prepare('SELECT bytes_read FROM files WHERE path = ?');
+    getFile = (path) => stmt.get(path) || null;
+  }
+  const p = plan(files, getFile);
+  if (db) db.close();
+  console.log(`dry run against ${dbPath}: ${p.files_seen} transcripts seen, ${p.would_read} would be read`
+    + ` (${p.rewritten} rewritten since last time), ${(p.bytes_to_read / 1048576).toFixed(1)} MB to read,`
+    + ` ${p.unchanged} unchanged. Nothing was written.`);
+  return 0;
+}
+
+/**
+ * --full re-reads every transcript, and the last time that was 10 GB for a few kilobytes of new
+ * rows. It says how much before it starts, and it starts only on --yes. Returns the refusal, or
+ * null when the run may proceed.
+ */
+function fullGate(argv, files = listTranscripts(PROJECTS)) {
+  if (!argv.includes('--full') || argv.includes('--yes')) return null;
+  let bytes = 0;
+  for (const f of files) { try { bytes += statSync(f).size; } catch { /* gone between list and stat */ } }
+  return `--full re-reads every transcript: ${files.length} files, ${(bytes / 1048576).toFixed(0)} MB. Pass --yes to run it.`;
 }
 
 // The census must report the record's OWN type, not the first "type" string that happens to
@@ -1645,6 +1699,50 @@ async function selfTest() {
   rmSync(liveDb + '-wal', { force: true });
   rmSync(liveDb + '-shm', { force: true });
 
+  // The two flags that stand between a bare invocation and a 10 GB re-read or a silent write.
+  {
+    const dir = join(ROOT, 'tmp', `plan-selftest-${process.pid}-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    const fake = (name, bytes) => { const p = join(dir, name); writeFileSync(p, 'x'.repeat(bytes)); return p; };
+    const unchanged = fake('unchanged.jsonl', 10);
+    const grown = fake('grown.jsonl', 20);
+    const fresh = fake('fresh.jsonl', 30);
+    const shrunk = fake('shrunk.jsonl', 20);
+    const scratch = join(dir, 'scratch.db');
+    {
+      const s = new DatabaseSync(scratch);
+      s.exec(SCHEMA);
+      const put = s.prepare('INSERT INTO files (path,size,mtime_ms,bytes_read,lines_read,rewrites,last_harvest_ts) VALUES (?,?,?,?,?,?,?)');
+      put.run(unchanged, 10, 0, 10, 1, 0, 't');
+      put.run(grown, 5, 0, 5, 1, 0, 't');
+      put.run(shrunk, 50, 0, 50, 1, 0, 't');
+      s.close();
+    }
+    const files = [unchanged, grown, fresh, shrunk];
+    const ro = new DatabaseSync(scratch, { readOnly: true });
+    const get = ro.prepare('SELECT bytes_read FROM files WHERE path = ?');
+    const p = plan(files, (path) => get.get(path) || null);
+    ro.close();
+    checks.push(['plan: an unchanged file is not read', p.unchanged === 1, JSON.stringify(p)]);
+    checks.push(['plan: a grown file is read from its offset, a new one whole, a shrunk one whole as a rewrite',
+      p.would_read === 3 && p.rewritten === 1 && p.bytes_to_read === 15 + 30 + 20, JSON.stringify(p)]);
+    checks.push(['plan: a plan over no store reads everything (gate can fail)',
+      plan(files, () => null).bytes_to_read === 80]);
+    checks.push(['--full without --yes is refused with the file count and the byte total',
+      (() => { const g = fullGate(['--full'], files); return typeof g === 'string' && g.includes('4 files') && g.includes('--yes'); })()]);
+    checks.push(['--full --yes is allowed', fullGate(['--full', '--yes'], files) === null]);
+    checks.push(['a bare incremental run is not gated', fullGate([], files) === null]);
+    // Through the command line, against the scratch store: the refusal exits 2 before any open,
+    // the dry run exits 0, and neither touches the store's bytes.
+    const before = statSync(scratch).mtimeMs;
+    const refused = spawnSync(process.execPath, [process.argv[1], '--full', '--db', scratch], { encoding: 'utf8', cwd: ROOT });
+    checks.push(['CLI: --full without --yes exits 2 and names the flag', refused.status === 2 && /--yes/.test(refused.stderr), `${refused.status} ${refused.stderr.slice(0, 120)}`]);
+    const dry = spawnSync(process.execPath, [process.argv[1], '--dry-run', '--db', scratch], { encoding: 'utf8', cwd: ROOT });
+    checks.push(['CLI: --dry-run exits 0 and says nothing was written', dry.status === 0 && /Nothing was written/.test(dry.stdout), `${dry.status} ${(dry.stderr || dry.stdout).slice(0, 160)}`]);
+    checks.push(['CLI: neither touched the store', statSync(scratch).mtimeMs === before]);
+    rmSync(dir, { recursive: true, force: true });
+  }
+
   // Negative control: the same assertions against an EMPTY store must fail.
   const empty = new DatabaseSync(':memory:');
   empty.exec(SCHEMA);
@@ -1679,5 +1777,10 @@ else if (argv.includes('--backfill-titles')) code = await backfillTitles();
 else if (argv.includes('--backfill-agents')) code = await backfillAgents(resolveDbPath(argv));
 else if (argv.includes('--backfill-message-source'))
   code = await backfillMessageSource(resolveDbPath(argv));
-else code = await run({ full: argv.includes('--full') });
+else if (argv.includes('--dry-run')) code = dryRun(resolveDbPath(argv));
+else {
+  const refusal = fullGate(argv);
+  if (refusal) { console.error(refusal); code = 2; }
+  else code = await run({ full: argv.includes('--full') });
+}
 if (IS_ENTRY) process.exit(code);

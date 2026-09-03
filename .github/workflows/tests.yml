@@ -89,8 +89,10 @@ jobs:
         run: npm ci --prefix frontend
 
       # Synthetic, and it says so in every row it writes. Nothing here came from a conversation.
+      # Spelled out with --force: the tool's default is a dated directory under tmp/, and the real
+      # store path is refused without --force even where, as here, nothing exists yet.
       - name: Build the fixture store
-        run: node tools/make_fixture.mjs
+        run: node tools/make_fixture.mjs --out data/context.db --force
 
       # Linters before the suite: a lint failure is cheap to read, and a green suite over code
       # nobody linted is how the two drift apart.

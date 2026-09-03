@@ -27,7 +27,8 @@ Two things it does that a plain loop does not, both because a plain loop got the
 No store on this machine? Build a synthetic one:
 
 ```bash
-node tools/make_fixture.mjs        # writes data/context.db, refuses to overwrite an existing one
+node tools/make_fixture.mjs        # writes tmp/fixture-<stamp>/context.db and prints the path
+export C4X_DB=tmp/fixture-<stamp>/context.db   # point the checks at it; data/context.db needs --out and --force
 node tools/run_tests.mjs
 ```
 
