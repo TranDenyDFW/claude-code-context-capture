@@ -9,10 +9,10 @@ node tools/run_tests.mjs
 It runs every `--self-test` in `tools/` and `hooks/`, plus the Python checks over the dashboard,
 and prints one total.
 
-The total is not quoted here on purpose. It moves whenever a check is added, and it is not the same
-everywhere: CI and a Windows checkout collect different numbers of pytest cases from the same
-commit. A figure in a guide that nobody re-runs is worse than no figure, which this line learned the
-hard way. Run it and read the last line.
+The total is not quoted here on purpose. It moves whenever a check is added, and a machine whose
+packages differ from the pins collects a different one; the suite checks for exactly that drift
+and names the package. A figure in a guide that nobody re-runs is worse than no figure, which this
+line learned the hard way. Run it and read the last line.
 
 Two things it does that a plain loop does not, both because a plain loop got them wrong:
 
@@ -34,9 +34,16 @@ node tools/run_tests.mjs
 That is what CI does. The fixture is not decoration: two node self-tests and all three Python checks
 read a store, and without one they correctly fail rather than skip.
 
-The Python side needs its dev dependencies for the suite and the linter:
+The Python side needs its dev dependencies for the suite and the linter, installed the way CI
+installs them, with the pins:
 
-    pip install -r requirements.txt -r requirements-dev.txt
+    pip install -c constraints-ci.txt -r requirements.txt -r requirements-dev.txt
+
+Not `pip install -r requirements.txt` alone. That gives you whatever is newest, and on 2026-09-02
+a machine that had done that passed a change locally, passed an independent review on the same
+machine, and failed CI twice, because CI's pandas represents a missing cell differently from the
+one it had. The suite now refuses to pass on a machine whose direct requirements differ from the
+pins, and tells you which. Python 3.12 or newer: the pins do not resolve on 3.11.
 
 `node tools/run_tests.mjs` runs everything, pytest included, and reports one total. Running pytest
 directly works too, but note that the runner reads pytest's `N passed` summary line to know the
