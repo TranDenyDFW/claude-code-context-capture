@@ -98,7 +98,11 @@ def test_a_row_with_no_target_says_why_rather_than_looking_broken(table):
     input. A blank cell with no explanation reads as missing data."""
     blank = [r for r in table["rows"] if not r.get("target")]
     if not blank:
-        pytest.skip("every repeated input in this store names a target")
+        # The skip reason carries what the table actually held, so a skip on a store that
+        # SHOULD have a blank-target row is diagnosable from the runner's tail alone.
+        seen = [(r.get("tool"), repr(r.get("target"))) for r in table["rows"][:6]]
+        pytest.skip(f"every repeated input in this store names a target; "
+                    f"{len(table['rows'])} rows, first: {seen}")
     from c4x.theme import COLUMN_HELP
     assert "target" in COLUMN_HELP
     assert "hash of the input" in COLUMN_HELP["target"]
