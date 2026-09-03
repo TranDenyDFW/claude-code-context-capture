@@ -2,6 +2,15 @@
 # from pip. Dependencies stay in requirements.txt, which is what the README and CI install; this
 # file carries the tool configuration.
 
+[project]
+# Not a package: nothing here builds a wheel, and the README installs with `pip -r`. This table
+# exists for one field. `requires-python` is the floor CI actually tests: the pinned set in
+# constraints-ci.txt does NOT resolve on 3.11 (measured 2026-09-03), and the matrix runs 3.12 and
+# 3.14, so a claim of anything lower would be a claim no run has ever checked.
+name = "c4x"
+version = "0.1.0"
+requires-python = ">=3.12"
+
 [tool.mypy]
 # OVER c4x/ ONLY, and BLOCKING in CI.
 #

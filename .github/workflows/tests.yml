@@ -1,11 +1,24 @@
 name: tests
 
-# Runs the whole suite, not a subset.
+# Runs the whole suite, not a subset, on every interpreter and platform this repo claims to support.
 #
 # The obstacle was that data/ is gitignored, for good reason: it holds verbatim conversations. Three
 # checks read a store, and two node self-tests each carry one store-dependent check that correctly
 # FAILS rather than skips when there is none. So CI builds a synthetic store first, and the runner
 # says out loud when anything did not execute rather than printing a total that implies otherwise.
+#
+# WHY A MATRIX, AND WHY A WINDOWS LEG. On 2026-09-02 a change passed on a Windows developer machine,
+# passed an independent review on the same machine, and failed here, twice. The variable was not
+# the platform: CI installs pandas 3.0.5 from constraints-ci.txt and that machine ran 2.3.3, and
+# pandas 3 represents a missing text cell as NaN where pandas 2 used None. A second interpreter
+# leg would not have caught that either; the pin check in tools/make_constraints.py does. What the
+# Windows leg catches is the reverse: a CRLF write, a path separator, a locale, anything that passes
+# on Ubuntu and fails where most of this tool's users actually run it.
+#
+# WHY THE FAN-IN JOB IS CALLED `suite`. Branch protection on main requires a status check with
+# exactly that context. A matrix job reports as `checks (ubuntu-latest, 3.12)` and so on, none of
+# which is `suite`, so without the fan-in the protection would either block every merge or,
+# worse, silently require nothing. The fan-in is green only when every leg is.
 
 on:
   push:
@@ -13,8 +26,22 @@ on:
   pull_request:
 
 jobs:
-  suite:
-    runs-on: ubuntu-latest
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ['3.12', '3.14']
+        include:
+          - os: windows-latest
+            python: '3.12'
+    runs-on: ${{ matrix.os }}
+    name: checks (${{ matrix.os }}, ${{ matrix.python }})
+    defaults:
+      run:
+        # bash on every leg, including Windows, so one script serves all three. GitHub's Windows
+        # runners ship Git Bash; `rm -f` and `$VAR` mean the same thing everywhere below.
+        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4, v4.4.0
 
@@ -34,25 +61,26 @@ jobs:
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # actions/setup-python@v5, v5.6.0
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
 
       # `-c constraints-ci.txt` pins everything including transitives, so a run six months from
       # now installs the graph today's green run installed. The requirements files keep their lower
       # bounds, because they are what someone installing this to look at their own context gets.
+      # The same command is what CONTRIBUTING tells a developer to run, and the suite checks that
+      # the installed versions match the pins, so a machine that drifted from CI says so itself.
       - name: Install Python dependencies
         run: |
           pip install -c constraints-ci.txt -r requirements.txt -r requirements-dev.txt
           pip check
 
-      # WITHOUT THIS THE FRONTEND CHECKS DO NOT RUN. tools/run_tests.mjs skips the typecheck and
-      # Vitest when frontend/node_modules is absent, and this job never installed it, so those two
-      # gates were skipped on every run CI ever made while the job reported success. `ci` rather
-      # than `install` because frontend/package-lock.json is committed.
       # `ci`, not `install`: it installs exactly the lockfile and fails if package.json and the
       # lockfile disagree, which is the whole point of committing one.
       - name: Install the linter
         run: npm ci
 
+      # WITHOUT THIS THE FRONTEND CHECKS DO NOT RUN. tools/run_tests.mjs skips the typecheck and
+      # Vitest when frontend/node_modules is absent, and this job never installed it, so those two
+      # gates were skipped on every run CI ever made while the job reported success.
       - name: Install the frontend
         run: npm ci --prefix frontend
 
@@ -91,3 +119,16 @@ jobs:
       - name: Confirm no store is left behind
         if: always()
         run: rm -f data/context.db data/context.db-wal data/context.db-shm
+
+  # The one context branch protection requires. Green only when every matrix leg is green; a leg
+  # that was skipped or cancelled is a failure here, not an absence, because an absence is how a
+  # required check quietly stops requiring anything.
+  suite:
+    needs: [checks]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every leg must have succeeded
+        run: |
+          echo "checks result: ${{ needs.checks.result }}"
+          test "${{ needs.checks.result }}" = "success"

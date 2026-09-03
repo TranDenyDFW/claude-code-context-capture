@@ -96,6 +96,40 @@ def pins(text=None):
     return out
 
 
+def drifted(installed=None):
+    """Direct requirements whose INSTALLED version differs from the pin. Empty means this machine
+    runs what CI runs.
+
+    The check that would have saved a day. On 2026-09-02 a change passed locally, passed an
+    independent review on the same machine, and failed CI twice, because CI installs pandas 3.0.5
+    from these pins and the machine had 2.3.3, and pandas 3 represents a missing cell differently.
+    Nothing said the two environments differed. Now the suite does, by name, with the fix.
+
+    `installed` is injectable so the self-test can plant a drift; by default it reads the running
+    environment. A direct requirement that is not installed at all is not drift, it is absence,
+    and pip check reports that elsewhere.
+    """
+    from importlib import metadata
+    have = pins()
+    out = []
+    for name in named_requirements():
+        pinned = have.get(name)
+        if pinned is None:
+            continue
+        if installed is not None:
+            actual = installed.get(name)
+        else:
+            try:
+                actual = metadata.version(name)
+            except metadata.PackageNotFoundError:
+                actual = None
+        if actual is None:
+            continue
+        if normalise(actual) != normalise(pinned):
+            out.append(f"{name}: installed {actual}, constraints-ci.txt pins {pinned}")
+    return sorted(out)
+
+
 def uncovered(text=None):
     """Direct requirements with no exact pin. Empty means the file covers what it claims to."""
     have = pins(text)
@@ -241,6 +275,16 @@ def self_test():
         # reported as one. This spelling flip was a false failure until names were normalised.
         ("a PEP 503 respelling is NOT reported as missing",
          uncovered(respelled("python-multipart")) == []),
+        # This machine runs what CI runs. When it does not, the suite says which package and what
+        # to do about it, instead of passing here and failing there.
+        ("every installed direct requirement matches its pin "
+         "(else: pip install -c constraints-ci.txt -r requirements.txt -r requirements-dev.txt)",
+         drifted() == []),
+        # Planted drift, so the row above is known to be able to fail.
+        ("a drifted install IS detected",
+         any("pandas" in line for line in drifted({"pandas": "2.3.3"}))),
+        ("and a matching install is not",
+         drifted({name: version for name, version in have.items() if version}) == []),
     ]
     bad = 0
     for what, ok in cases:
@@ -251,6 +295,8 @@ def self_test():
         print(f"  unpinned: {line}")
     for line in contradicted():
         print(f"  contradicted: {line}")
+    for line in drifted():
+        print(f"  drifted: {line}")
     print(f"SELF-TEST {'PASS' if not bad else 'FAIL'} ({len(cases)} checks)")
     return 1 if bad else 0
 
