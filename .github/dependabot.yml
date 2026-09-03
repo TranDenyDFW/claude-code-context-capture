@@ -1,0 +1,42 @@
+# Monthly, grouped, and for every ecosystem this repo pins. A pin that never moves is a pin that
+# eventually cannot install, and a pin that moves by hand is a guess; these PRs are the third way.
+#
+# pip updates land in the requirements files, which state floors. The exact set CI installs lives in
+# constraints-ci.txt and is regenerated from a resolve (`python tools/make_constraints.py
+# --regenerate`), never edited by a bot or a hand, so a pip update here is a prompt to regenerate,
+# and the make_constraints self-test fails the suite if the two disagree.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      root-tooling:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: monthly
+    groups:
+      frontend:
+        patterns: ["*"]
+
+  # Actions are pinned to commit SHAs in the workflow; dependabot keeps the SHA and the version
+  # comment beside it moving together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
