@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from dash import dcc, html
 
 from c4x.dash_compat import DataTable
-from c4x.store import cohort_sessions, session_rows
+from c4x.store import SESSION_TURN_FLOOR, cohort_sessions, session_rows
 from c4x.theme import (
     ACCENT,
     GOOD,
@@ -121,7 +121,8 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
         })
     breakdown = " · ".join(f"{k} {v:,}" for k, v in counts.items()) or "none"
     return html.Div([
-        html.Div(f"{len(rows):,} sessions with 5 or more turns. {breakdown}.", style=SECTION_NOTE),
+        html.Div(f"{len(rows):,} sessions with {SESSION_TURN_FLOOR} or more turns. {breakdown}.",
+                 style=SECTION_NOTE),
         html.Div("Click a row to make it the header selection. Sections come from disk: the "
                  "working directory, the entrypoint, and whether the transcript still exists.",
                  style=SECTION_NOTE),
