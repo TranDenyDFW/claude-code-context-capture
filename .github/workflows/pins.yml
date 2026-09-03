@@ -1,6 +1,7 @@
 name: pins
 
-# Re-resolve constraints-ci.txt as a SET, monthly, and open a pull request when a pin moved.
+# Re-resolve constraints-ci.txt as a SET, monthly, on both platforms CI runs, and open a pull
+# request when a pin moved.
 #
 # WHY NOT DEPENDABOT FOR THIS FILE. constraints-ci.txt is the answer to one question, "what does
 # pip install today for these requirements", and every line in it depends on the others: pydantic
@@ -8,7 +9,15 @@ name: pins
 # content (any .txt that reads as requirements) and moves one line at a time. Its first attempt,
 # PR #49, bumped pydantic_core alone and could not install (ResolutionImpossible on all three
 # legs). No dependabot.yml setting scopes it off one file, so the pip ecosystem is not configured
-# there at all, and this job is the mechanism instead: the same `--regenerate` a developer runs.
+# there at all, and this job is the mechanism instead: the same tool a developer runs.
+#
+# WHY TWO RUNNERS AND A FAN-IN. pip evaluates environment markers on the interpreter that runs it,
+# and `--platform` changes only which wheel tags it accepts, so an Ubuntu runner never requests
+# `pywinpty ; sys_platform == "win32"` and cannot pin it, while a Windows machine requesting it
+# for Linux tags finds no wheel and fails. The third run of this job proved the first half: it
+# wrote 52 pins and refused, because pywinpty was unpinned. So each platform resolves its own set
+# with `--resolve-only`, and one `--regenerate --from` unions them: a plain pin where both agree,
+# a marker where only one platform installs the package, a refusal where they disagree.
 #
 # WHY THE LAST STEP DISPATCHES tests.yml BY NAME. A push or a pull request made with GITHUB_TOKEN
 # starts no workflow, by GitHub's design against loops. Left there, the pull request this opens
@@ -33,8 +42,16 @@ permissions:
   actions: write
 
 jobs:
-  regenerate:
-    runs-on: ubuntu-latest
+  resolve:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: resolve (${{ matrix.os }})
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -50,17 +67,57 @@ jobs:
       - name: The tool's one dependency
         run: pip install -c constraints-ci.txt packaging
 
-      - name: Re-resolve the set
-        run: python tools/make_constraints.py --regenerate
+      - name: Resolve this platform's set
+        run: python tools/make_constraints.py --resolve-only resolve-${{ matrix.os }}.json
 
-      # Offline: every direct requirement pinned, no pin below its own floor, and the planted
-      # failures still caught. The drift row compares installed packages to pins and nothing from
-      # the requirements is installed yet, which it treats as absence, not drift.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: resolve-${{ matrix.os }}
+          path: resolve-${{ matrix.os }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  merge:
+    needs: [resolve]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: The tool's one dependency
+        run: pip install -c constraints-ci.txt packaging
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: resolve-*
+          merge-multiple: true
+          path: resolves
+
+      # Both sets, or nothing: a union of one platform is the file this job exists to stop writing.
+      - name: Both platforms reported
+        run: |
+          ls -l resolves
+          test -s resolves/resolve-ubuntu-latest.json
+          test -s resolves/resolve-windows-latest.json
+
+      - name: Union the two sets into constraints-ci.txt
+        run: |
+          python tools/make_constraints.py --regenerate \
+            --from resolves/resolve-ubuntu-latest.json resolves/resolve-windows-latest.json
+
+      # Offline: every direct requirement pinned, no pin below its own floor, the rewrite and the
+      # union rows, and the planted failures still caught. The drift row compares installed
+      # packages to pins and nothing from the requirements is installed yet, which it treats as
+      # absence, not drift.
       - name: The new set still covers the requirements
         run: python tools/make_constraints.py --self-test
 
-      # The one thing --regenerate cannot prove by itself: that the set it wrote INSTALLS, on the
-      # floor, with no conflicts. This is the step Dependabot's one-line bump failed.
+      # The one thing a resolve cannot prove by itself: that the set it wrote INSTALLS, with the
+      # markers applied, with no conflicts. This is the step Dependabot's one-line bump failed. The
+      # Windows install is proven by the pull request's own Windows leg.
       - name: The new set installs and pip check agrees
         run: |
           pip install -c constraints-ci.txt -r requirements.txt -r requirements-dev.txt
@@ -87,9 +144,10 @@ jobs:
           git add constraints-ci.txt
           git commit -m "chore: re-resolve the pinned set
 
-          Written by tools/make_constraints.py --regenerate on the floor interpreter, then
-          installed and pip-checked on the same runner. Every line moved together, which is the
-          only way this file is allowed to change."
+          Written by tools/make_constraints.py from a resolve on an Ubuntu runner and a
+          resolve on a Windows runner, unioned, then installed and pip-checked on the
+          Ubuntu runner. Every line moved together, which is the only way this file is
+          allowed to change."
           # --force, because this branch is a rolling snapshot of one file and nothing else ever
           # commits to it. A rejected push here would leave the run green with nothing opened.
           git push --force origin "$BRANCH"
@@ -98,7 +156,7 @@ jobs:
           else
             gh pr create --base main --head "$BRANCH" \
               --title "chore: re-resolve the pinned set" \
-              --body "Opened by .github/workflows/pins.yml. tools/make_constraints.py re-resolved constraints-ci.txt on Python 3.12, the self-test passed, and the new set installed with pip check clean on the runner.
+              --body "Opened by .github/workflows/pins.yml. tools/make_constraints.py resolved the set on an Ubuntu runner and on a Windows runner (Python 3.12), unioned them, the self-test passed, and the union installed with pip check clean on the Ubuntu runner; the Windows leg below proves the other half.
 
           The suite on this branch was started by the same job: a pull request opened with GITHUB_TOKEN gets no automatic run, so the job dispatches tests.yml on the branch and the check lands here."
           fi

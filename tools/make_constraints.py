@@ -13,7 +13,18 @@ so. An independent review found it, not the file's own instructions.
 So the generation lives here, and so does a check that runs in the suite with no network:
 
     python tools/make_constraints.py --self-test    # offline: is every direct requirement pinned?
-    python tools/make_constraints.py --regenerate   # network: re-resolve and rewrite the file
+    python tools/make_constraints.py --regenerate   # network: re-resolve HERE and rewrite the file
+    python tools/make_constraints.py --resolve-only OUT.json         # network: this platform's set
+    python tools/make_constraints.py --regenerate --from A.json B.json   # union those, rewrite
+
+WHY THE FILE IS A UNION OF TWO RESOLVES. pip evaluates environment markers on the interpreter that
+runs it, and `--platform` changes only which wheel tags it accepts, so a machine cannot resolve
+another platform's set: from Windows, `pywinpty ; sys_platform == "win32"` is still requested and
+has no Linux wheel; from Linux it is never requested and never pinned. The monthly job therefore
+resolves on an Ubuntu runner and a Windows runner, each with `--resolve-only`, and one `--regenerate
+--from` unions them: a package every platform installs at one version is a plain pin, a package
+only some platforms install carries the marker naming them, and a version the platforms disagree
+on is refused, because that would be two sets and this file is one.
 
 WHAT THE OFFLINE CHECK SEES. Every package NAMED in the requirements files carries an exact pin
 here; no pin is a range; every pin SATISFIES the floor its own requirement states; and the header's
@@ -86,12 +97,15 @@ def pins(text=None):
         line = raw.split("#")[0].strip()
         if not line:
             continue
-        if "==" not in line:
+        # `pywinpty==3.0.5 ; sys_platform == "win32"`: the marker is where the pin applies, not
+        # part of what it pins to.
+        spec = line.partition(";")[0].strip()
+        if "==" not in spec:
             # Recorded as a non-pin rather than skipped, so a range in a constraints file is a
             # finding instead of an absence.
-            out[normalise(re.split(r"[<>=!~;\[]", line, maxsplit=1)[0])] = None
+            out[normalise(re.split(r"[<>=!~;\[]", spec, maxsplit=1)[0])] = None
             continue
-        name, version = line.split("==", 1)
+        name, version = spec.split("==", 1)
         out[normalise(name)] = version.strip()
     return out
 
@@ -175,10 +189,49 @@ def resolve():
                   for i in data["install"])
 
 
-def render(rows):
+def platform_set():
+    """This machine's resolve, labelled with the platform whose markers pip evaluated it under."""
+    return {"sys_platform": sys.platform, "python": CI_PYTHON, "pins": dict(resolve())}
+
+
+def union(sets):
+    """One list of (name, version, marker) rows from per-platform resolves.
+
+    A package every set holds at one version is a plain pin. A package only some sets hold carries
+    the marker naming those platforms, `sys_platform == "win32"` for a Windows-only wheel, so pip
+    applies the pin exactly where the resolve saw it. A package two sets hold at DIFFERENT versions
+    is refused with both named: that is two sets, and choosing one would be the hand-edit this file
+    forbids.
+    """
+    if not sets:
+        raise SystemExit("nothing to union")
+    by_set = [{normalise(name): (name, version) for name, version in s["pins"].items()}
+              for s in sets]
+    labels = [s["sys_platform"] for s in sets]
+    rows, clashes = [], []
+    for key in sorted(set().union(*by_set)):
+        seen = {label: found[key] for label, found in zip(labels, by_set, strict=True)
+                if key in found}
+        versions = {version for _, version in seen.values()}
+        if len(versions) > 1:
+            clashes.append(key + ": " + ", ".join(
+                f"{label} {version}" for label, (_, version) in sorted(seen.items())))
+            continue
+        name = next(iter(seen.values()))[0]
+        marker = ("" if len(seen) == len(sets) else
+                  " or ".join(f'sys_platform == "{label}"' for label in sorted(seen)))
+        rows.append((name, versions.pop(), marker))
+    if clashes:
+        raise SystemExit("the platforms disagree on a version, so this is two sets, not one:\n  "
+                         + "\n  ".join(clashes))
+    return rows
+
+
+def render(rows, platforms=()):
     """The file body, header included, so the counts in the header cannot drift from the pins."""
     direct = set(named_requirements())
-    covered = sum(1 for name, _ in rows if normalise(name) in direct)
+    covered = sum(1 for name, _, _ in rows if normalise(name) in direct)
+    origin = (", ".join(platforms) if platforms else "one machine")
     header = f'''# The exact versions CI installs. NOT the public requirements.
 #
 # requirements.txt and requirements-dev.txt state lower bounds on purpose: someone installing this
@@ -202,20 +255,24 @@ def render(rows):
 # through the commit that made the mypy step blocking, which meant the one tool that could fail the
 # job was the one tool free to change underneath it.
 #
-# Resolved for Python {CI_PYTHON}, matching the workflow's setup-python. Environment markers
-# come from the machine that ran the resolve, so a platform-specific package can appear that
-# another platform never installs; CI is the authority on whether these pins are satisfiable,
-# and a wrong pin fails the install loudly rather than being quietly ignored.
+# Resolved for Python {CI_PYTHON}, matching the workflow's setup-python, on: {origin}. pip
+# evaluates environment markers on the interpreter that runs it and `--platform` does not change
+# that, so no one machine can resolve another platform's set; .github/workflows/pins.yml resolves
+# on an Ubuntu runner and a Windows runner and this file is their union. A package only some
+# platforms install carries the marker naming them, so pip applies that pin exactly where the
+# resolve saw it and nowhere else. A version the platforms disagree on is refused, not chosen.
+# CI is the authority on whether the set is satisfiable: a wrong pin fails the install loudly.
 #
 # {len(rows)} packages, of which {covered} are named in the requirements files.
 '''
     lines = [header]
-    for name, version in rows:
-        lines.append(f"{name}=={version}{'  # direct' if normalise(name) in direct else ''}")
+    for name, version, marker in rows:
+        lines.append(f"{name}=={version}" + (f" ; {marker}" if marker else "")
+                     + ("  # direct" if normalise(name) in direct else ""))
     return "\n".join(lines) + "\n"
 
 
-def rewrite(rows, path=CONSTRAINTS):
+def rewrite(rows, path=CONSTRAINTS, platforms=()):
     """Write the rendered set to `path`, PRESERVING its line endings, and return the ending used.
 
     The newline matters on Windows. Writing LF into a CRLF checkout rewrites every line's bytes, so
@@ -229,16 +286,34 @@ def rewrite(rows, path=CONSTRAINTS):
     """
     existing = path.read_bytes().decode("utf-8") if path.exists() else ""
     newline = "\r\n" if "\r\n" in existing else "\n"
-    path.write_text(render(rows), encoding="utf-8", newline=newline)
+    path.write_text(render(rows, platforms), encoding="utf-8", newline=newline)
     return newline
 
 
-def regenerate():
-    """Re-resolve and rewrite the file. Needs the network; the rewrite itself does not."""
-    rows = resolve()
-    newline = rewrite(rows)
+def resolve_only(out):
+    """This platform's set to a JSON file, for a `--regenerate --from` on another machine."""
+    found = platform_set()
+    Path(out).write_text(json.dumps(found, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"{out} written: {len(found['pins'])} pins resolved on {found['sys_platform']}")
+    return 0
+
+
+def regenerate(inputs=()):
+    """Rewrite the file from the union of `inputs` (each a `--resolve-only` file), or from a
+    resolve on this machine when there are none. Only the resolve needs the network."""
+    if inputs:
+        sets = [json.loads(Path(name).read_text(encoding="utf-8")) for name in inputs]
+    else:
+        sets = [platform_set()]
+    rows = union(sets)
+    platforms = tuple(s["sys_platform"] for s in sets)
+    newline = rewrite(rows, platforms=platforms)
     missing, wrong = uncovered(), contradicted()
-    print(f"constraints-ci.txt written: {len(rows)} pins, line endings {newline!r}")
+    print(f"constraints-ci.txt written: {len(rows)} pins from {len(sets)} platform set(s) "
+          f"({', '.join(platforms)}), line endings {newline!r}")
+    if len(sets) == 1:
+        print("ONE platform only: a package another platform installs is not pinned here. The "
+              "monthly job resolves on Ubuntu and Windows and unions them.")
     print("direct requirements still unpinned:", missing or "none")
     print("pins that do not satisfy their own floor:", wrong or "none")
     return 1 if (missing or wrong) else 0
@@ -269,8 +344,21 @@ def self_test():
         with tempfile.TemporaryDirectory() as scratch_dir:
             scratch = Path(scratch_dir) / "constraints.txt"
             scratch.write_bytes(seed)
-            rewrite([("packaging", "1.0")], scratch)
+            rewrite([("packaging", "1.0", ""), ("pywinpty", "3.0.5", 'sys_platform == "win32"')],
+                    scratch)
             return scratch.read_bytes()
+
+    def refused(*sets):
+        """True when union() refuses these sets, which is the answer for a version clash."""
+        try:
+            union(list(sets))
+        except SystemExit:
+            return True
+        return False
+
+    win = {"sys_platform": "win32", "pins": {"shared": "1.0", "pywinpty": "3.0.5"}}
+    lin = {"sys_platform": "linux", "pins": {"shared": "1.0", "uvloop": "0.21.0"}}
+    merged = {name: (version, marker) for name, version, marker in union([win, lin])}
 
     def respelled(package):
         """The file with one pin written in the other PEP 503 spelling, in memory."""
@@ -313,6 +401,24 @@ def self_test():
          and b"\n" not in rewritten(b"a==1\r\n").replace(b"\r\n", b"")),
         ("a rewrite over an LF file keeps LF", b"\r" not in rewritten(b"a==1\n")),
         ("and the rewrite carries the pin it was given", b"packaging==1.0" in rewritten(b"")),
+        # A pin that applies on one platform only. The marker is where it applies, not part of the
+        # version, and it must survive a rewrite and a read back, or the union is lost on the way.
+        ("a pin that carries a marker is read as a pin",
+         pins('pywinpty==3.0.5 ; sys_platform == "win32"').get("pywinpty") == "3.0.5"),
+        ("and the marker survives the rewrite and the read back",
+         pins(rewritten(b"").decode("utf-8")).get("pywinpty") == "3.0.5"
+         and b'pywinpty==3.0.5 ; sys_platform == "win32"' in rewritten(b"")),
+        # The union of two platform resolves, which is what the monthly job writes.
+        ("a package both platforms install at one version is a plain pin",
+         merged.get("shared") == ("1.0", "")),
+        ("a package only Windows installs carries the win32 marker",
+         merged.get("pywinpty") == ("3.0.5", 'sys_platform == "win32"')),
+        ("a package only Linux installs carries the linux marker",
+         merged.get("uvloop") == ("0.21.0", 'sys_platform == "linux"')),
+        ("a version the platforms disagree on is REFUSED, not chosen",
+         refused({"sys_platform": "win32", "pins": {"x": "1.0"}},
+                 {"sys_platform": "linux", "pins": {"x": "2.0"}})),
+        ("and agreeing platforms are not refused", not refused(win, lin)),
     ]
     bad = 0
     for what, ok in cases:
@@ -342,14 +448,24 @@ def main(argv=None):
     ap.add_argument("--self-test", action="store_true",
                     help="offline coverage check, the one the suite runs and the default")
     ap.add_argument("--regenerate", action="store_true",
-                    help="re-resolve against the network and rewrite constraints-ci.txt")
+                    help="rewrite constraints-ci.txt from --from files, or from a resolve here")
+    ap.add_argument("--from", dest="inputs", nargs="+", metavar="JSON", default=(),
+                    help="with --regenerate: per-platform --resolve-only files to union")
+    ap.add_argument("--resolve-only", metavar="OUT",
+                    help="resolve on this platform and write the set to OUT; no rewrite")
     args = ap.parse_args(argv)
     # Both flags is a contradiction rather than a preference, and it used to be accepted silently
     # because `args.self_test` was never read at all.
     if args.regenerate and args.self_test:
         ap.error("--regenerate and --self-test do different things; pick one")
+    if args.inputs and not args.regenerate:
+        ap.error("--from only means something with --regenerate")
+    if args.resolve_only and (args.regenerate or args.self_test):
+        ap.error("--resolve-only writes one platform's set and nothing else; pick one")
+    if args.resolve_only:
+        return resolve_only(args.resolve_only)
     if args.regenerate:
-        return regenerate()
+        return regenerate(args.inputs)
     return self_test()
 
 
