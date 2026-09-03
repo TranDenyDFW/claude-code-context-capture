@@ -44,6 +44,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      # The tool's own import, from the CURRENT pins, before those pins are re-resolved. The first
+      # run of this job died here: a bare runner has no `packaging`, and the step that regenerates
+      # the file cannot be the one that installs from it.
+      - name: The tool's one dependency
+        run: pip install -c constraints-ci.txt packaging
+
       - name: Re-resolve the set
         run: python tools/make_constraints.py --regenerate
 
