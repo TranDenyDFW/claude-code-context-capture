@@ -93,7 +93,7 @@ def session_ids(con, project):
     THE SECOND HALF IS NOT REDUNDANT, and getting its condition wrong cost 79 sessions.
 
     `session_rows()` does not merely read FROM turns, it also drops any session with fewer than
-    FIVE of them (`HAVING COUNT(*) >= 5`). Measured on this store that is 1,008 of 1,325 sessions,
+    `SESSION_TURN_FLOOR` of them. Measured on this store that was 1,008 of 1,325 sessions,
     985 of which have between one and four turns. An earlier version of this asked for sessions
     with NO turns, so those 985 were in neither half: exporting one 137-session project carried 58
     of them and said nothing, and a delete would have left the other 79 behind with their project
