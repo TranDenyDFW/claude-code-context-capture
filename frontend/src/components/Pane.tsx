@@ -28,22 +28,33 @@ export function Pane({
   // A section's body is ALSO in `text`, because `extract.texts()` flattens the whole pane including
   // what is inside a collapsed block. Rendered naively every SQL query appears twice: once as a
   // wall of prose and again inside its own section.
+  // CASE-INSENSITIVE. The server title-cases a card's label ("Re-read Groups") and `text` keeps
+  // the raw one ("Re-read groups"), so an exact match claimed nothing and every card's label was
+  // printed again as prose. Measured on the Cost tab: nineteen leaked lines, five of them labels.
   const claimed = new Set<string>()
+  const claim = (line: string) => claimed.add(line.trim().toLowerCase())
+  const isClaimed = (line: string) => claimed.has(line.trim().toLowerCase())
   // A stat card's three strings are in `text` too, for the same flattening reason, so without this
   // the page prints "sessions / 1,325 / in the store" as body prose directly under the card.
   for (const stat of stats) {
-    claimed.add(stat.label)
-    claimed.add(stat.value)
-    if (stat.sub) claimed.add(stat.sub)
+    claim(stat.label)
+    claim(stat.value)
+    if (stat.sub) claim(stat.sub)
   }
   for (const section of sections) {
-    for (const line of section.body) claimed.add(line)
-    if (section.summary) claimed.add(section.summary)
+    for (const line of section.body) claim(line)
+    if (section.summary) claim(section.summary)
+  }
+  // A TABLE'S HEADING AND NOTE BELONG TO THE TABLE. The server pairs them and lists the exact
+  // lines it folded in; printing them here as well put six headings and their notes on the
+  // Diagnostics tab in one block above the first table, with nothing saying which was whose.
+  for (const entry of meta) {
+    for (const line of entry.absorbed ?? []) claim(line)
   }
   const prose = payload.text.filter(
     (line) =>
       line !== payload.population &&
-      !claimed.has(line) &&
+      !isClaimed(line) &&
       !sections.some((s) => s.summary.includes(line)),
   )
 
@@ -125,29 +136,48 @@ export function Pane({
         <Section key={`loose-${index}`} section={section} />
       ))}
 
-      {payload.tables.map((table, index) => (
-        // Keyed by INDEX, not by id. Five of the Cost tab's six tables report the id
-        // `(anonymous)`, so keying on it collided four times and React warned on every render.
-        <section key={index} className="flex flex-col gap-2">
-          {/* The heading comes from `table_label()` on the server. Deriving it here by stripping a
-              `tbl-` prefix was a naming rule living in the browser, which is the mistake this
-              whole pass exists to undo. */}
-          {(titleFor('table', index) || meta[index]?.title) && (
-            <h3 className="text-md font-semibold text-ink-dim">
-              {titleFor('table', index) || meta[index]?.title}
+      {payload.tables.map((table, index) => {
+        // EVERY TABLE HAS THE SAME HEADING: its name, the row count, and its note on hover. The
+        // name comes from the server, which pairs the heading it wrote above the table; the last
+        // resort is a numbered one, so no table is ever the only unnamed thing on a page. The note
+        // is on the heading, not in the body, and the glyph says there is something to hover.
+        const name = titleFor('table', index) || meta[index]?.title || `Table ${index + 1}`
+        const note = meta[index]?.note ?? null
+        return (
+          // Keyed by INDEX, not by id. Five of the Cost tab's six tables report the id
+          // `(anonymous)`, so keying on it collided four times and React warned on every render.
+          <section key={index} className="flex flex-col gap-2">
+            <h3
+              className="flex items-baseline gap-2 text-md font-semibold text-ink-dim"
+              title={note ?? undefined}
+              aria-description={note ?? undefined}
+            >
+              <span>{name}</span>
+              <span className="text-2xs font-normal tabular-nums text-ink-faint">
+                {table.rows.length.toLocaleString()} {table.rows.length === 1 ? 'row' : 'rows'}
+              </span>
+              {note && (
+                <span
+                  aria-hidden="true"
+                  className="rounded border border-edge px-1 text-2xs font-normal leading-4
+                             text-ink-faint"
+                >
+                  ?
+                </span>
+              )}
             </h3>
-          )}
-          <DataTable
-            table={table}
-            meta={meta[index]}
-            title={titleFor('table', index) || meta[index]?.title || undefined}
-            onRowClick={onRowClick}
-          />
-          {attached(index).map((section, at) => (
-            <Section key={at} section={section} table={table} />
-          ))}
-        </section>
-      ))}
+            <DataTable
+              table={table}
+              meta={meta[index]}
+              title={name}
+              onRowClick={onRowClick}
+            />
+            {attached(index).map((section, at) => (
+              <Section key={at} section={section} table={table} meta={meta[index]} />
+            ))}
+          </section>
+        )
+      })}
 
       {figures.length === 0 && payload.tables.length === 0 && (
         <div className="rounded-lg bg-panel shadow-panel p-8 text-center text-ink-dim">

@@ -81,7 +81,7 @@ def _reread_curve(read_tools, where, args, dup_min):
                   config={"displayModeBar": False}),
         html.Div(
             f"The ten worst groups are {top10:.1f}% of all {total:,} re-reads, and half of them "
-            f"sit in the worst {half:,} of {len(share):,} groups. The table above shows the "
+            f"sit in the worst {half:,} of {len(share):,} groups. The table of groups shows the "
             f"first 200 of those groups; this curve is computed over all of them, so the two "
             f"denominators are different on purpose.",
             style=SECTION_NOTE),

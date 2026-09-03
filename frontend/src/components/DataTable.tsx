@@ -165,6 +165,7 @@ export function DataTable({
     rows: sorted,
     name: title || table.id || 'table',
     format: (value, column) => show(value, column),
+    fullText: meta?.full_text,
   }
 
   if (!table.columns.length) return null

@@ -76,10 +76,21 @@ export interface ColumnMeta {
 
 export interface TableMeta {
   id: string
+  /** The heading above the table. Every table has one; the server pairs the heading it wrote. */
   title: string | null
+  /** What the table shows, in a sentence or two. Shown on the heading, never in the page body. */
+  note?: string | null
+  /** The `text` lines the server folded into `title` and `note`, so the page does not print them. */
+  absorbed?: string[]
   columns: ColumnMeta[]
   filterable: boolean
   page_size: number | null
+  /**
+   * Where the rest of a cut column is. The messages table carries a 220-character preview per
+   * row; an export must carry the message. POST `{ [key]: [...] }` to `url` and the answer maps
+   * each key to the full text that replaces `column`.
+   */
+  full_text?: { url: string; key: string; column: string; as: string }
 }
 
 /** A headline figure a tab leads with, built by `theme.stat_card()` and read back by the API. */

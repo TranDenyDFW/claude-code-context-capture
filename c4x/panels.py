@@ -21,13 +21,11 @@ from c4x.theme import (
     DANGER,
     GOOD,
     MONO,
-    MUTED,
     PANEL,
     SECTION_HEAD,
     SECTION_NOTE,
     TABLE_STYLE,
     TEXT,
-    VIOLET,
     WARN,
     accordion,
     fmt_bytes,
@@ -97,8 +95,8 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
                  if len(records) > page_size else "")
     return html.Div([
         html.Div(title, style=SECTION_HEAD),
-        html.Div(f"{len(records):,} rows.{truncated}" + (f" {note}" if note else ""),
-                 style=SECTION_NOTE),
+        html.Div(f"{len(records):,} {'row' if len(records) == 1 else 'rows'}.{truncated}"
+                 + (f" {note}" if note else ""), style=SECTION_NOTE),
         DataTable(
             # Only the tables a callback drives carry one, so an id here means "something on this
             # page filters this table" rather than being decoration.
@@ -306,15 +304,15 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
                      "basis": ("per unit" if per_unit else
                                "total, arms are the same size" if same_size else
                                "total, arms are different sizes")})
+    # The arm labels live in the table's note, not in two Divs above it. Over the API those Divs
+    # arrived as four loose lines ("A", the label, "B", the label) with nothing tying them to the
+    # columns they named; the note is paired to the table and shown on its heading.
     return html.Div([
-        html.Div([
-            html.Div([html.Div("A", style={"color": ACCENT, "fontWeight": 700, "fontFamily": MONO}),
-                      html.Div(a_label, style={"color": MUTED, "fontSize": "11px"})],
-                     style={"flex": "1"}),
-            html.Div([html.Div("B", style={"color": VIOLET, "fontWeight": 700, "fontFamily": MONO}),
-                      html.Div(b_label, style={"color": MUTED, "fontSize": "11px"})],
-                     style={"flex": "1"}),
-        ], style={"display": "flex", "gap": "16px", "marginBottom": "10px"}),
+        html.Div("Side by side", style=SECTION_HEAD),
+        html.Div(f"A is {a_label}. B is {b_label}. One row per metric, both arms measured the "
+                 "same way. B vs A is the ratio where both arms have a value; the verdict names "
+                 "the direction only when the ratio clears 5% and the metric has a direction "
+                 "that is worse.", style=SECTION_NOTE),
         DataTable(
             columns=(_cols := numeric_columns(
                 ["metric", "unit", "A", "B", "B vs A", "verdict", "basis"],

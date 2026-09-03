@@ -509,6 +509,10 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
         cols = ["ts", "trigger", "pre_tokens", "post_tokens", "cumulative_dropped_tokens",
                 "duration_ms", "version"]
         cards = html.Div([cards, html.Div(style={"height": "14px"}),
+                          html.Div("Compactions in this session", style=SECTION_HEAD),
+                          html.Div("One row per compaction, oldest first: what it was told to "
+                                   "keep, what it kept, and how much it has dropped so far.",
+                                   style=SECTION_NOTE),
                           DataTable(
                               columns=(_cols := numeric_columns(cols, {"pre_tokens", "post_tokens",
                                                              "cumulative_dropped_tokens",
@@ -530,7 +534,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
         cards = html.Div([
             cards,
             html.Div(f"{note}, oldest first. Click a row to read it in full.",
-                     style={"color": MUTED, "fontSize": "11.5px", "margin": "16px 0 6px 0"}),
+                     style=SECTION_NOTE),
             DataTable(
                 id="tbl-messages",
                 columns=(_cols :=

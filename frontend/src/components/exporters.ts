@@ -1,4 +1,4 @@
-import type { ColumnMeta } from '@/api'
+import type { ColumnMeta, TableMeta } from '@/api'
 
 /**
  * Getting a table out of the page: copy, CSV, Excel, PDF, print.
@@ -23,6 +23,8 @@ import type { ColumnMeta } from '@/api'
 export interface Sheet {
   /** The visible columns, in the order they are shown. */
   columns: ColumnMeta[]
+  /** Where a cut column's full text is; see `TableMeta.full_text`. */
+  fullText?: TableMeta['full_text']
   /** Rows as the table has them: filtered and sorted, keyed by column id. */
   rows: Record<string, unknown>[]
   /** What the file and the document title are called. */
@@ -32,6 +34,38 @@ export interface Sheet {
 }
 
 /** A filename Windows will accept, with the extension left to the caller. */
+/**
+ * The sheet with every cut column filled in from the server, or the sheet as it is when nothing
+ * was cut. Called once per export, on purpose: 400 full messages are 841 KB on the largest session,
+ * which is nothing for a file somebody asked for and far too much for every render of a tab.
+ *
+ * A row whose key the server does not answer keeps its preview rather than going blank: a preview
+ * is a true prefix and a blank would read as an empty message.
+ */
+export async function hydrate(sheet: Sheet, post = postJson): Promise<Sheet> {
+  const spec = sheet.fullText
+  if (!spec) return sheet
+  const keys = sheet.rows.map((row) => row[spec.key]).filter((k): k is string => typeof k === 'string')
+  if (keys.length === 0) return sheet
+  const full = await post(spec.url, { [`${spec.key}s`]: keys })
+  const rows = sheet.rows.map((row) => {
+    const key = row[spec.key]
+    const text = typeof key === 'string' ? full[key] : undefined
+    return typeof text === 'string' ? { ...row, [spec.column]: text } : row
+  })
+  return { ...sheet, rows }
+}
+
+async function postJson(url: string, body: unknown): Promise<Record<string, string>> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) throw new Error(`${url}: ${response.status}`)
+  return (await response.json()) as Record<string, string>
+}
+
 export function safeName(name: string): string {
   return (name || 'table')
     .replace(/[\\/:*?"<>|]+/g, '_')

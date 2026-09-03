@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown, Columns3, Download } from 'lucide-react'
 import type { ColumnMeta } from '@/api'
 import {
-  copyToClipboard, downloadCsv, downloadExcel, downloadPdf, printSheet, type Sheet,
+  copyToClipboard, downloadCsv, downloadExcel, downloadPdf, hydrate, printSheet, type Sheet,
 } from './exporters'
 
 /**
@@ -171,16 +171,30 @@ export function TableToolbar({
         <Menu label="Export" icon={<Download size={13} aria-hidden="true" />}>
           {(close) => (
             <>
+              {/* EVERY EXPORT IS THE WHOLE TEXT. The table shows a preview of a cut column;
+                  hydrate() fetches the rest once, for the file, and a failure says so rather than
+                  quietly exporting the previews. */}
               <Item onClick={async () => {
-                say(await copyToClipboard(sheet) ? 'Copied' : 'Clipboard refused')
+                try {
+                  say(await copyToClipboard(await hydrate(sheet)) ? 'Copied' : 'Clipboard refused')
+                } catch {
+                  say('Could not fetch the full text')
+                }
                 close()
               }}>Copy</Item>
-              <Item onClick={() => { downloadCsv(sheet); close() }}>CSV</Item>
+              <Item onClick={async () => {
+                try {
+                  downloadCsv(await hydrate(sheet))
+                } catch {
+                  say('Could not fetch the full text')
+                }
+                close()
+              }}>CSV</Item>
               {/* Excel and PDF load their libraries on click, so nothing is fetched for a reader
                   who never exports. Failures are reported rather than swallowed. */}
               <Item onClick={async () => {
                 try {
-                  await downloadExcel(sheet)
+                  await downloadExcel(await hydrate(sheet))
                 } catch {
                   say('Excel export failed')
                 }
@@ -188,14 +202,18 @@ export function TableToolbar({
               }}>Excel</Item>
               <Item onClick={async () => {
                 try {
-                  await downloadPdf(sheet)
+                  await downloadPdf(await hydrate(sheet))
                 } catch {
                   say('PDF export failed')
                 }
                 close()
               }}>PDF</Item>
-              <Item onClick={() => {
-                if (!printSheet(sheet)) say('Pop-up blocked')
+              <Item onClick={async () => {
+                try {
+                  if (!printSheet(await hydrate(sheet))) say('Pop-up blocked')
+                } catch {
+                  say('Could not fetch the full text')
+                }
                 close()
               }}>Print</Item>
             </>

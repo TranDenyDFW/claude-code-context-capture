@@ -27,9 +27,12 @@ os.environ.setdefault("C4X_READ_ONLY", "1")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import re  # noqa: E402
+
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
 from c4x.api import cache  # noqa: E402
 from c4x.frames import jsonable, records  # noqa: E402
@@ -239,6 +242,20 @@ def tab_render(tab_id: str,
         # would rename a column that does not exist on it, which is worse than showing the raw id.
         meta = _table_meta(pane)
         payload["meta"] = meta if len(meta) == len(payload["tables"]) else []
+        # WHERE THE FULL TEXT IS. The messages table carries a 220-character `preview` per row,
+        # because 400 full messages are 841 KB on the largest session and a tab is re-fetched on
+        # every selection. An export is not a render: it happens once, on purpose, and a CSV of
+        # previews is a CSV of the first sentence of everything. So the row says where the rest is,
+        # keyed by the uuid the row already holds, and the page fetches it at export time.
+        # Only when the pairing held. On a mismatch `meta` is EMPTY by design, and a strict zip
+        # over it turned that documented fallback into a 500 for the whole tab; the review that
+        # found it forced the mismatch and watched all eight tabs fail.
+        if payload["meta"]:
+            for table, entry in zip(payload["tables"], payload["meta"], strict=True):
+                rows = table.get("rows") or []
+                if "preview" in table.get("columns", []) and rows and "uuid" in rows[0]:
+                    entry["full_text"] = {"url": "/api/messages/text", "key": "uuid",
+                                          "column": "preview", "as": "text"}
 
         # WHICH POPULATION THIS TAB DESCRIBES, as a field rather than as prose.
         #
@@ -404,17 +421,57 @@ def _table_meta(node, found=None):
     formats live in exactly such a panel.
     """
     from c4x.cli import extract
-    from c4x.theme import column_label, table_label
+    from c4x.theme import SECTION_HEAD, column_label, table_label
     found = [] if found is None else found
 
-    def walk(node):
+    def plain_text(node):
+        """The one string a text-only Div/H*/P holds, or None for anything with structure."""
+        if not hasattr(node, "_prop_names") or type(node).__name__ not in (
+                "Div", "P", "H2", "H3", "H4", "H5", "Span", "Small"):
+            return None
+        children = getattr(node, "children", None)
+        if isinstance(children, str):
+            return children
+        if isinstance(children, (list, tuple)) and children and all(
+                isinstance(c, str) for c in children):
+            return " ".join(children)
+        return None
+
+    def walk(node, pending=None):
+        # THE HEADING AND THE NOTE ABOVE A TABLE BELONG TO IT. evidence_block() and every hand-built
+        # table put a SECTION_HEAD line and a SECTION_NOTE line before the DataTable, as siblings.
+        # `describe()` flattens those into `text`, so over the API twelve of eighteen tables had no
+        # title and every note was a loose paragraph far above the rows it explained: on the
+        # Diagnostics tab six headings and their notes opened the page as a wall of prose. The
+        # pairing is done here, where the tree is, by carrying the most recent text siblings
+        # forward to the next DataTable in the same list and resetting at a chart or a section.
         if isinstance(node, (list, tuple)):
+            pending = {"head": None, "note": None}
             for child in node:
-                walk(child)
+                walk(child, pending)
             return
         if not hasattr(node, "_prop_names"):
             return
-        if type(node).__name__ == extract.TABLE_TYPE:
+        kind = type(node).__name__
+        text = plain_text(node) if pending is not None else None
+        if text is not None and text.strip():
+            # A heading is a SECTION_HEAD or an H-tag, nothing else. Every other text sibling is
+            # the note, whatever its length or punctuation: a length rule left a 73-character
+            # caption ending in a period as neither, and it printed as loose prose above the
+            # Messages table on every one of fifty sessions the review walked.
+            if getattr(node, "style", None) == SECTION_HEAD or kind.startswith("H"):
+                pending["head"], pending["note"] = text, None
+            else:
+                pending["note"] = text
+            return
+        if pending is not None and kind in ("Graph", "Details"):
+            # A heading before a chart names the chart; a section starts fresh.
+            pending["head"], pending["note"] = None, None
+        if kind == extract.TABLE_TYPE:
+            head = (pending or {}).get("head")
+            note = (pending or {}).get("note")
+            if pending is not None:
+                pending["head"], pending["note"] = None, None
             hidden = set(getattr(node, "hidden_columns", None) or [])
             bands = _heat_bands(getattr(node, "style_data_conditional", None) or [])
             columns = []
@@ -441,9 +498,25 @@ def _table_meta(node, found=None):
                     "hidden": cid in hidden,
                     "bands": bands.get(cid, []),
                 })
+            # The note as the reader should see it on the heading: without the row count, which
+            # the page states beside the heading from the rows it holds, and without the Dash
+            # paging clause, which describes a table this page does not draw.
+            shown = note or ""
+            shown = re.sub(r"^\s*[\d,]+ rows\.\s*", "", shown)
+            shown = shown.replace("(table shows the first page; export gives every row)", "")
+            shown = shown.strip()
             found.append({
                 "id": getattr(node, "id", None) or "(anonymous)",
-                "title": table_label(getattr(node, "id", None)),
+                # The heading WRITTEN above the table first; the label table is for a table that
+                # has none. The other order served "Files Read More Than Once" from the label
+                # table while the heading actually written above tbl-reread was absorbed into
+                # nothing and shown nowhere.
+                "title": head or table_label(getattr(node, "id", None)),
+                "note": shown or None,
+                # The exact `text` lines folded into this entry, so the page can drop them from
+                # the prose block instead of printing each heading twice and each note far from
+                # its table.
+                "absorbed": [t for t in (head, note) if t],
                 "columns": columns,
                 "filterable": getattr(node, "filter_action", "none") != "none",
                 "page_size": getattr(node, "page_size", None),
@@ -452,7 +525,7 @@ def _table_meta(node, found=None):
         for name in node._prop_names:
             value = getattr(node, name, None)
             if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
-                walk(value)
+                walk(value, None if kind in ("Graph", "Details") else pending)
 
     walk(node)
     return found
@@ -600,6 +673,23 @@ def _figures(node, found=None):
         if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
             _figures(value, found)
     return found
+
+
+class _Uuids(BaseModel):
+    uuids: list[str]
+
+
+@api.post("/api/messages/text")
+def messages_text(body: _Uuids):
+    """Full text for up to 1,000 message uuids, for an export that must not stop at the preview.
+
+    A POST with the keys in the body rather than a GET with a session, because the table that
+    needs this does not carry its session id in its rows and 400 uuids do not fit a URL.
+    """
+    from c4x.store import messages_text as full
+    if len(body.uuids) > 1000:
+        raise HTTPException(status_code=422, detail="at most 1,000 uuids per request")
+    return full(body.uuids)
 
 
 @api.get("/api/cohorts")
@@ -868,8 +958,29 @@ def project_include(body: dict):
 # It is OPTIONAL. In development the page is served by Vite on 5173 with hot reload and proxies /api
 # here, so `frontend/dist` is usually absent and this does nothing. After `npm run build` the same
 # server answers both, which means one process and no CORS rather than two ports to remember.
-_dist = ROOT / "frontend" / "dist"
-if _dist.is_dir():
+# THE PAGE SHELL IS NEVER CACHED. index.html names the hashed bundle, so a browser that keeps a
+# stale copy of it runs last week's page against this week's API: after one rebuild here the page
+# kept a bundle that had no export hydration and no heading notes, twice in an hour, and nothing
+# said so until the script names were read out of the DOM. The hashed assets can be cached for as
+# long as a browser likes, because a new build is a new name; the shell that names them cannot.
+@api.middleware("http")
+async def _no_cache_shell(request: Request, call_next):
+    response = await call_next(request)
+    # By content type, not by path: /INDEX.HTML, /Index.Html and /index.html/ all served the
+    # shell cacheable under a path rule, on a case-insensitive filesystem. The hashed assets are
+    # script, style and image; the other HTML this process serves is FastAPI's own /docs, where
+    # no-cache costs nothing. A 304 carries no content type, so the shell's revalidation is
+    # matched by path as well: without the header there, a copy cached before this rule stayed
+    # cached until the next rebuild changed the ETag.
+    shell = request.url.path.rstrip("/").lower() in ("", "/index.html")
+    if (response.headers.get("content-type", "").startswith("text/html")
+            or (response.status_code == 304 and shell)):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+_dist = ROOT / "frontend" / "dist"
+if _dist.is_dir():
     from fastapi.staticfiles import StaticFiles
 
     # html=True serves index.html for "/" itself. The app keeps its state in memory rather than in
