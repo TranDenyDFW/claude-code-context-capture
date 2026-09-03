@@ -135,6 +135,23 @@ def write():
         con.close()
 
 
+# FEWER THAN THIS MANY TRANSCRIPT ROWS AND A SESSION IS NOT LISTED. The rule's one home:
+# session_rows() applies it, overview_stats() counts by it, the sessions tab prints it, and the
+# tests import it. tests/test_floor.py reads the source and fails on any per-session HAVING clause
+# that spells the number out instead, because that is how a rule drifts: one site moves and the
+# others keep the old number, and the page shows two totals that no longer reconcile.
+#
+# Why it exists: most sessions in a store are one-shot runs from a benchmark harness or a hook
+# probe, a few rows each, and listing them buries every real session. When this was measured
+# (2026-08, one store of 1,325 sessions) 1,008 were below the line, 985 of them with between one
+# and four rows.
+#
+# It is a PRESENTATION rule and nothing else may treat it as the population. Anything that has to
+# cover every session, an export or a delete, must union the listed sessions with the ones this
+# hides; c4x/projects.py does, and it was carrying 58 of one project's 137 sessions until it did.
+SESSION_TURN_FLOOR = 5
+
+
 def q(sql: str, params=()) -> pd.DataFrame:
     if not DB_PATH.exists():
         raise FileNotFoundError(
@@ -166,16 +183,16 @@ def overview_stats() -> dict:
         SELECT (SELECT COUNT(*) FROM sessions)                     AS sessions,
                -- How many of those the picker and All sessions actually LIST. Shown beside the
                -- total because the page shows both numbers and called them both "sessions",
-               -- leaving a reader to reconcile 1,325 against 317 with nothing to go on. Same
-               -- threshold as session_rows(), where it is explained.
+               -- leaving a reader to reconcile 1,325 against 317 with nothing to go on. The
+               -- threshold is SESSION_TURN_FLOOR, explained where it is defined.
                (SELECT COUNT(*) FROM (SELECT session_id FROM turns
-                                       GROUP BY session_id HAVING COUNT(*) >= 5)) AS listed,
+                                       GROUP BY session_id HAVING COUNT(*) >= ?)) AS listed,
                (SELECT COUNT(*) FROM turns)                        AS turn_rows,
                (SELECT COUNT(*) FROM compactions)                  AS compactions,
                (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
                (SELECT COUNT(*) FROM files)                        AS files,
                (SELECT SUM(bytes_read) FROM files)                 AS bytes
-    """).iloc[0].to_dict()
+    """, (SESSION_TURN_FLOOR,)).iloc[0].to_dict()
     calls = q("""
         SELECT COUNT(*)                                                     AS api_calls,
                SUM(CASE WHEN COALESCE(is_sidechain,0)=0 THEN 1 ELSE 0 END)   AS main_calls,
@@ -448,17 +465,10 @@ def _session_rows_uncached() -> pd.DataFrame:
         -- and the fixture now contains streamed messages, so the comparison had something to
         -- disagree about.
         GROUP BY t.session_id
-        -- FEWER THAN FIVE TRANSCRIPT ROWS AND A SESSION IS NOT LISTED. This is why the picker
-        -- offers 317 sessions while the store holds 1,325: 1,008 are below the line, 985 of them
-        -- with between one and four rows, and most are one-shot runs from a benchmark harness that
-        -- would bury every real session in the list.
-        --
-        -- It is a PRESENTATION rule and nothing else may treat it as the population. Anything
-        -- that has to cover every session, an export or a delete, must union this with the
-        -- sessions it cannot see; c4x/projects.py does, and it was carrying 58 of one project's
-        -- 137 sessions until it did.
-        HAVING COUNT(*) >= 5
-    """)
+        -- Fewer than SESSION_TURN_FLOOR transcript rows and a session is not listed. The rule,
+        -- its measurement and its one warning are beside the constant.
+        HAVING COUNT(*) >= ?
+    """, (SESSION_TURN_FLOOR,))
     if df.empty:
         return df
 
