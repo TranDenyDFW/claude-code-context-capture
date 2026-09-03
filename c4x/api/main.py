@@ -32,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 
 from c4x.api import cache  # noqa: E402
+from c4x.frames import jsonable, records  # noqa: E402
 
 api = FastAPI(
     title="c4x",
@@ -68,10 +69,9 @@ def _jsonable(payload):
     Plotly's own encoder because it already handles numpy scalars, pandas timestamps and NaN (which
     it writes as null, the right answer for a figure that has no value there rather than a zero).
     """
-    import json
-
-    import plotly.utils as plotly_utils
-    return json.loads(json.dumps(payload, cls=plotly_utils.PlotlyJSONEncoder))
+    # One definition, shared with the CLI, so `dump --json` and this endpoint cannot disagree
+    # on what a missing value looks like. c4x/frames.py says why that mattered.
+    return jsonable(payload)
 
 
 def _cached(key, build):
@@ -663,7 +663,7 @@ def sessions(limit: int = Query(50, ge=1, le=2000), cohort: str | None = Query(N
     total = int(len(frame))
     if "last_ts" in frame.columns:
         frame = frame.sort_values("last_ts", ascending=False)
-    return {"rows": frame.head(limit).to_dict("records"), "total": total}
+    return {"rows": records(frame.head(limit)), "total": total}
 
 
 @api.get("/__shutdown__")

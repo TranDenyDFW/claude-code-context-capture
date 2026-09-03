@@ -136,10 +136,11 @@ def sessions(limit=20, cohort=None):
     if _via == API:
         return _get("/api/sessions", {"limit": limit, "cohort": cohort})["rows"]
     from c4x import store
+    from c4x.frames import records
     frame = store.session_rows()
     if frame.empty:
         return []
-    return frame.sort_values("last_ts", ascending=False).head(limit).to_dict("records")
+    return records(frame.sort_values("last_ts", ascending=False).head(limit))
 
 
 def self_test():

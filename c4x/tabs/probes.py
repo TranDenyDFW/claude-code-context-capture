@@ -5,6 +5,7 @@ What a probe session measured about the fixed overhead of your configuration.
 from dash import html
 
 from c4x.dash_compat import DataTable
+from c4x.frames import records
 from c4x.store import q
 from c4x.theme import (
     CODE_BLOCK,
@@ -59,7 +60,12 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                 columns=(_cols := [{"name": c, "id": c} for c in
                          ["id", "ts", "ok", "model", "total_tokens", "auto_compact_threshold"]]),
                 tooltip_header=header_help(_cols),
-                data=probes.astype(object).where(probes.notna(), "").to_dict("records"),
+                # NULL renders as None, not "". A failed probe has no total_tokens or
+                # auto_compact_threshold, and "" in those numeric columns is exactly the
+                # placeholder the table audit exists to catch: a blank string reads as a value,
+                # None renders as an empty cell and is not mistaken for one. Text columns
+                # (ts, model) are never null on a real probe, so this changes only the failed row.
+                data=records(probes),
                 **TABLE_STYLE),
             html.Div("Per-category items and cost", style=SECTION_HEAD),
             html.Div("A count with zero tokens means the channel named the items but priced none "
@@ -69,7 +75,7 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                 columns=(_cols :=
                     [{"name": c, "id": c} for c in ["probe_id", "kind", "items", "tokens"]]),
                 tooltip_header=header_help(_cols),
-                data=details.to_dict("records"), page_size=12,
+                data=records(details), page_size=12,
                 style_table={"overflowX": "auto"}, **TABLE_STYLE),
         ]
         if not named.empty:
@@ -79,7 +85,7 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                     columns=(_cols :=
                         [{"name": c, "id": c} for c in ["probe_id", "kind", "name", "tokens"]]),
                     tooltip_header=header_help(_cols),
-                    data=named.to_dict("records"), page_size=12,
+                    data=records(named), page_size=12,
                     style_table={"overflowX": "auto"}, **TABLE_STYLE),
             ]
 

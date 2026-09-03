@@ -8,6 +8,7 @@ from dash import dcc, html
 from dash.dash_table.Format import Format, Scheme
 
 from c4x.breakdown import tool_spec
+from c4x.frames import records
 from c4x.panels import evidence_block
 from c4x.pricing import PRICE_TABLE_DATE, cost_of, cost_of_rows, coverage_note
 from c4x.store import q, scoped
@@ -109,7 +110,7 @@ def _estimated_cost(where, args):
     df = q(sql, args)
     if df.empty:
         return html.Div()
-    rows = df.to_dict("records")
+    rows = records(df)
     total, priced_calls, missing = cost_of_rows(rows)
     for row in rows:
         value = cost_of(row["model"], row["input_tokens"], row["output_tokens"],
@@ -380,7 +381,7 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         # them. The curve is drawn over every group and the table holds the worst 200, so the
         # cross-filter needs both numbers to say what a click actually did.
         dcc.Store(id="reread-rows",
-                  data={"rows": dup.to_dict("records") if not dup.empty else [],
+                  data={"rows": records(dup),
                         "population": groups}),
         html.Div(id="reread-filter-note"),
         _reread_curve(read_tools, wsid, wargs, dup_min),

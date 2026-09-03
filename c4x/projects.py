@@ -37,6 +37,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from c4x.frames import records
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -71,7 +73,7 @@ def projects():
     frame = store.q("""SELECT cwd AS project, COUNT(*) AS sessions
                          FROM sessions WHERE cwd IS NOT NULL
                         GROUP BY 1 ORDER BY 2 DESC""")
-    return frame.to_dict("records")
+    return records(frame)
 
 
 def session_ids(con, project):
@@ -389,7 +391,7 @@ def excluded():
     from c4x import store
     try:
         return store.q("SELECT cwd, excluded_at, note FROM excluded_projects ORDER BY cwd") \
-            .to_dict("records")
+            .pipe(records)
     except Exception:                              # noqa: BLE001 - absent table means none excluded
         return []
 
