@@ -26,6 +26,8 @@ from c4x.theme import (
     MONO,
     MUTED,
     PANEL,
+    SECTION_HEAD,
+    SECTION_NOTE,
     TABLE_STYLE,
     TEXT,
     WARN,
@@ -323,6 +325,10 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
             "grows and is not. The treemap groups them; the bar cannot.",
             style={"color": MUTED, "fontSize": "11.5px", "margin": "4px 0 14px 0",
                    "maxWidth": "900px", "lineHeight": "1.55"}),
+        html.Div("What is in the window, item by item", style=SECTION_HEAD),
+        html.Div("One row per item the window holds right now, with its share of the "
+                 "resident total. Resident and free space are exact; the category rows are "
+                 "the baseline's split and are not.", style=SECTION_NOTE),
         DataTable(
             columns=(_cols := numeric_columns(
                 ["category", "tokens", "percent", "items"], {"tokens", "percent", "items"},

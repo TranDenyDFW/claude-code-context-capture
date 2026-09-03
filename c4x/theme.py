@@ -203,6 +203,32 @@ def dark_fig(fig: go.Figure, height: int = 420) -> go.Figure:
         legend=dict(bgcolor=PANEL, bordercolor=BORDER, borderwidth=1, font=dict(color=TEXT)),
         hoverlabel=dict(bgcolor=PANEL, font=dict(color=TEXT, family=MONO), bordercolor=BORDER),
     )
+    # HOVER ANSWERS ANYWHERE ON THE CHART, not only within 20 px of a point. Plotly's default is
+    # `closest`, which on a turn-by-turn line chart means the pointer must sit on the line, and one
+    # trace answers at a time. Measured on the Session chart: three pointer positions inside the
+    # plot, two tooltips, one blank. A chart with lines or areas now hovers `x unified`: every
+    # series reports its value at that x wherever the pointer is vertically, and the band traces
+    # that set hoverinfo="skip" stay out of it. The reach is finite on purpose: with an unlimited
+    # one, the sparse marker traces (survivors, out-of-range points) joined every tooltip with
+    # their NEAREST point, hundreds of turns away, and read as if it were at the pointer. Forty
+    # pixels keeps a dense line answering everywhere and a sparse marker only when it is there.
+    # Markers-only charts keep `closest` with the same reach, since there is no x to unify along.
+    # Read through each trace's own JSON rather than getattr(): tools/table_audit.py treats a
+    # getattr() call as one it cannot name, and refuses the file for it, on purpose.
+    specs = []
+    for trace in fig.data:
+        spec = trace.to_plotly_json()
+        specs.append((trace, spec))
+    kinds = [(spec.get("type"), spec.get("mode") or "", spec.get("fill")) for _, spec in specs]
+    lined = any(k == "scatter" and ("lines" in m or f) for k, m, f in kinds)
+    if lined:
+        fig.update_layout(hovermode="x unified", hoverdistance=40)
+        for trace, spec in specs:
+            if (spec.get("type") == "scatter" and not spec.get("hovertemplate")
+                    and spec.get("hoverinfo") is None):
+                trace.hovertemplate = "%{y:,.0f}"
+    elif any(k == "scatter" for k, _, _ in kinds):
+        fig.update_layout(hovermode="closest", hoverdistance=40)
     fig.update_xaxes(gridcolor=BORDER, zerolinecolor=BORDER, linecolor=BORDER,
                      tickfont=dict(color=MUTED), title_font=dict(color=MUTED))
     fig.update_yaxes(gridcolor=BORDER, zerolinecolor=BORDER, linecolor=BORDER,

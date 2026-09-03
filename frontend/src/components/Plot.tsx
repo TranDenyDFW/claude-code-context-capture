@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { PlotlyFigure } from '@/api'
 
 /**
@@ -37,6 +37,9 @@ function plotly(): Promise<PlotlyModule> {
 
 export function Plot({ figure, height = 380 }: { figure: PlotlyFigure; height?: number }) {
   const holder = useRef<HTMLDivElement>(null)
+  // A chunk that fails to download left every chart on the page blank and silent, with nothing
+  // in the DOM or the console naming the cause. Found by a review sweep; pre-existing.
+  const [failed, setFailed] = useState<string | null>(null)
 
   useEffect(() => {
     const node = holder.current
@@ -54,7 +57,7 @@ export function Plot({ figure, height = 380 }: { figure: PlotlyFigure; height?: 
       title: undefined,
       legend: { orientation: 'h' as const, y: -0.18, font: { size: 10 } },
     }
-    void plotly().then((Plotly) => {
+    plotly().then((Plotly) => {
       // The tab may have changed while the library was downloading. Drawing into a node React has
       // already unmounted throws inside Plotly, where the stack names none of this.
       if (dropped || !holder.current) return
@@ -64,12 +67,25 @@ export function Plot({ figure, height = 380 }: { figure: PlotlyFigure; height?: 
         // Plotly's own scroll zoom fights the page: a reader scrolling past a chart zooms it.
         scrollZoom: false,
       })
+    }).catch((error: unknown) => {
+      // Forget the failed download so the next chart, or a reload of this one, tries again
+      // rather than inheriting a rejected promise for the life of the page.
+      pending = null
+      if (!dropped) setFailed(error instanceof Error ? error.message : String(error))
     })
     return () => {
       dropped = true
-      void plotly().then((Plotly) => Plotly.purge(node))
+      void plotly().then((Plotly) => Plotly.purge(node)).catch(() => { /* never loaded */ })
     }
   }, [figure, height])
 
+  if (failed) {
+    return (
+      <div role="alert" className="flex w-full items-center justify-center text-sm text-ink-dim"
+           style={{ height }}>
+        The chart library could not be loaded ({failed}). Reload the page to try again.
+      </div>
+    )
+  }
   return <div ref={holder} className="w-full" style={{ height }} />
 }
