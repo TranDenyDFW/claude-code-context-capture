@@ -21,22 +21,25 @@
 # through the commit that made the mypy step blocking, which meant the one tool that could fail the
 # job was the one tool free to change underneath it.
 #
-# Resolved for Python 3.12, matching the workflow's setup-python. Environment markers
-# come from the machine that ran the resolve, so a platform-specific package can appear that
-# another platform never installs; CI is the authority on whether these pins are satisfiable,
-# and a wrong pin fails the install loudly rather than being quietly ignored.
+# Resolved for Python 3.12, matching the workflow's setup-python, on: linux, win32. pip
+# evaluates environment markers on the interpreter that runs it and `--platform` does not change
+# that, so no one machine can resolve another platform's set; .github/workflows/pins.yml resolves
+# on an Ubuntu runner and a Windows runner and this file is their union. A package only some
+# platforms install carries the marker naming them, so pip applies that pin exactly where the
+# resolve saw it and nowhere else. A version the platforms disagree on is refused, not chosen.
+# CI is the authority on whether the set is satisfiable: a wrong pin fails the install loudly.
 #
 # 55 packages, of which 13 are named in the requirements files.
 
 annotated-doc==0.0.5
 annotated-types==0.8.0
-anyio==4.14.2
-ast_serialize==0.8.0
+anyio==4.15.0
+ast_serialize==0.9.0
 blinker==1.9.0
 certifi==2026.7.22
 charset-normalizer==3.5.1
 click==8.5.0
-colorama==0.4.6
+colorama==0.4.6 ; sys_platform == "win32"
 comm==0.2.3
 dash==4.4.1  # direct
 fastapi==0.141.1  # direct
@@ -69,16 +72,16 @@ pygments==2.21.0
 pytest==9.1.1  # direct
 python-dateutil==2.9.0.post0
 python-multipart==0.0.32  # direct
-pywinpty==3.0.5  # direct
+pywinpty==3.0.5 ; sys_platform == "win32"  # direct
 requests==2.34.2
 retrying==1.4.2
 ruff==0.16.5  # direct
 setuptools==84.0.0
 six==1.17.0
 starlette==1.6.0
-typing-inspection==0.4.4
 typing_extensions==4.16.0
-tzdata==2026.3
+typing-inspection==0.4.4
+tzdata==2026.3 ; sys_platform == "win32"
 urllib3==2.7.0
 uvicorn==0.52.4  # direct
 werkzeug==3.1.8
