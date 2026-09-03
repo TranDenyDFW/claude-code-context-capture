@@ -215,17 +215,28 @@ def render(rows):
     return "\n".join(lines) + "\n"
 
 
-def regenerate():
-    """Rewrite the file, PRESERVING its line endings.
+def rewrite(rows, path=CONSTRAINTS):
+    """Write the rendered set to `path`, PRESERVING its line endings, and return the ending used.
 
     The newline matters on Windows. Writing LF into a CRLF checkout rewrites every line's bytes, so
     `git diff` shows the whole file and says nothing about whether any pin actually moved, which is
     the one question a regenerate needs to answer.
+
+    Bytes, not `read_text(newline="")`: that keyword exists only from Python 3.13, and the first run
+    of the monthly pins job died on it on the 3.12 floor, after three green legs, because nothing in
+    the suite had ever executed this path. The self-test now drives it on every interpreter the
+    matrix runs, so an interpreter-specific call here fails the suite rather than the job.
     """
-    existing = CONSTRAINTS.read_text(encoding="utf-8", newline="") if CONSTRAINTS.exists() else ""
+    existing = path.read_bytes().decode("utf-8") if path.exists() else ""
     newline = "\r\n" if "\r\n" in existing else "\n"
+    path.write_text(render(rows), encoding="utf-8", newline=newline)
+    return newline
+
+
+def regenerate():
+    """Re-resolve and rewrite the file. Needs the network; the rewrite itself does not."""
     rows = resolve()
-    CONSTRAINTS.write_text(render(rows), encoding="utf-8", newline=newline)
+    newline = rewrite(rows)
     missing, wrong = uncovered(), contradicted()
     print(f"constraints-ci.txt written: {len(rows)} pins, line endings {newline!r}")
     print("direct requirements still unpinned:", missing or "none")
@@ -251,6 +262,15 @@ def self_test():
         """The file with one pin moved below its floor, in memory."""
         return "\n".join(f"{package}=={version}" if is_pin_for(line, package) else line
                          for line in real.splitlines())
+
+    def rewritten(seed):
+        """The bytes rewrite() leaves behind on a scratch file seeded with `seed`."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as scratch_dir:
+            scratch = Path(scratch_dir) / "constraints.txt"
+            scratch.write_bytes(seed)
+            rewrite([("packaging", "1.0")], scratch)
+            return scratch.read_bytes()
 
     def respelled(package):
         """The file with one pin written in the other PEP 503 spelling, in memory."""
@@ -285,6 +305,14 @@ def self_test():
          any("pandas" in line for line in drifted({"pandas": "2.3.3"}))),
         ("and a matching install is not",
          drifted({name: version for name, version in have.items() if version}) == []),
+        # The rewrite the monthly job performs, driven here on every interpreter the matrix runs.
+        # Its first run died on the 3.12 floor calling an API that exists only from 3.13, and no
+        # leg had noticed because no check had ever executed the path.
+        ("a rewrite over a CRLF file keeps CRLF",
+         b"\r\n" in rewritten(b"a==1\r\n")
+         and b"\n" not in rewritten(b"a==1\r\n").replace(b"\r\n", b"")),
+        ("a rewrite over an LF file keeps LF", b"\r" not in rewritten(b"a==1\n")),
+        ("and the rewrite carries the pin it was given", b"packaging==1.0" in rewritten(b"")),
     ]
     bad = 0
     for what, ok in cases:
