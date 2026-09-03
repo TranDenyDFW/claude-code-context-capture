@@ -28,14 +28,16 @@ permissions:
   # A pull request needs this. The job no longer pushes to main, so `contents: write` is now only
   # for the branch it pushes the change onto.
   pull-requests: write
+  # For the dispatch of tests.yml at the end.
+  actions: write
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # actions/checkout@v4, v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # actions/setup-node@v4, v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: '24'
 
@@ -88,3 +90,9 @@ jobs:
 
           This is a pull request rather than a push to main so that the price table goes through the same \`suite\` check as every other change."
           fi
+          # A pull request opened with GITHUB_TOKEN gets no automatic run, so ask for the suite by
+          # name on the branch; the check lands on the commit the pull request points at. Without
+          # this the pull request above would sit unmergeable, which is what the two settings this
+          # step depends on were hiding: the repo did not allow Actions to open pull requests until
+          # 2026-09-03, and this path had never been reached because the prices never moved.
+          gh workflow run tests.yml --ref "$BRANCH"
