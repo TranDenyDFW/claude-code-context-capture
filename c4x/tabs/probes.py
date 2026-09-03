@@ -59,7 +59,12 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                 columns=(_cols := [{"name": c, "id": c} for c in
                          ["id", "ts", "ok", "model", "total_tokens", "auto_compact_threshold"]]),
                 tooltip_header=header_help(_cols),
-                data=probes.astype(object).where(probes.notna(), "").to_dict("records"),
+                # NULL renders as None, not "". A failed probe has no total_tokens or
+                # auto_compact_threshold, and "" in those numeric columns is exactly the
+                # placeholder the table audit exists to catch: a blank string reads as a value,
+                # None renders as an empty cell and is not mistaken for one. Text columns
+                # (ts, model) are never null on a real probe, so this changes only the failed row.
+                data=probes.astype(object).where(probes.notna(), None).to_dict("records"),
                 **TABLE_STYLE),
             html.Div("Per-category items and cost", style=SECTION_HEAD),
             html.Div("A count with zero tokens means the channel named the items but priced none "

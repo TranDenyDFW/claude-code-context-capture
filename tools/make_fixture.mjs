@@ -241,8 +241,16 @@ for (const session of SESSIONS) {
     uuidsSinceCompaction.push(`${uuid}-msg`);
 
     if (turn % 5 === 2) {
-      insertTool.run(`${uuid}-tool`, session.id, uuid, ts, turn % 10 === 2 ? 'Read' : 'Bash',
-                     null, `C:\\fixture\\file_${turn % 4}.txt`, `sha1-${turn}`,
+      const isRead = turn % 10 === 2;
+      // A Read has a target; a Bash does NOT, because the store keeps a hash of the input and
+      // never the input, and Bash has no path argument. The Bash branch used to write a target
+      // anyway, which left the cross-session repeat table with no blank-target row to explain,
+      // and test_repeated_inputs:101 skipped for want of one. It also gives that row a stable,
+      // shared input_sha1 across sessions, so the group is unambiguously blank-target on every
+      // SQLite (`GROUP BY` picks an arbitrary representative, and a Bash group's are all NULL).
+      insertTool.run(`${uuid}-tool`, session.id, uuid, ts, isRead ? 'Read' : 'Bash',
+                     null, isRead ? `C:\\fixture\\file_${turn % 4}.txt` : null,
+                     isRead ? `sha1-read-${turn % 4}` : 'sha1-bash-shared',
                      220, 4_000 + turn * 37, 'fixture://transcript.jsonl', turn + 1);
     }
 
@@ -484,6 +492,16 @@ const unpricedTurns = db.prepare(
   "SELECT COUNT(*) n FROM turns WHERE model = 'fixture-unpriced-1'").get().n;
 const deferredBaseline = db.prepare(
   'SELECT COALESCE(mcp_tools_deferred,0) + COALESCE(system_tools_deferred,0) n FROM context_baselines LIMIT 1').get().n;
+// The EXACT query the cross-session repeat table renders (waste.py), so the self-test fails if the
+// fixture would not give test_repeated_inputs:101 a blank-target row. Asserting membership of the
+// LIMIT-200 result, not the raw table, because that is what the page shows and what the test reads.
+const repeatBlankTarget = db.prepare(`
+  SELECT COUNT(*) n FROM (
+    SELECT tool_name AS tool, target, COUNT(DISTINCT session_id) AS sessions, COUNT(*) AS calls
+      FROM tool_calls WHERE input_sha1 IS NOT NULL
+      GROUP BY input_sha1 HAVING sessions > 1
+      ORDER BY calls DESC, sessions DESC LIMIT 200)
+   WHERE target IS NULL OR TRIM(target) = ''`).get().n;
 
 db.close();
 
@@ -546,6 +564,8 @@ if (!SELF_TEST) {
     ['turns on a model no price table knows (test_pricing:163)', unpricedTurns > 0],
     ['deferred tools in the baseline, so a not-resident row exists (test_window:174)',
      deferredBaseline > 0],
+    ['a cross-session repeat with a BLANK target in the rendered top 200 (test_repeated_inputs:101)',
+     repeatBlankTarget > 0],
   ];
   let failed = 0;
   for (const [what, ok] of checks) {
