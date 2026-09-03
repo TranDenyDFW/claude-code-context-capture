@@ -488,3 +488,64 @@ describe('a card caption', () => {
     expect(screen.getByText('largest single API call, any session')).toBeTruthy()
   })
 })
+
+describe('every table is named and explained the same way', () => {
+  const meta = (over: Partial<TableMeta> = {}): TableMeta => ({
+    id: 't', title: null, columns: [], filterable: true, page_size: null, ...over,
+  })
+
+  it('names a table the server could not, so no table is the one unnamed thing on a page', () => {
+    render(<Pane payload={payload({ tables: [table('(anonymous)', [{ a: 1 }])], meta: [meta()] })} />)
+    expect(screen.getByRole('heading', { level: 3 }).textContent).toContain('Table 1')
+  })
+
+  it('puts the note on the heading, not in the body', () => {
+    render(
+      <Pane
+        payload={payload({
+          tables: [table('(anonymous)', [{ a: 1 }])],
+          text: ['Probe runs', 'Each row is one spawned session answering the control protocol.'],
+          meta: [meta({
+            title: 'Probe runs',
+            note: 'Each row is one spawned session answering the control protocol.',
+            absorbed: ['Probe runs', 'Each row is one spawned session answering the control protocol.'],
+          })],
+        })}
+      />,
+    )
+    const heading = screen.getByRole('heading', { level: 3 })
+    expect(heading.getAttribute('title')).toContain('Each row is one spawned session')
+    // Once, as the heading; never again as a paragraph.
+    expect(screen.getAllByText('Probe runs')).toHaveLength(1)
+    expect(screen.queryByText('Each row is one spawned session answering the control protocol.')).toBeNull()
+  })
+
+  it('says "1 row" for one row, the way the table footer already does', () => {
+    render(
+      <Pane payload={payload({ tables: [table('t', [{ a: 1 }])], meta: [meta({ title: 'One' })] })} />,
+    )
+    const heading = screen.getByRole('heading', { level: 3 }).textContent ?? ''
+    expect(heading).toContain('1 row')
+    expect(heading).not.toContain('1 rows')
+  })
+
+  it('states the row count beside the name', () => {
+    render(
+      <Pane payload={payload({ tables: [table('t', [{ a: 1 }, { a: 2 }, { a: 3 }])], meta: [meta({ title: 'Three' })] })} />,
+    )
+    expect(screen.getByRole('heading', { level: 3 }).textContent).toContain('3 rows')
+  })
+
+  it('does not print a stat card label as prose because the server changed its case', () => {
+    render(
+      <Pane
+        payload={payload({
+          stats: [{ label: 'Re-read Groups', value: '1,158', sub: '' }],
+          text: ['Re-read groups', '1,158', 'A sentence that is real prose.'],
+        })}
+      />,
+    )
+    expect(screen.getAllByText(/re-read groups/i)).toHaveLength(1)
+    expect(screen.getByText('A sentence that is real prose.')).toBeTruthy()
+  })
+})

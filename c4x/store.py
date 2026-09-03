@@ -809,6 +809,16 @@ def session_messages(session_id: str, limit: int = 400) -> pd.DataFrame:
     )
 
 
+def messages_text(uuids: list[str]) -> dict[str, str]:
+    """{uuid: full text} for the uuids given, in one query. Absent uuids are absent, not empty."""
+    if not uuids:
+        return {}
+    marks = ",".join("?" for _ in uuids)
+    df = q(f"SELECT uuid, text FROM messages WHERE uuid IN ({marks})", tuple(uuids))
+    return {str(u): ("" if t is None else str(t))
+            for u, t in zip(df["uuid"], df["text"], strict=True)}
+
+
 def message_text(uuid: str) -> pd.DataFrame:
     return q("SELECT text, chars, ts, role, type FROM messages WHERE uuid = ?", (uuid,))
 

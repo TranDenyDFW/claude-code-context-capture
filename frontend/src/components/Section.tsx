@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import type { Section as SectionData, Table } from '@/api'
+import type { Section as SectionData, Table, TableMeta } from '@/api'
+import { hydrate } from './exporters'
 
 /**
  * A collapsible section under a table, which in this app almost always holds the SQL that produced
@@ -49,9 +50,21 @@ function Copy({ text, label }: { text: string; label: string }) {
   )
 }
 
-export function Section({ section, table }: { section: SectionData; table?: Table }) {
+export function Section({
+  section,
+  table,
+  meta,
+}: {
+  section: SectionData
+  table?: Table
+  meta?: TableMeta
+}) {
   const body = section.body.join('\n')
   const query = looksLikeQuery(section.body)
+  // A failed fetch of the full text is said out loud, here, next to the button that failed. The
+  // toolbar's exports already did this; this button dropped the rejection on the floor and
+  // exported nothing with no message, which reads as a button that does not work.
+  const [problem, setProblem] = useState<string | null>(null)
   return (
     <details className="group rounded-lg bg-panel shadow-panel">
       <summary
@@ -67,19 +80,46 @@ export function Section({ section, table }: { section: SectionData; table?: Tabl
             <Copy text={body} label={query ? 'copy query' : 'copy'} />
             {table && table.rows.length > 0 && (
               <button
-                onClick={() => {
-                  // A data: URL rather than a Blob object URL. Both work; this one needs no
-                  // revoke, so a page left open for an afternoon does not accumulate them.
+                onClick={async () => {
+                  // The full text where a column was cut, fetched once for the file; then a data:
+                  // URL rather than a Blob object URL. Both work; this one needs no revoke, so a
+                  // page left open for an afternoon does not accumulate them.
+                  let rows = table.rows
+                  if (meta?.full_text) {
+                    const columns = table.columns.map((id) => ({
+                      id, label: id, numeric: false, specifier: null, align: 'left' as const,
+                      hidden: false, bands: [],
+                    }))
+                    try {
+                      const full = await hydrate({
+                        columns, rows, name: table.id ?? 'table', format: (v) => String(v ?? ''),
+                        fullText: meta.full_text,
+                      })
+                      rows = full.rows
+                    } catch {
+                      // Said for as long as the toolbar says its messages, then gone: a message
+                      // that outlives the moment reads as a permanent state of the button.
+                      setProblem('Could not fetch the full text; nothing was exported')
+                      setTimeout(() => setProblem(null), 1800)
+                      return
+                    }
+                  }
+                  setProblem(null)
                   const link = document.createElement('a')
-                  link.href = `data:text/csv;charset=utf-8,${encodeURIComponent(toCsv(table))}`
+                  link.href = `data:text/csv;charset=utf-8,${encodeURIComponent(toCsv({ ...table, rows }))}`
                   link.download = `${table.id && table.id !== '(anonymous)' ? table.id : 'table'}.csv`
                   link.click()
                 }}
                 className="rounded border border-edge px-2 py-1 text-xs text-ink-dim
                            hover:text-ink"
               >
-                export {table.rows.length.toLocaleString()} rows as CSV
+                export {table.rows.length.toLocaleString()} {table.rows.length === 1 ? 'row' : 'rows'} as CSV
               </button>
+            )}
+            {problem && (
+              <span role="alert" className="self-center text-2xs text-ink-dim">
+                {problem}
+              </span>
             )}
           </div>
           <pre
