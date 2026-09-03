@@ -495,13 +495,19 @@ const deferredBaseline = db.prepare(
 // The EXACT query the cross-session repeat table renders (waste.py), so the self-test fails if the
 // fixture would not give test_repeated_inputs:101 a blank-target row. Asserting membership of the
 // LIMIT-200 result, not the raw table, because that is what the page shows and what the test reads.
+// Asks for the BASH group by name. The first version asked for any NULL target, and the thirty
+// Agent groups satisfied it whatever the Bash branch wrote, so planting the defect back (a path
+// as a Bash target) left the row green. A reviewer found that; a gate that cannot fail is not one.
 const repeatBlankTarget = db.prepare(`
   SELECT COUNT(*) n FROM (
     SELECT tool_name AS tool, target, COUNT(DISTINCT session_id) AS sessions, COUNT(*) AS calls
       FROM tool_calls WHERE input_sha1 IS NOT NULL
       GROUP BY input_sha1 HAVING sessions > 1
       ORDER BY calls DESC, sessions DESC LIMIT 200)
-   WHERE target IS NULL OR TRIM(target) = ''`).get().n;
+   WHERE tool = 'Bash' AND target IS NULL`).get().n;
+// And the converse: no Bash group may carry a target at all, which is the old defect exactly.
+const bashWithTarget = db.prepare(`
+  SELECT COUNT(*) n FROM tool_calls WHERE tool_name = 'Bash' AND target IS NOT NULL`).get().n;
 
 db.close();
 
@@ -564,8 +570,9 @@ if (!SELF_TEST) {
     ['turns on a model no price table knows (test_pricing:163)', unpricedTurns > 0],
     ['deferred tools in the baseline, so a not-resident row exists (test_window:174)',
      deferredBaseline > 0],
-    ['a cross-session repeat with a BLANK target in the rendered top 200 (test_repeated_inputs:101)',
+    ['a Bash group with a BLANK target in the rendered top 200 (test_repeated_inputs:101)',
      repeatBlankTarget > 0],
+    ['and no Bash call carries a target, since Bash has none', bashWithTarget === 0],
   ];
   let failed = 0;
   for (const [what, ok] of checks) {
