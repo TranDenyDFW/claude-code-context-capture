@@ -100,3 +100,15 @@ describe('a table heading built from a collapsible label', () => {
       .toBe('its caption\nOne row per item.')
   })
 })
+
+describe('what a view IS', () => {
+  it('is claimed by the pane, because the header chip is already showing it', () => {
+    render(<Pane payload={payload({
+      about: ['This tab describes the capture machinery and the window math.'],
+      text: ['This tab describes the capture machinery and the window math.'],
+    })} />)
+    // Claimed but NOT rendered here: the chip in the shell shows it. Printing it in the body as
+    // well put the same sentence on screen twice, which is the wall with an extra copy of itself.
+    expect(screen.queryByText(/capture machinery/)).toBeNull()
+  })
+})

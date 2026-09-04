@@ -272,12 +272,9 @@ def session_layout(session_id=None, scope="main", cohort=None):
     ])
 
 
-def _model_names(turns) -> str:
-    """The models this session ran, saying so when there are more than the card can show."""
-    names = real_models(turns["model"])
-    if len(names) <= 2:
-        return ", ".join(names)
-    return f"{', '.join(names[:2])}, +{len(names) - 2} more"
+def _model_names(turns) -> list[str]:
+    """Every model this session actually ran, in the order the store reports them."""
+    return real_models(turns["model"])
 
 
 def session_view(session_id, scope="main", budget_pct=None, mark=None, with_cards=True):
@@ -512,10 +509,12 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                       else "transcript rows, main thread"),
         stat_card("output", fmt_tokens(total_out), sub=f"{fmt_tokens(think)} thinking"),
         stat_card("compactions", str(len(comps)), color=DANGER if len(comps) else TEXT),
-        # "+1 more" RATHER THAN SILENCE. This showed the first two names and dropped the rest with
-        # nothing saying so, and the session this was written against ran three: the card read
-        # "claude-fable-5-1, claude-opus-4-8" over a chart segmented five ways by three models.
-        stat_card("models", _model_names(turns) or "-"),
+        # THE COUNT IS THE FIGURE; THE NAMES ARE THE CAPTION. This put two model names in the
+        # value slot, in the same size and weight as every other card's number, where they wrapped
+        # onto four lines and stretched the whole row to match. It also showed the first two and
+        # dropped the rest in silence: the session this was written against ran three.
+        stat_card("models", str(len(_model_names(turns))),
+                  sub=", ".join(_model_names(turns)) or "none recorded"),
         # The one fact the old chart title carried that no card did. Segments are not models: this
         # session has three models and five segments, because it changed model and changed back.
         stat_card("model segments", str(max(len(segs), 1)),

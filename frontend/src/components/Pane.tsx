@@ -55,6 +55,9 @@ export function Pane({
   // The labels of controls this page does not draw. The window calculator is Dash-only; its
   // "Resident tokens", "Window" and constants sentence read as orphaned prose here.
   for (const line of payload.dash_only ?? []) claim(line)
+  // WHAT THIS VIEW IS. The header chip carries these; without the claim they are on the chip AND
+  // still in the body, which is the wall this was meant to end, with one more copy of it.
+  for (const line of payload.about ?? []) claim(line)
   // A CHART'S CAPTION BELONGS TO THE CHART. The server pairs it and lists the exact lines it
   // folded in; without this every one of them printed as a paragraph in the body, far from the
   // chart it explains, which is how ten captions across seven tabs became a wall of prose.

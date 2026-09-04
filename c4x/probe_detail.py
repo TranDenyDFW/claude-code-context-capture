@@ -215,7 +215,7 @@ def configuration_treemap(probe_id):
             values.append(int(row.tokens))
             colors.append(toward_background(base, 0.15 + 0.7 * rank / span))
     return (treemap(labels, parents, values, colors=colors, height=460,
-                    title=f"Every configured item probe {int(probe_id)} saw, by size",
+                    title="Every Configured Item, by Size",
                     hover="%{label}<br>%{value:,} tokens<br>%{percentParent} of "
                           "%{parent}<extra></extra>"),
             len(sized), dropped)
@@ -405,11 +405,16 @@ def stacked_message_figure(rows):
             name=name, marker=dict(color=palette[index % len(palette)],
                                    line=dict(color=BG, width=1)),
             hovertemplate="%{x}<br>" + name + ": %{y:,} tokens<extra></extra>"))
-    fig.update_layout(barmode="stack", title="The message half, by category, per probe",
+    fig.update_layout(barmode="stack", title="The Message Half, by Category",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="", yaxis_title="tokens")
-    return dcc.Graph(id="fig-probe-messages", figure=dark_fig(fig, 340),
-                     config={"displayModeBar": False})
+    return html.Div([
+        dcc.Graph(id="fig-probe-messages", figure=dark_fig(fig, 340),
+                  config={"displayModeBar": False}),
+        # One bar per probe, which the title used to say and no longer needs to.
+        chart_note(f"One stacked bar per probe, {len(order)} on record, so the shape can be "
+                   f"compared across readings.", for_id="fig-probe-messages"),
+    ])
 
 
 def message_blocks(probe_id):
