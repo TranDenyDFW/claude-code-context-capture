@@ -96,7 +96,7 @@ def test_thresholds_rise_in_order(body):
     """warn < compact < blocked < window. Any other order would make a band inside-out."""
     table = next((t for t in extract.tables(body) if "window" in (t["columns"] or [])), None)
     for row in table["rows"]:
-        values = [row.get(k) for k in ("warn at", "compact at", "blocked at", "window")]
+        values = [row.get(k) for k in ("warn", "compact", "blocked", "window")]
         numeric = [v for v in values if isinstance(v, (int, float))]
         if len(numeric) < 2:
             continue
@@ -115,8 +115,10 @@ def test_the_tab_matches_the_thresholds_the_app_uses(body, app):
         if window not in app.THRESHOLDS:
             continue
         published = app.THRESHOLDS[window]
-        for label, key in (("warn at", "warn"), ("compact at", "compact"),
-                           ("blocked at", "blocked")):
+        # The columns lost their "at": the column already says what the number is OF, and a
+        # header reading "Warn at" over a token count says it twice.
+        for label, key in (("warn", "warn"), ("compact", "compact"),
+                           ("blocked", "blocked")):
             if isinstance(row.get(label), (int, float)):
                 assert int(row[label]) == int(published[key]), f"{window} {label}"
                 checked += 1

@@ -38,7 +38,7 @@ from c4x.api import cache  # noqa: E402
 from c4x.frames import jsonable, records  # noqa: E402
 
 api = FastAPI(
-    title="c4x",
+    title="C4X",
     summary="What the context-capture dashboard renders, as JSON.",
     version="0",
     # The docs are left on. This binds to loopback and serves a local store; an interactive schema
@@ -459,6 +459,12 @@ def _render_payload(pane):
             if "preview" in table.get("columns", []) and rows and "uuid" in rows[0]:
                 entry["full_text"] = {"url": "/api/messages/text", "key": "uuid",
                                       "column": "preview", "as": "text"}
+            # WHAT A COMPACTION REPLACED, on the row that records it. This table has told
+            # the reader to click a row and read the summary since the tab existed, and on
+            # this page clicking did nothing: no route, no handler. The instruction was
+            # the promise; this is the thing that keeps it.
+            if entry.get("id") == "tbl-compactions" and rows and "uuid" in rows[0]:
+                entry["detail"] = {"url": "/api/compaction", "key": "uuid"}
 
     # WHICH POPULATION THIS TAB DESCRIBES, as a field rather than as prose.
     #
@@ -733,7 +739,7 @@ def _table_meta(node, found=None):
             shown = note or ""
             # BOTH SPELLINGS. evidence_block writes "1 row." for a one-row table, and this
             # stripped the plural only, so the count survived into the note and the page
-            # stated it twice: "MCP servers by invocation count, 1 row" over a note opening
+            # stated it twice: "MCP Calls, 1 row" over a note opening
             # "1 row. Invocation count alone is a PROXY for cost."
             shown = re.sub(r"^\s*[\d,]+ rows?\.\s*", "", shown)
             shown = shown.replace("(table shows the first page; export gives every row)", "")
@@ -741,7 +747,7 @@ def _table_meta(node, found=None):
             found.append({
                 "id": getattr(node, "id", None) or "(anonymous)",
                 # The heading WRITTEN above the table first; the label table is for a table that
-                # has none. The other order served "Files Read More Than Once" from the label
+                # has none. The other order served "Session Rereads" from the label
                 # table while the heading actually written above tbl-reread was absorbed into
                 # nothing and shown nowhere.
                 "title": head or table_label(getattr(node, "id", None)),
@@ -907,7 +913,7 @@ def _details(node, found=None):
                 if hasattr(child, "_prop_names") and type(child).__name__ == "Summary":
                     # THE TWO HALVES STAY TWO. `theme.accordion()` writes a title and a caption as
                     # two styled spans, and joining them gave the page one string with no hover:
-                    # "What to do about it 6 finding(s), each with an action" was the heading of the
+                    # "Recommendation(s) 6 finding(s), each with an action" was the heading of the
                     # Summary tab's findings table, over a table whose own name is "Findings". The
                     # caption is marked, so the title is everything else.
                     parts = child.children
@@ -992,6 +998,59 @@ def messages_text(body: _Uuids):
     if len(body.uuids) > 1000:
         raise HTTPException(status_code=422, detail="at most 1,000 uuids per request")
     return full(body.uuids)
+
+
+@api.get("/api/compaction/{uuid}")
+def compaction(uuid: str, limit: int = Query(300, ge=1, le=5000)):
+    """What a compaction REPLACED, and what it dropped, for one boundary.
+
+    THE MOST IMPORTANT THING ON THAT TAB AND THE ONE THING THE BROWSER COULD NOT REACH. The store
+    has held it all along: `compactions.summary_uuid` joins to the summary message, and
+    `compaction_survivors` is what makes the dropped set computable. The Dash page has shown both
+    on a row click since the tab existed, through a callback into `compaction-detail`. The React
+    port drew the token counts and never built this, while the table's own note told the reader to
+    click a row to read the summary. A page that instructs a reader to do something it does not
+    implement is worse than one that says nothing.
+
+    Returns the summary as TEXT, not a preview. A compaction summary is 12,000 to 17,000 characters
+    in this store, it is written once and read deliberately, and truncating it would defeat the
+    only reason to open it.
+    """
+    from c4x.store import (
+        compaction_dropped,
+        compaction_dropped_count,
+        compaction_kept,
+        compaction_kept_count,
+        compaction_summary_text,
+        compaction_survivors_recorded,
+    )
+    summary = compaction_summary_text(uuid)
+    dropped = compaction_dropped(uuid, limit=limit)
+    kept = compaction_kept(uuid, limit=limit)
+    row = None
+    if not summary.empty:
+        first = summary.iloc[0]
+        row = {"text": str(first["text"]), "chars": int(first["chars"]), "ts": str(first["ts"])}
+    return _jsonable({
+        "uuid": uuid,
+        "summary": row,
+        # Said out loud rather than implied by a row count: the dropped set is a LOWER BOUND,
+        # because it is computed by subtracting recorded survivors, and a survivor the store never
+        # saw counts as dropped here.
+        "dropped": records(dropped) if not dropped.empty else [],
+        "dropped_total": compaction_dropped_count(uuid),
+        "dropped_shown": int(len(dropped)),
+        # THE OTHER HALF. A boundary keeps a chosen few messages verbatim beside the summary it
+        # writes, and which ones it chose is the most legible thing about it. Same lower bound: a
+        # survivor uuid the store holds no message for cannot be shown.
+        "kept": records(kept) if not kept.empty else [],
+        # THREE NUMBERS, NOT TWO, because they differ by a factor of two and a half here and the
+        # page printed one under the other's name: 697 survivors recorded, 268 of them messages
+        # this store holds. `kept_recorded` is what the row the reader just clicked reports.
+        "kept_recorded": compaction_survivors_recorded(uuid),
+        "kept_total": compaction_kept_count(uuid),
+        "kept_shown": int(len(kept)),
+    })
 
 
 @api.get("/api/cohorts")

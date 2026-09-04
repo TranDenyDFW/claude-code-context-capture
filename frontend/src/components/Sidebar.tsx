@@ -58,12 +58,21 @@ export function Sidebar({
   onPick,
   collapsed,
   onToggle,
+  about,
 }: {
   tabs: TabInfo[]
   active: string | null
   onPick: (id: string) => void
   collapsed: boolean
   onToggle: () => void
+  /**
+   * What the OPEN tab says about itself, appended to that tab's hover.
+   *
+   * Only the open one: these come from the rendered pane, so the other tabs have not been built
+   * and there is nothing honest to put on them. It is the same sentence either way, and the tab
+   * is the thing on screen that already answers "what am I looking at".
+   */
+  about?: string[]
 }) {
   const Toggle = collapsed ? PanelLeftOpen : PanelLeftClose
   return (
@@ -93,7 +102,8 @@ export function Sidebar({
             // paragraph per tab and the name did not contain the visible text. The label is the
             // name; the sentence is the description.
             aria-label={tab.label}
-            aria-description={tab.help}
+            aria-description={[tab.help, ...(current ? about ?? [] : [])]
+              .filter(Boolean).join(' ')}
             // WHAT THIS TAB IS, on the tab. The sentence used to be printed across the top of
             // every pane; it belongs on the thing it describes. When collapsed the label leads,
             // because the rail shows only an icon.
@@ -101,7 +111,8 @@ export function Sidebar({
               collapsed ? tab.label : '',
               tab.help,
               tab.scoped === false ? 'Store-wide: the header selection does not change it.' : '',
-            ].filter(Boolean).join('\n')}
+              ...(current ? about ?? [] : []),
+            ].filter(Boolean).join('\n\n')}
             className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm
                         transition-colors duration-150 ${collapsed ? 'justify-center' : ''} ${
                           current

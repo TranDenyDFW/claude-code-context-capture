@@ -299,12 +299,12 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     # added, and a filled ribbon added last covers the series it is describing.
     band, band_note = anomaly_band(fig, x, turns["cache_read_input_tokens"].fillna(0))
     fig.add_trace(go.Scatter(
-        x=x, y=turns["total_resident"], mode="lines", name="resident",
+        x=x, y=turns["total_resident"], mode="lines", name="Resident",
         line=dict(color=ACCENT, width=2),
         hovertemplate="turn %{x}<br>%{y:,.0f} resident<extra></extra>",
     ))
     fig.add_trace(go.Scatter(
-        x=x, y=turns["cache_read_input_tokens"], mode="lines", name="cache read",
+        x=x, y=turns["cache_read_input_tokens"], mode="lines", name="Cache Read",
         line=dict(color=VIOLET, width=1, dash="dot"),
         hovertemplate="turn %{x}<br>%{y:,.0f} cache read<extra></extra>",
     ))
@@ -313,12 +313,12 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     # context, turn after turn, and it is the largest single cost in this store.
     fig.add_trace(go.Scatter(
         x=x, y=turns["cache_read_input_tokens"].fillna(0).cumsum(), mode="lines",
-        name="cache read, cumulative", yaxis="y2",
+        name="Cache Read, Cumulative", yaxis="y2",
         line=dict(color=WARN, width=1.5),
         hovertemplate="turn %{x}<br>%{y:,.0f} re-read so far<extra></extra>",
     ))
     fig.update_layout(yaxis2=dict(overlaying="y", side="right", showgrid=False,
-                                  title="cumulative cache read",
+                                  title="Cumulative Cache Read",
                                   title_font=dict(color=WARN, size=10),
                                   tickfont=dict(color=WARN, size=9)))
 
@@ -382,7 +382,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     chart_facts = " ".join(facts)
     fig.update_layout(title="Context Window Over the Session",
                       title_font=dict(color=TEXT, size=13),
-                      xaxis_title="turn", yaxis_title="tokens")
+                      xaxis_title="Turn", yaxis_title="Tokens")
 
     # Dated calibrations, so a step in the fixed overhead reads as an event rather than a glitch.
     _ts_index = {v: i + 1 for i, v in enumerate(ts_list) if v}

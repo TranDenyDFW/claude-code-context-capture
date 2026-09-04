@@ -415,7 +415,7 @@ COLUMN_HELP = {
     "basis": ("Whether this row is a total, which grows with the size of the population, or a "
               "per-unit figure. Comparing one session against a cohort makes every total larger "
               "for the cohort by construction."),
-    "B vs A": "B divided by A. Blank where A is zero.",
+    "B / A": "B divided by A. Blank where A is zero.",
     "verdict": "Which arm is better, where for a cost metric lower is better.",
     "unit": "What the two numbers are counted in.",
 
@@ -492,7 +492,7 @@ COLUMN_LABEL = {
     "id": "ID",
     "ok": "OK",
     # Already written for a reader; the rule would only mangle the casing.
-    "B vs A": "B vs A",
+    "B / A": "B / A",
     "A": "A",
     "B": "B",
 }
@@ -512,7 +512,7 @@ TABLE_LABEL = {
     "tbl-session": "Sessions",
     "tbl-messages": "Messages",
     "tbl-findings": "Findings",
-    "tbl-reread": "Files Read More Than Once",
+    "tbl-reread": "Session Rereads",
 }
 
 
@@ -549,6 +549,11 @@ def column_label(column_id) -> str:
     def cased(word, first):
         bare = word.lower().strip(".")
         if bare in _ACRONYMS:
+            return word.upper()
+        # A SINGLE LETTER IS A NAME, NOT A MINOR WORD. The Compare table's ratio column is
+        # "B / A" and the minor-word rule read that trailing A as the article, so the header
+        # rendered "B / a" over a column of ratios between two arms called A and B.
+        if len(bare) == 1 and bare.isalpha():
             return word.upper()
         if not first and bare in _MINOR:
             return word.lower()
@@ -645,7 +650,7 @@ def table_note(text, for_id: str | None = None, style: dict | None = None):
 def empty_panel(title: str, note: str):
     """A block that names what would be here and says why it is not.
 
-    Not prose, and not a hover. "The same input, issued in more than one session" followed by
+    Not prose, and not a hover. "Multi-Session Input" followed by
     "Not answerable with a single session selected" is the most useful thing on that part of the
     page when a session is selected: it distinguishes "there are none" from "this question cannot
     be asked from here", and only one of those is true. Hiding it behind a glyph on a heading that
@@ -694,7 +699,7 @@ def accordion(title: str, sub: str, children, open_by_default: bool = False):
             html.Span(title, style={"color": TEXT, "fontSize": "13px", "fontWeight": 600}),
             # MARKED, so the API can tell the two apart again. Dash keeps them apart with 13px/600
             # against 11px/muted and two literal spaces; `extract.texts()` strips and joins, so over
-            # the API the pair arrived as one string and the page drew "What to do about it 6
+            # the API the pair arrived as one string and the page drew "Recommendation(s) 6
             # finding(s), each with an action" as a heading, with no hover, because a summary has
             # only one slot. The class says which half is the caption.
             html.Span(f"  {sub}", className="accordion-sub",

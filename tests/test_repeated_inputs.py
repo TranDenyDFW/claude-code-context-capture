@@ -10,7 +10,7 @@ import pytest
 
 from c4x.cli import extract
 
-TITLE = "The same input, issued in more than one session"
+TITLE = "Multi-Session Input"
 
 
 @pytest.fixture(scope="module")

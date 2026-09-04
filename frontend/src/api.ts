@@ -98,6 +98,13 @@ export interface TableMeta {
    * row; an export must carry the message. POST `{ [key]: [...] }` to `url` and the answer maps
    * each key to the full text that replaces `column`.
    */
+  /**
+   * A GET route that returns what this row POINTS AT, keyed by one of its columns.
+   *
+   * The compactions table records a boundary's token counts; the summary that replaced the
+   * dropped context is a separate document the store holds and the row only references.
+   */
+  detail?: { url: string; key: string }
   full_text?: { url: string; key: string; column: string; as: string }
 }
 

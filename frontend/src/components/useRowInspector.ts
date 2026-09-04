@@ -22,6 +22,8 @@ export function useRowInspector(
   payload: TabPayload,
   names: string[],
   onSelectSession?: (row: Record<string, unknown>) => void,
+  /** Open the whole of what a row points at, when the drawer can only show part of it. */
+  onOpenDetail?: (key: string) => void,
 ) {
   const [content, setContent] = useState<InspectorContent | null>(null)
   const token = useRef(0)
@@ -55,6 +57,46 @@ export function useRowInspector(
         // payload would sit over the new one.
         ? () => { onSelectSession(row); close() }
         : null,
+    }
+    // A ROW THAT POINTS AT SOMETHING BIGGER THAN ITSELF. The compactions table records the token
+    // counts of a boundary; what the boundary REPLACED is a 14,000-character summary the store has
+    // always held and this page could not reach. The table's own note has said "click a row to
+    // read the summary it produced" since the tab existed, over a click that did nothing.
+    const detail = meta?.detail
+    if (detail) {
+      const key = row[detail.key]
+      if (typeof key === 'string' && key) {
+        setContent({
+          ...base,
+          text: null,
+          // THE DRAWER SHOWS PART, THE WINDOW SHOWS ALL. A boundary is a 14,000-character summary
+          // AND hundreds of messages; the drawer is the wrong shape for both at once, so it shows
+          // enough to decide and offers the place where the whole thing is.
+          onOpenDetail: onOpenDetail ? () => onOpenDetail(key) : null,
+        })
+        const write = (patch: Partial<InspectorContent>) => {
+          if (token.current === mine) setContent((was) => (was ? { ...was, ...patch } : was))
+        }
+        fetch(`${detail.url}/${encodeURIComponent(key)}`)
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+          .then((body) => write({
+            dropped: body?.dropped ?? null,
+            text: body?.summary?.text
+              ?? 'No summary message was harvested for this compaction. Older boundaries record '
+               + 'token counts only.',
+            // Stated, not implied by the row count: the dropped set is a LOWER BOUND, computed by
+            // subtracting recorded survivors, so a survivor the store never saw counts as dropped.
+            textNote: body?.dropped_total
+              ? `${body.dropped_total.toLocaleString()} messages were present before this `
+                + `compaction and are absent from its survivor list, a lower bound.`
+              : null,
+          }))
+          .catch(() => write({
+            text: null,
+            textProblem: 'the summary could not be fetched',
+          }))
+        return
+      }
     }
     if (!spec) {
       setContent(base)

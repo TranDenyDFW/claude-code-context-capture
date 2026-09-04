@@ -36,7 +36,6 @@ from c4x.theme import (
     fmt_tokens,
     header_help,
     numeric_columns,
-    stat_card,
 )
 
 # ---- Breakdown --------------------------------------------------------------
@@ -102,7 +101,8 @@ def latest_baseline():
     return None if df.empty else df.iloc[0].to_dict()
 
 
-def composition_treemap(baseline, resident_cols, labels, messages, free, window):
+def composition_treemap(baseline, resident_cols, labels, messages, free, window,
+                        resident=0, population=''):
     """The window as area, grouped by what a reader can actually do about each part.
 
     Three groups, because that is the decision the flat bar cannot express: Configuration is fixed
@@ -145,8 +145,16 @@ def composition_treemap(baseline, resident_cols, labels, messages, free, window)
             parents.append("")
             values.append(int(value))
             colors.append(color)
+    # THE NUMBER IS THE TITLE. The figure it describes was drawn directly under a card stating
+    # the same 782.8k, the same percentage and the same free space, so the page said it twice and
+    # the picture was the only one of the two that showed the shape. The title also names the
+    # POPULATION, because "right now" is a different moment for one chat than for a whole store
+    # and nothing on the chart said which one was being sized.
+    share = f" ({resident / window * 100:.0f}%)" if window else ""
+    where = f" - {population}" if population else ""
     return treemap(labels_, parents, values, colors=colors, height=380,
-                   title="What Is in the Window Right Now")
+                   title=f"Context Window Composition: {fmt_tokens(resident)} of "
+                         f"{fmt_tokens(window)}{share}{where}")
 
 
 def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=None):
@@ -192,6 +200,16 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
 
     static_total = int(b["static_total"])
     window = int(b["window_size"] or 1000000)
+    # WHICH POPULATION THIS IS THE WINDOW OF, in the words the title will use. "Right now" is a
+    # different moment for one chat than for a whole store, and the chart said neither.
+    if session_id:
+        population = "one chat"
+    elif cohort:
+        population = str(cohort).split("::", 1)[-1] or "a population"
+    else:
+        population = "store-wide"
+    if include_sidechain:
+        population += ", subagents included"
     scope_sql, scope_args = scoped(session_id, "all" if include_sidechain else "main",
                                    cohort=cohort)
     turns = q(f"""SELECT ts, total_resident FROM api_calls
@@ -278,16 +296,16 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
     res = merged["total_resident"].astype(int)
     stat = merged["static_total"].clip(upper=res)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=stat, mode="lines", name="static overhead",
+    fig.add_trace(go.Scatter(x=x, y=stat, mode="lines", name="Static overhead",
                              line=dict(width=0), stackgroup="one", fillcolor="#e8590c"))
     fig.add_trace(go.Scatter(x=x, y=(res - stat).clip(lower=0), mode="lines",
-                             name="messages", line=dict(width=0), stackgroup="one",
+                             name="Messages", line=dict(width=0), stackgroup="one",
                              fillcolor=ACCENT))
-    fig.add_trace(go.Scatter(x=x, y=(window - res).clip(lower=0), mode="lines", name="free space",
+    fig.add_trace(go.Scatter(x=x, y=(window - res).clip(lower=0), mode="lines", name="Free space",
                              line=dict(width=0), stackgroup="one", fillcolor="#21262d"))
-    fig.update_layout(title="Context Window Composition",
+    fig.update_layout(title="Context Window Over Time",
                       title_font=dict(color=TEXT, size=13),
-                      xaxis_title="API call", yaxis_title="tokens")
+                      xaxis_title="API Call", yaxis_title="Tokens")
 
     applies = str(b["ts"])[:19].replace("T", " ")
     notes = [html.Div(
@@ -309,18 +327,11 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
             f"Messages figure is the least trustworthy number on this page.",
             style={"color": WARN, "fontSize": "11.5px", "marginBottom": "8px"}))
     composition = [
-        # THE TAB'S HEADLINE NUMBER, AS A CARD. This was a label span and a value span, which
-        # flattens to two loose lines over the API: "context window" and "160.7k / 1M (16%)" read
-        # as prose in the body of a tab that had no cards at all.
-        html.Div([
-            stat_card("context window", fmt_tokens(resident), color=ACCENT,
-                      sub=f"{resident / window * 100:.0f}% of {fmt_tokens(window)}, "
-                          f"{fmt_tokens(free)} free"),
-        ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "10px"}),
         bar,
         html.Div(style={"height": "14px"}),
         dcc.Graph(id="fig-window-treemap",
-                  figure=composition_treemap(b, resident_cols, labels, messages, free, window),
+                  figure=composition_treemap(b, resident_cols, labels, messages, free, window,
+                                             resident=resident, population=population),
                   config={"displayModeBar": False}),
         chart_note(f"Resident {fmt_tokens(resident)} of a {fmt_tokens(window)} window. Sized by "
                    "tokens, and grouped by the one distinction that decides what you can do about "
@@ -337,7 +348,7 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
             className="dash-only",
             style={"color": MUTED, "fontSize": "11.5px", "margin": "4px 0 14px 0",
                    "maxWidth": "900px", "lineHeight": "1.55"}),
-        html.Div("What is in the window, item by item", style=SECTION_HEAD),
+        html.Div("Itemized Window", style=SECTION_HEAD),
         html.Div("One row per item the window holds right now, with its share of the "
                  "resident total. Resident and free space are exact; the category rows are "
                  "the baseline's split and are not.", style=SECTION_NOTE),

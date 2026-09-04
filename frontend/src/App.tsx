@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
+import { CompactionPage } from '@/components/CompactionPage'
+import { FigurePage } from '@/components/FigurePage'
 import { TablePage } from '@/components/TablePage'
-import { readState, tableUrl, writeState, type ViewState } from '@/state'
+import { compactionUrl, figureUrl, readState, tableUrl, writeState, type ViewState } from '@/state'
 import { Palette, type Choice } from '@/components/Palette'
 import { CompareArms } from '@/components/CompareArms'
 import { ProjectMoves } from '@/components/ProjectMoves'
@@ -25,6 +27,8 @@ export default function App() {
   const [selection, setSelection] = useState<Selection>(initial.selection)
   const [view, setView] = useState<ViewState['view']>(initial.view)
   const [tableIndex, setTableIndex] = useState<number | null>(initial.table)
+  const [figureIndex, setFigureIndex] = useState<number | null>(initial.figure)
+  const [compactionId, setCompactionId] = useState<string | null>(initial.compaction)
   const [tableQuery, setTableQuery] = useState(initial.query)
   const [tableFilter, setTableFilter] = useState(initial.filter)
   const [live, setLive] = useState(false)
@@ -48,12 +52,13 @@ export default function App() {
   }, [tab, tabs.data])
 
   const state: ViewState = {
-    tab, selection, view, table: tableIndex, query: tableQuery, filter: tableFilter,
+    tab, selection, view, table: tableIndex, figure: figureIndex, compaction: compactionId,
+    query: tableQuery, filter: tableFilter,
   }
   // The deps are `state`'s own fields, listed rather than the object, which is rebuilt every
   // render and would make this run every render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { writeState(state) }, [tab, selection, view, tableIndex, tableQuery, tableFilter])
+  useEffect(() => { writeState(state) }, [tab, selection, view, tableIndex, figureIndex, compactionId, tableQuery, tableFilter])
 
   // replaceState writes no history entry, so this page pushes none of its own and Back leaves the
   // app rather than stepping through it. The handler is still right for the cases that DO fire: a
@@ -66,6 +71,10 @@ export default function App() {
       setSelection(next.selection)
       setView(next.view)
       setTableIndex(next.table)
+      // The two views added later were missing here, so Back out of a chart or a compaction left
+      // the previous screen under the new address, which is the exact bug this effect exists for.
+      setFigureIndex(next.figure)
+      setCompactionId(next.compaction)
       setTableQuery(next.query)
       setTableFilter(next.filter)
     }
@@ -74,6 +83,16 @@ export default function App() {
   }, [])
 
   /** One table of the current tab, in a window of its own, with the current selection. */
+  // A REAL WINDOW, the way the table's button already worked. These called setView and navigated
+  // in place, so one label meant two different things depending on which panel it sat on, and
+  // `figureUrl` was exported and called by nothing.
+  const openFigure = (index: number) => {
+    window.open(figureUrl(state, index), '_blank', 'noopener')
+  }
+  const openCompaction = (id: string) => {
+    window.open(compactionUrl(state, id), '_blank', 'noopener')
+  }
+
   const openTable = (
     index: number,
     focus: { query?: string; filter?: { key: string; value: string } | null } = {},
@@ -162,6 +181,50 @@ export default function App() {
     ? `${parts[parts.length - 1]}  ·  ${parts[0]}`
     : (selected?.label ?? `${selection.session?.slice(0, 8)}…`)
 
+  // ONE COMPACTION, IN A WINDOW. Reached from the drawer, which shows enough of a boundary to
+  // decide whether to come here and cannot show both of its documents at once.
+  if (view === 'compaction' && compactionId) {
+    const back = () => {
+      setView('dashboard')
+      setCompactionId(null)
+    }
+    return (
+      <div className="flex min-h-full flex-col" data-view="compaction">
+        <CompactionPage uuid={compactionId} onBack={back} />
+      </div>
+    )
+  }
+
+  // THE SINGLE-CHART PAGE. Same shape as the single-table page below and for the same reason: a
+  // window opened for one chart shows that chart, at the height a window allows rather than the
+  // height a dashboard panel allows.
+  if (view === 'figure' && figureIndex !== null) {
+    const back = () => {
+      setView('dashboard')
+      setFigureIndex(null)
+    }
+    return (
+      <div className="flex min-h-full flex-col">
+        {/* The way back is drawn before the payload arrives, so an address naming a tab that
+            failed to build still has a control rather than an address to edit by hand. */}
+        {!pane.data && (
+          <div className="px-6 pt-5">
+            <button onClick={back} className="text-sm text-accent hover:underline">
+              Back to the dashboard
+            </button>
+          </div>
+        )}
+        {pane.isError && <Failure error={pane.error} />}
+        {!pane.data && !pane.isError && <Waiting />}
+        {pane.data && (
+          <div data-tab={pane.data.tab} data-view="figure">
+            <FigurePage payload={pane.data} index={figureIndex} onBack={back} />
+          </div>
+        )}
+      </div>
+    )
+  }
+
   // THE SINGLE-TABLE PAGE. No sidebar, no header, no other content: a window opened for one
   // table shows that table. The same queries feed it, so it is exactly what the pane would draw.
   if (view === 'table' && tableIndex !== null) {
@@ -208,6 +271,7 @@ export default function App() {
         tabs={tabs.data ?? []}
         active={tab}
         onPick={setTab}
+        about={pane.data?.about}
         collapsed={collapsed}
         onToggle={() => setCollapsed(!collapsed)}
       />
@@ -374,7 +438,9 @@ export default function App() {
             data-loading={pane.isFetching ? 'true' : 'false'}
             className={pane.isFetching ? 'opacity-60 transition-opacity' : undefined}
           >
-            <Pane payload={pane.data} onRowClick={selectFromRow} onOpenTable={openTable} />
+            <Pane payload={pane.data} onRowClick={selectFromRow} onOpenTable={openTable}
+                  onOpenCompaction={openCompaction}
+                  onOpenFigure={openFigure} />
           </div>
         )}
       </main>

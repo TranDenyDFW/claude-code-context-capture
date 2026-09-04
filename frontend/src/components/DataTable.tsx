@@ -194,7 +194,11 @@ export function DataTable({
   // list, which is how the identifier travels without showing a uuid. Reading `columns` here made
   // the feature do nothing on the one table it exists for. Read across rows, not just the first:
   // a store can hand back a first row missing a key that every other row has.
-  const reads = Boolean(onOpenRow) && Boolean(meta?.full_text)
+  // A ROW THAT CAN BE READ beats a row that navigates, and `detail` is a second way to be
+  // readable: the compactions table carries no full text of its own, it carries a POINTER to
+  // the summary that replaced the dropped context. Without it here, a table that both
+  // identifies a session and points at a document would navigate instead of opening.
+  const reads = Boolean(onOpenRow) && Boolean(meta?.full_text || meta?.detail)
   const identifies = table.rows.some((row) => 'session_id' in row || 'session' in row)
   const navigable = Boolean(onRowClick) && !reads && identifies
   const openable = Boolean(onOpenRow) && !navigable

@@ -39,6 +39,18 @@ export interface InspectorContent {
   text?: string | null
   /** A problem with the text, said next to it rather than in place of it. */
   textProblem?: string | null
+  /**
+   * What was REPLACED, when `text` is a summary of something.
+   *
+   * A compaction is two documents: the summary that survived and the messages that did not. The
+   * summary alone reads as the whole story, and the whole point of looking at a boundary is what
+   * it cost, so the dropped side is shown beside it rather than being a count.
+   */
+  dropped?: { ts: string; role: string; type: string; chars: number; preview: string }[] | null
+  /** Open the whole of this subject in a window of its own, when the drawer shows part. */
+  onOpenDetail?: (() => void) | null
+  /** A qualifier on `text` that the reader must see, such as a count being a lower bound. */
+  textNote?: string | null
   /** The rows behind the thing, already filtered, drawn as the same table they came from. */
   rows?: { name: string; table: Table; meta?: TableMeta } | null
   /** Why there are none, when there are none. */
@@ -112,6 +124,17 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
         </dl>
       )}
 
+      {content.onOpenDetail && (
+        <div>
+          <button
+            onClick={content.onOpenDetail}
+            className="rounded border border-edge px-2 py-1 text-xs text-ink-dim hover:text-ink"
+            title="Open the whole of this in a window of its own, with an export of every row"
+          >
+            Open in a window
+          </button>
+        </div>
+      )}
       {content.onSelectSession && (
         <div>
           <button
@@ -144,6 +167,9 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
                 {copied ? 'copied' : 'copy'}
               </button>
             )}
+            {content.textNote && (
+              <span className="text-2xs text-ink-faint">{content.textNote}</span>
+            )}
             {content.textProblem && (
               <span role="alert" className="text-2xs text-ink-dim">{content.textProblem}</span>
             )}
@@ -155,6 +181,28 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
                             font-mono text-xs leading-relaxed text-ink">
               {content.text}
             </pre>
+          )}
+
+          {content.dropped && content.dropped.length > 0 && (
+            <div className="mt-4">
+              <div className="mb-1 text-2xs uppercase tracking-[0.06em] text-ink-faint">
+                What it dropped, largest first
+              </div>
+              <div className="max-h-[40vh] overflow-auto rounded border border-edge">
+                {content.dropped.map((row, index) => (
+                  <div key={index} className="border-b border-edge/40 px-3 py-2 last:border-0">
+                    <div className="flex items-baseline gap-2 text-2xs text-ink-faint">
+                      <span className="tabular-nums">{row.chars.toLocaleString()} chars</span>
+                      <span>{row.role}</span>
+                      <span>{row.type}</span>
+                      <span className="ml-auto tabular-nums">{String(row.ts).slice(0, 19)}</span>
+                    </div>
+                    <p className="mt-0.5 truncate font-mono text-2xs text-ink-dim"
+                       title={row.preview}>{row.preview}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </section>
       )}

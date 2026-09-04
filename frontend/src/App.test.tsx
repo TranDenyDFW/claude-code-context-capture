@@ -180,3 +180,25 @@ describe('the page', () => {
     expect(screen.queryByText(/this server never writes to the store/)).toBeNull()
   })
 })
+
+describe('what a view says about itself', () => {
+  it('reaches the OPEN tab and no other, which is the only reason the disclosure was removed', async () => {
+    // An independent review deleted the `about` wiring from Sidebar.tsx entirely and the whole
+    // frontend suite stayed green. The justification for taking the About disclosure out of the
+    // body was that the tab carries it; nothing asserted that it does.
+    vi.mocked(api.tab).mockResolvedValue(payload({
+      about: ['This tab describes the capture machinery and the window math.'],
+      text: ['This tab describes the capture machinery and the window math.'],
+    }))
+    show('/?tab=tab-cost')
+    const open = await screen.findByRole('tab', { name: 'Cost' })
+      .catch(() => screen.getByText('Cost').closest('button')!)
+    const other = screen.getByText('Summary').closest('button')!
+    await waitFor(() =>
+      expect(open.getAttribute('title')).toContain('capture machinery'))
+    // Only the open one: the others have not been built, so there is nothing honest to put on them.
+    expect(other.getAttribute('title') ?? '').not.toContain('capture machinery')
+    // And it is not ALSO printed in the body.
+    expect(screen.queryByText(/capture machinery/)).toBeNull()
+  })
+})

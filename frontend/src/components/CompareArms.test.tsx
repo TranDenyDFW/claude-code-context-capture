@@ -64,7 +64,10 @@ describe('choosing the two arms', () => {
 
   it('says so when arm B is unset, rather than looking chosen', () => {
     show({ session: PARENT })
-    expect(screen.getByText(/Arm B is unset/)).toBeTruthy()
+    // The paragraph explaining an unset arm B is gone: it restated the empty picker beside it.
+    // What still has to be true is that the picker does not LOOK chosen.
+    expect(screen.queryByText(/Arm B is unset/)).toBeNull()
+    expect((screen.getAllByRole('combobox')[1] as HTMLSelectElement).value).toBe('')
   })
 
   it('warns rather than silently comparing a chat with itself', () => {
@@ -84,7 +87,7 @@ describe('switching what arm B means', () => {
     // A session id left behind under compareKind=cohort makes the server resolve a population that
     // does not exist, and the pane comes back describing nothing with no error to explain it.
     const { onChange } = show({ session: PARENT, compareWith: FORK })
-    fireEvent.click(screen.getByRole('button', { name: 'a population' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Population' }))
     expect(onChange).toHaveBeenCalledWith({ compareKind: 'cohort', compareWith: null })
   })
 })
