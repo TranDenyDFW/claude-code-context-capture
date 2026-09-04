@@ -193,6 +193,7 @@ export default function App() {
               query={tableQuery}
               filter={tableFilter}
               onQueryChange={setTableQuery}
+              onSelectSession={selectFromRow}
               onBack={back}
             />
           </div>

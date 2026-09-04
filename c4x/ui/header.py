@@ -128,9 +128,12 @@ _harvest_state: _HarvestState = {"ts": 0.0, "error": None, "runs": 0}
 def refresh_store(min_interval: float = 4.0) -> None:
     """Run an incremental harvest so the store follows the live session.
 
-    Nothing else ever triggers one. hooks/event-hook.mjs only appends lifecycle sizes to an ndjson
-    file, so without this the page shows whatever was true the last time someone ran the command
-    by hand - which is exactly how an hour-stale number ends up on screen next to a live one.
+    NOT THE ONLY TRIGGER, and this sentence used to say it was. hooks/event-hook.mjs harvests on
+    SessionEnd and UserPromptSubmit (detached on the prompt, so the person is not kept waiting),
+    and its own self-test asserts exactly that. What this adds is the interval BETWEEN those
+    events: a session that is running right now moves between prompts, and without a tick here the
+    page would show whatever the last hook left behind, which is how an hour-stale number ends up
+    on screen next to a live one.
 
     Guarded twice: a non-blocking lock so overlapping ticks cannot start a second node process,
     and a floor on frequency so a fast Interval cannot spawn harvests in a loop. A failure is

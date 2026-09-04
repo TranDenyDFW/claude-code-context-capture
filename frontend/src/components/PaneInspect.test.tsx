@@ -121,3 +121,29 @@ describe('opening a row of the messages table', () => {
     expect(screen.getByRole('dialog').textContent).toContain('only the preview')
   })
 })
+
+describe('a fetch that lands after the reader moved on', () => {
+  it('never writes a message into the drawer of a chart point', async () => {
+    let land: (value: unknown) => void = () => {}
+    vi.mocked(hydrate).mockImplementationOnce(() => new Promise((resolve) => { land = resolve as (value: unknown) => void }))
+    render(
+      <Pane
+        payload={payload({
+          figures: [{ title: 'sessions by peak', traces: [] }],
+          plotly: [{ data: [] }],
+          tables: [{ id: 'tbl-messages', columns: ['ts', 'preview'],
+                     rows: [{ uuid: 'u1', ts: '10:00', preview: 'cut' }] }],
+          meta: [{
+            id: 'tbl-messages', title: 'Messages', columns: [], filterable: true, page_size: null,
+            full_text: { url: '/api/messages/text', key: 'uuid', column: 'preview', as: 'text' },
+          }],
+        })}
+      />,
+    )
+    fireEvent.click(screen.getByRole('table').querySelector('tbody tr')!)
+    fireEvent.click(screen.getByTestId('chart'))
+    land({ rows: [{ preview: 'THE WHOLE MESSAGE, EVERY WORD' }] })
+    await waitFor(() => expect(screen.getByRole('dialog').textContent).toContain('990,000'))
+    expect(screen.getByRole('dialog').textContent).not.toContain('THE WHOLE MESSAGE')
+  })
+})

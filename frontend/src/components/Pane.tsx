@@ -70,14 +70,18 @@ export function Pane({
 
   const attached = (index: number) => textSections.filter((s) => s.table_index === index)
   const names = payload.tables.map((_, index) => tableName(index, meta[index], titleFor('table', index)))
-  const reader = useRowInspector(payload, names, onRowClick)
+  // NO onSelectSession HERE, and it is not an omission. In the pane a table whose rows carry a
+  // session key is navigable, so its click selects the session and this drawer never opens for
+  // such a row; the only rows that do reach it carry no session to offer. The standalone page is
+  // the opposite case, because it passes no row click, and it does pass the handler.
+  const reader = useRowInspector(payload, names)
 
   /** A click on a chart: the point's fields, the rows behind it, and a way to open those rows. */
   const inspectPoint = (figureIndex: number) => (point: PlotPoint) => {
     const figureTitle = titleFor('figure', figureIndex) || payload.figures[figureIndex]?.title || null
     const { content, tableIndex, filter, query } = describePoint(
       point, figureTitle, payload.tables, meta, names)
-    reader.setContent({
+    reader.showPoint({
       ...content,
       // The link carries the EXACT filter when the value lives in a key column, since a text
       // search over the columns a page draws would never find a hidden session id; otherwise the

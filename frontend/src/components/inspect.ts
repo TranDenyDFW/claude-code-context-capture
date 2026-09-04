@@ -58,23 +58,39 @@ export interface Located {
  * specific match wins: the fewest rows. A candidate that matches EVERY row of a table has
  * identified nothing, and showing that table would be a wrong answer that looks checkable, so it
  * is refused, unless the table holds ONE row: there the whole table is that row.
+ *
+ * ACROSS ALL TABLES, not the first one that matched. The loop used to RETURN on its first key
+ * match, so a forty-row match in the first table pre-empted the exact one-row match in a later
+ * one and the drawer showed thirty-nine rows that were not the point's. No tab ships two
+ * key-bearing tables today, which is why nothing caught it; the rule is enforced rather than left
+ * to the order the payload happens to arrive in.
  */
 const specific = (rows: Record<string, unknown>[], table: Table) =>
   rows.length > 0 && (rows.length < table.rows.length || table.rows.length === 1)
 
 export function locate(tables: Table[], values: string[]): Located | null {
   let best: Located | null = null
+  // A key match beats a match that merely found the value in some cell, because that IS the row.
+  // Then the fewest rows. A tie keeps the earlier hit, which is KEYS order within a table, then
+  // candidate order, then the order the tab draws its tables in.
+  const better = (hit: Located) => {
+    if (!best) return true
+    if ((hit.key !== null) !== (best.key !== null)) return hit.key !== null
+    return hit.rows.length < best.rows.length
+  }
   for (let index = 0; index < tables.length; index++) {
     const table = tables[index]
     if (!table.rows.length) continue
     for (const value of values) {
       for (const key of KEYS) {
         const rows = table.rows.filter((row) => row[key] === value)
-        if (specific(rows, table)) return { index, rows, value, key }
+        if (specific(rows, table) && better({ index, rows, value, key })) {
+          best = { index, rows, value, key }
+        }
       }
       const rows = table.rows.filter((row) =>
         Object.values(row).some((cell) => typeof cell === 'string' && cell === value))
-      if (specific(rows, table) && (!best || rows.length < best.rows.length)) {
+      if (specific(rows, table) && better({ index, rows, value, key: null })) {
         best = { index, rows, value, key: null }
       }
     }

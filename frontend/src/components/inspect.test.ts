@@ -106,3 +106,23 @@ describe('describing a point', () => {
     expect(out.filter).toBeNull()
   })
 })
+
+describe('the most specific match wins across every table, not the first table that had one', () => {
+  it('takes an exact key match in a later table over a broad one in the first', () => {
+    const messages = {
+      id: 'm', columns: ['preview'],
+      rows: [
+        ...Array.from({ length: 40 }, (_, i) => ({ session_id: 's2', preview: `line ${i}` })),
+        { session_id: 's9', preview: 'another session' },
+      ],
+    }
+    const found = locate([messages, sessions], ['s2'])!
+    expect(found).toMatchObject({ index: 1, key: 'session_id', value: 's2' })
+    expect(found.rows).toEqual([sessions.rows[1]])
+  })
+
+  it('still lets a key match beat a smaller match that is not on a key column', () => {
+    const mentions = { id: 'x', columns: ['note'], rows: [{ note: 's2' }] }
+    expect(locate([mentions, sessions], ['s2'])).toMatchObject({ index: 1, key: 'session_id' })
+  })
+})
