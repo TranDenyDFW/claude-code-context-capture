@@ -5,6 +5,8 @@ The defect these pin: twelve of eighteen tables reached the page with no title, 
 and note the server had written for them arrived as loose prose far above the rows, because
 `describe()` flattens a pane and nothing paired the text back to its table.
 """
+import re
+
 import pytest
 
 fastapi = pytest.importorskip(
@@ -44,7 +46,11 @@ def test_a_note_never_repeats_the_row_count_or_the_paging_clause(rendered):
     for tid, p in rendered.items():
         for m in p["meta"]:
             note = m.get("note") or ""
-            assert " rows." not in note[:16], f"{tid}: {note[:60]!r}"
+            # BOTH SPELLINGS. This asserted the plural only, so when evidence_block learned to
+            # write "1 row." the count came back through: the heading said "1 row" and the note it
+            # carries opened "1 row. Invocation count alone is...", the same number twice, on every
+            # one-row table. A guard that names one half of a pair is how the other half returns.
+            assert not re.match(r"\s*[\d,]+ rows?\.", note), f"{tid}: {note[:60]!r}"
             assert "table shows the first page" not in note, f"{tid}: {note[:60]!r}"
 
 
@@ -137,7 +143,8 @@ def test_the_page_shell_is_never_cached_and_the_hashed_assets_may_be(client):
     shell names the bundle by hash, so it is the one file that must be fetched every time."""
     shell = client.get("/")
     if shell.status_code == 404:
-        pytest.skip("frontend/dist is not built here; the shell is served only when it exists")
+        pytest.fail("frontend/dist is TRACKED in this repository, so a 404 here is a broken "
+                    "checkout or a mount that stopped mounting, not a missing build")
     assert shell.headers.get("cache-control") == "no-cache"
     assert client.get("/api/health").headers.get("cache-control") != "no-cache"
 
@@ -202,7 +209,8 @@ def test_the_heading_written_above_a_table_beats_the_label_table():
 def test_every_spelling_of_the_shell_is_uncached_and_an_asset_is_not(client):
     from pathlib import Path
     if client.get("/").status_code == 404:
-        pytest.skip("frontend/dist is not built here; the shell is served only when it exists")
+        pytest.fail("frontend/dist is TRACKED in this repository, so a 404 here is a broken "
+                    "checkout or a mount that stopped mounting, not a missing build")
     for alias in ("/INDEX.HTML", "/Index.Html", "/index.html/", "/index.html?v=1"):
         response = client.get(alias, follow_redirects=True)
         if response.status_code == 200:
@@ -220,7 +228,8 @@ def test_a_revalidation_of_the_shell_carries_the_header_too(client):
     before the rule kept that copy until the next rebuild changed the ETag."""
     first = client.get("/")
     if first.status_code == 404:
-        pytest.skip("frontend/dist is not built here; the shell is served only when it exists")
+        pytest.fail("frontend/dist is TRACKED in this repository, so a 404 here is a broken "
+                    "checkout or a mount that stopped mounting, not a missing build")
     etag = first.headers.get("etag")
     assert etag, "the shell is served without an ETag, so revalidation cannot be exercised"
     again = client.get("/", headers={"If-None-Match": etag})
@@ -258,3 +267,44 @@ def test_dash_only_lines_are_named_and_are_real_text_lines(rendered):
     for tid, p in rendered.items():
         for line in p.get("dash_only") or []:
             assert line in p["text"], (tid, line[:60])
+
+
+def test_the_shell_rule_is_installed_and_holds_without_any_bundle(client):
+    """The three tests above need `frontend/dist`. This one does not, and it also asserts the
+    middleware is REGISTERED rather than merely defined: a dispatch nobody installed is a comment.
+
+    The 304 leg is checked directly, because a conditional request is the one case no content type
+    can reach and no unbuilt checkout can produce.
+    """
+    import asyncio
+
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    import c4x.api.main as main
+
+    assert any(getattr(m, "kwargs", {}).get("dispatch") is main._no_cache_shell
+               for m in main.api.user_middleware), "the no-cache middleware is not installed"
+
+    # HTML this process serves with no bundle at all: its own schema page.
+    docs = client.get("/api/docs")
+    assert docs.status_code == 200
+    assert docs.headers["content-type"].startswith("text/html")
+    assert docs.headers.get("cache-control") == "no-cache"
+    assert client.get("/api/health").headers.get("cache-control") != "no-cache"
+
+    def through(path, response):
+        scope = {"type": "http", "method": "GET", "path": path, "headers": [],
+                 "query_string": b"", "scheme": "http", "server": ("test", 80)}
+
+        async def call_next(_request):
+            return response
+
+        return asyncio.run(main._no_cache_shell(Request(scope), call_next))
+
+    def cached(path):
+        return through(path, Response(status_code=304)).headers.get("cache-control")
+
+    assert cached("/index.html") == "no-cache"
+    assert cached("/") == "no-cache"
+    assert cached("/assets/index-abc.js") is None

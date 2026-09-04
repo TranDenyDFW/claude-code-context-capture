@@ -598,3 +598,20 @@ describe('text under a Dash-only control is never printed', () => {
     expect(screen.getByText('A real sentence.')).toBeTruthy()
   })
 })
+
+describe('a table whose first row is not the one carrying the session', () => {
+  it('is still navigable, because the key is read across rows and not from row zero', () => {
+    const clicked: Record<string, unknown>[] = []
+    render(
+      <Pane
+        payload={payload({
+          tables: [{ id: 't', columns: ['turns'], rows: [{ turns: 1 }, { session_id: 'abc', turns: 2 }] }],
+        })}
+        onRowClick={(row) => clicked.push(row)}
+      />,
+    )
+    const rows = screen.getByRole('table').querySelectorAll('tbody tr')
+    fireEvent.click(rows[1])
+    expect(clicked).toEqual([{ session_id: 'abc', turns: 2 }])
+  })
+})

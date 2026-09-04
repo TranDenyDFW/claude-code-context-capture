@@ -55,3 +55,35 @@ describe('the inspector drawer', () => {
     expect(screen.getByRole('alert').textContent).toContain('could not be fetched')
   })
 })
+
+describe('the drawer is non-modal, and says so', () => {
+  it('never claims the page behind it is inert, and never swallows Tab', () => {
+    render(<><button>behind</button><Inspector content={content} onClose={() => {}} /></>)
+    const dialog = screen.getByRole('dialog')
+    // aria-modal was added by "fixing" a finding the review had rejected, with the reasoning that
+    // it would be an accessibility regression: there is no backdrop and nothing behind is inert,
+    // so it tells assistive tech a falsehood, and a Tab trap strands the reader away from the
+    // chart the drawer exists to keep in view.
+    expect(dialog.getAttribute('aria-modal')).toBeNull()
+    expect(document.querySelector('[role="presentation"]')).toBeNull()
+    const close = screen.getByRole('button', { name: 'Close' })
+    close.focus()
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    window.dispatchEvent(tab)
+    expect(tab.defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(close)
+    expect(screen.getByText('behind')).toBeTruthy()
+  })
+
+  it('moves focus when the subject changes, and not when the same subject gains its text', () => {
+    const a: InspectorContent = { ...content, subject: 1, title: 'Messages: row', text: null }
+    const { rerender } = render(<Inspector content={a} onClose={() => {}} />)
+    const close = screen.getByRole('button', { name: 'Close' })
+    close.focus()
+    rerender(<Inspector content={{ ...a, text: 'the whole message' }} onClose={() => {}} />)
+    expect(document.activeElement).toBe(close)
+    // A different row carries the same title, which is why the subject is a number and not a name.
+    rerender(<Inspector content={{ ...a, subject: 2, fields: [['ts', '11:00']] }} onClose={() => {}} />)
+    expect(document.activeElement).toBe(screen.getByRole('dialog'))
+  })
+})

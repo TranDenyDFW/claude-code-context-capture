@@ -10,12 +10,25 @@ import { DataTable } from './DataTable'
  * for anyone who wants the page. Transient by design: nothing about it goes into the URL, because a
  * link that reopened a drawer would surprise the person it was sent to.
  *
- * IT IS A REAL DIALOG, which took a review to get right. The first version focused its container in
- * an effect that ran on every parent render, so a reader who tabbed to the close button lost focus
- * the moment anything above re-rendered; it also had no aria-modal, no focus trap and no return of
- * focus on close, which makes "role=dialog" a claim rather than a behaviour.
+ * A NON-MODAL DIALOG, ON PURPOSE, AND aria-modal AND A TAB TRAP HAVE BOTH BEEN TRIED AND REVERTED.
+ * There is no backdrop and nothing behind is inert or aria-hidden: the chart stays live so the
+ * reader can click the next point. `aria-modal` would tell assistive technology that everything
+ * outside is unavailable, which is false here, and a Tab trap would strand a screen-reader user in
+ * the drawer with no way back to the chart it exists to keep in view. The two places in this
+ * codebase that ARE modal, the palette and the project mover, each have a full-viewport backdrop
+ * and each declare aria-modal; the attribute tracks modality, it is not decoration. A review said
+ * all of this and the finding was "fixed" against it anyway, which is why the reasoning is here
+ * rather than only the verdict.
+ *
+ * What it does have: a role and an accessible name, Escape, a close button, focus moved here when
+ * it opens and when its SUBJECT changes, and focus returned where the reader left it on close.
  */
 export interface InspectorContent {
+  /**
+   * Which thing this drawer is about, from the hook's token. NOT the title, which repeats: every
+   * row of the Messages table is titled "Messages: row", so a second row would move nothing.
+   */
+  subject?: number
   /** The accessible name of the drawer and its heading. */
   title: string
   /** Where it came from: the figure's title, or the table's name. */
@@ -36,8 +49,6 @@ export interface InspectorContent {
   onSelectSession?: (() => void) | null
 }
 
-const FOCUSABLE = 'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])'
-
 export function Inspector({ content, onClose }: { content: InspectorContent; onClose: () => void }) {
   const panel = useRef<HTMLDivElement>(null)
   const [copied, setCopied] = useState(false)
@@ -45,8 +56,9 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
   const close = useRef(onClose)
   close.current = onClose
 
-  // ON MOUNT AND WHEN THE SUBJECT CHANGES, never on every render. `content.title` is what the
-  // drawer is about; clicking a different point moves focus here, a re-render above does not.
+  // ON OPEN AND ON A CHANGE OF SUBJECT, never on every render, and never when the same subject
+  // merely gains its text. A re-render of the page behind must not take focus off whatever the
+  // reader had chosen.
   useEffect(() => {
     const before = document.activeElement as HTMLElement | null
     panel.current?.focus()
@@ -54,29 +66,12 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
       // Focus goes back where the reader left it, which is what closing a dialog means.
       if (before && document.contains(before)) before.focus()
     }
-  }, [content.title])
+  }, [content.subject])
 
   useEffect(() => {
+    // Escape only. This is a non-modal dialog and it must not swallow Tab; see the docstring.
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        close.current()
-        return
-      }
-      if (event.key !== 'Tab' || !panel.current) return
-      // A focus trap, so Tab cycles the drawer rather than walking the page behind it.
-      const stops = Array.from(panel.current.querySelectorAll<HTMLElement>(FOCUSABLE))
-        .filter((node) => node.offsetParent !== null || node === document.activeElement)
-      if (!stops.length) return
-      const first = stops[0]
-      const last = stops[stops.length - 1]
-      const active = document.activeElement
-      if (event.shiftKey && (active === first || active === panel.current)) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault()
-        first.focus()
-      }
+      if (event.key === 'Escape') close.current()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -86,7 +81,6 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
     <div
       ref={panel}
       role="dialog"
-      aria-modal="true"
       aria-label={content.title}
       tabIndex={-1}
       className="fixed inset-y-0 right-0 z-30 flex w-full max-w-xl flex-col gap-3 overflow-y-auto
@@ -123,7 +117,7 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
           <button
             onClick={content.onSelectSession}
             className="rounded border border-edge px-2 py-1 text-xs text-ink-dim hover:text-ink"
-            title="Make this row's session the header selection"
+            title="Make this session the selection in this window; Back to the dashboard then shows it"
           >
             Select this session
           </button>
