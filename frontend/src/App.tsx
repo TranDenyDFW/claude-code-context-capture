@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
+import { TablePage } from '@/components/TablePage'
+import { readState, tableUrl, writeState, type ViewState } from '@/state'
 import { Palette, type Choice } from '@/components/Palette'
 import { CompareArms } from '@/components/CompareArms'
 import { ProjectMoves } from '@/components/ProjectMoves'
@@ -15,8 +17,16 @@ import { Sidebar, useCollapsed } from '@/components/Sidebar'
  * proposal that started this work ended up planning three pages that no longer exist.
  */
 export default function App() {
-  const [tab, setTab] = useState<string | null>(null)
-  const [selection, setSelection] = useState<Selection>({ scope: 'main' })
+  // FROM THE ADDRESS BAR FIRST. A link, a bookmark or a second window starts where it says; a
+  // fresh page starts at the defaults. Written back on every change, so the address always
+  // describes the screen and can be copied at any moment.
+  const initial = useMemo<ViewState>(() => readState(), [])
+  const [tab, setTab] = useState<string | null>(initial.tab)
+  const [selection, setSelection] = useState<Selection>(initial.selection)
+  const [view, setView] = useState<ViewState['view']>(initial.view)
+  const [tableIndex, setTableIndex] = useState<number | null>(initial.table)
+  const [tableQuery, setTableQuery] = useState(initial.query)
+  const [tableFilter, setTableFilter] = useState(initial.filter)
   const [live, setLive] = useState(false)
   const [palette, setPalette] = useState(false)
   const [collapsed, setCollapsed] = useCollapsed()
@@ -36,6 +46,40 @@ export default function App() {
   useEffect(() => {
     if (!tab && tabs.data?.length) setTab(tabs.data[0].id)
   }, [tab, tabs.data])
+
+  const state: ViewState = {
+    tab, selection, view, table: tableIndex, query: tableQuery, filter: tableFilter,
+  }
+  // The deps are `state`'s own fields, listed rather than the object, which is rebuilt every
+  // render and would make this run every render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { writeState(state) }, [tab, selection, view, tableIndex, tableQuery, tableFilter])
+
+  // replaceState writes no history entry, so this page pushes none of its own and Back leaves the
+  // app rather than stepping through it. The handler is still right for the cases that DO fire: a
+  // reader editing the address, a hash link, and a Back that returns here from another page in the
+  // same tab. Without it, those would show the previous screen under the new address.
+  useEffect(() => {
+    const onPop = () => {
+      const next = readState()
+      setTab(next.tab)
+      setSelection(next.selection)
+      setView(next.view)
+      setTableIndex(next.table)
+      setTableQuery(next.query)
+      setTableFilter(next.filter)
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
+  /** One table of the current tab, in a window of its own, with the current selection. */
+  const openTable = (
+    index: number,
+    focus: { query?: string; filter?: { key: string; value: string } | null } = {},
+  ) => {
+    window.open(tableUrl(state, index, focus), '_blank', 'noopener')
+  }
 
   const pane = useQuery({
     // EVERY FIELD `api.tab` SENDS. A key that omits one caches two different requests under one
@@ -84,6 +128,9 @@ export default function App() {
   // when the palette is closed, which is the only time it matters.
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      // Not on the single-table page, which renders no palette: the shortcut would set a state
+      // nothing draws, and the next return to the dashboard would open a palette nobody asked for.
+      if (view === 'table') return
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
         setPalette((was) => !was)
@@ -91,7 +138,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [])
+  }, [view])
 
   const pick = (choice: Choice) => {
     if (choice.kind === 'tab') setTab(choice.id)
@@ -114,6 +161,45 @@ export default function App() {
   const selectedWhen = parts.length >= 3
     ? `${parts[parts.length - 1]}  ·  ${parts[0]}`
     : (selected?.label ?? `${selection.session?.slice(0, 8)}…`)
+
+  // THE SINGLE-TABLE PAGE. No sidebar, no header, no other content: a window opened for one
+  // table shows that table. The same queries feed it, so it is exactly what the pane would draw.
+  if (view === 'table' && tableIndex !== null) {
+    const back = () => {
+      setView('dashboard')
+      setTableIndex(null)
+      setTableQuery('')
+      setTableFilter(null)
+    }
+    return (
+      <div className="flex min-h-full flex-col">
+        {/* THE WAY BACK IS ALWAYS THERE. It used to live inside TablePage, which renders only once
+            the payload arrives, so an address naming a tab that failed to build left the reader
+            on an error with no control at all and an address to edit by hand. */}
+        {!pane.data && (
+          <div className="px-6 pt-5">
+            <button onClick={back} className="text-sm text-accent hover:underline">
+              Back to the dashboard
+            </button>
+          </div>
+        )}
+        {pane.isError && <Failure error={pane.error} />}
+        {!pane.data && !pane.isError && <Waiting />}
+        {pane.data && (
+          <div data-tab={pane.data.tab} data-view="table">
+            <TablePage
+              payload={pane.data}
+              index={tableIndex}
+              query={tableQuery}
+              filter={tableFilter}
+              onQueryChange={setTableQuery}
+              onBack={back}
+            />
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="flex min-h-full">
@@ -280,7 +366,7 @@ export default function App() {
             data-loading={pane.isFetching ? 'true' : 'false'}
             className={pane.isFetching ? 'opacity-60 transition-opacity' : undefined}
           >
-            <Pane payload={pane.data} onRowClick={selectFromRow} />
+            <Pane payload={pane.data} onRowClick={selectFromRow} onOpenTable={openTable} />
           </div>
         )}
       </main>

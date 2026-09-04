@@ -20,7 +20,7 @@
  * accurate, or whether the page is usable with a screen reader. A pass means no rule was broken.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import axe from 'axe-core'
 import { Pane } from './components/Pane'
 import { Palette } from './components/Palette'
@@ -188,5 +188,29 @@ describe('the gate itself', () => {
     const found = await violations(container)
     expect(found.length).toBeGreaterThan(0)
     expect(found.map((v) => v.id)).toContain('image-alt')
+  })
+})
+
+describe('a tab button is named by what it shows', () => {
+  it('has the visible label as its accessible name, and the sentence as its description', () => {
+    const tabs = [
+      { id: 'tab-summary', label: 'Summary', help: 'Findings worth acting on.', scoped: false },
+      { id: 'tab-cost', label: 'Cost', help: 'What was paid for twice.', scoped: true },
+    ]
+    // COLLAPSED, which is where the defect was. Expanded, the visible label already supplies the
+    // accessible name, so the assertion passed with the aria-label deleted: a gate that cannot
+    // fail. A review found that; both states are checked now.
+    const { unmount } = render(
+      <Sidebar tabs={tabs} active="tab-summary" onPick={() => {}} collapsed onToggle={() => {}} />)
+    const collapsed = screen.getByRole('button', { name: 'Summary' })
+    expect(collapsed.getAttribute('aria-description')).toBe('Findings worth acting on.')
+    expect(collapsed.textContent).not.toContain('Summary')
+    expect(screen.queryByRole('button', { name: /Findings worth acting on/ })).toBeNull()
+    unmount()
+
+    render(<Sidebar tabs={tabs} active="tab-summary" onPick={() => {}} collapsed={false} onToggle={() => {}} />)
+    expect(screen.getByRole('button', { name: 'Summary' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Cost' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Findings worth acting on/ })).toBeNull()
   })
 })
