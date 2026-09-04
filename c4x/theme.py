@@ -415,7 +415,7 @@ COLUMN_HELP = {
     "basis": ("Whether this row is a total, which grows with the size of the population, or a "
               "per-unit figure. Comparing one session against a cohort makes every total larger "
               "for the cohort by construction."),
-    "B vs A": "B divided by A. Blank where A is zero.",
+    "B / A": "B divided by A. Blank where A is zero.",
     "verdict": "Which arm is better, where for a cost metric lower is better.",
     "unit": "What the two numbers are counted in.",
 
@@ -492,7 +492,7 @@ COLUMN_LABEL = {
     "id": "ID",
     "ok": "OK",
     # Already written for a reader; the rule would only mangle the casing.
-    "B vs A": "B vs A",
+    "B / A": "B / A",
     "A": "A",
     "B": "B",
 }

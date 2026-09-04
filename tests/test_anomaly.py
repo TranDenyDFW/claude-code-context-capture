@@ -139,10 +139,10 @@ def test_the_band_is_drawn_behind_the_lines(drawn):
     """Plotly draws in the order traces are added, so a filled ribbon added last covers the series
     it describes. The band's two traces must come before resident and cache read."""
     names = [t["name"] for t in drawn[0]["traces"]]
-    assert "resident" in names and "cache read" in names
+    assert "Resident" in names and "Cache Read" in names
     band = next(i for i, n in enumerate(names) if n and n.startswith("usual range"))
-    assert band < names.index("resident")
-    assert band < names.index("cache read")
+    assert band < names.index("Resident")
+    assert band < names.index("Cache Read")
 
 
 def test_the_marks_are_capped_and_the_count_is_not(drawn):
