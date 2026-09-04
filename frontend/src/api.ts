@@ -126,6 +126,12 @@ export interface TabPayload {
   stats?: Stat[]
   /** Only on /render. Text under a Dash-only control the page does not draw; never printed. */
   dash_only?: string[]
+  /**
+   * Only on /render. What this VIEW is, as opposed to what any chart on it shows.
+   *
+   * Shown on the population chip in the header, which already states what the numbers cover.
+   */
+  about?: string[]
   /** Only on /render. The caption each chart answers to, in the same order as `figures`. */
   figure_meta?: { note: string | null; absorbed: string[] }[]
   /** Whether the header selection changes this tab at all. From the app's SELECTION_SCOPED. */

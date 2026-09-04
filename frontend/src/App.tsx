@@ -246,16 +246,36 @@ export default function App() {
             // tabs answer to the header.
             (() => {
               const onSelection = (pane.data.population_scope ?? 'store') === 'selection'
+              // WHAT THIS VIEW IS, on the chip that already says what it covers. These are the
+              // sentences that are about the page rather than about any chart on it: a sub-panel
+              // saying which half of the window it describes, "A reading describes the moment it
+              // was taken", the four window constants. They printed as a wall in the body for want
+              // of anywhere else, and this is where a reader already looks to ask what they are
+              // reading.
+              const about = [pane.data.population, ...(pane.data.about ?? [])]
+                .filter(Boolean).join('\n\n')
+              const more = (pane.data.about ?? []).length > 0
               return (
                 <span
                   data-scoped={pane.data.scoped ? 'true' : 'false'}
                   data-population={pane.data.population_scope ?? 'store'}
-                  title={pane.data.population}
+                  title={about || undefined}
+                  aria-description={about || undefined}
                   className={`rounded-md px-2 py-1 text-2xs ${
                     onSelection ? 'bg-panel text-ink-faint' : 'bg-warn/10 text-warn'
                   }`}
                 >
                   {onSelection ? 'This Selection' : 'Store-Wide'}
+                  {/* The same glyph a table heading uses, for the same reason: the chip has
+                      carried hover text since it was added and nothing on screen said so. */}
+                  {more && (
+                    <span
+                      aria-hidden="true"
+                      className="ml-1.5 rounded border border-edge px-1 font-normal"
+                    >
+                      ?
+                    </span>
+                  )}
                 </span>
               )
             })()
@@ -381,15 +401,11 @@ export default function App() {
         onPick={pick}
       />
 
-      <footer className="border-t border-edge px-6 py-2 text-xs text-ink-faint">
-        {health.data?.read_only && 'read only, this server never writes to the store. '}
-        {health.data?.cache && (
-          <>
-            cache {health.data.cache.hits} hit / {health.data.cache.misses} miss,{' '}
-            {Math.round((health.data.cache.bytes ?? 0) / 1024)} KB
-          </>
-        )}
-      </footer>
+      {/* NO FOOTER. It carried the server's cache hit and miss counters and its byte total on
+          every page, which is a developer's readout of this process rather than anything about
+          the store being read, and it sat under every tab for the life of the port. The read-only
+          fact it also carried is not lost: `writes_enabled` still governs what the page offers to
+          write, which is the form in which that fact matters to a reader. */}
       </div>
     </div>
   )

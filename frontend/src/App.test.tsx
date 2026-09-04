@@ -139,3 +139,44 @@ describe('the filter typed on the single-table page', () => {
     expect(screen.queryByText('a.json')).toBeNull()
   })
 })
+
+describe('the population chip', () => {
+  it('carries what the view IS, not just what it covers, and says so with a glyph', async () => {
+    vi.mocked(api.tab).mockResolvedValue(payload({
+      population: 'Store-wide. Not affected by the header selection.',
+      population_scope: 'store',
+      about: ['This tab describes the capture machinery and the window math.'],
+      text: ['This tab describes the capture machinery and the window math.'],
+    }))
+    show('/?tab=tab-cost')
+    const chip = await screen.findByText(/Store-Wide/)
+    expect(chip.getAttribute('title')).toBe(
+      'Store-wide. Not affected by the header selection.\n\n'
+      + 'This tab describes the capture machinery and the window math.')
+    // The chip has carried hover text since it was added and nothing on screen said so.
+    expect(chip.textContent).toContain('?')
+  })
+
+  it('shows no glyph when the view has nothing to add to its population', async () => {
+    // A population and no `about`: the chip still states what the numbers cover, and there is
+    // nothing further to hover for, so nothing should say there is.
+    vi.mocked(api.tab).mockResolvedValue(payload({
+      population: 'Store-wide. Not affected by the header selection.',
+      population_scope: 'store',
+    }))
+    show('/?tab=tab-cost')
+    const chip = await screen.findByText(/Store-Wide/)
+    expect(chip.textContent).not.toContain('?')
+    expect(chip.getAttribute('title')).toBe('Store-wide. Not affected by the header selection.')
+  })
+})
+
+describe('the page', () => {
+  it('has no footer, so no tab ends in this process cache counters', async () => {
+    show('/?tab=tab-cost')
+    await screen.findByRole('button', { name: 'Search tabs, populations and sessions' })
+    expect(document.querySelector('footer')).toBeNull()
+    expect(screen.queryByText(/cache .* hit/)).toBeNull()
+    expect(screen.queryByText(/this server never writes to the store/)).toBeNull()
+  })
+})
