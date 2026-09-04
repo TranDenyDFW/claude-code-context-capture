@@ -242,6 +242,10 @@ def tab_render(tab_id: str,
         # would rename a column that does not exist on it, which is worse than showing the raw id.
         meta = _table_meta(pane)
         payload["meta"] = meta if len(meta) == len(payload["tables"]) else []
+        # TEXT THAT BELONGS TO A DASH-ONLY CONTROL. The window calculator's labels and constants
+        # sentence are marked in the tree; the page drops these lines rather than printing the
+        # labels of inputs it does not draw. The parity surface keeps them: they are real text.
+        payload["dash_only"] = _dash_only(pane)
         # WHERE THE FULL TEXT IS. The messages table carries a 220-character `preview` per row,
         # because 400 full messages are 841 KB on the largest session and a tab is re-fetched on
         # every selection. An export is not a render: it happens once, on purpose, and a CSV of
@@ -528,6 +532,27 @@ def _table_meta(node, found=None):
                 walk(value, None if kind in ("Graph", "Details") else pending)
 
     walk(node)
+    return found
+
+
+def _dash_only(node, found=None):
+    """Every text line under a component marked className="dash-only", in document order."""
+    from c4x.cli import extract
+    found = [] if found is None else found
+    if isinstance(node, (list, tuple)):
+        for child in node:
+            _dash_only(child, found)
+        return found
+    if not hasattr(node, "_prop_names"):
+        return found
+    classes = str(getattr(node, "className", "") or "").split()
+    if "dash-only" in classes:
+        found.extend(extract.texts(node))
+        return found
+    for name in node._prop_names:
+        value = getattr(node, name, None)
+        if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
+            _dash_only(value, found)
     return found
 
 
