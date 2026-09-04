@@ -39,6 +39,8 @@ export interface InspectorContent {
   text?: string | null
   /** A problem with the text, said next to it rather than in place of it. */
   textProblem?: string | null
+  /** A qualifier on `text` that the reader must see, such as a count being a lower bound. */
+  textNote?: string | null
   /** The rows behind the thing, already filtered, drawn as the same table they came from. */
   rows?: { name: string; table: Table; meta?: TableMeta } | null
   /** Why there are none, when there are none. */
@@ -143,6 +145,9 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
               >
                 {copied ? 'copied' : 'copy'}
               </button>
+            )}
+            {content.textNote && (
+              <span className="text-2xs text-ink-faint">{content.textNote}</span>
             )}
             {content.textProblem && (
               <span role="alert" className="text-2xs text-ink-dim">{content.textProblem}</span>

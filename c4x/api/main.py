@@ -459,6 +459,12 @@ def _render_payload(pane):
             if "preview" in table.get("columns", []) and rows and "uuid" in rows[0]:
                 entry["full_text"] = {"url": "/api/messages/text", "key": "uuid",
                                       "column": "preview", "as": "text"}
+            # WHAT A COMPACTION REPLACED, on the row that records it. This table has told
+            # the reader to click a row and read the summary since the tab existed, and on
+            # this page clicking did nothing: no route, no handler. The instruction was
+            # the promise; this is the thing that keeps it.
+            if entry.get("id") == "tbl-compactions" and rows and "uuid" in rows[0]:
+                entry["detail"] = {"url": "/api/compaction", "key": "uuid"}
 
     # WHICH POPULATION THIS TAB DESCRIBES, as a field rather than as prose.
     #
