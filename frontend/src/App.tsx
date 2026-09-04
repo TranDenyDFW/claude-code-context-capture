@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
+import { CompactionPage } from '@/components/CompactionPage'
 import { FigurePage } from '@/components/FigurePage'
 import { TablePage } from '@/components/TablePage'
 import { readState, tableUrl, writeState, type ViewState } from '@/state'
@@ -27,6 +28,7 @@ export default function App() {
   const [view, setView] = useState<ViewState['view']>(initial.view)
   const [tableIndex, setTableIndex] = useState<number | null>(initial.table)
   const [figureIndex, setFigureIndex] = useState<number | null>(initial.figure)
+  const [compactionId, setCompactionId] = useState<string | null>(initial.compaction)
   const [tableQuery, setTableQuery] = useState(initial.query)
   const [tableFilter, setTableFilter] = useState(initial.filter)
   const [live, setLive] = useState(false)
@@ -50,13 +52,13 @@ export default function App() {
   }, [tab, tabs.data])
 
   const state: ViewState = {
-    tab, selection, view, table: tableIndex, figure: figureIndex,
+    tab, selection, view, table: tableIndex, figure: figureIndex, compaction: compactionId,
     query: tableQuery, filter: tableFilter,
   }
   // The deps are `state`'s own fields, listed rather than the object, which is rebuilt every
   // render and would make this run every render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { writeState(state) }, [tab, selection, view, tableIndex, figureIndex, tableQuery, tableFilter])
+  useEffect(() => { writeState(state) }, [tab, selection, view, tableIndex, figureIndex, compactionId, tableQuery, tableFilter])
 
   // replaceState writes no history entry, so this page pushes none of its own and Back leaves the
   // app rather than stepping through it. The handler is still right for the cases that DO fire: a
@@ -170,6 +172,20 @@ export default function App() {
   const selectedWhen = parts.length >= 3
     ? `${parts[parts.length - 1]}  ·  ${parts[0]}`
     : (selected?.label ?? `${selection.session?.slice(0, 8)}…`)
+
+  // ONE COMPACTION, IN A WINDOW. Reached from the drawer, which shows enough of a boundary to
+  // decide whether to come here and cannot show both of its documents at once.
+  if (view === 'compaction' && compactionId) {
+    const back = () => {
+      setView('dashboard')
+      setCompactionId(null)
+    }
+    return (
+      <div className="flex min-h-full flex-col" data-view="compaction">
+        <CompactionPage uuid={compactionId} onBack={back} />
+      </div>
+    )
+  }
 
   // THE SINGLE-CHART PAGE. Same shape as the single-table page below and for the same reason: a
   // window opened for one chart shows that chart, at the height a window allows rather than the
@@ -415,6 +431,7 @@ export default function App() {
             className={pane.isFetching ? 'opacity-60 transition-opacity' : undefined}
           >
             <Pane payload={pane.data} onRowClick={selectFromRow} onOpenTable={openTable}
+                  onOpenCompaction={(id) => { setCompactionId(id); setView('compaction') }}
                   onOpenFigure={openFigure} />
           </div>
         )}

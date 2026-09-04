@@ -47,6 +47,8 @@ export interface InspectorContent {
    * it cost, so the dropped side is shown beside it rather than being a count.
    */
   dropped?: { ts: string; role: string; type: string; chars: number; preview: string }[] | null
+  /** Open the whole of this subject in a window of its own, when the drawer shows part. */
+  onOpenDetail?: (() => void) | null
   /** A qualifier on `text` that the reader must see, such as a count being a lower bound. */
   textNote?: string | null
   /** The rows behind the thing, already filtered, drawn as the same table they came from. */
@@ -122,6 +124,17 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
         </dl>
       )}
 
+      {content.onOpenDetail && (
+        <div>
+          <button
+            onClick={content.onOpenDetail}
+            className="rounded border border-edge px-2 py-1 text-xs text-ink-dim hover:text-ink"
+            title="Open the whole of this in a window of its own, with an export of every row"
+          >
+            Open in a window
+          </button>
+        </div>
+      )}
       {content.onSelectSession && (
         <div>
           <button

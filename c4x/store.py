@@ -778,6 +778,48 @@ def compaction_dropped(compaction_uuid: str, limit: int = 300) -> pd.DataFrame:
     )
 
 
+def compaction_kept(compaction_uuid: str, limit: int = 300) -> pd.DataFrame:
+    """Messages from before a compaction that its survivor list names, so they crossed the boundary.
+
+    THE OTHER HALF OF `compaction_dropped`, and the half that says what a compaction was FOR. A
+    boundary is not only a deletion: it keeps a chosen few messages verbatim alongside the summary
+    it writes, and which ones it chose is the most legible thing about it.
+
+    Same lower bound in the same direction. A survivor uuid the store holds no message for cannot
+    be shown, so this lists what can be shown to have stayed rather than everything that stayed:
+    on this store one boundary records 24 message survivors and 17 of them join to a harvested row.
+    """
+    return q(
+        """
+        SELECT m.uuid, m.ts, m.role, m.type, m.chars,
+               substr(replace(replace(m.text, char(10), ' '), char(13), ' '), 1, 220) AS preview
+        FROM compactions c
+        JOIN compaction_survivors s ON s.compaction_uuid = c.uuid
+        JOIN messages m ON m.uuid = s.uuid
+        WHERE c.uuid = ?
+          AND m.uuid <> COALESCE(c.summary_uuid, '')
+        ORDER BY m.chars DESC
+        LIMIT ?
+        """,
+        (compaction_uuid, limit),
+    )
+
+
+def compaction_kept_count(compaction_uuid: str) -> int:
+    """How many survivors can be SHOWN, which is not how many were recorded."""
+    df = q(
+        """
+        SELECT COUNT(*) AS n
+        FROM compactions c
+        JOIN compaction_survivors s ON s.compaction_uuid = c.uuid
+        JOIN messages m ON m.uuid = s.uuid
+        WHERE c.uuid = ? AND m.uuid <> COALESCE(c.summary_uuid, '')
+        """,
+        (compaction_uuid,),
+    )
+    return int(df.iloc[0]["n"]) if not df.empty else 0
+
+
 def compaction_dropped_count(compaction_uuid: str) -> int:
     """How many dropped messages EXIST, as opposed to how many the table shows.
 

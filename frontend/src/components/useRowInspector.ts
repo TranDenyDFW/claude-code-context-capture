@@ -22,6 +22,8 @@ export function useRowInspector(
   payload: TabPayload,
   names: string[],
   onSelectSession?: (row: Record<string, unknown>) => void,
+  /** Open the whole of what a row points at, when the drawer can only show part of it. */
+  onOpenDetail?: (key: string) => void,
 ) {
   const [content, setContent] = useState<InspectorContent | null>(null)
   const token = useRef(0)
@@ -64,7 +66,14 @@ export function useRowInspector(
     if (detail) {
       const key = row[detail.key]
       if (typeof key === 'string' && key) {
-        setContent({ ...base, text: null })
+        setContent({
+          ...base,
+          text: null,
+          // THE DRAWER SHOWS PART, THE WINDOW SHOWS ALL. A boundary is a 14,000-character summary
+          // AND hundreds of messages; the drawer is the wrong shape for both at once, so it shows
+          // enough to decide and offers the place where the whole thing is.
+          onOpenDetail: onOpenDetail ? () => onOpenDetail(key) : null,
+        })
         const write = (patch: Partial<InspectorContent>) => {
           if (token.current === mine) setContent((was) => (was ? { ...was, ...patch } : was))
         }

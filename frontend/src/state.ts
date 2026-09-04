@@ -17,7 +17,7 @@ export interface ViewState {
   tab: string | null
   selection: Selection
   /** `table` and `figure` each render exactly one thing full width, for a window of its own. */
-  view: 'dashboard' | 'table' | 'figure'
+  view: 'dashboard' | 'table' | 'figure' | 'compaction'
   /** Which table of the tab, by index into `payload.tables`, when `view` is `table`. */
   table: number | null
   /**
@@ -27,6 +27,8 @@ export interface ViewState {
    * else exactly as a link to a table does.
    */
   figure: number | null
+  /** Which compaction, by uuid: a document, not an index into this tab's payload. */
+  compaction: string | null
   /** A filter to seed the table's search box with, so a link can point at the rows behind a click. */
   query: string
   /** An exact row filter: a column and its value, so a link can name a row by a hidden key. */
@@ -35,6 +37,7 @@ export interface ViewState {
 
 export const EMPTY: ViewState = {
   tab: null, selection: { scope: 'main' }, view: 'dashboard', table: null, figure: null,
+  compaction: null,
   query: '', filter: null,
 }
 
@@ -70,8 +73,10 @@ export function fromSearch(search: string): ViewState {
   }
   const figure = whole('figure')
   const asked = params.get('view')
+  const compaction = text('compaction')
   const view = asked === 'table' && table !== null ? 'table'
     : asked === 'figure' && figure !== null ? 'figure'
+    : asked === 'compaction' && compaction ? 'compaction'
     : 'dashboard'
   const filterKey = text('key')
   const filterValue = params.get('val')
@@ -82,6 +87,7 @@ export function fromSearch(search: string): ViewState {
     // Every single-thing field is dropped outside its own view, so one state has one address.
     table: view === 'table' ? table : null,
     figure: view === 'figure' ? figure : null,
+    compaction: view === 'compaction' ? compaction : null,
     query: view === 'table' ? (params.get('q') ?? '') : '',
     filter: view === 'table' && filterKey && filterValue !== null
       ? { key: filterKey, value: filterValue }
@@ -100,6 +106,10 @@ export function toSearch(state: ViewState): string {
   if (selection.compareWith) {
     params.set('compare', selection.compareWith)
     if (selection.compareKind === 'cohort') params.set('compareKind', 'cohort')
+  }
+  if (state.view === 'compaction' && state.compaction) {
+    params.set('view', 'compaction')
+    params.set('compaction', state.compaction)
   }
   if (state.view === 'figure' && state.figure !== null) {
     params.set('view', 'figure')
@@ -147,7 +157,7 @@ export function writeState(state: ViewState): void {
 /** An address for one chart of the current tab, so a chart can be opened in a window of its own. */
 export function figureUrl(state: ViewState, figure: number): string {
   const search = toSearch({
-    ...state, view: 'figure', figure, table: null, query: '', filter: null,
+    ...state, view: 'figure', figure, table: null, compaction: null, query: '', filter: null,
   })
   return `${window.location.origin}${window.location.pathname}${search}`
 }
@@ -158,7 +168,7 @@ export function tableUrl(
   focus: { query?: string; filter?: { key: string; value: string } | null } = {},
 ): string {
   const search = toSearch({
-    ...state, view: 'table', table, figure: null,
+    ...state, view: 'table', table, figure: null, compaction: null,
     query: focus.query ?? '', filter: focus.filter ?? null,
   })
   return `${window.location.origin}${window.location.pathname}${search}`

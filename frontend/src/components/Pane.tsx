@@ -12,6 +12,7 @@ export function Pane({
   onRowClick,
   onOpenTable,
   onOpenFigure,
+  onOpenCompaction,
 }: {
   payload: TabPayload
   onRowClick?: (row: Record<string, unknown>) => void
@@ -19,6 +20,8 @@ export function Pane({
   onOpenTable?: (index: number, focus?: { query: string; filter: { key: string; value: string } | null }) => void
   /** Open chart `index` of this tab in a window of its own, for the same reason a table can be. */
   onOpenFigure?: (index: number) => void
+  /** Open one compaction full width: a boundary is two documents and a drawer shows one. */
+  onOpenCompaction?: (uuid: string) => void
 }) {
   const figures = payload.plotly ?? []
   const sections = payload.details ?? []
@@ -100,7 +103,7 @@ export function Pane({
   // session key is navigable, so its click selects the session and this drawer never opens for
   // such a row; the only rows that do reach it carry no session to offer. The standalone page is
   // the opposite case, because it passes no row click, and it does pass the handler.
-  const reader = useRowInspector(payload, names)
+  const reader = useRowInspector(payload, names, undefined, onOpenCompaction)
 
   /** A click on a chart: the point's fields, the rows behind it, and a way to open those rows. */
   const inspectPoint = (figureIndex: number) => (point: PlotPoint) => {

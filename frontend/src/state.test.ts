@@ -11,6 +11,7 @@ const full: ViewState = {
   view: 'table',
   table: 3,
   figure: null,
+  compaction: null,
   query: 'categories.json',
   filter: { key: 'session_id', value: 's-1' },
 }

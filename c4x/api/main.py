@@ -1001,7 +1001,7 @@ def messages_text(body: _Uuids):
 
 
 @api.get("/api/compaction/{uuid}")
-def compaction(uuid: str, limit: int = Query(300, ge=1, le=1000)):
+def compaction(uuid: str, limit: int = Query(300, ge=1, le=5000)):
     """What a compaction REPLACED, and what it dropped, for one boundary.
 
     THE MOST IMPORTANT THING ON THAT TAB AND THE ONE THING THE BROWSER COULD NOT REACH. The store
@@ -1016,9 +1016,16 @@ def compaction(uuid: str, limit: int = Query(300, ge=1, le=1000)):
     in this store, it is written once and read deliberately, and truncating it would defeat the
     only reason to open it.
     """
-    from c4x.store import compaction_dropped, compaction_dropped_count, compaction_summary_text
+    from c4x.store import (
+        compaction_dropped,
+        compaction_dropped_count,
+        compaction_kept,
+        compaction_kept_count,
+        compaction_summary_text,
+    )
     summary = compaction_summary_text(uuid)
     dropped = compaction_dropped(uuid, limit=limit)
+    kept = compaction_kept(uuid, limit=limit)
     row = None
     if not summary.empty:
         first = summary.iloc[0]
@@ -1032,6 +1039,12 @@ def compaction(uuid: str, limit: int = Query(300, ge=1, le=1000)):
         "dropped": records(dropped) if not dropped.empty else [],
         "dropped_total": compaction_dropped_count(uuid),
         "dropped_shown": int(len(dropped)),
+        # THE OTHER HALF. A boundary keeps a chosen few messages verbatim beside the summary it
+        # writes, and which ones it chose is the most legible thing about it. Same lower bound: a
+        # survivor uuid the store holds no message for cannot be shown.
+        "kept": records(kept) if not kept.empty else [],
+        "kept_total": compaction_kept_count(uuid),
+        "kept_shown": int(len(kept)),
     })
 
 
