@@ -162,6 +162,14 @@ export function figureUrl(state: ViewState, figure: number): string {
   return `${window.location.origin}${window.location.pathname}${search}`
 }
 
+/** An address for one compaction, so a boundary opens in a window of its own. */
+export function compactionUrl(state: ViewState, compaction: string): string {
+  const search = toSearch({
+    ...state, view: 'compaction', compaction, table: null, figure: null, query: '', filter: null,
+  })
+  return `${window.location.origin}${window.location.pathname}${search}`
+}
+
 export function tableUrl(
   state: ViewState,
   table: number,

@@ -16,6 +16,9 @@ export interface CompactionDetail {
   summary: { text: string; chars: number; ts: string } | null
   kept: Omit<Crossing, 'kept'>[]
   dropped: Omit<Crossing, 'kept'>[]
+  /** What the boundary RECORDED, which is the number its own row reports. */
+  kept_recorded: number
+  /** Of those, how many are messages this store actually holds. Not the same number. */
   kept_total: number
   kept_shown: number
   dropped_total: number
@@ -31,7 +34,13 @@ export function crossings(detail: CompactionDetail): Crossing[] {
   return rows.sort((a, b) => b.chars - a.chars)
 }
 
-/** The whole set, both sides, as CSV. The export is the full data, not what the page draws. */
+/**
+ * Both sides as CSV, and it carries what was FETCHED rather than what the page draws.
+ *
+ * Not "the full data", which is what this claimed while the route caps at 5,000 rows and one
+ * boundary here dropped 22,346. The page states the cap beside the list; the file cannot, so the
+ * claim had to go rather than the number.
+ */
 export function csv(rows: Crossing[]): string {
   const cell = (v: unknown) => '"' + String(v ?? '').replace(/"/g, '""') + '"'
   const head = ['outcome', 'ts', 'role', 'type', 'chars', 'uuid', 'preview']
@@ -154,15 +163,22 @@ export function CompactionPage({
                 Only what it kept
               </label>
             </div>
-            {/* A LOWER BOUND IN BOTH DIRECTIONS, said rather than left to be inferred from two
-                counts that do not add up to the total. A survivor uuid the store never harvested
-                cannot be shown on either side. */}
+            {/* THREE NUMBERS PER SIDE, AND THEY ARE NOT INTERCHANGEABLE. This printed
+                "270 kept of 270 recorded" while the boundary recorded 697 and only 268 of them
+                are messages the store holds. A count under the wrong word is a wrong number. */}
             <p className="mb-2 text-2xs text-ink-faint">
-              {detail.kept_shown.toLocaleString()} kept and{' '}
-              {detail.dropped_shown.toLocaleString()} dropped can be shown, of{' '}
-              {detail.kept_total.toLocaleString()} and {detail.dropped_total.toLocaleString()}{' '}
-              recorded. Both are lower bounds: a survivor this store never harvested cannot appear
-              on either side.
+              Showing {shown.length.toLocaleString()} of{' '}
+              {(detail.kept_shown + detail.dropped_shown).toLocaleString()} fetched.
+              {' '}This boundary recorded {detail.kept_recorded.toLocaleString()} survivors, of
+              which {detail.kept_total.toLocaleString()} are messages this store holds; it dropped
+              at least {detail.dropped_total.toLocaleString()}, of which{' '}
+              {detail.dropped_shown.toLocaleString()} were fetched. A survivor this store never
+              harvested cannot appear on either side, so both are lower bounds.
+              {detail.dropped_shown < detail.dropped_total && (
+                <> The list and the export carry the{' '}
+                  {(detail.kept_shown + detail.dropped_shown).toLocaleString()} largest, not every
+                  row.</>
+              )}
             </p>
             <div className="max-h-[55vh] overflow-auto rounded border border-edge">
               {shown.map((row) => (

@@ -110,7 +110,7 @@ def test_api_calls_is_deduped_and_is_not_the_turn_count(compared, two_sessions, 
 def test_the_ratio_is_b_over_a(compared):
     """Every ratio is recomputed from the two numbers printed beside it."""
     for metric, row in compared.items():
-        a, b, shown = float(row["A"]), float(row["B"]), row.get("B vs A")
+        a, b, shown = float(row["A"]), float(row["B"]), row.get("B / A")
         if shown in (None, "") or a == 0:
             continue
         assert float(shown) == pytest.approx(b / a, abs=0.006), (
@@ -158,8 +158,8 @@ def test_comparing_a_session_with_itself_is_a_flat_one(two_sessions, has_store):
     same = metrics_of(commands.render_compare("session", a, a))
     for metric, row in same.items():
         assert str(row["A"]) == str(row["B"]), f"{metric} differs from itself: {row}"
-        if row.get("B vs A") not in (None, ""):
-            assert float(row["B vs A"]) == pytest.approx(1.0, abs=0.001), metric
+        if row.get("B / A") not in (None, ""):
+            assert float(row["B / A"]) == pytest.approx(1.0, abs=0.001), metric
         assert not row.get("verdict"), f"{metric} called a winner between identical arms"
 
 

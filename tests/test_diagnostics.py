@@ -96,7 +96,7 @@ def test_thresholds_rise_in_order(body):
     """warn < compact < blocked < window. Any other order would make a band inside-out."""
     table = next((t for t in extract.tables(body) if "window" in (t["columns"] or [])), None)
     for row in table["rows"]:
-        values = [row.get(k) for k in ("warn at", "compact at", "blocked at", "window")]
+        values = [row.get(k) for k in ("warn", "compact", "blocked", "window")]
         numeric = [v for v in values if isinstance(v, (int, float))]
         if len(numeric) < 2:
             continue

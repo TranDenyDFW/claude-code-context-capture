@@ -5,7 +5,7 @@ import { Pane } from '@/components/Pane'
 import { CompactionPage } from '@/components/CompactionPage'
 import { FigurePage } from '@/components/FigurePage'
 import { TablePage } from '@/components/TablePage'
-import { readState, tableUrl, writeState, type ViewState } from '@/state'
+import { compactionUrl, figureUrl, readState, tableUrl, writeState, type ViewState } from '@/state'
 import { Palette, type Choice } from '@/components/Palette'
 import { CompareArms } from '@/components/CompareArms'
 import { ProjectMoves } from '@/components/ProjectMoves'
@@ -71,6 +71,10 @@ export default function App() {
       setSelection(next.selection)
       setView(next.view)
       setTableIndex(next.table)
+      // The two views added later were missing here, so Back out of a chart or a compaction left
+      // the previous screen under the new address, which is the exact bug this effect exists for.
+      setFigureIndex(next.figure)
+      setCompactionId(next.compaction)
       setTableQuery(next.query)
       setTableFilter(next.filter)
     }
@@ -79,10 +83,14 @@ export default function App() {
   }, [])
 
   /** One table of the current tab, in a window of its own, with the current selection. */
-  /** Open one chart full width, in a window of its own, the way a table opens. */
+  // A REAL WINDOW, the way the table's button already worked. These called setView and navigated
+  // in place, so one label meant two different things depending on which panel it sat on, and
+  // `figureUrl` was exported and called by nothing.
   const openFigure = (index: number) => {
-    setFigureIndex(index)
-    setView('figure')
+    window.open(figureUrl(state, index), '_blank', 'noopener')
+  }
+  const openCompaction = (id: string) => {
+    window.open(compactionUrl(state, id), '_blank', 'noopener')
   }
 
   const openTable = (
@@ -431,7 +439,7 @@ export default function App() {
             className={pane.isFetching ? 'opacity-60 transition-opacity' : undefined}
           >
             <Pane payload={pane.data} onRowClick={selectFromRow} onOpenTable={openTable}
-                  onOpenCompaction={(id) => { setCompactionId(id); setView('compaction') }}
+                  onOpenCompaction={openCompaction}
                   onOpenFigure={openFigure} />
           </div>
         )}

@@ -788,14 +788,21 @@ def compaction_kept(compaction_uuid: str, limit: int = 300) -> pd.DataFrame:
     Same lower bound in the same direction. A survivor uuid the store holds no message for cannot
     be shown, so this lists what can be shown to have stayed rather than everything that stayed:
     on this store one boundary records 24 message survivors and 17 of them join to a harvested row.
+
+    ONE ROW PER MESSAGE, VIA `IN` RATHER THAN A JOIN. `compaction_survivors` holds 208 duplicate
+    (compaction, uuid) pairs across every boundary that has any, so joining it row for row returned
+    the same message twice: 270 rows carrying 268 distinct uuids on the worst boundary here. That
+    inflated the count the page printed AND collided the React key it is drawn under. Its opposite
+    number, `compaction_dropped`, uses `NOT IN` and was never exposed to this, which is how the two
+    halves of one feature came to disagree.
     """
     return q(
         """
         SELECT m.uuid, m.ts, m.role, m.type, m.chars,
                substr(replace(replace(m.text, char(10), ' '), char(13), ' '), 1, 220) AS preview
         FROM compactions c
-        JOIN compaction_survivors s ON s.compaction_uuid = c.uuid
-        JOIN messages m ON m.uuid = s.uuid
+        JOIN messages m ON m.uuid IN (
+                 SELECT uuid FROM compaction_survivors WHERE compaction_uuid = c.uuid)
         WHERE c.uuid = ?
           AND m.uuid <> COALESCE(c.summary_uuid, '')
         ORDER BY m.chars DESC
@@ -806,15 +813,35 @@ def compaction_kept(compaction_uuid: str, limit: int = 300) -> pd.DataFrame:
 
 
 def compaction_kept_count(compaction_uuid: str) -> int:
-    """How many survivors can be SHOWN, which is not how many were recorded."""
+    """How many survivors can be SHOWN: distinct messages this store actually holds.
+
+    NOT how many were recorded, and the page must not print it under that word. On the worst
+    boundary here the store recorded 697 survivors, 270 of them join to a harvested message, and
+    268 of those are distinct. Three different numbers, and only the last is what a reader sees.
+    """
     df = q(
         """
-        SELECT COUNT(*) AS n
-        FROM compactions c
-        JOIN compaction_survivors s ON s.compaction_uuid = c.uuid
-        JOIN messages m ON m.uuid = s.uuid
-        WHERE c.uuid = ? AND m.uuid <> COALESCE(c.summary_uuid, '')
+        SELECT COUNT(*) AS n FROM (
+            SELECT DISTINCT m.uuid
+            FROM compactions c
+            JOIN messages m ON m.uuid IN (
+                     SELECT uuid FROM compaction_survivors WHERE compaction_uuid = c.uuid)
+            WHERE c.uuid = ? AND m.uuid <> COALESCE(c.summary_uuid, ''))
         """,
+        (compaction_uuid,),
+    )
+    return int(df.iloc[0]["n"]) if not df.empty else 0
+
+
+def compaction_survivors_recorded(compaction_uuid: str) -> int:
+    """How many survivors the BOUNDARY recorded, which is what its own row reports.
+
+    The number the reader just clicked on. Kept apart from what can be shown, because they differ
+    by a factor of two and a half on this store and printing either under the other's name is a
+    wrong number rather than a rounded one.
+    """
+    df = q(
+        "SELECT COUNT(DISTINCT uuid) AS n FROM compaction_survivors WHERE compaction_uuid = ?",
         (compaction_uuid,),
     )
     return int(df.iloc[0]["n"]) if not df.empty else 0

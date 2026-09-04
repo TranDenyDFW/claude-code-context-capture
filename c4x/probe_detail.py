@@ -41,8 +41,8 @@ from c4x.theme import (
 KINDS = [
     ("skill", "Skills", "skills", None),
     ("mcpTool", "MCP tools", "mcp_tools", "mcp_tools_items"),
-    ("agent", "Custom Agents", "custom_agents", "custom_agents_items"),
-    ("memoryFile", "Memory Files", "memory_files", "memory_files_items"),
+    ("agent", "Custom agents", "custom_agents", "custom_agents_items"),
+    ("memoryFile", "Memory files", "memory_files", "memory_files_items"),
     ("attachment", "Attachments in the conversation", None, None),
     ("toolCallType", "Tool calls in the conversation", None, None),
 ]

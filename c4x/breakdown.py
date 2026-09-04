@@ -296,12 +296,12 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
     res = merged["total_resident"].astype(int)
     stat = merged["static_total"].clip(upper=res)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=stat, mode="lines", name="Static Overhead",
+    fig.add_trace(go.Scatter(x=x, y=stat, mode="lines", name="Static overhead",
                              line=dict(width=0), stackgroup="one", fillcolor="#e8590c"))
     fig.add_trace(go.Scatter(x=x, y=(res - stat).clip(lower=0), mode="lines",
                              name="Messages", line=dict(width=0), stackgroup="one",
                              fillcolor=ACCENT))
-    fig.add_trace(go.Scatter(x=x, y=(window - res).clip(lower=0), mode="lines", name="Free Space",
+    fig.add_trace(go.Scatter(x=x, y=(window - res).clip(lower=0), mode="lines", name="Free space",
                              line=dict(width=0), stackgroup="one", fillcolor="#21262d"))
     fig.update_layout(title="Context Window Over Time",
                       title_font=dict(color=TEXT, size=13),

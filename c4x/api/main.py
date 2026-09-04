@@ -1022,6 +1022,7 @@ def compaction(uuid: str, limit: int = Query(300, ge=1, le=5000)):
         compaction_kept,
         compaction_kept_count,
         compaction_summary_text,
+        compaction_survivors_recorded,
     )
     summary = compaction_summary_text(uuid)
     dropped = compaction_dropped(uuid, limit=limit)
@@ -1043,6 +1044,10 @@ def compaction(uuid: str, limit: int = Query(300, ge=1, le=5000)):
         # writes, and which ones it chose is the most legible thing about it. Same lower bound: a
         # survivor uuid the store holds no message for cannot be shown.
         "kept": records(kept) if not kept.empty else [],
+        # THREE NUMBERS, NOT TWO, because they differ by a factor of two and a half here and the
+        # page printed one under the other's name: 697 survivors recorded, 268 of them messages
+        # this store holds. `kept_recorded` is what the row the reader just clicked reports.
+        "kept_recorded": compaction_survivors_recorded(uuid),
         "kept_total": compaction_kept_count(uuid),
         "kept_shown": int(len(kept)),
     })
