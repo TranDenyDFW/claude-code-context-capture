@@ -408,13 +408,8 @@ def stacked_message_figure(rows):
     fig.update_layout(barmode="stack", title="The Message Half, by Category",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="", yaxis_title="tokens")
-    return html.Div([
-        dcc.Graph(id="fig-probe-messages", figure=dark_fig(fig, 340),
-                  config={"displayModeBar": False}),
-        # One bar per probe, which the title used to say and no longer needs to.
-        chart_note(f"One stacked bar per probe, {len(order)} on record, so the shape can be "
-                   f"compared across readings.", for_id="fig-probe-messages"),
-    ])
+    return dcc.Graph(id="fig-probe-messages", figure=dark_fig(fig, 340),
+                     config={"displayModeBar": False})
 
 
 def message_blocks(probe_id):
@@ -434,6 +429,11 @@ def message_blocks(probe_id):
     bar = message_composition_bar(probe_id)
     if bar is not None:
         out.append(bar)
+        # HERE, not inside the figure builder: `stacked_message_figure` returns a `dcc.Graph` and
+        # two chart tests read `.figure` straight off it. Wrapping it to carry its own caption
+        # broke both, which is the shape of change that looks free and is not.
+        out.append(chart_note("One stacked bar per probe, so the shape can be compared across "
+                              "readings.", for_id="fig-probe-messages"))
     if not df.empty:
         out.append(evidence_block(
             "What the messages are made of", df, sql, (int(probe_id),),

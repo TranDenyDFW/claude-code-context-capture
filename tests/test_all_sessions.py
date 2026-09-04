@@ -24,15 +24,21 @@ def test_the_table_has_the_columns_the_page_promises(table):
 
 
 def test_row_count_matches_the_population_the_page_states(table, q, pane):
-    """The tab prints "N sessions with F or more turns". That sentence is a claim, and F is the
-    floor the store applies, not a number this test happens to agree with."""
+    """The tab STATES how many sessions it lists and on what floor. That is a claim, and F is the
+    floor the store applies, not a number this test happens to agree with.
+
+    The claim moved from a sentence to a card, because a number in a paragraph is a number a reader
+    has to find. It is still a claim and it is still checked: the count, the label it sits under,
+    and the floor it was taken on all have to reach the page.
+    """
     expected = int(q("""SELECT COUNT(*) AS n FROM (
                           SELECT session_id FROM turns GROUP BY session_id HAVING COUNT(*) >= ?)""",
                      (SESSION_TURN_FLOOR,)).iloc[0]["n"])
     assert len(table["rows"]) == expected
-    text = "\n".join(extract.texts(pane("tab-sessions")))
-    assert f"{expected:,} sessions with {SESSION_TURN_FLOOR} or more turns" in text, (
-        "the stated population and the rendered one disagree")
+    lines = [t.strip().lower() for t in extract.texts(pane("tab-sessions"))]
+    for claim in ("listed sessions", f"{expected:,}", f"{SESSION_TURN_FLOOR} or more turns"):
+        assert claim in lines, (
+            f"the page does not state {claim!r}: stated and rendered populations disagree")
 
 
 def test_every_numeric_column_matches_its_own_sql(table, q):
@@ -69,13 +75,24 @@ def test_current_never_exceeds_peak(table):
 
 
 def test_sections_partition_the_rows(table, pane):
-    """Every row lands in exactly one section, and the stated counts add up to the total."""
+    """Every row lands in exactly one section, and the stated counts add up to the total.
+
+    The largest section is the card's figure and the rest are its caption, so the two are read
+    differently here. Both are still checked: every section's count reaches the reader, which is
+    the property, and it does not matter which line it arrives on.
+    """
     from collections import Counter
     counts = Counter(r["section"] for r in table["rows"])
     assert sum(counts.values()) == len(table["rows"])
-    text = "\n".join(extract.texts(pane("tab-sessions")))
+    lines = [t.strip().lower() for t in extract.texts(pane("tab-sessions"))]
+    joined = chr(10).join(lines)
     for section, n in counts.items():
-        assert f"{section} {n:,}" in text, f"the page does not state {section} {n:,}"
+        if section == "Projects":
+            assert "projects" in lines and f"{n:,}" in lines, (
+                f"the page does not state Projects as a figure of {n:,}")
+        else:
+            assert f"{section.lower()} {n:,}" in joined, (
+                f"the page does not state {section} {n:,}")
 
 
 def test_archived_paths_agree_with_the_desktop_records(table, store):

@@ -432,3 +432,85 @@ def test_every_chart_on_every_surface_has_a_name(app):
     unnamed = [(name, i) for name, payload in _surfaces(app).items()
                for i, figure in enumerate(payload["figures"]) if not (figure.get("title") or "")]
     assert not unnamed, f"charts the page would draw with no heading: {unnamed}"
+
+
+def _graph(index):
+    import plotly.graph_objects as go
+    from dash import dcc
+    return dcc.Graph(id=f"g{index}", figure=go.Figure())
+
+
+def test_a_caption_between_two_charts_belongs_to_the_one_above_it():
+    """The rule stated in `_marked_notes`, checked rather than assumed.
+
+    Four of this app's chart captions are written UNDER their chart, because "click a point to..."
+    belongs there on the page. A rule that preferred the chart below would put every one of them on
+    the wrong chart, silently, and the reader would have no way to tell.
+    """
+    from dash import html
+
+    from c4x.api.main import _figure_meta
+    from c4x.theme import chart_note
+
+    pane = html.Div([_graph(1), chart_note("mine"), _graph(2)])
+    assert [m["note"] for m in _figure_meta(pane, 2)] == ["mine", None]
+
+
+def test_a_caption_before_the_first_chart_still_reaches_it():
+    """`sources.py` writes its caption above the chart. With no chart above it, the one
+    below wins."""
+    from dash import html
+
+    from c4x.api.main import _figure_meta
+    from c4x.theme import chart_note
+
+    assert _figure_meta(html.Div([chart_note("mine"), _graph(1)]), 1)[0]["note"] == "mine"
+
+
+def test_one_chart_can_carry_more_than_one_caption():
+    """The Window tab's composition chart carries three separate statements.
+
+    They bind by CLASS, not by id: an id must be unique in a Dash page, so the first version of
+    this allowed exactly one caption per chart and silently dropped the rest.
+    """
+    from dash import html
+
+    from c4x.api.main import _figure_meta
+    from c4x.theme import chart_note
+
+    pane = html.Div([_graph(1), _graph(2),
+                     chart_note("a", for_id="g1"), chart_note("b", for_id="g1")])
+    assert [m["note"] for m in _figure_meta(pane, 2)] == ["a\nb", None]
+
+
+def test_a_caption_naming_a_chart_that_is_not_there_binds_to_nothing():
+    """And is therefore caught by the gate on loose prose, rather than shown on a chart at random.
+
+    A chart is conditional on several panels: no probe, no chart. A caption that quietly moved to
+    whichever chart happened to be nearest would be a caption about a chart that is not on screen.
+    """
+    from dash import html
+
+    from c4x.api.main import _figure_meta
+    from c4x.theme import chart_note
+
+    pane = html.Div([_graph(1), chart_note("x", for_id="absent")])
+    assert _figure_meta(pane, 1)[0]["note"] is None
+
+
+def test_a_heading_above_a_chart_reaches_the_chart_and_not_the_table_after_it():
+    """`_table_meta` discards this pair, correctly, and had nowhere to put it.
+
+    On the Injected panel that pair is the only thing naming the chart, so the chart was drawn with
+    no explanation while its heading printed as a loose line above it.
+    """
+    from dash import dash_table, html
+
+    from c4x.api.main import _figure_meta, _table_meta
+    from c4x.theme import SECTION_HEAD
+
+    pane = html.Div([html.Div("Head", style=SECTION_HEAD), html.Div("note"),
+                     _graph(1), dash_table.DataTable(id="t")])
+    assert _figure_meta(pane, 1)[0]["absorbed"] == ["Head", "note"]
+    # And the table after the chart does not also claim it.
+    assert _table_meta(pane)[0]["absorbed"] == []
