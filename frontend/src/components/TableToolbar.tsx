@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, Columns3, Download } from 'lucide-react'
+import { Check, ChevronDown, Columns3, Download, ExternalLink } from 'lucide-react'
 import type { ColumnMeta } from '@/api'
 import {
   copyToClipboard, downloadCsv, downloadExcel, downloadPdf, hydrate, printSheet, type Sheet,
@@ -103,8 +103,11 @@ export function TableToolbar({
   pageSize,
   onPageSize,
   children,
+  onOpenWindow,
 }: {
   sheet: Sheet
+  /** Open this table in a window of its own. Absent on the single-table page itself. */
+  onOpenWindow?: () => void
   allColumns: ColumnMeta[]
   hidden: Set<string>
   onToggleColumn: (id: string) => void
@@ -167,6 +170,19 @@ export function TableToolbar({
             </>
           )}
         </Menu>
+
+        {onOpenWindow && (
+          <button
+            onClick={onOpenWindow}
+            title="Open this table on a page of its own, in a new window, with the current selection"
+            aria-label={`Open ${sheet.name} in a new window`}
+            className="flex items-center gap-1 rounded border border-edge px-2 py-1 text-xs
+                       text-ink-dim hover:text-ink"
+          >
+            <ExternalLink size={13} aria-hidden="true" />
+            Window
+          </button>
+        )}
 
         <Menu label="Export" icon={<Download size={13} aria-hidden="true" />}>
           {(close) => (

@@ -1,24 +1,21 @@
 import type { TabPayload } from '@/api'
 import { DataTable } from './DataTable'
-import { Plot } from './Plot'
+import { describePoint } from './inspect'
+import { Inspector } from './Inspector'
+import { Plot, type PlotPoint } from './Plot'
 import { Section } from './Section'
+import { TableHeading, tableName } from './TableHeading'
+import { useRowInspector } from './useRowInspector'
 
-/**
- * A whole tab, drawn from the payload, with no per-tab code.
- *
- * This is the payoff from making `extract.describe()` the API contract rather than inventing a new
- * one per page. Every tab in this app is some tables, some charts and some prose, and the server
- * says which. So ONE renderer covers all eight, and per-tab work is only needed where a tab has an
- * interaction rather than merely content.
- *
- * The order is: what this tab describes, then the shape, then the caveats, then the numbers.
- */
 export function Pane({
   payload,
   onRowClick,
+  onOpenTable,
 }: {
   payload: TabPayload
   onRowClick?: (row: Record<string, unknown>) => void
+  /** Open table `index` of this tab in a window of its own; the toolbar shows the control. */
+  onOpenTable?: (index: number, focus?: { query: string; filter: { key: string; value: string } | null }) => void
 }) {
   const figures = payload.plotly ?? []
   const sections = payload.details ?? []
@@ -51,6 +48,9 @@ export function Pane({
   for (const entry of meta) {
     for (const line of entry.absorbed ?? []) claim(line)
   }
+  // The labels of controls this page does not draw. The window calculator is Dash-only; its
+  // "Resident tokens", "Window" and constants sentence read as orphaned prose here.
+  for (const line of payload.dash_only ?? []) claim(line)
   const prose = payload.text.filter(
     (line) =>
       line !== payload.population &&
@@ -69,6 +69,24 @@ export function Pane({
     sections.find((s) => s.wraps === wraps && s.wraps_index === index)?.summary
 
   const attached = (index: number) => textSections.filter((s) => s.table_index === index)
+  const names = payload.tables.map((_, index) => tableName(index, meta[index], titleFor('table', index)))
+  const reader = useRowInspector(payload, names, onRowClick)
+
+  /** A click on a chart: the point's fields, the rows behind it, and a way to open those rows. */
+  const inspectPoint = (figureIndex: number) => (point: PlotPoint) => {
+    const figureTitle = titleFor('figure', figureIndex) || payload.figures[figureIndex]?.title || null
+    const { content, tableIndex, filter, query } = describePoint(
+      point, figureTitle, payload.tables, meta, names)
+    reader.setContent({
+      ...content,
+      // The link carries the EXACT filter when the value lives in a key column, since a text
+      // search over the columns a page draws would never find a hidden session id; otherwise the
+      // visible value, which is what a reader would have typed.
+      onOpen: onOpenTable && tableIndex !== null
+        ? () => onOpenTable(tableIndex, { query: query ?? '', filter })
+        : null,
+    })
+  }
   const loose = textSections.filter(
     (s) => s.table_index === null || s.table_index < 0 || s.table_index >= payload.tables.length,
   )
@@ -118,7 +136,7 @@ export function Pane({
               {titleFor('figure', index) || payload.figures[index]?.title}
             </h3>
           )}
-          <Plot figure={figure} />
+          <Plot figure={figure} onPointClick={inspectPoint(index)} />
         </section>
       ))}
 
@@ -141,36 +159,20 @@ export function Pane({
         // name comes from the server, which pairs the heading it wrote above the table; the last
         // resort is a numbered one, so no table is ever the only unnamed thing on a page. The note
         // is on the heading, not in the body, and the glyph says there is something to hover.
-        const name = titleFor('table', index) || meta[index]?.title || `Table ${index + 1}`
+        const name = tableName(index, meta[index], titleFor('table', index))
         const note = meta[index]?.note ?? null
         return (
           // Keyed by INDEX, not by id. Five of the Cost tab's six tables report the id
           // `(anonymous)`, so keying on it collided four times and React warned on every render.
           <section key={index} className="flex flex-col gap-2">
-            <h3
-              className="flex items-baseline gap-2 text-md font-semibold text-ink-dim"
-              title={note ?? undefined}
-              aria-description={note ?? undefined}
-            >
-              <span>{name}</span>
-              <span className="text-2xs font-normal tabular-nums text-ink-faint">
-                {table.rows.length.toLocaleString()} {table.rows.length === 1 ? 'row' : 'rows'}
-              </span>
-              {note && (
-                <span
-                  aria-hidden="true"
-                  className="rounded border border-edge px-1 text-2xs font-normal leading-4
-                             text-ink-faint"
-                >
-                  ?
-                </span>
-              )}
-            </h3>
+            <TableHeading name={name} table={table} note={note} />
             <DataTable
               table={table}
               meta={meta[index]}
               title={name}
               onRowClick={onRowClick}
+              onOpenWindow={onOpenTable ? () => onOpenTable(index) : undefined}
+              onOpenRow={reader.openRow(index)}
             />
             {attached(index).map((section, at) => (
               <Section key={at} section={section} table={table} meta={meta[index]} />
@@ -184,6 +186,8 @@ export function Pane({
           This tab produced nothing for the current selection.
         </div>
       )}
+
+      {reader.content && <Inspector content={reader.content} onClose={reader.close} />}
     </div>
   )
 }

@@ -140,7 +140,10 @@ describe('clicking a row to select a session', () => {
     expect(clicked).toEqual([{ session_id: 'abc', turns: 10 }])
   })
 
-  it('is INERT on a table with no session column, rather than looking clickable and doing nothing', () => {
+  it('opens the inspector on a table with no session column, and never selects a session from it', () => {
+    // This used to assert the row was inert. A row that looks clickable must do something, and
+    // now every row does: it opens the drawer with its fields, which is the message reader for the
+    // Messages table and a plain field list for every other one.
     const clicked: Record<string, unknown>[] = []
     render(
       <Pane
@@ -149,9 +152,11 @@ describe('clicking a row to select a session', () => {
       />,
     )
     const row = screen.getByRole('table').querySelector('tbody tr')!
-    row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    fireEvent.click(row)
     expect(clicked).toEqual([])
-    expect(row.className).not.toContain('cursor-pointer')
+    const drawer = screen.getByRole('dialog')
+    expect(drawer.textContent).toContain('opus')
+    expect(drawer.textContent).toContain('usd')
   })
 })
 
@@ -547,5 +552,49 @@ describe('every table is named and explained the same way', () => {
     )
     expect(screen.getAllByText(/re-read groups/i)).toHaveLength(1)
     expect(screen.getByText('A sentence that is real prose.')).toBeTruthy()
+  })
+})
+
+describe('every table can open in a window of its own', () => {
+  const meta = (over: Partial<TableMeta> = {}): TableMeta => ({
+    id: 't', title: null, columns: [], filterable: true, page_size: null, ...over,
+  })
+
+  it('shows the control on each table and reports which table was asked for', () => {
+    const open = vi.fn()
+    render(
+      <Pane
+        payload={payload({
+          tables: [table('a', [{ a: 1 }]), table('b', [{ b: 2 }])],
+          meta: [meta({ id: 'a', title: 'First' }), meta({ id: 'b', title: 'Second' })],
+        })}
+        onOpenTable={open}
+      />,
+    )
+    const buttons = screen.getAllByRole('button', { name: /in a new window/ })
+    expect(buttons).toHaveLength(2)
+    fireEvent.click(buttons[1])
+    expect(open).toHaveBeenCalledWith(1)
+  })
+
+  it('shows no control when nothing can open one (gate can fail)', () => {
+    render(<Pane payload={payload({ tables: [table('a', [{ a: 1 }])], meta: [meta({ id: 'a', title: 'First' })] })} />)
+    expect(screen.queryByRole('button', { name: /in a new window/ })).toBeNull()
+  })
+})
+
+describe('text under a Dash-only control is never printed', () => {
+  it('drops the calculator labels the server names, and keeps real prose', () => {
+    render(
+      <Pane
+        payload={payload({
+          text: ['Resident tokens', 'Window', 'Constants read from tools/mirror-core.mjs', 'A real sentence.'],
+          dash_only: ['Resident tokens', 'Window', 'Constants read from tools/mirror-core.mjs'],
+        })}
+      />,
+    )
+    expect(screen.queryByText('Resident tokens')).toBeNull()
+    expect(screen.queryByText('Window')).toBeNull()
+    expect(screen.getByText('A real sentence.')).toBeTruthy()
   })
 })

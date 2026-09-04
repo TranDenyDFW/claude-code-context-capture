@@ -27,6 +27,33 @@ type PlotlyModule = {
   purge: (node: HTMLElement) => void
 }
 
+/** What a click on a chart reports: the point Plotly resolved, reduced to what a reader can use. */
+export interface PlotPoint {
+  traceName: string | null
+  x: unknown
+  y: unknown
+  text?: unknown
+  customdata?: unknown
+  /** Treemap and pie cells name themselves by label rather than by x. */
+  label?: unknown
+  value?: unknown
+  pointIndex: number
+}
+
+type PlotlyEvent = {
+  points?: {
+    data?: { name?: string }
+    x?: unknown; y?: unknown; text?: unknown; customdata?: unknown; label?: unknown; value?: unknown
+    pointIndex?: number; pointNumber?: number
+  }[]
+}
+
+/** The div Plotly draws into gains an event emitter once drawn. */
+type GraphDiv = HTMLElement & {
+  on?: (event: string, handler: (event: PlotlyEvent) => void) => void
+  removeAllListeners?: (event: string) => void
+}
+
 let pending: Promise<PlotlyModule> | null = null
 
 function plotly(): Promise<PlotlyModule> {
@@ -35,8 +62,21 @@ function plotly(): Promise<PlotlyModule> {
   return pending
 }
 
-export function Plot({ figure, height = 380 }: { figure: PlotlyFigure; height?: number }) {
+export function Plot({
+  figure,
+  height = 380,
+  onPointClick,
+}: {
+  figure: PlotlyFigure
+  height?: number
+  /** A click on a point, bar or cell. Absent, the chart is hover-only as before. */
+  onPointClick?: (point: PlotPoint) => void
+}) {
   const holder = useRef<HTMLDivElement>(null)
+  // The latest handler, read at click time, so a re-render with a new closure does not rebind the
+  // chart's listeners or, worse, leave the old closure attached.
+  const clickHandler = useRef(onPointClick)
+  clickHandler.current = onPointClick
   // A chunk that fails to download left every chart on the page blank and silent, with nothing
   // in the DOM or the console naming the cause. Found by a review sweep; pre-existing.
   const [failed, setFailed] = useState<string | null>(null)
@@ -66,6 +106,22 @@ export function Plot({ figure, height = 380 }: { figure: PlotlyFigure; height?: 
         responsive: true,
         // Plotly's own scroll zoom fights the page: a reader scrolling past a chart zooms it.
         scrollZoom: false,
+      }).then(() => {
+        // Bound once per draw, on the emitter Plotly attaches to the node it drew into. A
+        // re-draw of the same node replaces the listener rather than stacking a second one.
+        const graph = node as GraphDiv
+        graph.removeAllListeners?.('plotly_click')
+        graph.on?.('plotly_click', (event) => {
+          const point = event.points?.[0]
+          const handler = clickHandler.current
+          if (!point || !handler) return
+          handler({
+            traceName: point.data?.name ?? null,
+            x: point.x, y: point.y, text: point.text, customdata: point.customdata,
+            label: point.label, value: point.value,
+            pointIndex: point.pointIndex ?? point.pointNumber ?? 0,
+          })
+        })
       })
     }).catch((error: unknown) => {
       // Forget the failed download so the next chart, or a reload of this one, tries again
@@ -87,5 +143,12 @@ export function Plot({ figure, height = 380 }: { figure: PlotlyFigure; height?: 
       </div>
     )
   }
-  return <div ref={holder} className="w-full" style={{ height }} />
+  return (
+    <div
+      ref={holder}
+      className={`w-full ${onPointClick ? 'cursor-pointer' : ''}`}
+      style={{ height }}
+      title={onPointClick ? 'Click a point, bar or cell to see the data behind it' : undefined}
+    />
+  )
 }

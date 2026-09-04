@@ -78,14 +78,29 @@ export function DataTable({
   meta,
   title,
   onRowClick,
+  onOpenWindow,
+  initialQuery,
+  onQueryChange,
+  onOpenRow,
 }: {
   table: Table
   meta?: TableMeta
   title?: string
   onRowClick?: (row: Record<string, unknown>) => void
+  /** Open a row in the inspector: its fields, and its full text where a column was cut. */
+  onOpenRow?: (row: Record<string, unknown>) => void
+  /** Open this table in a window of its own; the toolbar shows the control when given. */
+  onOpenWindow?: () => void
+  /** What the search box starts with, so a link can point at the rows behind a click. */
+  initialQuery?: string
+  /** Reports the search box as it changes, so a page that owns the address can publish it. */
+  onQueryChange?: (query: string) => void
 }) {
   const [sort, setSort] = useState<{ column: string; direction: 1 | -1 } | null>(null)
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useState(initialQuery ?? '')
+  // FOLLOWS THE PROP, not only its first value. A mount-time seed meant a link opened in a window
+  // already showing this table kept the old filter, and the address described a screen nobody had.
+  useEffect(() => { setQuery(initialQuery ?? '') }, [initialQuery])
   const [columnQuery, setColumnQuery] = useState<Record<string, string>>({})
   const [hidden, setHidden] = useState<Set<string>>(new Set())
   const [order, setOrder] = useState<string[] | null>(null)
@@ -170,12 +185,19 @@ export function DataTable({
 
   if (!table.columns.length) return null
 
-  // Only a table that identifies a session can be navigated from. `session_id` is a HIDDEN column
-  // on the sessions table: in every row, absent from the column list, which is how the identifier
-  // travels without showing a uuid. Reading `columns` here made the feature do nothing on the one
-  // table it exists for.
-  const navigable = Boolean(onRowClick) && table.rows.length > 0 &&
-    ('session_id' in table.rows[0] || 'session' in table.rows[0])
+  // ONE CLICK, ONE MEANING, and the reader wins. A table whose rows carry a full text says so in
+  // its own note ("click a row to read it in full"), so that click must read; a table that only
+  // identifies a session navigates. A table with both would have lost its reader silently under
+  // the previous rule, which read row 0 alone.
+  //
+  // `session_id` is a HIDDEN column on the sessions table: in every row, absent from the column
+  // list, which is how the identifier travels without showing a uuid. Reading `columns` here made
+  // the feature do nothing on the one table it exists for. Read across rows, not just the first:
+  // a store can hand back a first row missing a key that every other row has.
+  const reads = Boolean(onOpenRow) && Boolean(meta?.full_text)
+  const identifies = table.rows.some((row) => 'session_id' in row || 'session' in row)
+  const navigable = Boolean(onRowClick) && !reads && identifies
+  const openable = Boolean(onOpenRow) && !navigable
 
   const filtering = Boolean(query.trim() || Object.values(columnQuery).some((v) => v.trim()))
 
@@ -183,6 +205,7 @@ export function DataTable({
     <div className="overflow-hidden rounded-lg bg-panel shadow-panel">
       <TableToolbar
         sheet={sheet}
+        onOpenWindow={onOpenWindow}
         allColumns={columns}
         hidden={hidden}
         onToggleColumn={(id) =>
@@ -205,7 +228,12 @@ export function DataTable({
       >
         <input
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => {
+            setQuery(event.target.value)
+            // The page that owns the address publishes it, so a copied link points at the rows
+            // on screen rather than at the ones the link happened to open with.
+            onQueryChange?.(event.target.value)
+          }}
           // Just "Filter". It used to say "Filter 5 rows" while the footer said "5 rows" two
           // inches below, which is the same number twice.
           placeholder="Filter"
@@ -216,7 +244,7 @@ export function DataTable({
         {filtering && (
           <>
             <button
-              onClick={() => { setQuery(''); setColumnQuery({}) }}
+              onClick={() => { setQuery(''); onQueryChange?.(''); setColumnQuery({}) }}
               className="rounded border border-edge px-2 py-1 text-2xs text-ink-dim hover:text-ink"
             >
               Clear
@@ -297,10 +325,12 @@ export function DataTable({
             {rows.map((row, index) => (
               <tr
                 key={index}
-                onClick={navigable ? () => onRowClick!(row) : undefined}
-                title={navigable ? 'select this session' : undefined}
+                onClick={navigable ? () => onRowClick!(row)
+                  : openable ? () => onOpenRow!(row) : undefined}
+                title={navigable ? 'select this session'
+                  : openable ? 'open this row: every field, and the full text' : undefined}
                 className={`border-b border-edge/40 last:border-0 hover:bg-panel-raised
-                            ${navigable ? 'cursor-pointer' : ''}`}
+                            ${navigable || openable ? 'cursor-pointer' : ''}`}
               >
                 {visible.map((column) => {
                   const value = row[column.id]
