@@ -3,7 +3,7 @@ import type { TabPayload } from '@/api'
 import { DataTable } from './DataTable'
 import { Inspector } from './Inspector'
 import { Section } from './Section'
-import { TableHeading, tableName } from './TableHeading'
+import { TableHeading, joinNotes, tableName } from './TableHeading'
 import { useRowInspector } from './useRowInspector'
 
 /**
@@ -45,8 +45,11 @@ export function TablePage({
   const table = payload.tables[index]
   const meta = payload.meta?.[index]
   const sections = payload.details ?? []
-  const sectionTitle = sections.find((s) => s.wraps === 'table' && s.wraps_index === index)?.summary
-  const name = tableName(index, meta, sectionTitle)
+  const wrapping = sections.find((s) => s.wraps === 'table' && s.wraps_index === index)
+  const name = tableName(index, meta, wrapping?.summary)
+  // The same note the pane shows, from the same two halves, so a table opened in its own window is
+  // not a table that quietly lost its description on the way.
+  const note = joinNotes(wrapping?.summary_note, meta?.note)
   const names = payload.tables.map((_, at) => tableName(
     at, payload.meta?.[at], sections.find((s) => s.wraps === 'table' && s.wraps_index === at)?.summary))
   const reader = useRowInspector(payload, names, onSelectSession)
@@ -81,7 +84,7 @@ export function TablePage({
   return (
     <main className="mx-auto flex w-full max-w-[1600px] flex-col gap-3 px-6 py-5">
       <div className="flex items-baseline justify-between gap-4">
-        <TableHeading name={name} table={filtered} note={meta?.note ?? null} as="h1" />
+        <TableHeading name={name} table={filtered} note={note} as="h1" />
         <button
           onClick={onBack}
           className="text-sm text-accent hover:underline"

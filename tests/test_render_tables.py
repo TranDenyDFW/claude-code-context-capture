@@ -346,3 +346,86 @@ def test_no_two_tables_of_one_surface_share_a_title(app):
                 if i < j:
                     shared = mine & theirs
                     assert not shared, f"panels {prefix}[{i}] and {prefix}[{j}] share {shared}"
+
+
+def _loose_prose(payload):
+    """The lines this payload would print as a wall, replicating `Pane.tsx`'s own claim pass.
+
+    Kept in step with the page by construction: every field the component consults to drop a line
+    is consulted here, in the same order and with the same case-insensitive compare. A test that
+    approximated the filter would go green on lines the reader still sees.
+    """
+    claimed = set()
+
+    def claim(line):
+        if line:
+            claimed.add(str(line).strip().lower())
+
+    for stat in payload.get("stats") or []:
+        claim(stat.get("label"))
+        claim(stat.get("value"))
+        claim(stat.get("sub"))
+    sections = payload.get("details") or []
+    for section in sections:
+        for line in section.get("body") or []:
+            claim(line)
+        claim(section.get("summary"))
+        claim(section.get("summary_note"))
+    for entry in payload.get("meta") or []:
+        for line in entry.get("absorbed") or []:
+            claim(line)
+    for entry in payload.get("figure_meta") or []:
+        for line in entry.get("absorbed") or []:
+            claim(line)
+    for line in payload.get("dash_only") or []:
+        claim(line)
+    population = payload.get("population")
+    return [line for line in payload["text"]
+            if line != population
+            and line.strip().lower() not in claimed
+            and not any(line in (s.get("summary") or "") for s in sections)]
+
+
+def _surfaces(app):
+    """Every tab and every registered sub-panel, as {name: render payload}.
+
+    The sub-panels are included because they are exactly what nothing else looks at: three of them
+    are unreachable from the React page today, and their button labels reached the reader as
+    sentences for as long as the port has existed.
+    """
+    from c4x.api.main import _pane, _render_payload
+    from c4x.ui.subpanels import PANELLED
+
+    out = {}
+    for tab, *_ in app.TABS:
+        out[f"tab {tab}"] = _render_payload(_pane(tab, None, "main", None, None, "session"))
+    for prefix, spec in PANELLED.items():
+        for index in range(len(spec["panels"])):
+            out[f"panel {prefix}[{index}]"] = _render_payload(spec["body"](index, None, "main", None))
+    return out
+
+
+def test_no_surface_prints_a_wall_of_loose_prose(app):
+    """EVERY LINE HAS AN OWNER: a card, a table, a chart, a section, the population, or a control
+    this page does not draw.
+
+    This is the whole shape of the page stated once. A tab that grows a sentence with nowhere to
+    put it fails here rather than shipping it as a paragraph in the body, which is how twenty-eight
+    lines across seven tabs arrived: chart captions with no channel to reach a chart, table captions
+    written below their table where the forward-only pairing never sees them, the labels of sliders
+    and buttons the React page never draws, and five numbers that wanted to be stat cards.
+    """
+    homeless = {name: _loose_prose(payload) for name, payload in _surfaces(app).items()}
+    homeless = {name: lines for name, lines in homeless.items() if lines}
+    report = "\n".join(f"  {name}: {len(lines)} line(s)\n"
+                       + "\n".join(f"      {line[:96]!r}" for line in lines)
+                       for name, lines in homeless.items())
+    assert not homeless, f"text with no owner, which the page prints as a wall:\n{report}"
+
+
+def test_every_chart_on_every_surface_has_a_name(app):
+    """A chart with no title is drawn under nothing at all: `Pane.tsx` renders no heading rather
+    than inventing one, so the reader gets a plot and no statement of what it plots."""
+    unnamed = [(name, i) for name, payload in _surfaces(app).items()
+               for i, figure in enumerate(payload["figures"]) if not (figure.get("title") or "")]
+    assert not unnamed, f"charts the page would draw with no heading: {unnamed}"

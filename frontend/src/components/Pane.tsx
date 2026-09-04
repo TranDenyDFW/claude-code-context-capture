@@ -4,7 +4,7 @@ import { describePoint } from './inspect'
 import { Inspector } from './Inspector'
 import { Plot, type PlotPoint } from './Plot'
 import { Section } from './Section'
-import { TableHeading, tableName } from './TableHeading'
+import { Heading, TableHeading, joinNotes, tableName } from './TableHeading'
 import { useRowInspector } from './useRowInspector'
 
 export function Pane({
@@ -21,6 +21,7 @@ export function Pane({
   const sections = payload.details ?? []
   const meta = payload.meta ?? []
   const stats = payload.stats ?? []
+  const figureMeta = payload.figure_meta ?? []
 
   // A section's body is ALSO in `text`, because `extract.texts()` flattens the whole pane including
   // what is inside a collapsed block. Rendered naively every SQL query appears twice: once as a
@@ -41,6 +42,9 @@ export function Pane({
   for (const section of sections) {
     for (const line of section.body) claim(line)
     if (section.summary) claim(section.summary)
+    // The caption half of a collapsible's label. It reaches the reader on the heading's hover, so
+    // printing it again in the body would be the same sentence twice, once where it means nothing.
+    if (section.summary_note) claim(section.summary_note)
   }
   // A TABLE'S HEADING AND NOTE BELONG TO THE TABLE. The server pairs them and lists the exact
   // lines it folded in; printing them here as well put six headings and their notes on the
@@ -51,6 +55,12 @@ export function Pane({
   // The labels of controls this page does not draw. The window calculator is Dash-only; its
   // "Resident tokens", "Window" and constants sentence read as orphaned prose here.
   for (const line of payload.dash_only ?? []) claim(line)
+  // A CHART'S CAPTION BELONGS TO THE CHART. The server pairs it and lists the exact lines it
+  // folded in; without this every one of them printed as a paragraph in the body, far from the
+  // chart it explains, which is how ten captions across seven tabs became a wall of prose.
+  for (const entry of figureMeta) {
+    for (const line of entry.absorbed ?? []) claim(line)
+  }
   const prose = payload.text.filter(
     (line) =>
       line !== payload.population &&
@@ -65,8 +75,12 @@ export function Pane({
   // those cards are already at the top of the tab.
   const isText = (s: (typeof sections)[number]) => (s.wraps ?? 'text') === 'text'
   const textSections = sections.filter(isText)
-  const titleFor = (wraps: 'table' | 'figure', index: number) =>
-    sections.find((s) => s.wraps === wraps && s.wraps_index === index)?.summary
+  const wrapping = (wraps: 'table' | 'figure', index: number) =>
+    sections.find((s) => s.wraps === wraps && s.wraps_index === index)
+  const titleFor = (wraps: 'table' | 'figure', index: number) => wrapping(wraps, index)?.summary
+  /** The caption half of the collapsible whose title became this heading, if there is one. */
+  const noteFor = (wraps: 'table' | 'figure', index: number) =>
+    wrapping(wraps, index)?.summary_note
 
   const attached = (index: number) => textSections.filter((s) => s.table_index === index)
   const names = payload.tables.map((_, index) => tableName(index, meta[index], titleFor('table', index)))
@@ -133,16 +147,20 @@ export function Pane({
         </section>
       )}
 
-      {figures.map((figure, index) => (
-        <section key={index} className="rounded-lg bg-panel shadow-panel p-4">
-          {(titleFor('figure', index) || payload.figures[index]?.title) && (
-            <h3 className="mb-2 text-md font-semibold text-ink">
-              {titleFor('figure', index) || payload.figures[index]?.title}
-            </h3>
-          )}
-          <Plot figure={figure} onPointClick={inspectPoint(index)} />
-        </section>
-      ))}
+      {figures.map((figure, index) => {
+        // EVERY CHART GETS THE HEADING A TABLE GETS: its name, and its explanation on hover behind
+        // the same glyph. The name is the collapsible's title where one wraps the chart and the
+        // figure's own title otherwise; the note is whatever the server paired to it, plus the
+        // caption half of that collapsible's label.
+        const name = titleFor('figure', index) || payload.figures[index]?.title || ''
+        const note = joinNotes(noteFor('figure', index), figureMeta[index]?.note)
+        return (
+          <section key={index} className="rounded-lg bg-panel shadow-panel p-4">
+            {name && <div className="mb-2"><Heading name={name} note={note} /></div>}
+            <Plot figure={figure} onPointClick={inspectPoint(index)} />
+          </section>
+        )
+      })}
 
       {prose.length > 0 && (
         <section className="rounded-lg bg-panel shadow-panel px-4 py-3">
@@ -164,7 +182,7 @@ export function Pane({
         // resort is a numbered one, so no table is ever the only unnamed thing on a page. The note
         // is on the heading, not in the body, and the glyph says there is something to hover.
         const name = tableName(index, meta[index], titleFor('table', index))
-        const note = meta[index]?.note ?? null
+        const note = joinNotes(noteFor('table', index), meta[index]?.note)
         return (
           // Keyed by INDEX, not by id. Five of the Cost tab's six tables report the id
           // `(anonymous)`, so keying on it collided four times and React warned on every render.

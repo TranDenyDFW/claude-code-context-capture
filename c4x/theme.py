@@ -607,6 +607,28 @@ def numeric_columns(cols, numeric, formats=None):
     return out
 
 
+def chart_note(text, for_id: str | None = None, style: dict | None = None):
+    """The sentence that explains a chart, marked so it reaches the chart over the API.
+
+    A table's heading and note are paired by position, which works because they are always written
+    directly above the rows. A chart's caption is not: it is written above the chart on one tab and
+    below it on four others, and on the Window tab it sits between a table and the chart it
+    describes. Ten of them therefore reached the browser as loose paragraphs, and two more were
+    picked up by the forward-only pairing and shown as the hover of a TABLE they say nothing about.
+
+    So the pairing is declared rather than guessed. `for_id` names the chart exactly and is the
+    right answer whenever the caption is not a sibling of its `dcc.Graph`; without it the caption
+    binds to the nearest chart in its own list, preferring the one above it, which is where a
+    caption written below a chart belongs. A caption that binds to nothing is caught by the gate on
+    loose prose rather than disappearing.
+
+    Dash renders it exactly as `SECTION_NOTE` always did, so the page it was written for is
+    unchanged; `style` overrides that for the few that are warnings.
+    """
+    marked = {"id": f"chart-note-{for_id}"} if for_id else {}
+    return html.Div(text, className="chart-note", style={**SECTION_NOTE, **(style or {})}, **marked)
+
+
 def accordion(title: str, sub: str, children, open_by_default: bool = False):
     """A collapsible block. Native details/summary, so it needs no callback and no state.
 
@@ -617,7 +639,13 @@ def accordion(title: str, sub: str, children, open_by_default: bool = False):
     return html.Details([
         html.Summary([
             html.Span(title, style={"color": TEXT, "fontSize": "13px", "fontWeight": 600}),
-            html.Span(f"  {sub}", style={"color": MUTED, "fontSize": "11px", "marginLeft": "8px"}),
+            # MARKED, so the API can tell the two apart again. Dash keeps them apart with 13px/600
+            # against 11px/muted and two literal spaces; `extract.texts()` strips and joins, so over
+            # the API the pair arrived as one string and the page drew "What to do about it 6
+            # finding(s), each with an action" as a heading, with no hover, because a summary has
+            # only one slot. The class says which half is the caption.
+            html.Span(f"  {sub}", className="accordion-sub",
+                      style={"color": MUTED, "fontSize": "11px", "marginLeft": "8px"}),
         ], style={"cursor": "pointer", "padding": "8px 10px", "background": PANEL,
                   "border": f"1px solid {BORDER}", "borderRadius": "6px",
                   "fontFamily": MONO, "listStyle": "none"}),

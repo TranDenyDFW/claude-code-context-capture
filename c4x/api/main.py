@@ -206,6 +206,153 @@ def tab(tab_id: str,
     return _cached(("verify", tab_id, session, scope, cohort, compare_with, compare_kind), build)
 
 
+def _figure_meta(node, count):
+    """The caption belonging to each chart, by figure index, for `count` charts.
+
+    THE COUNTERPART OF `_table_meta`, AND IT DOES NOT GUESS. A table's heading and note are always
+    written directly above the rows, so pairing them by position works. A chart's caption is not:
+    `sources.py` writes it above the chart, `waste.py` and `compactions.py` write it below, and
+    `breakdown.py` writes one between a table and the chart it describes. Position alone therefore
+    handed two captions to the wrong owner in `main` today, where the All sessions scatter's caption
+    and the Compactions scatter's caption are both served as the hover of a table they say nothing
+    about, and left ten more as loose paragraphs because a chart had no note field at all.
+
+    So a caption is paired because `theme.chart_note()` MARKED it. `for_id` binds it to that chart
+    exactly; otherwise it binds to the nearest chart in its own list, preferring the one above it,
+    because a caption written below a chart is about the chart above it. Anything that binds to
+    nothing stays in `text` and fails the gate on loose prose, which is the point: an unreachable
+    caption should be a failure, not a disappearance.
+    """
+    from c4x.cli import extract
+    events = []
+
+    def walk(node, owner):
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child, id(node))
+            return
+        if not hasattr(node, "_prop_names"):
+            return
+        kind = type(node).__name__
+        if "chart-note" in str(getattr(node, "className", "") or "").split():
+            target = getattr(node, "id", None) or ""
+            target = target[len("chart-note-"):] if target.startswith("chart-note-") else None
+            events.append(("note", extract.texts(node), target, owner))
+            return
+        if kind == "Graph":
+            events.append(("graph", getattr(node, "id", None), None, owner))
+            return
+        for name in node._prop_names:
+            value = getattr(node, name, None)
+            if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
+                walk(value, owner)
+
+    walk(node, None)
+
+    # Figure indices in the order `_figures()` and `extract.figures()` count them, which is the
+    # order the frontend pairs by.
+    index_at, seen = {}, 0
+    for at, event in enumerate(events):
+        if event[0] == "graph":
+            index_at[at] = seen
+            seen += 1
+
+    notes = {i: [] for i in range(count)}
+    absorbed = {i: [] for i in range(count)}
+    for at, event in enumerate(events):
+        if event[0] != "note":
+            continue
+        _, lines, target, owner = event
+        chosen = None
+        if target is not None:
+            chosen = next((index_at[j] for j, other in enumerate(events)
+                           if other[0] == "graph" and other[1] == target), None)
+        else:
+            before = [j for j in range(at) if events[j][0] == "graph" and events[j][3] == owner]
+            after = [j for j in range(at + 1, len(events))
+                     if events[j][0] == "graph" and events[j][3] == owner]
+            if before:
+                chosen = index_at[before[-1]]
+            elif after:
+                chosen = index_at[after[0]]
+        if chosen is None or chosen not in notes:
+            continue
+        notes[chosen].extend(line for line in lines if line and line.strip())
+        absorbed[chosen].extend(lines)
+
+    # Joined with a newline, not a space: the Window tab's composition chart carries three separate
+    # statements and running them together makes one unreadable sentence in a tooltip.
+    return [{"note": "\n".join(notes[i]) or None, "absorbed": absorbed[i]}
+            for i in range(count)]
+
+
+def _render_payload(pane):
+    """Everything the drawing shape adds to `describe()`, assembled from a pane.
+
+    A function rather than a closure in the route because the route is not the only caller that
+    matters: the sub-panels are rendered by their own bodies and never pass through a tab, so a
+    contract checked only through `/api/tab/{id}/render` is a contract three sub-panels are exempt
+    from. The gate on loose prose runs this over the panels too, which is where it found the four
+    orphaned button labels the page had been printing as sentences.
+    """
+    from c4x.cli import extract
+    payload = extract.describe(pane)
+    payload["plotly"] = [f.to_plotly_json() for f in _figures(pane)]
+    sections = _details(pane)
+    # The pairing is only meaningful if this walk saw the same tables the extractor did. If the
+    # two ever diverge, an index would point at the wrong table and a query would be shown under
+    # a table it did not produce, which is worse than showing no query at all. Dropped rather
+    # than served wrong, and said out loud in the payload.
+    limit = len(payload["tables"])
+    for section in sections:
+        if not -1 <= section["table_index"] < limit:
+            section["table_index"] = None
+    payload["details"] = sections
+
+    # Per-table presentation the verify shape drops. Paired to `payload["tables"]` BY INDEX and
+    # only when both walks saw the same number of tables: a label attached to the wrong table
+    # would rename a column that does not exist on it, which is worse than showing the raw id.
+    meta = _table_meta(pane)
+    payload["meta"] = meta if len(meta) == len(payload["tables"]) else []
+    # TEXT THAT BELONGS TO A DASH-ONLY CONTROL. The window calculator's labels and constants
+    # sentence are marked in the tree; the page drops these lines rather than printing the
+    # labels of inputs it does not draw. The parity surface keeps them: they are real text.
+    payload["dash_only"] = _dash_only(pane)
+    # THE CAPTION EACH CHART ANSWERS TO, paired by index the same way `meta` is, and only when this
+    # walk saw the same charts the extractor did. A caption under the wrong chart is a caption that
+    # lies, which is worse than one the reader has to look for.
+    figure_meta = _figure_meta(pane, len(payload["figures"]))
+    payload["figure_meta"] = figure_meta if len(figure_meta) == len(payload["figures"]) else []
+    # WHERE THE FULL TEXT IS. The messages table carries a 220-character `preview` per row,
+    # because 400 full messages are 841 KB on the largest session and a tab is re-fetched on
+    # every selection. An export is not a render: it happens once, on purpose, and a CSV of
+    # previews is a CSV of the first sentence of everything. So the row says where the rest is,
+    # keyed by the uuid the row already holds, and the page fetches it at export time.
+    # Only when the pairing held. On a mismatch `meta` is EMPTY by design, and a strict zip
+    # over it turned that documented fallback into a 500 for the whole tab; the review that
+    # found it forced the mismatch and watched all eight tabs fail.
+    if payload["meta"]:
+        for table, entry in zip(payload["tables"], payload["meta"], strict=True):
+            rows = table.get("rows") or []
+            if "preview" in table.get("columns", []) and rows and "uuid" in rows[0]:
+                entry["full_text"] = {"url": "/api/messages/text", "key": "uuid",
+                                      "column": "preview", "as": "text"}
+
+    # WHICH POPULATION THIS TAB DESCRIBES, as a field rather than as prose.
+    #
+    # The app has always said it: `_render_tab` puts a banner at the top of every pane, and it
+    # arrives here inside `text` because `extract.texts()` flattens the pane. But it arrives as
+    # one grey line among twenty-seven identical grey lines, so on the Diagnostics tab the
+    # sentence "Store-wide. Not affected by the header selection." sat far above the table
+    # somebody was actually looking at, and the honest answer to "why does this never change?"
+    # was on screen and unfindable. Promoted to its own field so the page can put it where the
+    # question gets asked.
+    payload["stats"] = _stats(pane)
+
+    payload["population"], payload["population_scope"] = _population(pane)
+    return payload
+
+
 @api.get("/api/tab/{tab_id}/render")
 def tab_render(tab_id: str,
                session: str | None = Query(None),
@@ -219,64 +366,13 @@ def tab_render(tab_id: str,
     Charts are returned in the order they appear in the pane, so `plotly[i]` describes the same
     figure as `figures[i]`. A frontend that pairs them by index is relying on something real.
     """
-    from c4x.cli import extract
-
     def build():
         pane = _pane(tab_id, session, scope, cohort, compare_with, compare_kind)
-        payload = extract.describe(pane)
+        payload = _render_payload(pane)
         payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
-        payload["plotly"] = [f.to_plotly_json() for f in _figures(pane)]
-        sections = _details(pane)
-        # The pairing is only meaningful if this walk saw the same tables the extractor did. If the
-        # two ever diverge, an index would point at the wrong table and a query would be shown under
-        # a table it did not produce, which is worse than showing no query at all. Dropped rather
-        # than served wrong, and said out loud in the payload.
-        limit = len(payload["tables"])
-        for section in sections:
-            if not -1 <= section["table_index"] < limit:
-                section["table_index"] = None
-        payload["details"] = sections
-
-        # Per-table presentation the verify shape drops. Paired to `payload["tables"]` BY INDEX and
-        # only when both walks saw the same number of tables: a label attached to the wrong table
-        # would rename a column that does not exist on it, which is worse than showing the raw id.
-        meta = _table_meta(pane)
-        payload["meta"] = meta if len(meta) == len(payload["tables"]) else []
-        # TEXT THAT BELONGS TO A DASH-ONLY CONTROL. The window calculator's labels and constants
-        # sentence are marked in the tree; the page drops these lines rather than printing the
-        # labels of inputs it does not draw. The parity surface keeps them: they are real text.
-        payload["dash_only"] = _dash_only(pane)
-        # WHERE THE FULL TEXT IS. The messages table carries a 220-character `preview` per row,
-        # because 400 full messages are 841 KB on the largest session and a tab is re-fetched on
-        # every selection. An export is not a render: it happens once, on purpose, and a CSV of
-        # previews is a CSV of the first sentence of everything. So the row says where the rest is,
-        # keyed by the uuid the row already holds, and the page fetches it at export time.
-        # Only when the pairing held. On a mismatch `meta` is EMPTY by design, and a strict zip
-        # over it turned that documented fallback into a 500 for the whole tab; the review that
-        # found it forced the mismatch and watched all eight tabs fail.
-        if payload["meta"]:
-            for table, entry in zip(payload["tables"], payload["meta"], strict=True):
-                rows = table.get("rows") or []
-                if "preview" in table.get("columns", []) and rows and "uuid" in rows[0]:
-                    entry["full_text"] = {"url": "/api/messages/text", "key": "uuid",
-                                          "column": "preview", "as": "text"}
-
-        # WHICH POPULATION THIS TAB DESCRIBES, as a field rather than as prose.
-        #
-        # The app has always said it: `_render_tab` puts a banner at the top of every pane, and it
-        # arrives here inside `text` because `extract.texts()` flattens the pane. But it arrives as
-        # one grey line among twenty-seven identical grey lines, so on the Diagnostics tab the
-        # sentence "Store-wide. Not affected by the header selection." sat far above the table
-        # somebody was actually looking at, and the honest answer to "why does this never change?"
-        # was on screen and unfindable. Promoted to its own field so the page can put it where the
-        # question gets asked.
-        payload["stats"] = _stats(pane)
-
         from c4x.ui.layout import SELECTION_SCOPED
         payload["scoped"] = tab_id in SELECTION_SCOPED
-        payload["population"], payload["population_scope"] = _population(pane)
         return _jsonable(payload)
-
     if no_cache:
         return build()
     return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind), build)
@@ -457,6 +553,12 @@ def _table_meta(node, found=None):
         if not hasattr(node, "_prop_names"):
             return
         kind = type(node).__name__
+        # TEXT THAT ANOTHER CHANNEL OWNS IS NOT A TABLE'S NOTE. A chart caption written between a
+        # table and the chart it describes would otherwise become that table's hover, which is
+        # exactly what happens on All sessions and on Compactions today, and the label of a control
+        # this page never draws would become the note of whatever table came next.
+        if set(str(getattr(node, "className", "") or "").split()) & {"chart-note", "dash-only"}:
+            return
         text = plain_text(node) if pending is not None else None
         if text is not None and text.strip():
             # A heading is a SECTION_HEAD or an H-tag, nothing else. Every other text sibling is
@@ -645,10 +747,22 @@ def _details(node, found=None):
         if kind == "Details" and not inside_details:
             children = list(node.children) if isinstance(node.children, (list, tuple)) \
                 else [node.children]
-            summary, body = "", []
+            summary, summary_note, body = "", "", []
             for child in children:
                 if hasattr(child, "_prop_names") and type(child).__name__ == "Summary":
-                    summary = " ".join(extract.texts(child.children)) if child.children else ""
+                    # THE TWO HALVES STAY TWO. `theme.accordion()` writes a title and a caption as
+                    # two styled spans, and joining them gave the page one string with no hover:
+                    # "What to do about it 6 finding(s), each with an action" was the heading of the
+                    # Summary tab's findings table, over a table whose own name is "Findings". The
+                    # caption is marked, so the title is everything else.
+                    parts = list(child.children) if isinstance(child.children, (list, tuple))                         else ([child.children] if child.children else [])
+                    heads, subs = [], []
+                    for part in parts:
+                        target = subs if "accordion-sub" in str(
+                            getattr(part, "className", "") or "").split() else heads
+                        target.extend(extract.texts(part))
+                    summary = " ".join(t for t in heads if t).strip()
+                    summary_note = " ".join(t for t in subs if t).strip()
                 else:
                     body.extend(extract.texts(child))
             # WHAT THIS SECTION WRAPS, which is the difference between a useful collapsible and an
@@ -661,7 +775,8 @@ def _details(node, found=None):
             inner = _wrapped_kind([c for c in children
                                   if not (hasattr(c, "_prop_names")
                                           and type(c).__name__ == "Summary")])
-            found.append({"summary": summary, "body": body, "table_index": state["seen"] - 1,
+            found.append({"summary": summary, "summary_note": summary_note or None,
+                          "body": body, "table_index": state["seen"] - 1,
                           "wraps": inner,
                           # Which table or figure, counted the same way the extractor counts them.
                           "wraps_index": state["seen"] if inner == "table" else (
@@ -1010,8 +1125,10 @@ async def _no_cache_shell(request: Request, call_next):
     return response
 
 
-_dist = ROOT / "frontend" / "dist"
-if _dist.is_dir():
+_dist = ROOT / "frontend" / "dist"
+
+if _dist.is_dir():
+
     from fastapi.staticfiles import StaticFiles
 
     # html=True serves index.html for "/" itself. The app keeps its state in memory rather than in
