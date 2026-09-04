@@ -17,7 +17,7 @@ from c4x import projects
 from c4x.dash_compat import DataTable
 from c4x.tabs.mirror import mirror_layout
 from c4x.tabs.probes import probes_layout
-from c4x.theme import SECTION_HEAD, SECTION_NOTE, TABLE_STYLE, header_help
+from c4x.theme import SECTION_HEAD, SECTION_NOTE, TABLE_STYLE, about_note, header_help
 
 
 def exclusions_layout():
@@ -59,19 +59,23 @@ def diagnostics_layout(session_id=None, scope="main", cohort=None):
     the merge and the mirror's calculator keeps the component ids its callback is bound to.
     """
     return html.Div([
-        html.Div(
-            "Nothing on this tab answers to the header selection. It describes the capture "
-            "machinery and the window math, both of which are the same whichever session is "
-            "chosen.", style=SECTION_NOTE),
+        # The first half of this used to restate the population banner word for word. What it
+        # adds is what the tab is ABOUT, which is where that now goes.
+        about_note(
+            "This tab describes the capture machinery and the window math, both of which are the "
+            "same whichever session is chosen."),
         probes_layout(session_id, scope, cohort),
         html.Div(style={"height": "26px"}),
         *exclusions_layout(),
         html.Div(style={"height": "26px"}),
-        html.Div("The window math, and a calculator over it", style=SECTION_HEAD),
-        html.Div(
-            "Read from tools/mirror-core.mjs at startup and computed by tools/mirror.mjs, not "
-            "reimplemented here. Every threshold band on the Session chart comes from these "
-            "numbers, so a wrong row here would be wrong everywhere at once.",
-            style=SECTION_NOTE),
+        about_note([
+            html.Div("The window math", style=SECTION_HEAD),
+            html.Div(
+                "Read from tools/mirror-core.mjs at startup and computed by tools/mirror.mjs, not "
+                "reimplemented here. Every threshold band on the Session chart comes from these "
+                "numbers, so a wrong row here would be wrong everywhere at once."),
+        ]),
+        # The calculator is Dash-only, so the half of that heading naming it is too.
+        html.Div("A calculator over it", className="dash-only", style=SECTION_HEAD),
         mirror_layout(session_id, scope, cohort),
     ])

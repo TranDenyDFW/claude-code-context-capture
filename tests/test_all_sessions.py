@@ -24,15 +24,26 @@ def test_the_table_has_the_columns_the_page_promises(table):
 
 
 def test_row_count_matches_the_population_the_page_states(table, q, pane):
-    """The tab prints "N sessions with F or more turns". That sentence is a claim, and F is the
-    floor the store applies, not a number this test happens to agree with."""
+    """The tab STATES how many sessions it lists and on what floor, and it states them together.
+
+    ASSERTED ON THE CARD, not on the page's words. This was three independent membership tests
+    against a flattened list of every string on the page, which any three cards between them could
+    satisfy: the label could sit on one card and the number on another and the test would not know.
+    A card is a label, a figure and a caption that belong to each other, so that is the unit.
+    """
+    from c4x.api.main import _stats
     expected = int(q("""SELECT COUNT(*) AS n FROM (
                           SELECT session_id FROM turns GROUP BY session_id HAVING COUNT(*) >= ?)""",
                      (SESSION_TURN_FLOOR,)).iloc[0]["n"])
     assert len(table["rows"]) == expected
-    text = "\n".join(extract.texts(pane("tab-sessions")))
-    assert f"{expected:,} sessions with {SESSION_TURN_FLOOR} or more turns" in text, (
-        "the stated population and the rendered one disagree")
+    cards = {c["label"].strip().lower(): c for c in _stats(pane("tab-sessions"))}
+    card = cards.get("listed sessions")
+    assert card is not None, f"no card states the listed population: {sorted(cards)}"
+    assert card["value"] == f"{expected:,}", (
+        f"the card says {card['value']!r} and the table holds {expected:,} rows")
+    assert f"{SESSION_TURN_FLOOR} or more turns" in (card["sub"] or ""), (
+        f"the card does not say what floor it was taken on: {card['sub']!r}")
+
 
 
 def test_every_numeric_column_matches_its_own_sql(table, q):
@@ -69,13 +80,37 @@ def test_current_never_exceeds_peak(table):
 
 
 def test_sections_partition_the_rows(table, pane):
-    """Every row lands in exactly one section, and the stated counts add up to the total."""
+    """Every row lands in exactly one section, and the page states every section's count.
+
+    CONTIGUOUS, as one string. This was loosened to two independent membership tests while the
+    card it was checking counted the wrong thing, and that is what let it through: a card labelled
+    "Projects" over a figure that counted SESSIONS whose section is Projects passed, because the
+    word and the number were each somewhere on the page. "Projects 269" as one string is the claim.
+    """
     from collections import Counter
     counts = Counter(r["section"] for r in table["rows"])
     assert sum(counts.values()) == len(table["rows"])
-    text = "\n".join(extract.texts(pane("tab-sessions")))
+    text = chr(10).join(extract.texts(pane("tab-sessions")))
     for section, n in counts.items():
         assert f"{section} {n:,}" in text, f"the page does not state {section} {n:,}"
+
+
+def test_the_projects_card_counts_projects(table, pane):
+    """A card's label is a claim about what its figure counts.
+
+    This card counted sessions and was labelled Projects. On the live store it read "Projects 269"
+    over 162 distinct working directories among the listed rows; on the committed fixture it read
+    "Projects 0" above a caption saying 49 sessions were imported, a card contradicting itself in
+    two lines. Recomputed here from the same rows the table holds.
+    """
+    from c4x.api.main import _stats
+    expected = len({r["project"] for r in table["rows"]})
+    cards = {c["label"].strip().lower(): c for c in _stats(pane("tab-sessions"))}
+    card = cards.get("projects")
+    assert card is not None, f"no card names projects: {sorted(cards)}"
+    assert card["value"] == f"{expected:,}", (
+        f"the card says {card['value']!r} projects; the rows hold {expected:,} distinct ones")
+
 
 
 def test_archived_paths_agree_with_the_desktop_records(table, store):

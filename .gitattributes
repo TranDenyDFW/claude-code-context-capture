@@ -1,0 +1,20 @@
+# LF in the repository, whatever the working tree uses.
+#
+# This exists because a diff was made unreadable without anyone choosing to make it unreadable.
+# 173 of this repository's 175 tracked text blobs already store LF and two stored CRLF, so LF was
+# already the convention and nothing declared it. An edit to one of the two anomalies normalised it
+# on the way past, and the diff for that file came back 1248 insertions and 1018 deletions instead
+# of the 292 and 62 that were real, which hid the change inside its own whitespace.
+#
+# The mechanism, worth knowing before writing another edit script: Path.read_text() decodes with
+# universal newlines, so a CRLF file arrives as LF and any "preserve what was there" logic that
+# inspects the decoded string sees LF and preserves that. Reading with newline="" is what actually
+# preserves them. Declaring the convention here means it no longer matters which one a script does.
+# `text=auto` and NOT `eol=lf`: the repository stores LF, and the working tree keeps whatever
+# the platform checks out. Forcing LF into the working tree as well would change what every
+# Windows contributor sees on disk, which is a different decision from what git stores and one
+# this file has no reason to make.
+* text=auto
+
+# Built assets: whatever the bundler emitted, byte for byte.
+frontend/dist/** -text

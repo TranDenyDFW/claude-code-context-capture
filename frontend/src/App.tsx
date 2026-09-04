@@ -246,11 +246,18 @@ export default function App() {
             // tabs answer to the header.
             (() => {
               const onSelection = (pane.data.population_scope ?? 'store') === 'selection'
+              // THE CHIP CARRIES THE POPULATION AND NOTHING ELSE. It briefly carried the
+              // view-level statements too, and on the Diagnostics tab that was 826
+              // characters across six paragraphs as the tooltip of a chip 61 pixels wide.
+              // A tooltip that long is not a hover, it is a wall with no scrollbar. Those
+              // lines are drawn as a named, collapsed disclosure below instead.
+              const about = pane.data.population ?? ''
               return (
                 <span
                   data-scoped={pane.data.scoped ? 'true' : 'false'}
                   data-population={pane.data.population_scope ?? 'store'}
-                  title={pane.data.population}
+                  title={about || undefined}
+                  aria-description={about || undefined}
                   className={`rounded-md px-2 py-1 text-2xs ${
                     onSelection ? 'bg-panel text-ink-faint' : 'bg-warn/10 text-warn'
                   }`}
@@ -381,15 +388,11 @@ export default function App() {
         onPick={pick}
       />
 
-      <footer className="border-t border-edge px-6 py-2 text-xs text-ink-faint">
-        {health.data?.read_only && 'read only, this server never writes to the store. '}
-        {health.data?.cache && (
-          <>
-            cache {health.data.cache.hits} hit / {health.data.cache.misses} miss,{' '}
-            {Math.round((health.data.cache.bytes ?? 0) / 1024)} KB
-          </>
-        )}
-      </footer>
+      {/* NO FOOTER. It carried the server's cache hit and miss counters and its byte total on
+          every page, which is a developer's readout of this process rather than anything about
+          the store being read, and it sat under every tab for the life of the port. The read-only
+          fact it also carried is not lost: `writes_enabled` still governs what the page offers to
+          write, which is the form in which that fact matters to a reader. */}
       </div>
     </div>
   )

@@ -73,6 +73,11 @@ export function Section({
       >
         <span className="mr-1.5 inline-block transition-transform group-open:rotate-90">›</span>
         {section.summary || (query ? 'The query behind this table' : 'More')}
+        {/* THE CAPTION HALF, kept as a caption. Dash draws it smaller and muted beside the title;
+            the API used to join them into one string, so the whole label read as one sentence. */}
+        {section.summary_note && (
+          <span className="ml-2 text-2xs font-normal text-ink-faint">{section.summary_note}</span>
+        )}
       </summary>
       {body && (
         <div className="border-t border-edge px-3 py-2">

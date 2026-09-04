@@ -34,6 +34,14 @@ export interface FigureSummary {
  */
 export interface Section {
   summary: string
+  /**
+   * The caption beside the title in the same summary line, kept apart from it.
+   *
+   * `theme.accordion()` writes a title and a caption as two styled spans; joined they became one
+   * heading with no hover, which is how the Summary tab drew "What to do about it 6 finding(s),
+   * each with an action" over a table whose own name is "Findings".
+   */
+  summary_note?: string | null
   body: string[]
   table_index: number | null
   /**
@@ -118,6 +126,22 @@ export interface TabPayload {
   stats?: Stat[]
   /** Only on /render. Text under a Dash-only control the page does not draw; never printed. */
   dash_only?: string[]
+  /**
+   * Only on /render. What this VIEW is, as opposed to what any chart on it shows.
+   *
+   * Shown on the population chip in the header, which already states what the numbers cover.
+   */
+  about?: string[]
+  /**
+   * Only on /render. A block that names what would be here and says why it is not.
+   *
+   * Drawn as a placeholder where the table would be. "Not answerable with a single session
+   * selected" is the most useful thing on that part of the page, and it is the difference between
+   * "there are none" and "this question cannot be asked from here".
+   */
+  empty?: { title: string; note: string | null }[]
+  /** Only on /render. The caption each chart answers to, in the same order as `figures`. */
+  figure_meta?: { note: string | null; absorbed: string[] }[]
   /** Whether the header selection changes this tab at all. From the app's SELECTION_SCOPED. */
   scoped?: boolean
   /** The one sentence saying which population this tab describes. */
