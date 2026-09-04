@@ -506,7 +506,11 @@ def _table_meta(node, found=None):
             # the page states beside the heading from the rows it holds, and without the Dash
             # paging clause, which describes a table this page does not draw.
             shown = note or ""
-            shown = re.sub(r"^\s*[\d,]+ rows\.\s*", "", shown)
+            # BOTH SPELLINGS. evidence_block writes "1 row." for a one-row table, and this
+            # stripped the plural only, so the count survived into the note and the page
+            # stated it twice: "MCP servers by invocation count, 1 row" over a note opening
+            # "1 row. Invocation count alone is a PROXY for cost."
+            shown = re.sub(r"^\s*[\d,]+ rows?\.\s*", "", shown)
             shown = shown.replace("(table shows the first page; export gives every row)", "")
             shown = shown.strip()
             found.append({
@@ -993,8 +997,10 @@ async def _no_cache_shell(request: Request, call_next):
     response = await call_next(request)
     # By content type, not by path: /INDEX.HTML, /Index.Html and /index.html/ all served the
     # shell cacheable under a path rule, on a case-insensitive filesystem. The hashed assets are
-    # script, style and image; the other HTML this process serves is FastAPI's own /docs, where
-    # no-cache costs nothing. A 304 carries no content type, so the shell's revalidation is
+    # script, style and image. The other HTML this process serves is FastAPI's own schema pages,
+    # /api/docs and /redoc, and the stopped page from /__shutdown__; no-cache costs nothing on any
+    # of them, and naming only one of the three was the previous version of this comment being
+    # tidier than it was true. A 304 carries no content type, so the shell's revalidation is
     # matched by path as well: without the header there, a copy cached before this rule stayed
     # cached until the next rebuild changed the ETag.
     shell = request.url.path.rstrip("/").lower() in ("", "/index.html")

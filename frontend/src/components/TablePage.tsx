@@ -15,10 +15,12 @@ import { useRowInspector } from './useRowInspector'
  * first version had neither the reader nor the query, on a page that still printed the note
  * promising the reader; a review found both.
  *
- * NO SESSION NAVIGATION HERE. In the pane a row click can change the header selection, which
- * rebuilds every tab. On a window opened for one table there is no header to see it happen: the
- * rows would swap under the reader with nothing saying why. A row opens the drawer instead, and
- * the drawer offers the selection as a button for anyone who wants it.
+ * NO SESSION NAVIGATION FROM A ROW CLICK. In the pane a row click can change the header selection,
+ * which rebuilds every tab. On a window opened for one table there is no header to see it happen:
+ * the rows would swap under the reader with nothing saying why. A row opens the drawer instead,
+ * and where that row names a session the drawer offers the selection as a labelled button, which
+ * is the deliberate version of the same act. Three of this app's tables carry a session key; on
+ * the others the button is absent because there is no session to offer.
  */
 export function TablePage({
   payload,
@@ -27,6 +29,7 @@ export function TablePage({
   filter,
   onBack,
   onQueryChange,
+  onSelectSession,
 }: {
   payload: TabPayload
   index: number
@@ -36,6 +39,8 @@ export function TablePage({
   filter?: { key: string; value: string } | null
   onBack: () => void
   onQueryChange?: (query: string) => void
+  /** Make a row's session the selection, when the reader asks for it in the drawer. */
+  onSelectSession?: (row: Record<string, unknown>) => void
 }) {
   const table = payload.tables[index]
   const meta = payload.meta?.[index]
@@ -44,7 +49,7 @@ export function TablePage({
   const name = tableName(index, meta, sectionTitle)
   const names = payload.tables.map((_, at) => tableName(
     at, payload.meta?.[at], sections.find((s) => s.wraps === 'table' && s.wraps_index === at)?.summary))
-  const reader = useRowInspector(payload, names)
+  const reader = useRowInspector(payload, names, onSelectSession)
 
   useEffect(() => {
     const before = document.title

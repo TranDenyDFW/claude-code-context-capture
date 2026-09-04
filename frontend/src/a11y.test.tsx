@@ -27,6 +27,8 @@ import { Palette } from './components/Palette'
 import { CompareArms } from './components/CompareArms'
 import { ProjectMoves } from './components/ProjectMoves'
 import { Sidebar } from './components/Sidebar'
+import { Inspector } from './components/Inspector'
+import { TablePage } from './components/TablePage'
 import type { TabPayload } from './api'
 
 vi.mock('./components/Plot', () => ({ Plot: () => <div data-testid="chart" /> }))
@@ -94,6 +96,47 @@ describe('axe finds no WCAG A or AA violation in', () => {
                       table_index: 0 }],
         })}
         onRowClick={() => {}}
+      />,
+    )
+    expect(await violations(container)).toEqual([])
+  })
+
+  // THE TWO SURFACES THE GATE DID NOT COVER. Both shipped user-facing and neither was rendered
+  // here: the drawer a chart click opens, and the page a table opens into. The drawer is also
+  // where aria-modal and a Tab trap were added and then reverted, so it is the one most worth
+  // watching.
+  it('the inspector drawer, with fields, a full text and the rows behind a point', async () => {
+    const { container } = render(
+      <Inspector
+        content={{
+          subject: 1,
+          title: 'sess-1',
+          source: 'sessions by peak',
+          fields: [['series', 'peaks'], ['y', '990,000']],
+          text: 'the whole message',
+          rows: { name: 'Sessions', table: { id: 't', columns: ['title'], rows: [{ title: 'the one' }] } },
+          onOpen: () => {},
+          onSelectSession: () => {},
+        }}
+        onClose={() => {}}
+      />,
+    )
+    expect(await violations(container)).toEqual([])
+  })
+
+  it('one table on a page of its own, with its filter chip and its query', async () => {
+    const { container } = render(
+      <TablePage
+        payload={payload({
+          population: 'the whole store, every session',
+          tables: [{ id: 't', columns: ['title'], rows: [{ session_id: 's1', title: 'the one' }] }],
+          meta: [{ id: 't', title: 'Sessions', note: 'why it matters', columns: [],
+                   filterable: true, page_size: null }],
+          details: [{ summary: 'The query behind this table', body: ['SELECT 1'], table_index: 0 }],
+        })}
+        index={0}
+        filter={{ key: 'session_id', value: 's1' }}
+        onBack={() => {}}
       />,
     )
     expect(await violations(container)).toEqual([])

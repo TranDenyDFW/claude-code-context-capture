@@ -109,6 +109,11 @@ describe('the standalone page does everything the pane does with that table', ()
     }
     render(<TablePage payload={two} index={0} filter={{ key: 'session_id', value: 's2' }} onBack={() => {}} />)
     expect(screen.getByText(/Filtered to session_id = s2, 1 of 2 rows/)).toBeTruthy()
+    // The heading counts what the page DRAWS. Counting the unfiltered table would put "2 rows"
+    // directly above a line saying 1 of 2.
+    const heading = screen.getByRole('heading', { level: 1 })
+    expect(heading.textContent).toContain('1 row')
+    expect(heading.textContent).not.toContain('2 rows')
     expect(screen.getByText('11:00')).toBeTruthy()
     expect(screen.queryByText('10:00')).toBeNull()
   })
@@ -118,5 +123,56 @@ describe('the standalone page does everything the pane does with that table', ()
     render(<TablePage payload={messages} index={0} onQueryChange={(q) => changes.push(q)} onBack={() => {}} />)
     fireEvent.change(screen.getByLabelText('Filter Messages'), { target: { value: 'cut' } })
     expect(changes).toEqual(['cut'])
+  })
+})
+
+describe('selecting a session from the drawer, which is the only way to do it here', () => {
+  const sessions: TabPayload = {
+    tab: 'tab-sessions', session: null, scope: 'main', cohort: null,
+    tables: [{ id: 'tbl-session', columns: ['title'],
+               rows: [{ session_id: 's7', title: 'the one' }] }],
+    figures: [], text: [], plotly: [],
+    meta: [{ id: 'tbl-session', title: 'Sessions', columns: [], filterable: true, page_size: null }],
+  }
+
+  it('offers the button for a row that names a session, and closes as it fires', async () => {
+    const picked: Record<string, unknown>[] = []
+    render(<TablePage payload={sessions} index={0} onSelectSession={(r) => picked.push(r)} onBack={() => {}} />)
+    fireEvent.click(screen.getByRole('table').querySelector('tbody tr')!)
+    fireEvent.click(await screen.findByRole('button', { name: 'Select this session' }))
+    expect(picked).toEqual([{ session_id: 's7', title: 'the one' }])
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('offers no such button where the row names no session (gate can fail)', async () => {
+    render(<TablePage payload={payload} index={0} onSelectSession={() => {}} onBack={() => {}} />)
+    fireEvent.click(screen.getByRole('table').querySelector('tbody tr')!)
+    await screen.findByRole('dialog')
+    expect(screen.queryByRole('button', { name: 'Select this session' })).toBeNull()
+  })
+})
+
+describe('what the standalone page follows and what it shows', () => {
+  it('follows the filter the address moves to, not only the one it opened with', () => {
+    const { rerender } = render(<TablePage payload={payload} index={0} query="b.md" onBack={() => {}} />)
+    expect(screen.getByText('b.md')).toBeTruthy()
+    expect(screen.queryByText('a.json')).toBeNull()
+    rerender(<TablePage payload={payload} index={0} query="a.json" onBack={() => {}} />)
+    expect(screen.getByText('a.json')).toBeTruthy()
+    expect((screen.getByLabelText('Filter Files read repeatedly') as HTMLInputElement).value)
+      .toBe('a.json')
+  })
+
+  it('puts the query under the table this page IS, not under the first one', () => {
+    const two: TabPayload = {
+      ...payload,
+      details: [
+        { summary: 'The query behind the first table', body: ['SELECT 1'], table_index: 0 },
+        { summary: 'The query behind the second table', body: ['SELECT 2'], table_index: 1 },
+      ],
+    }
+    render(<TablePage payload={two} index={1} onBack={() => {}} />)
+    expect(screen.getByText('The query behind the second table')).toBeTruthy()
+    expect(screen.queryByText('The query behind the first table')).toBeNull()
   })
 })
