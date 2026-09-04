@@ -31,10 +31,12 @@ from c4x.theme import (
     TABLE_STYLE,
     TEXT,
     WARN,
+    chart_note,
     dark_fig,
     fmt_tokens,
     header_help,
     numeric_columns,
+    stat_card,
 )
 
 # ---- Breakdown --------------------------------------------------------------
@@ -144,7 +146,7 @@ def composition_treemap(baseline, resident_cols, labels, messages, free, window)
             values.append(int(value))
             colors.append(color)
     return treemap(labels_, parents, values, colors=colors, height=380,
-                   title=f"What is in the window right now, of {fmt_tokens(window)}")
+                   title="What Is in the Window Right Now")
 
 
 def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=None):
@@ -283,7 +285,7 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
                              fillcolor=ACCENT))
     fig.add_trace(go.Scatter(x=x, y=(window - res).clip(lower=0), mode="lines", name="free space",
                              line=dict(width=0), stackgroup="one", fillcolor="#21262d"))
-    fig.update_layout(title=f"Context window composition over {len(merged):,} API calls",
+    fig.update_layout(title="Context Window Composition",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="API call", yaxis_title="tokens")
 
@@ -307,22 +309,32 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
             f"Messages figure is the least trustworthy number on this page.",
             style={"color": WARN, "fontSize": "11.5px", "marginBottom": "8px"}))
     composition = [
+        # THE TAB'S HEADLINE NUMBER, AS A CARD. This was a label span and a value span, which
+        # flattens to two loose lines over the API: "context window" and "160.7k / 1M (16%)" read
+        # as prose in the body of a tab that had no cards at all.
         html.Div([
-            html.Span("context window", style={"color": MUTED, "fontSize": "12px"}),
-            html.Span(f"  {fmt_tokens(resident)} / {fmt_tokens(window)} "
-                      f"({resident / window * 100:.0f}%)",
-                      style={"color": TEXT, "fontFamily": MONO, "fontSize": "14px",
-                             "fontWeight": 700, "marginLeft": "8px"}),
-        ], style={"marginBottom": "8px"}),
+            stat_card("context window", fmt_tokens(resident), color=ACCENT,
+                      sub=f"{resident / window * 100:.0f}% of {fmt_tokens(window)}, "
+                          f"{fmt_tokens(free)} free"),
+        ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "10px"}),
         bar,
         html.Div(style={"height": "14px"}),
-        dcc.Graph(figure=composition_treemap(b, resident_cols, labels, messages, free, window),
+        dcc.Graph(id="fig-window-treemap",
+                  figure=composition_treemap(b, resident_cols, labels, messages, free, window),
                   config={"displayModeBar": False}),
+        chart_note(f"Resident {fmt_tokens(resident)} of a {fmt_tokens(window)} window. Sized by "
+                   "tokens, and grouped by the one distinction that decides what you can do about "
+                   "any of it: Configuration is fixed and yours to change, Messages grows and is "
+                   "not.", for_id="fig-window-treemap",
+                   style={"margin": "4px 0 14px 0"}),
+        # The flat bar is an html.Div of spans, not a figure, so the React page never draws it and
+        # a sentence comparing it against the treemap describes something that is not on screen.
         html.Div(
             "The bar above is the same figure flat. It is the shape the tooltip uses, which makes "
             "the two comparable at a glance, and it loses the one distinction that decides what "
             "you can do about any of it: Configuration is fixed and yours to change, Messages "
             "grows and is not. The treemap groups them; the bar cannot.",
+            className="dash-only",
             style={"color": MUTED, "fontSize": "11.5px", "margin": "4px 0 14px 0",
                    "maxWidth": "900px", "lineHeight": "1.55"}),
         html.Div("What is in the window, item by item", style=SECTION_HEAD),
@@ -335,8 +347,10 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
                 {"percent": Format(precision=1, scheme=Scheme.fixed)})),
             tooltip_header=header_help(_cols),
             data=rows, **TABLE_STYLE),
-        html.Div(notes, style={"margin": "10px 0 0 0"}),
-        html.Div(
+        # BOUND TO THE CHART BELOW, by id. Two of these sit above the chart and one below the
+        # table, so nothing about where they are drawn says which of the two charts they are
+        # about; all three describe the composition series.
+        chart_note(notes + [html.Div(
             f"DERIVED, not measured. Claude Code stores this split nowhere, so Messages and the "
             f"category rows are computed as resident minus a recorded baseline of "
             f"{static_total:,} tokens (source: {b['source']}, recorded {applies}). Resident and "
@@ -344,9 +358,11 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
             f"turn, not by the newest one. Rows marked 'not resident' are deferred tools, which "
             f"the tooltip lists without a percentage because they cost nothing until they load - "
             f"re-calibrate after adding an MCP server, a skill, or editing CLAUDE.md.",
-            style={"color": MUTED, "fontSize": "11.5px", "margin": "12px 0 14px 0",
-                   "maxWidth": "900px", "lineHeight": "1.55"}),
-        dcc.Graph(figure=dark_fig(fig, 420), config={"displayModeBar": False}),
+            style={"color": MUTED, "fontSize": "11.5px", "margin": "12px 0 0 0",
+                   "maxWidth": "900px", "lineHeight": "1.55"})],
+            for_id="fig-window-composition", style={"margin": "10px 0 14px 0"}),
+        dcc.Graph(id="fig-window-composition", figure=dark_fig(fig, 420),
+                  config={"displayModeBar": False}),
     ]
     # The categories above are DERIVED from a baseline. The item detail is a direct reading, and
     # the only place this store can say WHICH skill or WHICH tool the tokens went to. Two subjects,

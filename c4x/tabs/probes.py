@@ -15,6 +15,7 @@ from c4x.theme import (
     TABLE_STYLE,
     TEXT,
     WARN,
+    about_note,
     header_help,
     stat_card,
 )
@@ -104,10 +105,15 @@ def probes_layout(session_id=None, scope="main", cohort=None):
 
     return html.Div([
         html.Div(cards, style={"display": "flex", "gap": "12px", "flexWrap": "wrap"}),
-        html.Div("The refresh loop, measured", style=SECTION_HEAD),
-        html.Div("Most harvests find nothing, because the dashboard polls on a timer while the "
-                 "hooks already harvest on SessionEnd and UserPromptSubmit. A high percentage "
-                 "here is not an error, it is the cost of the tick being shorter than the work.",
-                 style=SECTION_NOTE),
+        # NAMES THE CARDS ABOVE IT, not the table below, so the pairing that carries a heading
+        # forward to the next table could only ever have attributed it wrongly. It is a statement
+        # about this section of the view, and it says so.
+        about_note([
+            html.Div("The refresh loop, measured", style=SECTION_HEAD),
+            html.Div("Most harvests find nothing, because the dashboard polls on a timer while "
+                     "the hooks already harvest on SessionEnd and UserPromptSubmit. A high "
+                     "percentage here is not an error, it is the cost of the tick being shorter "
+                     "than the work."),
+        ]),
         *body,
     ])

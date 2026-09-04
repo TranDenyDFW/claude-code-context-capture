@@ -15,11 +15,11 @@ from c4x.store import q, scoped
 from c4x.theme import (
     DANGER,
     MUTED,
-    SECTION_HEAD,
-    SECTION_NOTE,
     TEXT,
     WARN,
+    chart_note,
     dark_fig,
+    empty_panel,
     fmt_cost,
     fmt_tokens,
     numeric_columns,
@@ -69,7 +69,7 @@ def _reread_curve(read_tools, where, args, dup_min):
                             name="if every group were equal",
                             line=dict(color=MUTED, width=1, dash="dot"),
                             hoverinfo="skip"))
-    fig.update_layout(title=f"Concentration of re-reading across {len(share):,} groups",
+    fig.update_layout(title="Concentration of Re-Reading",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="groups, largest first",
                       yaxis_title="% of all re-reads")
@@ -79,12 +79,12 @@ def _reread_curve(read_tools, where, args, dup_min):
     return html.Div([
         dcc.Graph(id="fig-reread", figure=dark_fig(fig, 360),
                   config={"displayModeBar": False}),
-        html.Div(
-            f"The ten worst groups are {top10:.1f}% of all {total:,} re-reads, and half of them "
-            f"sit in the worst {half:,} of {len(share):,} groups. The table of groups shows the "
-            f"first 200 of those groups; this curve is computed over all of them, so the two "
-            f"denominators are different on purpose.",
-            style=SECTION_NOTE),
+        chart_note(
+            f"Across {len(share):,} groups. The ten worst are {top10:.1f}% of all {total:,} "
+            f"re-reads, and half of them sit in the worst {half:,} of {len(share):,} groups. The "
+            f"table of groups shows the first 200 of those groups; this curve is computed over "
+            f"all of them, so the two denominators are different on purpose.",
+            for_id="fig-reread"),
     ])
 
 
@@ -222,12 +222,11 @@ def _repeated_inputs(where, args, session_id=None):
     # appear. Saying why is the difference between "there are none" and "this question cannot be
     # asked from here", and only one of those is true.
     if session_id:
-        return html.Div([
-            html.Div("The same input, issued in more than one session", style=SECTION_HEAD),
-            html.Div("Not answerable with a single session selected: this table compares sessions "
-                     "to each other. Clear the session in the header, or pick a project, to see "
-                     "which inputs repeat across a whole population.", style=SECTION_NOTE),
-        ])
+        return empty_panel(
+            "The same input, issued in more than one session",
+            "Not answerable with a single session selected: this table compares sessions to each "
+            "other. Clear the session in the header, or pick a project, to see which inputs repeat "
+            "across a whole population.")
     df = q(sql, args)
     if df.empty:
         return html.Div()

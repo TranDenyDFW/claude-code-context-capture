@@ -12,6 +12,7 @@ from c4x.theme import (
     SECTION_HEAD,
     SECTION_NOTE,
     TABLE_STYLE,
+    about_note,
     fmt_tokens,
     header_help,
     numeric_columns,
@@ -59,7 +60,7 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
                 data=rows, **TABLE_STYLE,
             ),
         ]),
-        html.Div(
+        about_note(
             f"Constants read from tools/mirror-core.mjs at startup: "
             f"autocompact buffer {MATH['K']['AUTOCOMPACT_BUFFER']}, "
             f"compact buffer {MATH['K']['COMPACT_BUFFER']}, "
@@ -68,7 +69,8 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
             f"Predictions are computed by tools/mirror.mjs, not reimplemented here.",
             # CONTENT, not a control label: these four constants are the only place either page
             # states them, and marking the sentence dash-only removed them from the React page
-            # entirely. Only the calculator's own inputs and its answer are Dash-only.
-            style={"color": MUTED, "fontSize": "11.5px", "marginTop": "18px"},
+            # entirely. Only the calculator's own inputs and its answer are Dash-only. It is a
+            # statement about the build rather than about any table, so it goes on the chip.
+            style={"marginTop": "18px"},
         ),
     ])

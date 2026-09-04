@@ -137,7 +137,7 @@ def project_totals_fig() -> go.Figure:
         marker=dict(color=ACCENT, line=dict(color=BORDER, width=1)),
         hovertemplate="%{y}<br>%{x:,.0f} resident tokens<extra></extra>",
     ))
-    fig.update_layout(title="Cumulative resident tokens by working directory (top 15)",
+    fig.update_layout(title="Cumulative Resident Tokens by Working Directory",
                       title_font=dict(color=TEXT, size=13))
     fig.update_yaxes(autorange="reversed")
     return fig
@@ -354,7 +354,7 @@ def overview_layout():
         marker=dict(color=ACCENT, line=dict(color=BORDER, width=1)),
         hovertemplate="%{y}<br>%{x:,.0f} resident tokens<extra></extra>",
     ))
-    fig.update_layout(title="Cumulative resident tokens by project (top 15)",
+    fig.update_layout(title="Cumulative Resident Tokens by Project",
                       title_font=dict(color=TEXT, size=13))
     fig.update_yaxes(autorange="reversed")
 

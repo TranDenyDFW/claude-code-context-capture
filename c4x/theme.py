@@ -607,6 +607,81 @@ def numeric_columns(cols, numeric, formats=None):
     return out
 
 
+def chart_note(text, for_id: str | None = None, style: dict | None = None):
+    """The sentence that explains a chart, marked so it reaches the chart over the API.
+
+    A table's heading and note are paired by position, which works because they are always written
+    directly above the rows. A chart's caption is not: it is written above the chart on one tab and
+    below it on four others, and on the Window tab it sits between a table and the chart it
+    describes. Ten of them therefore reached the browser as loose paragraphs, and two more were
+    picked up by the forward-only pairing and shown as the hover of a TABLE they say nothing about.
+
+    So the pairing is declared rather than guessed. `for_id` names the chart exactly and is the
+    right answer whenever the caption is not a sibling of its `dcc.Graph`; without it the caption
+    binds to the nearest chart in its own list, preferring the one above it, which is where a
+    caption written below a chart belongs. A caption that binds to nothing is caught by the gate on
+    loose prose rather than disappearing.
+
+    Dash renders it exactly as `SECTION_NOTE` always did, so the page it was written for is
+    unchanged; `style` overrides that for the few that are warnings.
+    """
+    return _marked_note("chart-note", text, for_id, style)
+
+
+def table_note(text, for_id: str | None = None, style: dict | None = None):
+    """The sentence that explains a table when it is written BELOW the rows.
+
+    A heading and a note written above a table are paired by position and need no mark. Six
+    captions in this app are written under their table instead, because that is where a "click a
+    row to..." instruction belongs on the page, and a forward-only pairing cannot see them: all six
+    reached the browser as loose paragraphs at the bottom of a tab.
+
+    Use this only for the ones written below. Above the table, keep writing a plain `SECTION_NOTE`:
+    the pairing already handles it and a mark there would be noise.
+    """
+    return _marked_note("table-note", text, for_id, style)
+
+
+def empty_panel(title: str, note: str):
+    """A block that names what would be here and says why it is not.
+
+    Not prose, and not a hover. "The same input, issued in more than one session" followed by
+    "Not answerable with a single session selected" is the most useful thing on that part of the
+    page when a session is selected: it distinguishes "there are none" from "this question cannot
+    be asked from here", and only one of those is true. Hiding it behind a glyph on a heading that
+    does not exist would lose it, and printing it loose is the wall this app just stopped printing.
+
+    So it travels as its own kind and the page draws it as a placeholder where the table would be.
+    Dash renders exactly what it rendered before.
+    """
+    return html.Div([
+        html.Div(title, style=SECTION_HEAD),
+        html.Div(note, style=SECTION_NOTE),
+    ], className="empty-panel")
+
+
+def about_note(children, style: dict | None = None):
+    """What this view IS, as opposed to what any one chart or table on it shows.
+
+    Some sentences are about the page. "Nothing on this tab answers to the header selection",
+    "A reading describes the moment it was taken", a sub-panel's statement of which half of the
+    window it covers: none of them belong on a chart's hover, because they are not about a chart,
+    and all of them were printing as loose paragraphs for want of anywhere else.
+
+    They go where a reader already looks to ask what they are reading: the population chip in the
+    header, which states what the numbers cover and now states this too. The Dash page draws them
+    exactly where they are written.
+    """
+    return html.Div(children, className="about-note", style={**SECTION_NOTE, **(style or {})})
+
+
+def _marked_note(mark: str, text, for_id: str | None, style: dict | None):
+    # THE TARGET RIDES IN THE CLASS, NOT IN THE ID. An id must be unique in a Dash page, so binding
+    # by id allowed exactly one caption per chart and the Window tab needs three on one of them.
+    classes = f"{mark} {mark}-for-{for_id}" if for_id else mark
+    return html.Div(text, className=classes, style={**SECTION_NOTE, **(style or {})})
+
+
 def accordion(title: str, sub: str, children, open_by_default: bool = False):
     """A collapsible block. Native details/summary, so it needs no callback and no state.
 
@@ -617,7 +692,13 @@ def accordion(title: str, sub: str, children, open_by_default: bool = False):
     return html.Details([
         html.Summary([
             html.Span(title, style={"color": TEXT, "fontSize": "13px", "fontWeight": 600}),
-            html.Span(f"  {sub}", style={"color": MUTED, "fontSize": "11px", "marginLeft": "8px"}),
+            # MARKED, so the API can tell the two apart again. Dash keeps them apart with 13px/600
+            # against 11px/muted and two literal spaces; `extract.texts()` strips and joins, so over
+            # the API the pair arrived as one string and the page drew "What to do about it 6
+            # finding(s), each with an action" as a heading, with no hover, because a summary has
+            # only one slot. The class says which half is the caption.
+            html.Span(f"  {sub}", className="accordion-sub",
+                      style={"color": MUTED, "fontSize": "11px", "marginLeft": "8px"}),
         ], style={"cursor": "pointer", "padding": "8px 10px", "background": PANEL,
                   "border": f"1px solid {BORDER}", "borderRadius": "6px",
                   "fontFamily": MONO, "listStyle": "none"}),

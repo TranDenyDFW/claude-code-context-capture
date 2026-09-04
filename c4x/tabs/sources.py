@@ -64,7 +64,7 @@ def sources_layout(session_id=None, scope="main", cohort=None):
         head = att.head(14).iloc[::-1]
         fig.add_trace(go.Bar(x=head["occurrences"], y=head["kind"], orientation="h",
                              marker_color=ACCENT))
-        fig.update_layout(title="Injected context by type, all sessions",
+        fig.update_layout(title="Injected Context by Type",
                           title_font=dict(color=TEXT, size=13),
                           xaxis_title="occurrences", yaxis_title="")
 
@@ -89,11 +89,12 @@ def sources_layout(session_id=None, scope="main", cohort=None):
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"}),
 
         html.Div("Context injected by the harness", style=SECTION_HEAD),
-        html.Div("Not typed by you and not returned by a tool: reminders, hook output, skill and "
-                 "agent listings, deferred-tool deltas. It occupies the same window as everything "
-                 "else, and no native view shows it historically.",
+        html.Div("All sessions. Not typed by you and not returned by a tool: reminders, hook "
+                 "output, skill and agent listings, deferred-tool deltas. It occupies the same "
+                 "window as everything else, and no native view shows it historically.",
                  style=SECTION_NOTE),
-        dcc.Graph(figure=dark_fig(fig, 360), config={"displayModeBar": False}),
+        dcc.Graph(id="fig-sources", figure=dark_fig(fig, 360),
+                  config={"displayModeBar": False}),
         evidence_block("Injected context by type", att, sql["att"], sid_args),
 
         evidence_block(

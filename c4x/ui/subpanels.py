@@ -17,7 +17,7 @@ from typing import Any, TypedDict
 
 from dash import dcc, html
 
-from c4x.theme import ACCENT, BORDER, MONO, MUTED, PANEL, TEXT
+from c4x.theme import ACCENT, BORDER, MONO, MUTED, PANEL, TEXT, about_note
 
 
 class _Panelled(TypedDict):
@@ -85,20 +85,29 @@ def strip(prefix, panels, active=0):
         for index, (key, label, _description) in enumerate(panels)
     ]
     return html.Div([
-        html.Div(buttons, style={"display": "flex", "alignItems": "center",
-                                 "flexWrap": "wrap", "margin": "2px 0 10px 0"}),
+        # MARKED AS BELONGING TO A CONTROL THIS PAGE DOES NOT DRAW. The React page renders the tab
+        # body and never built the switcher, so the four labels arrived as four one-word
+        # paragraphs, "Composition Configuration Conversation Injected", above content that has no
+        # way to change. The Dash page draws the buttons exactly as before.
+        html.Div(buttons, className="dash-only",
+                 style={"display": "flex", "alignItems": "center",
+                        "flexWrap": "wrap", "margin": "2px 0 10px 0"}),
         dcc.Store(id=store_id(prefix), data=active),
     ])
 
 
 def description_note(panels, index):
-    """The active panel's own one-line statement of what it is, for the top of its body."""
+    """The active panel's own statement of what it is, for the top of its body.
+
+    A statement ABOUT THE VIEW, not about any one chart on it, so it goes where the page already
+    says what the reader is looking at. The React page draws one panel and no buttons, so this
+    used to arrive as a paragraph describing a choice that was not on screen, directly above the
+    four one-word paragraphs that were the buttons.
+    """
     text = panels[max(0, min(int(index or 0), len(panels) - 1))][2]
     if not text:
         return None
-    return html.Div(text, style={"color": MUTED, "fontSize": "11.5px",
-                                 "margin": "0 0 12px 0", "maxWidth": "900px",
-                                 "lineHeight": "1.55"})
+    return about_note(text, style={"margin": "0 0 12px 0"})
 
 
 def active_index(triggered_id, prefix, panels, current):

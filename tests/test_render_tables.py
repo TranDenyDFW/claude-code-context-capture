@@ -346,3 +346,244 @@ def test_no_two_tables_of_one_surface_share_a_title(app):
                 if i < j:
                     shared = mine & theirs
                     assert not shared, f"panels {prefix}[{i}] and {prefix}[{j}] share {shared}"
+
+
+def _loose_prose(payload):
+    """The lines this payload would print as a wall, replicating `Pane.tsx`'s own claim pass.
+
+    Kept in step with the page by construction: every field the component consults to drop a line
+    is consulted here, in the same order and with the same case-insensitive compare. A test that
+    approximated the filter would go green on lines the reader still sees.
+    """
+    claimed = set()
+
+    def claim(line):
+        if line:
+            claimed.add(str(line).strip().lower())
+
+    for stat in payload.get("stats") or []:
+        claim(stat.get("label"))
+        claim(stat.get("value"))
+        claim(stat.get("sub"))
+    sections = payload.get("details") or []
+    for section in sections:
+        for line in section.get("body") or []:
+            claim(line)
+        claim(section.get("summary"))
+        claim(section.get("summary_note"))
+    for entry in payload.get("meta") or []:
+        for line in entry.get("absorbed") or []:
+            claim(line)
+    for entry in payload.get("figure_meta") or []:
+        for line in entry.get("absorbed") or []:
+            claim(line)
+    for line in payload.get("dash_only") or []:
+        claim(line)
+    for line in payload.get("about") or []:
+        claim(line)
+    for panel in payload.get("empty") or []:
+        claim(panel.get("title"))
+        claim(panel.get("note"))
+    population = payload.get("population")
+    return [line for line in payload["text"]
+            if line != population
+            and line.strip().lower() not in claimed
+            and not any(line in (s.get("summary") or "") for s in sections)]
+
+
+def _selection_states(q):
+    """The header states a reader can actually be in, named by what produces them.
+
+    ONE STATE IS NOT A POPULATION, and rendering one is how this file passed while the Cost tab
+    printed a wall. `waste.py` returns a heading and a note with no table under them when a session
+    is selected, so a gate that only ever rendered `session=None` could not see it, and the branch
+    that added the gate shipped with the defect the gate exists to catch.
+
+    The session and the cohort are READ FROM THE STORE rather than hard-coded, so this covers
+    whatever the store in front of it holds instead of whatever was true on one machine.
+    """
+    states = [("default", None, "main", None), ("scope=all", None, "all", None)]
+    turns = q("SELECT session_id FROM turns GROUP BY session_id ORDER BY COUNT(*) DESC LIMIT 1")
+    if not turns.empty:
+        sid = turns.iloc[0]["session_id"]
+        states += [("session", sid, "main", None), ("session+all", sid, "all", None)]
+    projects = q("""SELECT cwd FROM sessions WHERE cwd IS NOT NULL AND cwd <> ''
+                     GROUP BY cwd ORDER BY COUNT(*) DESC LIMIT 1""")
+    if not projects.empty:
+        states.append(("cohort", None, "main", projects.iloc[0]["cwd"]))
+    return states
+
+
+def _surfaces(app, q):
+    """Every tab and every registered sub-panel, in every selection state, as {name: payload}.
+
+    The sub-panels are included because they are exactly what nothing else looks at: three of them
+    are unreachable from the React page today, and their button labels reached the reader as
+    sentences for as long as the port has existed.
+    """
+    from c4x.api.main import _pane, _render_payload
+    from c4x.ui.subpanels import PANELLED
+
+    out = {}
+    for name, session, scope, cohort in _selection_states(q):
+        for tab, *_ in app.TABS:
+            pane = _pane(tab, session, scope, cohort, None, "session")
+            out[f"tab {tab} [{name}]"] = _render_payload(pane)
+        for prefix, spec in PANELLED.items():
+            for index in range(len(spec["panels"])):
+                pane = spec["body"](index, session, scope, cohort)
+                out[f"panel {prefix}[{index}] [{name}]"] = _render_payload(pane)
+    return out
+
+
+def test_no_surface_prints_a_wall_of_loose_prose(app, q):
+    """EVERY LINE HAS AN OWNER: a card, a table, a chart, a section, the population, or a control
+    this page does not draw.
+
+    This is the whole shape of the page stated once. A tab that grows a sentence with nowhere to
+    put it fails here rather than shipping it as a paragraph in the body, which is how twenty-eight
+    lines across seven tabs arrived: chart captions with no channel to reach a chart, table captions
+    written below their table where the forward-only pairing never sees them, the labels of sliders
+    and buttons the React page never draws, and five numbers that wanted to be stat cards.
+    """
+    homeless = {name: _loose_prose(payload) for name, payload in _surfaces(app, q).items()}
+    homeless = {name: lines for name, lines in homeless.items() if lines}
+    report = "\n".join(f"  {name}: {len(lines)} line(s)\n"
+                       + "\n".join(f"      {line[:96]!r}" for line in lines)
+                       for name, lines in homeless.items())
+    assert not homeless, f"text with no owner, which the page prints as a wall:\n{report}"
+
+
+def test_every_chart_on_every_surface_has_a_name(app, q):
+    """A chart with no title is drawn under nothing at all: `Pane.tsx` renders no heading rather
+    than inventing one, so the reader gets a plot and no statement of what it plots."""
+    unnamed = [(name, i) for name, payload in _surfaces(app, q).items()
+               for i, figure in enumerate(payload["figures"]) if not (figure.get("title") or "")]
+    assert not unnamed, f"charts the page would draw with no heading: {unnamed}"
+
+
+def _graph(index):
+    import plotly.graph_objects as go
+    from dash import dcc
+    return dcc.Graph(id=f"g{index}", figure=go.Figure())
+
+
+def test_a_caption_between_two_charts_belongs_to_the_one_above_it():
+    """The rule stated in `_marked_notes`, checked rather than assumed.
+
+    Four of this app's chart captions are written UNDER their chart, because "click a point to..."
+    belongs there on the page. A rule that preferred the chart below would put every one of them on
+    the wrong chart, silently, and the reader would have no way to tell.
+    """
+    from dash import html
+
+    from c4x.api.main import _figure_meta
+    from c4x.theme import chart_note
+
+    pane = html.Div([_graph(1), chart_note("mine"), _graph(2)])
+    assert [m["note"] for m in _figure_meta(pane, 2)] == ["mine", None]
+
+
+def test_a_caption_before_the_first_chart_still_reaches_it():
+    """`sources.py` writes its caption above the chart. With no chart above it, the one
+    below wins."""
+    from dash import html
+
+    from c4x.api.main import _figure_meta
+    from c4x.theme import chart_note
+
+    assert _figure_meta(html.Div([chart_note("mine"), _graph(1)]), 1)[0]["note"] == "mine"
+
+
+def test_one_chart_can_carry_more_than_one_caption():
+    """The Window tab's composition chart carries three separate statements.
+
+    They bind by CLASS, not by id: an id must be unique in a Dash page, so the first version of
+    this allowed exactly one caption per chart and silently dropped the rest.
+    """
+    from dash import html
+
+    from c4x.api.main import _figure_meta
+    from c4x.theme import chart_note
+
+    pane = html.Div([_graph(1), _graph(2),
+                     chart_note("a", for_id="g1"), chart_note("b", for_id="g1")])
+    assert [m["note"] for m in _figure_meta(pane, 2)] == ["a\nb", None]
+
+
+def test_a_caption_naming_a_chart_that_is_not_there_binds_to_nothing():
+    """And is therefore caught by the gate on loose prose, rather than shown on a chart at random.
+
+    A chart is conditional on several panels: no probe, no chart. A caption that quietly moved to
+    whichever chart happened to be nearest would be a caption about a chart that is not on screen.
+    """
+    from dash import html
+
+    from c4x.api.main import _figure_meta
+    from c4x.theme import chart_note
+
+    pane = html.Div([_graph(1), chart_note("x", for_id="absent")])
+    assert _figure_meta(pane, 1)[0]["note"] is None
+
+
+def test_a_heading_above_a_chart_reaches_the_chart_and_not_the_table_after_it():
+    """`_table_meta` discards this pair, correctly, and had nowhere to put it.
+
+    On the Injected panel that pair is the only thing naming the chart, so the chart was drawn with
+    no explanation while its heading printed as a loose line above it.
+    """
+    from dash import dash_table, html
+
+    from c4x.api.main import _figure_meta, _table_meta
+    from c4x.theme import SECTION_HEAD
+
+    pane = html.Div([html.Div("Head", style=SECTION_HEAD), html.Div("note"),
+                     _graph(1), dash_table.DataTable(id="t")])
+    assert _figure_meta(pane, 1)[0]["absorbed"] == ["Head", "note"]
+    # And the table after the chart does not also claim it.
+    assert _table_meta(pane)[0]["absorbed"] == []
+
+
+# EVERY LINE THIS PAGE IS ALLOWED TO DELETE. `dash-only` is the one channel that removes text from
+# the reader entirely, and both the gate on loose prose and a diff of what the page renders are
+# blind to it by construction: a line marked here is claimed, so the gate is satisfied, and it is
+# gone, so nothing shows it missing. That is the shape of a check that cannot fail.
+#
+# So the channel is pinned. Adding to it means adding a line here, in a review, next to ten control
+# labels, which is where a 300-character explanation of a chart would look exactly as wrong as it
+# would be. Every entry below is the label of a control, or an instruction to use one, that the
+# React page does not draw.
+DASH_ONLY = {
+    "A calculator over it",
+    "Budget, as a share of the window",
+    "Compare turns A and B",
+    "Composition",
+    "Configuration",
+    "Conversation",
+    "Injected",
+    "Move A and B apart to see what entered the window between two turns, and what it cost.",
+    "Resident tokens",
+    "The bar above is the same figure flat. It is the shape the tooltip uses, which makes the two "
+    "comparable at a glance, and it loses the one distinction that decides what you can do about "
+    "any of it: Configuration is fixed and yours to change, Messages grows and is not. The treemap "
+    "groups them; the bar cannot.",
+    "Window",
+}
+
+
+def test_the_page_may_only_delete_what_this_file_lists(app, q):
+    """The silent-deletion channel is a fixed list, not a habit.
+
+    This is the one thing on the page that both other guards are blind to at once, so it gets a
+    guard whose whole content is the population it protects.
+    """
+    seen = set()
+    for payload in _surfaces(app, q).values():
+        seen |= {line.strip() for line in payload.get("dash_only") or [] if line.strip()}
+    added = seen - DASH_ONLY
+    assert not added, (
+        "text is being deleted from the page and this file does not list it. If each of these is "
+        f"the label of a control the React page does not draw, add it above: {sorted(added)}")
+    gone = DASH_ONLY - seen
+    assert not gone, (
+        f"listed as deletable and no longer marked anywhere; drop it from the list: {sorted(gone)}")
