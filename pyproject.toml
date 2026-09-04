@@ -45,11 +45,12 @@ show_error_codes = true
 #
 #     python -m mypy --disallow-untyped-defs
 #
-# The size is whatever that command reports today, and this comment no longer states it. Two
-# numbers have stood here, 278 and then 253, and both were measured against a tree that had moved
-# by the time anyone read them: the first was taken before the backlog was cleared, the second
-# before the frontend and the API grew. A count nobody re-runs is a claim, and the command above
-# is the answer.
+# The size is whatever that command reports today, and this comment does not state it. Two
+# different counts stood here in turn, and both were measured against a tree that had moved by
+# the time anyone read them: the first before the backlog it described was cleared, the second
+# before the frontend and the API grew. Quoting either of them again, even as history, puts a
+# number in front of a reader who has no way to tell it is stale. A count nobody re-runs is a
+# claim; the command above is the answer.
 
 [tool.ruff]
 line-length = 100          # what app.py and the checks are already written to
