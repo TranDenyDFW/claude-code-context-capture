@@ -642,6 +642,24 @@ def table_note(text, for_id: str | None = None, style: dict | None = None):
     return _marked_note("table-note", text, for_id, style)
 
 
+def empty_panel(title: str, note: str):
+    """A block that names what would be here and says why it is not.
+
+    Not prose, and not a hover. "The same input, issued in more than one session" followed by
+    "Not answerable with a single session selected" is the most useful thing on that part of the
+    page when a session is selected: it distinguishes "there are none" from "this question cannot
+    be asked from here", and only one of those is true. Hiding it behind a glyph on a heading that
+    does not exist would lose it, and printing it loose is the wall this app just stopped printing.
+
+    So it travels as its own kind and the page draws it as a placeholder where the table would be.
+    Dash renders exactly what it rendered before.
+    """
+    return html.Div([
+        html.Div(title, style=SECTION_HEAD),
+        html.Div(note, style=SECTION_NOTE),
+    ], className="empty-panel")
+
+
 def about_note(children, style: dict | None = None):
     """What this view IS, as opposed to what any one chart or table on it shows.
 

@@ -28,6 +28,7 @@ from c4x.theme import (
     TEXT,
     WARN,
     accordion,
+    empty_panel,
     fmt_bytes,
     fmt_tokens,
     header_help,
@@ -78,8 +79,10 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
     """
     if df is None or (hasattr(df, "empty") and df.empty):
         return html.Div([
-            html.Div(title, style=SECTION_HEAD),
-            html.Div("No rows.", style=SECTION_NOTE),
+            # The heading and its reason are ONE block, so the page can draw a placeholder where
+            # the table would be. The query stays a sibling: it is a collapsible of its own and
+            # folding it in would claim the SQL twice.
+            empty_panel(title, "No rows."),
             accordion("The query that returned nothing", "reproduce it yourself",
                       html.Pre(sql_preview(sql, params),
                                style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),

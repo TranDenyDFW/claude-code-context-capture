@@ -246,15 +246,12 @@ export default function App() {
             // tabs answer to the header.
             (() => {
               const onSelection = (pane.data.population_scope ?? 'store') === 'selection'
-              // WHAT THIS VIEW IS, on the chip that already says what it covers. These are the
-              // sentences that are about the page rather than about any chart on it: a sub-panel
-              // saying which half of the window it describes, "A reading describes the moment it
-              // was taken", the four window constants. They printed as a wall in the body for want
-              // of anywhere else, and this is where a reader already looks to ask what they are
-              // reading.
-              const about = [pane.data.population, ...(pane.data.about ?? [])]
-                .filter(Boolean).join('\n\n')
-              const more = (pane.data.about ?? []).length > 0
+              // THE CHIP CARRIES THE POPULATION AND NOTHING ELSE. It briefly carried the
+              // view-level statements too, and on the Diagnostics tab that was 826
+              // characters across six paragraphs as the tooltip of a chip 61 pixels wide.
+              // A tooltip that long is not a hover, it is a wall with no scrollbar. Those
+              // lines are drawn as a named, collapsed disclosure below instead.
+              const about = pane.data.population ?? ''
               return (
                 <span
                   data-scoped={pane.data.scoped ? 'true' : 'false'}
@@ -266,16 +263,6 @@ export default function App() {
                   }`}
                 >
                   {onSelection ? 'This Selection' : 'Store-Wide'}
-                  {/* The same glyph a table heading uses, for the same reason: the chip has
-                      carried hover text since it was added and nothing on screen said so. */}
-                  {more && (
-                    <span
-                      aria-hidden="true"
-                      className="ml-1.5 rounded border border-edge px-1 font-normal"
-                    >
-                      ?
-                    </span>
-                  )}
                 </span>
               )
             })()

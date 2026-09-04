@@ -22,6 +22,7 @@ export function Pane({
   const meta = payload.meta ?? []
   const stats = payload.stats ?? []
   const figureMeta = payload.figure_meta ?? []
+  const empties = payload.empty ?? []
 
   // A section's body is ALSO in `text`, because `extract.texts()` flattens the whole pane including
   // what is inside a collapsed block. Rendered naively every SQL query appears twice: once as a
@@ -58,6 +59,11 @@ export function Pane({
   // WHAT THIS VIEW IS. The header chip carries these; without the claim they are on the chip AND
   // still in the body, which is the wall this was meant to end, with one more copy of it.
   for (const line of payload.about ?? []) claim(line)
+  // A panel that cannot be filled is drawn below as a placeholder, so its two lines are not prose.
+  for (const panel of empties) {
+    claim(panel.title)
+    if (panel.note) claim(panel.note)
+  }
   // A CHART'S CAPTION BELONGS TO THE CHART. The server pairs it and lists the exact lines it
   // folded in; without this every one of them printed as a paragraph in the body, far from the
   // chart it explains, which is how ten captions across seven tabs became a wall of prose.
@@ -114,6 +120,29 @@ export function Pane({
 
   return (
     <div className="flex flex-col gap-5">
+
+      {(payload.about ?? []).length > 0 && (
+        // WHAT THIS VIEW IS, named and collapsed. These are the sentences that are about the page
+        // rather than about any chart on it: a sub-panel saying which half of the window it
+        // describes, "A reading describes the moment it was taken", the four window constants.
+        // They printed as a wall in the body, then briefly as an 826-character tooltip on a chip
+        // 61 pixels wide, which is a wall with no scrollbar. A disclosure is neither: it is named,
+        // it is closed until asked for, and what is inside it can be read.
+        <details className="rounded-lg bg-panel shadow-panel">
+          <summary className="cursor-pointer list-none px-4 py-2 text-sm text-ink-dim
+                              marker:content-none hover:text-ink">
+            <span className="mr-1.5 inline-block transition-transform group-open:rotate-90">›</span>
+            About this view
+          </summary>
+          <div className="border-t border-edge px-4 py-3">
+            {(payload.about ?? []).map((line, index) => (
+              <p key={index} className="mb-2 text-sm leading-relaxed text-ink-dim last:mb-0">
+                {line}
+              </p>
+            ))}
+          </div>
+        </details>
+      )}
 
       {stats.length > 0 && (
         // THE NUMBERS FIRST. These are the figures the tab is about, and they arrived as
@@ -177,6 +206,23 @@ export function Pane({
 
       {loose.map((section, index) => (
         <Section key={`loose-${index}`} section={section} />
+      ))}
+
+      {/* WHERE A TABLE WOULD HAVE BEEN. Not prose and not a hover: on the Cost tab with a session
+          selected this is the only thing that tells a reader the difference between "there are
+          none" and "this question cannot be asked from the selection you are in", and only one of
+          those is true. Drawn dimmer than a real panel and with a dashed edge, so it reads as an
+          absence rather than as content. */}
+      {empties.map((panel, index) => (
+        <section
+          key={`empty-${index}`}
+          className="rounded-lg border border-dashed border-edge px-4 py-3"
+        >
+          <h3 className="text-md font-semibold text-ink-dim">{panel.title}</h3>
+          {panel.note && (
+            <p className="mt-1 text-sm leading-relaxed text-ink-faint">{panel.note}</p>
+          )}
+        </section>
       ))}
 
       {payload.tables.map((table, index) => {

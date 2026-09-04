@@ -102,13 +102,21 @@ describe('a table heading built from a collapsible label', () => {
 })
 
 describe('what a view IS', () => {
-  it('is claimed by the pane, because the header chip is already showing it', () => {
+  it('is drawn once, in a named disclosure, and never as loose prose', () => {
     render(<Pane payload={payload({
       about: ['This tab describes the capture machinery and the window math.'],
       text: ['This tab describes the capture machinery and the window math.'],
     })} />)
-    // Claimed but NOT rendered here: the chip in the shell shows it. Printing it in the body as
-    // well put the same sentence on screen twice, which is the wall with an extra copy of itself.
-    expect(screen.queryByText(/capture machinery/)).toBeNull()
+    // Once, not twice: it is claimed out of the prose block AND rendered in the disclosure, so a
+    // reader meets it in one place, under a heading that says what it is.
+    const hits = screen.getAllByText(/capture machinery/)
+    expect(hits).toHaveLength(1)
+    expect(screen.getByText('About this view')).toBeTruthy()
+    expect(hits[0].closest('details')).toBeTruthy()
+  })
+
+  it('draws no disclosure when the view has nothing to say about itself', () => {
+    render(<Pane payload={payload({ text: [] })} />)
+    expect(screen.queryByText('About this view')).toBeNull()
   })
 })

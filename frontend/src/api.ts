@@ -132,6 +132,14 @@ export interface TabPayload {
    * Shown on the population chip in the header, which already states what the numbers cover.
    */
   about?: string[]
+  /**
+   * Only on /render. A block that names what would be here and says why it is not.
+   *
+   * Drawn as a placeholder where the table would be. "Not answerable with a single session
+   * selected" is the most useful thing on that part of the page, and it is the difference between
+   * "there are none" and "this question cannot be asked from here".
+   */
+  empty?: { title: string; note: string | null }[]
   /** Only on /render. The caption each chart answers to, in the same order as `figures`. */
   figure_meta?: { note: string | null; absorbed: string[] }[]
   /** Whether the header selection changes this tab at all. From the app's SELECTION_SCOPED. */

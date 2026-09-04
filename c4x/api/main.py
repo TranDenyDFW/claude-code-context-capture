@@ -255,22 +255,33 @@ def _preceding_notes(node, count, kind):
 
     def walk(node, pending):
         if isinstance(node, (list, tuple)):
-            pending = {"head": None, "note": None}
+            pending = {"head": None, "note": None, "after_table": False}
             for child in node:
                 walk(child, pending)
             return
         if not hasattr(node, "_prop_names"):
             return
         seen = type(node).__name__
-        marks = {"chart-note", "dash-only", "table-note", "about-note"}
+        marks = {"chart-note", "dash-only", "table-note", "about-note", "empty-panel"}
         if set(str(getattr(node, "className", "") or "").split()) & marks:
             return
         text = plain_text(node) if pending is not None else None
         if text is not None and text.strip():
             if getattr(node, "style", None) == SECTION_HEAD or seen.startswith("H"):
+                # A HEADING STARTS A NEW SECTION, which is what makes the rule below safe: a
+                # heading after a table is the next thing's heading, not the table's caption.
                 pending["head"], pending["note"] = text, None
-            else:
+                pending["after_table"] = False
+            elif not pending["after_table"]:
                 pending["note"] = text
+            else:
+                # A BARE CAPTION AFTER A TABLE BELONGS TO THAT TABLE, not to the next chart.
+                # `probe_detail.py` writes "Where the two columns disagree..." under its rollup
+                # table with a treemap next in the same list, and this walk served it as the
+                # TREEMAP's hover: a sentence about two columns, on a chart that has none. It is
+                # left unclaimed instead, which fails the gate on loose prose and makes the author
+                # mark it, rather than being shown in the wrong place with nothing saying so.
+                pass
             return
         if seen == kind:
             head = (pending or {}).get("head")
@@ -282,6 +293,7 @@ def _preceding_notes(node, count, kind):
             return
         if pending is not None and seen in (extract.TABLE_TYPE, "Details"):
             pending["head"], pending["note"] = None, None
+            pending["after_table"] = True
         for name in node._prop_names:
             value = getattr(node, name, None)
             if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
@@ -424,6 +436,10 @@ def _render_payload(pane):
     # WHAT THIS VIEW IS, as opposed to what any one chart on it shows. The page puts these on the
     # population chip, which is the thing a reader already looks at to ask what they are reading.
     payload["about"] = _marked_lines(pane, "about-note")
+    # A PANEL THAT CANNOT BE FILLED still has to say so. These are titled blocks with no table
+    # under them, and they are the one thing on the page that tells a reader the difference between
+    # "there are none" and "this question cannot be asked from the selection you are in".
+    payload["empty"] = _empty_panels(pane)
     # THE CAPTION EACH CHART ANSWERS TO, paired by index the same way `meta` is, and only when this
     # walk saw the same charts the extractor did. A caption under the wrong chart is a caption that
     # lies, which is worse than one the reader has to look for.
@@ -664,7 +680,7 @@ def _table_meta(node, found=None):
         # exactly what happens on All sessions and on Compactions today, and the label of a control
         # this page never draws would become the note of whatever table came next.
         if set(str(getattr(node, "className", "") or "").split()) & {
-                "chart-note", "dash-only", "table-note", "about-note"}:
+                "chart-note", "dash-only", "table-note", "about-note", "empty-panel"}:
             return
         text = plain_text(node) if pending is not None else None
         if text is not None and text.strip():
@@ -751,6 +767,34 @@ def _table_meta(node, found=None):
 def _dash_only(node):
     """Every text line under a component marked className="dash-only", in document order."""
     return _marked_lines(node, "dash-only")
+
+
+def _empty_panels(node, found=None):
+    """Every block marked `empty-panel`, as {title, note}, in document order.
+
+    Built the way `theme.empty_panel` builds them: the first line is the title and everything after
+    it is the note. Read from the tree rather than passed alongside it, for the same reason
+    `_table_meta` is: a second source of truth for what a block says is a second thing to keep in
+    step with it.
+    """
+    from c4x.cli import extract
+    found = [] if found is None else found
+    if isinstance(node, (list, tuple)):
+        for child in node:
+            _empty_panels(child, found)
+        return found
+    if not hasattr(node, "_prop_names"):
+        return found
+    if "empty-panel" in str(getattr(node, "className", "") or "").split():
+        lines = [t for t in extract.texts(node) if t and t.strip()]
+        if lines:
+            found.append({"title": lines[0], "note": " ".join(lines[1:]) or None})
+        return found
+    for name in node._prop_names:
+        value = getattr(node, name, None)
+        if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
+            _empty_panels(value, found)
+    return found
 
 
 def _marked_lines(node, mark, found=None):

@@ -118,19 +118,30 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
         html.Div([
             stat_card("listed sessions", f"{len(rows):,}",
                       sub=f"{SESSION_TURN_FLOOR} or more turns"),
-            stat_card("projects", f"{counts.get('Projects', 0):,}",
-                      sub=" · ".join(f"{k.lower()} {v:,}"
-                                     for k, v in counts.items() if k != "Projects") or "only"),
+            # COUNTS PROJECTS, which is what it says. It counted SESSIONS whose section is
+            # "Projects" and called them projects, so a store with 518 distinct working directories
+            # reported "Projects 269"; on the committed fixture it read "Projects 0" over a caption
+            # saying 49 sessions were imported, a card contradicting itself in two lines. The label
+            # was written first and the number was whatever was already in hand.
+            stat_card("projects", f"{df['project'].nunique():,}" if not df.empty else "0",
+                      sub="distinct working directories"),
+            # SHORT ENOUGH TO READ. A caption is one line in a 144px box and the browser
+            # truncates the rest, so a caption that runs to 367px is a caption whose second half
+            # only exists on a hover nothing says is there.
             stat_card("archived", f"{marked:,}" if marked or known_not or unknown else "-",
-                      sub=(f"{known_not:,} recorded as not archived, {unknown:,} with no desktop "
-                           f"record at all") if (marked or known_not or unknown) else ""),
+                      sub=(f"{unknown:,} with no desktop record" if unknown
+                           else "all accounted for")),
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap",
                   "marginBottom": "12px"}),
         # Written above the chart and above the table, and about the table, so it is marked: the
         # chart between them resets the forward pairing, and this reached the reader as a
         # paragraph at the top of the tab instead of as the table's hover.
+        # The section breakdown lives HERE, on the table whose `section` column it describes,
+        # rather than crammed into a card caption where the browser cut it in half.
         table_note("Click a row to make it the header selection. Sections come from disk: the "
-                   "working directory, the entrypoint, and whether the transcript still exists.",
+                   "working directory, the entrypoint, and whether the transcript still exists. "
+                   + (" · ".join(f"{k} {v:,}" for k, v in counts.items()) + "."
+                      if counts else ""),
                    for_id="tbl-session"),
         # The mode bar stays ON here, unlike every other chart in the app, because it carries the
         # box and lasso tools that drive the cross-filter below. A hidden mode bar would leave the

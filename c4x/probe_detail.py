@@ -32,6 +32,7 @@ from c4x.theme import (
     chart_note,
     header_help,
     numeric_columns,
+    table_note,
     toward_background,
 )
 
@@ -281,13 +282,15 @@ def probe_detail_blocks(baseline=None):
                      "tokens in baseline", "not loaded"})),
                 tooltip_header=header_help(_cols),
                 data=rows, **TABLE_STYLE),
-            html.Div(
+            # WRITTEN UNDER THE TABLE IT IS ABOUT, and it names that table's two columns. It was
+            # served as the treemap's hover, because a chart follows it in the same list: a
+            # sentence about two columns, on a chart that has none.
+            table_note(
                 "Where the two columns disagree, the probe and the calibration saw different "
                 "configurations. That is a fact about the readings, not an error to reconcile: a "
                 "headless probe does not load the interactive MCP servers, so a large gap in the "
                 "MCP row is expected and a gap in the skills row would not be.",
-                style={"color": MUTED, "fontSize": "11.5px", "margin": "6px 0 14px 0",
-                       "maxWidth": "900px", "lineHeight": "1.55"}),
+                style={"margin": "6px 0 14px 0"}),
         ]
 
     figure, shown, dropped = configuration_treemap(pid)

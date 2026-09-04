@@ -381,6 +381,9 @@ def _loose_prose(payload):
         claim(line)
     for line in payload.get("about") or []:
         claim(line)
+    for panel in payload.get("empty") or []:
+        claim(panel.get("title"))
+        claim(panel.get("note"))
     population = payload.get("population")
     return [line for line in payload["text"]
             if line != population
@@ -388,8 +391,31 @@ def _loose_prose(payload):
             and not any(line in (s.get("summary") or "") for s in sections)]
 
 
-def _surfaces(app):
-    """Every tab and every registered sub-panel, as {name: render payload}.
+def _selection_states(q):
+    """The header states a reader can actually be in, named by what produces them.
+
+    ONE STATE IS NOT A POPULATION, and rendering one is how this file passed while the Cost tab
+    printed a wall. `waste.py` returns a heading and a note with no table under them when a session
+    is selected, so a gate that only ever rendered `session=None` could not see it, and the branch
+    that added the gate shipped with the defect the gate exists to catch.
+
+    The session and the cohort are READ FROM THE STORE rather than hard-coded, so this covers
+    whatever the store in front of it holds instead of whatever was true on one machine.
+    """
+    states = [("default", None, "main", None), ("scope=all", None, "all", None)]
+    turns = q("SELECT session_id FROM turns GROUP BY session_id ORDER BY COUNT(*) DESC LIMIT 1")
+    if not turns.empty:
+        sid = turns.iloc[0]["session_id"]
+        states += [("session", sid, "main", None), ("session+all", sid, "all", None)]
+    projects = q("""SELECT cwd FROM sessions WHERE cwd IS NOT NULL AND cwd <> ''
+                     GROUP BY cwd ORDER BY COUNT(*) DESC LIMIT 1""")
+    if not projects.empty:
+        states.append(("cohort", None, "main", projects.iloc[0]["cwd"]))
+    return states
+
+
+def _surfaces(app, q):
+    """Every tab and every registered sub-panel, in every selection state, as {name: payload}.
 
     The sub-panels are included because they are exactly what nothing else looks at: three of them
     are unreachable from the React page today, and their button labels reached the reader as
@@ -399,16 +425,18 @@ def _surfaces(app):
     from c4x.ui.subpanels import PANELLED
 
     out = {}
-    for tab, *_ in app.TABS:
-        out[f"tab {tab}"] = _render_payload(_pane(tab, None, "main", None, None, "session"))
-    for prefix, spec in PANELLED.items():
-        for index in range(len(spec["panels"])):
-            pane = spec["body"](index, None, "main", None)
-            out[f"panel {prefix}[{index}]"] = _render_payload(pane)
+    for name, session, scope, cohort in _selection_states(q):
+        for tab, *_ in app.TABS:
+            pane = _pane(tab, session, scope, cohort, None, "session")
+            out[f"tab {tab} [{name}]"] = _render_payload(pane)
+        for prefix, spec in PANELLED.items():
+            for index in range(len(spec["panels"])):
+                pane = spec["body"](index, session, scope, cohort)
+                out[f"panel {prefix}[{index}] [{name}]"] = _render_payload(pane)
     return out
 
 
-def test_no_surface_prints_a_wall_of_loose_prose(app):
+def test_no_surface_prints_a_wall_of_loose_prose(app, q):
     """EVERY LINE HAS AN OWNER: a card, a table, a chart, a section, the population, or a control
     this page does not draw.
 
@@ -418,7 +446,7 @@ def test_no_surface_prints_a_wall_of_loose_prose(app):
     written below their table where the forward-only pairing never sees them, the labels of sliders
     and buttons the React page never draws, and five numbers that wanted to be stat cards.
     """
-    homeless = {name: _loose_prose(payload) for name, payload in _surfaces(app).items()}
+    homeless = {name: _loose_prose(payload) for name, payload in _surfaces(app, q).items()}
     homeless = {name: lines for name, lines in homeless.items() if lines}
     report = "\n".join(f"  {name}: {len(lines)} line(s)\n"
                        + "\n".join(f"      {line[:96]!r}" for line in lines)
@@ -426,10 +454,10 @@ def test_no_surface_prints_a_wall_of_loose_prose(app):
     assert not homeless, f"text with no owner, which the page prints as a wall:\n{report}"
 
 
-def test_every_chart_on_every_surface_has_a_name(app):
+def test_every_chart_on_every_surface_has_a_name(app, q):
     """A chart with no title is drawn under nothing at all: `Pane.tsx` renders no heading rather
     than inventing one, so the reader gets a plot and no statement of what it plots."""
-    unnamed = [(name, i) for name, payload in _surfaces(app).items()
+    unnamed = [(name, i) for name, payload in _surfaces(app, q).items()
                for i, figure in enumerate(payload["figures"]) if not (figure.get("title") or "")]
     assert not unnamed, f"charts the page would draw with no heading: {unnamed}"
 
@@ -514,3 +542,48 @@ def test_a_heading_above_a_chart_reaches_the_chart_and_not_the_table_after_it():
     assert _figure_meta(pane, 1)[0]["absorbed"] == ["Head", "note"]
     # And the table after the chart does not also claim it.
     assert _table_meta(pane)[0]["absorbed"] == []
+
+
+# EVERY LINE THIS PAGE IS ALLOWED TO DELETE. `dash-only` is the one channel that removes text from
+# the reader entirely, and both the gate on loose prose and a diff of what the page renders are
+# blind to it by construction: a line marked here is claimed, so the gate is satisfied, and it is
+# gone, so nothing shows it missing. That is the shape of a check that cannot fail.
+#
+# So the channel is pinned. Adding to it means adding a line here, in a review, next to ten control
+# labels, which is where a 300-character explanation of a chart would look exactly as wrong as it
+# would be. Every entry below is the label of a control, or an instruction to use one, that the
+# React page does not draw.
+DASH_ONLY = {
+    "A calculator over it",
+    "Budget, as a share of the window",
+    "Compare turns A and B",
+    "Composition",
+    "Configuration",
+    "Conversation",
+    "Injected",
+    "Move A and B apart to see what entered the window between two turns, and what it cost.",
+    "Resident tokens",
+    "The bar above is the same figure flat. It is the shape the tooltip uses, which makes the two "
+    "comparable at a glance, and it loses the one distinction that decides what you can do about "
+    "any of it: Configuration is fixed and yours to change, Messages grows and is not. The treemap "
+    "groups them; the bar cannot.",
+    "Window",
+}
+
+
+def test_the_page_may_only_delete_what_this_file_lists(app, q):
+    """The silent-deletion channel is a fixed list, not a habit.
+
+    This is the one thing on the page that both other guards are blind to at once, so it gets a
+    guard whose whole content is the population it protects.
+    """
+    seen = set()
+    for payload in _surfaces(app, q).values():
+        seen |= {line.strip() for line in payload.get("dash_only") or [] if line.strip()}
+    added = seen - DASH_ONLY
+    assert not added, (
+        "text is being deleted from the page and this file does not list it. If each of these is "
+        f"the label of a control the React page does not draw, add it above: {sorted(added)}")
+    gone = DASH_ONLY - seen
+    assert not gone, (
+        f"listed as deletable and no longer marked anywhere; drop it from the list: {sorted(gone)}")
