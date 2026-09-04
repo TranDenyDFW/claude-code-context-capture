@@ -208,6 +208,7 @@ export default function App() {
         tabs={tabs.data ?? []}
         active={tab}
         onPick={setTab}
+        about={pane.data?.about}
         collapsed={collapsed}
         onToggle={() => setCollapsed(!collapsed)}
       />

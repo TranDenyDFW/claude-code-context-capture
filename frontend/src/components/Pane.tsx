@@ -121,29 +121,6 @@ export function Pane({
   return (
     <div className="flex flex-col gap-5">
 
-      {(payload.about ?? []).length > 0 && (
-        // WHAT THIS VIEW IS, named and collapsed. These are the sentences that are about the page
-        // rather than about any chart on it: a sub-panel saying which half of the window it
-        // describes, "A reading describes the moment it was taken", the four window constants.
-        // They printed as a wall in the body, then briefly as an 826-character tooltip on a chip
-        // 61 pixels wide, which is a wall with no scrollbar. A disclosure is neither: it is named,
-        // it is closed until asked for, and what is inside it can be read.
-        <details className="rounded-lg bg-panel shadow-panel">
-          <summary className="cursor-pointer list-none px-4 py-2 text-sm text-ink-dim
-                              marker:content-none hover:text-ink">
-            <span className="mr-1.5 inline-block transition-transform group-open:rotate-90">›</span>
-            About this view
-          </summary>
-          <div className="border-t border-edge px-4 py-3">
-            {(payload.about ?? []).map((line, index) => (
-              <p key={index} className="mb-2 text-sm leading-relaxed text-ink-dim last:mb-0">
-                {line}
-              </p>
-            ))}
-          </div>
-        </details>
-      )}
-
       {stats.length > 0 && (
         // THE NUMBERS FIRST. These are the figures the tab is about, and they arrived as
         // twenty-one loose strings in the middle of a wall of prose. A dashboard that opens with a
@@ -153,27 +130,19 @@ export function Pane({
           style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(11rem, 1fr))' }}
         >
           {stats.map((stat, index) => (
-            // THE CAPTION IS SHOWN, not left to a hover. It used to be the tooltip only, on the
-            // reasoning that printing it under every card turned a row of figures into a row of
-            // paragraphs, and that reasoning is right about the LOOK and wrong about the risk: on
-            // at least half of these the caption is what the number MEANS. "Peak Resident 999.8k"
-            // is the largest single API call in the store and not any session's peak; "Sessions
-            // 1,325" counts every session while only 317 are listed on All sessions; "API Calls"
-            // exists to be told apart from the transcript row count in its own caption. A reader
-            // cannot hover for a qualifier they have no reason to suspect is there.
-            //
-            // Small, muted and one line, so it reads as a caption rather than as a second figure.
-            // The full text stays on the title for the few that run long.
+            // THE CAPTION IS THE HOVER. It was shown under every figure on the reasoning that
+            // half of these captions are what the number MEANS, and that is still true; what
+            // changed is that a row of eight cards each carrying a wrapped second line reads as a
+            // row of paragraphs rather than a row of figures, and the captions were being cut off
+            // by the card width anyway, so half of each one already only existed on the hover.
             <div
               key={index}
               title={stat.sub || undefined}
+              aria-description={stat.sub || undefined}
               className="rounded-lg bg-panel px-4 py-3 shadow-panel"
             >
               <p className="text-2xs tracking-[0.06em] text-ink-faint">{stat.label}</p>
               <p className="mt-1 font-mono text-xl font-bold tabular text-ink">{stat.value}</p>
-              {stat.sub && (
-                <p className="mt-1 truncate text-2xs leading-snug text-ink-faint">{stat.sub}</p>
-              )}
             </div>
           ))}
         </section>
@@ -236,7 +205,7 @@ export function Pane({
           // Keyed by INDEX, not by id. Five of the Cost tab's six tables report the id
           // `(anonymous)`, so keying on it collided four times and React warned on every render.
           <section key={index} className="flex flex-col gap-2">
-            <TableHeading name={name} table={table} note={note} />
+            <TableHeading name={name} note={note} />
             <DataTable
               table={table}
               meta={meta[index]}

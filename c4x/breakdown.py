@@ -278,16 +278,16 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
     res = merged["total_resident"].astype(int)
     stat = merged["static_total"].clip(upper=res)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=stat, mode="lines", name="static overhead",
+    fig.add_trace(go.Scatter(x=x, y=stat, mode="lines", name="Static Overhead",
                              line=dict(width=0), stackgroup="one", fillcolor="#e8590c"))
     fig.add_trace(go.Scatter(x=x, y=(res - stat).clip(lower=0), mode="lines",
-                             name="messages", line=dict(width=0), stackgroup="one",
+                             name="Messages", line=dict(width=0), stackgroup="one",
                              fillcolor=ACCENT))
-    fig.add_trace(go.Scatter(x=x, y=(window - res).clip(lower=0), mode="lines", name="free space",
+    fig.add_trace(go.Scatter(x=x, y=(window - res).clip(lower=0), mode="lines", name="Free Space",
                              line=dict(width=0), stackgroup="one", fillcolor="#21262d"))
     fig.update_layout(title="Context Window Composition",
                       title_font=dict(color=TEXT, size=13),
-                      xaxis_title="API call", yaxis_title="tokens")
+                      xaxis_title="API Call", yaxis_title="Tokens")
 
     applies = str(b["ts"])[:19].replace("T", " ")
     notes = [html.Div(
@@ -337,7 +337,7 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
             className="dash-only",
             style={"color": MUTED, "fontSize": "11.5px", "margin": "4px 0 14px 0",
                    "maxWidth": "900px", "lineHeight": "1.55"}),
-        html.Div("What is in the window, item by item", style=SECTION_HEAD),
+        html.Div("Itemized Window", style=SECTION_HEAD),
         html.Div("One row per item the window holds right now, with its share of the "
                  "resident total. Resident and free space are exact; the category rows are "
                  "the baseline's split and are not.", style=SECTION_NOTE),

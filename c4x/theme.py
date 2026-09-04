@@ -512,7 +512,7 @@ TABLE_LABEL = {
     "tbl-session": "Sessions",
     "tbl-messages": "Messages",
     "tbl-findings": "Findings",
-    "tbl-reread": "Files Read More Than Once",
+    "tbl-reread": "Session Rereads",
 }
 
 
@@ -645,7 +645,7 @@ def table_note(text, for_id: str | None = None, style: dict | None = None):
 def empty_panel(title: str, note: str):
     """A block that names what would be here and says why it is not.
 
-    Not prose, and not a hover. "The same input, issued in more than one session" followed by
+    Not prose, and not a hover. "Multi-Session Input" followed by
     "Not answerable with a single session selected" is the most useful thing on that part of the
     page when a session is selected: it distinguishes "there are none" from "this question cannot
     be asked from here", and only one of those is true. Hiding it behind a glyph on a heading that
@@ -694,7 +694,7 @@ def accordion(title: str, sub: str, children, open_by_default: bool = False):
             html.Span(title, style={"color": TEXT, "fontSize": "13px", "fontWeight": 600}),
             # MARKED, so the API can tell the two apart again. Dash keeps them apart with 13px/600
             # against 11px/muted and two literal spaces; `extract.texts()` strips and joins, so over
-            # the API the pair arrived as one string and the page drew "What to do about it 6
+            # the API the pair arrived as one string and the page drew "Recommendation(s) 6
             # finding(s), each with an action" as a heading, with no hover, because a summary has
             # only one slot. The class says which half is the caption.
             html.Span(f"  {sub}", className="accordion-sub",

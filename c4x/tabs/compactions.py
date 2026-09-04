@@ -57,7 +57,7 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
     fig.add_hline(y=0, line=dict(color=MUTED, width=1, dash="dash"))
     fig.update_layout(title="Overshoot Past the Predicted Trigger",
                       title_font=dict(color=TEXT, size=13),
-                      xaxis_title="tokens at compaction", yaxis_title="tokens past threshold")
+                      xaxis_title="Tokens at Compaction", yaxis_title="Tokens Past Threshold")
 
     show = df.copy()
     show["ts"] = show["ts"].astype(str).str.slice(0, 19).str.replace("T", " ", regex=False)

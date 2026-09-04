@@ -41,7 +41,7 @@ def exclusions_layout():
         if not rows else
         f"{len(rows)} project(s) deleted from this store and skipped by every harvest since.")
     return [
-        html.Div("Excluded projects", style=SECTION_HEAD),
+        html.Div("Excluded Projects", style=SECTION_HEAD),
         html.Div(f"{note} The rule is keyed on the working directory, not the transcript folder: "
                  "one folder can hold several projects, so excluding by folder would stop "
                  "capturing unrelated work. Lifting an exclusion re-reads the transcript from the "

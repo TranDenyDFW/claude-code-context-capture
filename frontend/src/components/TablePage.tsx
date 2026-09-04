@@ -56,7 +56,7 @@ export function TablePage({
 
   useEffect(() => {
     const before = document.title
-    document.title = `${name} · c4x`
+    document.title = `${name} · C4X`
     return () => { document.title = before }
   }, [name])
 
@@ -84,7 +84,7 @@ export function TablePage({
   return (
     <main className="mx-auto flex w-full max-w-[1600px] flex-col gap-3 px-6 py-5">
       <div className="flex items-baseline justify-between gap-4">
-        <TableHeading name={name} table={filtered} note={note} as="h1" />
+        <TableHeading name={name} note={note} as="h1" />
         <button
           onClick={onBack}
           className="text-sm text-accent hover:underline"

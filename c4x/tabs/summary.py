@@ -74,7 +74,7 @@ def summary_layout(session_id=None, scope="main", cohort=None):
                  # declared keyword is offered this dict and none of them fit. See theme.py.
                  **{"data-population": "store"}),  # type: ignore[arg-type]
 
-        accordion("What to do about it", f"{len(rows)} finding(s), each with an action",
+        accordion("Recommendation(s)", f"{len(rows)} finding(s), each with an action",
                   DataTable(
                       # Clickable. A finding names the tab that proves it, and usually a session,
                       # so a reader is not left copying an 8-character prefix into a dropdown of
@@ -112,7 +112,7 @@ def summary_layout(session_id=None, scope="main", cohort=None):
                   html.Div([stat_card(label, value, sub=note) for label, value, note in totals],
                            style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})),
 
-        accordion("Where the tokens went", "cumulative resident by project, top 15",
+        accordion("Project Token Use", "cumulative resident by project, top 15",
                   dcc.Graph(figure=dark_fig(project_totals_fig(), 420),
                             config={"displayModeBar": False})),
     ])

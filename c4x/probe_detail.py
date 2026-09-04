@@ -41,8 +41,8 @@ from c4x.theme import (
 KINDS = [
     ("skill", "Skills", "skills", None),
     ("mcpTool", "MCP tools", "mcp_tools", "mcp_tools_items"),
-    ("agent", "Custom agents", "custom_agents", "custom_agents_items"),
-    ("memoryFile", "Memory files", "memory_files", "memory_files_items"),
+    ("agent", "Custom Agents", "custom_agents", "custom_agents_items"),
+    ("memoryFile", "Memory Files", "memory_files", "memory_files_items"),
     ("attachment", "Attachments in the conversation", None, None),
     ("toolCallType", "Tool calls in the conversation", None, None),
 ]
@@ -148,7 +148,7 @@ def mcp_by_server(probe_id):
     if df.empty:
         return None
     return evidence_block(
-        "MCP servers, and what each one costs", df, sql, (int(probe_id),),
+        "MCP Server Costs", df, sql, (int(probe_id),),
         columns=numeric_columns(["server", "tools", "loaded_tools", "tokens"],
                                 {"tools", "loaded_tools", "tokens"}),
         page_size=12, heat=["tokens", "tools"],
@@ -243,12 +243,12 @@ def probe_detail_blocks(baseline=None):
     # from the literal this is a list[Div] and that append is an error.
     blocks: list[Component] = [
         # NAMED FOR THIS PANEL, not for the window as a whole. The composition panel already
-        # writes "What is in the window, item by item" over its own table, and this block
+        # writes "Itemized Window" over its own table, and this block
         # became the title of the first table under it once every table started carrying a
         # heading, so two different tables answered to one name. Only one of the two is
         # served today, which is why nothing showed it. The parallel is the conversation
         # panel's heading below.
-        html.Div("What the configuration put in the window", style=SECTION_HEAD),
+        html.Div("Configuration in the Window", style=SECTION_HEAD),
         about_note(
             f"Read directly from Claude Code by probe {pid} at {when} on {probe['model']}. This is "
             f"a measurement, not a derivation, which makes it the most trustworthy material on "
@@ -307,18 +307,18 @@ def probe_detail_blocks(baseline=None):
         blocks.append(chart_note(note))
 
     tables = [
-        item_table(pid, "skill", "Every skill, largest first",
+        item_table(pid, "skill", "Skills",
                    "Largest first. Only userSettings and plugin skills are yours to remove.",
                    "name, extra AS source, tokens", ["name", "source", "tokens"], {"tokens"}),
         mcp_by_server(pid),
-        item_table(pid, "mcpTool", "Every MCP tool, by server",
+        item_table(pid, "mcpTool", "MCP Tools by Server",
                    "A server is the unit you can switch off; a tool is not.",
                    "name, extra AS server, loaded, tokens",
                    ["name", "server", "loaded", "tokens"], {"loaded", "tokens"}),
-        item_table(pid, "agent", "Custom agents",
+        item_table(pid, "agent", "Custom Agents",
                    "Every agent definition resident in the window, whether or not it is used.",
                    "name, extra AS source, tokens", ["name", "source", "tokens"], {"tokens"}),
-        item_table(pid, "memoryFile", "Memory files",
+        item_table(pid, "memoryFile", "Memory Files",
                    "CLAUDE.md and anything it pulls in. Paid on the first request of every "
                    "session and never freed.",
                    "name AS path, extra AS type, tokens", ["path", "type", "tokens"], {"tokens"}),
@@ -410,7 +410,7 @@ def stacked_message_figure(rows):
             hovertemplate="%{x}<br>" + name + ": %{y:,} tokens<extra></extra>"))
     fig.update_layout(barmode="stack", title="The Message Half, by Category",
                       title_font=dict(color=TEXT, size=13),
-                      xaxis_title="", yaxis_title="tokens")
+                      xaxis_title="", yaxis_title="Tokens")
     return dcc.Graph(id="fig-probe-messages", figure=dark_fig(fig, 340),
                      config={"displayModeBar": False})
 
@@ -439,7 +439,7 @@ def message_blocks(probe_id):
                               "readings.", for_id="fig-probe-messages"))
     if not df.empty:
         out.append(evidence_block(
-            "What the messages are made of", df, sql, (int(probe_id),),
+            "Message Composition", df, sql, (int(probe_id),),
             columns=numeric_columns(["name", "tokens"], {"tokens"}), page_size=10,
             note=(f"{n_zero} further categories read zero and are omitted. "
                   if n_zero else "")
@@ -450,7 +450,7 @@ def message_blocks(probe_id):
     # built no table and nothing checked what it would have produced. A shared site is exercised by
     # whichever kind has rows, and the kind that has none simply yields nothing.
     for kind, title, note in (
-        ("attachment", "Attachments, by type",
+        ("attachment", "Attachments by Type",
          "Injected context rather than anything typed. Hook output lands here, which is how a "
          "hook that prints on every turn becomes a permanent resident of the window."),
         ("toolCallType", "Tool calls, by type",
