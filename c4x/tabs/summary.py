@@ -13,6 +13,7 @@ from c4x.store import overview_stats, q
 from c4x.theme import (
     ACCENT,
     BORDER,
+    GOOD,
     MUTED,
     SECTION_NOTE,
     TABLE_STYLE,
@@ -21,6 +22,7 @@ from c4x.theme import (
     WARN,
     accordion,
     dark_fig,
+    empty_fig,
     fmt_bytes,
     fmt_tokens,
     header_help,
@@ -74,7 +76,7 @@ def summary_layout(session_id=None, scope="main", cohort=None):
                  # declared keyword is offered this dict and none of them fit. See theme.py.
                  **{"data-population": "store"}),  # type: ignore[arg-type]
 
-        accordion("What to do about it", f"{len(rows)} finding(s), each with an action",
+        accordion("Recommendation(s)", f"{len(rows)} finding(s), each with an action",
                   DataTable(
                       # Clickable. A finding names the tab that proves it, and usually a session,
                       # so a reader is not left copying an 8-character prefix into a dropdown of
@@ -112,33 +114,78 @@ def summary_layout(session_id=None, scope="main", cohort=None):
                   html.Div([stat_card(label, value, sub=note) for label, value, note in totals],
                            style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})),
 
-        accordion("Where the tokens went", "cumulative resident by project, top 15",
+        # NAMED FOR WHAT IT MEASURES. It was "Project Token Use" while the bar was resident
+        # tokens; the bar is now bytes returned by tools, and a title saying "token" over a byte
+        # axis is the same class of wrong this chart changed measure to avoid.
+        accordion("Tool Bytes by Project", "what each project's tools returned, top 15",
                   dcc.Graph(figure=dark_fig(project_totals_fig(), 420),
                             config={"displayModeBar": False})),
     ])
 
 
+# Nine slots because the stack draws eight named kinds plus Other, and a palette that wraps puts
+# two segments of the same colour side by side in one bar.
+SECTION_COLORS = (ACCENT, GOOD, VIOLET, WARN, "#e8590c", "#a371f7", "#3fb950", "#d29922", MUTED)
+
+
 def project_totals_fig() -> go.Figure:
-    """Cumulative resident tokens by real project path.
+    """What the tools RETURNED, per project, split by the tool that returned it.
+
+    THE MEASURE IS BYTES, AND THAT IS THE WHOLE REASON THIS IS NOT TOKENS. The bar used to be
+    cumulative resident tokens, one flat colour, which answers "where did the context go" with a
+    total and nothing about what filled it. The obvious next question is what consumed it, and the
+    store cannot answer that in tokens: `tool_calls` records `result_bytes`, and nothing anywhere
+    attributes resident tokens to the tool that caused them. Stacking a byte mix inside a token bar
+    would produce segments that do not sum to their own bar, so the bar changed measure instead of
+    the segments changing meaning.
 
     Grouped by cwd, not by project_slug. The slug `subagents` is not a project: it is the folder
     subagent transcripts are written to, and it maps to 30 different working directories in this
     store, so charting it as one bar credited every subagent run in every project to a single
     invented project and made it the largest bar on the page.
+
+    Every MCP tool is one kind. A server is the unit a reader can switch off and an individual MCP
+    tool is not, and on this store the 30 kinds past the eighth are 1.1% of all bytes between them,
+    which is a legend nobody can read for a band nobody can see.
     """
-    top = q("""
+    KINDS = 8
+    rows = q("""
         SELECT COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project,
-               SUM(a.total_resident) AS resident
-        FROM api_calls a LEFT JOIN sessions s ON s.session_id = a.session_id
-        GROUP BY project ORDER BY resident DESC LIMIT 15
+               CASE WHEN t.server_name IS NOT NULL AND t.server_name <> '' THEN 'MCP'
+                    ELSE COALESCE(NULLIF(t.tool_name,''), '(unnamed)') END AS kind,
+               SUM(COALESCE(t.result_bytes, 0)) AS bytes
+        FROM tool_calls t LEFT JOIN sessions s ON s.session_id = t.session_id
+        GROUP BY project, kind
     """)
-    fig = go.Figure(go.Bar(
-        x=top["resident"], y=top["project"], orientation="h",
-        marker=dict(color=ACCENT, line=dict(color=BORDER, width=1)),
-        hovertemplate="%{y}<br>%{x:,.0f} resident tokens<extra></extra>",
-    ))
-    fig.update_layout(title="Cumulative Resident Tokens by Working Directory",
-                      title_font=dict(color=TEXT, size=13))
+    if rows.empty:
+        return empty_fig("No tool calls recorded yet")
+
+    totals = rows.groupby("project")["bytes"].sum().sort_values(ascending=False)
+    top = list(totals.head(15).index)
+    kept = rows[rows["project"].isin(top)]
+    ranked = kept.groupby("kind")["bytes"].sum().sort_values(ascending=False)
+    named = list(ranked.head(KINDS).index)
+    # The tail is SHOWN, not dropped. A stack whose segments do not add up to the bar is the exact
+    # dishonesty this chart changed measure to avoid.
+    kept = kept.assign(kind=kept["kind"].where(kept["kind"].isin(named), "Other"))
+    # RE-AGGREGATED AFTER THE COLLAPSE. Folding thirty kinds into "Other" gives one project many
+    # rows under that name, and a lookup against a duplicated index returns a Series rather than a
+    # number, which is a TypeError at draw time and an empty tab.
+    kept = kept.groupby(["project", "kind"], as_index=False)["bytes"].sum()
+    order = named + (["Other"] if (kept["kind"] == "Other").any() else [])
+
+    fig = go.Figure()
+    for index, kind in enumerate(order):
+        part = kept[kept["kind"] == kind].set_index("project")["bytes"]
+        fig.add_trace(go.Bar(
+            x=[int(part.get(p, 0)) for p in top], y=top, orientation="h", name=kind,
+            marker=dict(color=SECTION_COLORS[index % len(SECTION_COLORS)],
+                        line=dict(color=BORDER, width=1)),
+            hovertemplate="%{y}<br>" + kind + ": %{x:,.0f} bytes<extra></extra>",
+        ))
+    fig.update_layout(barmode="stack", title="Tool Bytes by Project",
+                      title_font=dict(color=TEXT, size=13),
+                      xaxis_title="Bytes Returned by Tools", yaxis_title="")
     fig.update_yaxes(autorange="reversed")
     return fig
 

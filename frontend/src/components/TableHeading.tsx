@@ -1,13 +1,16 @@
-import type { Table, TableMeta } from '@/api'
+import type { TableMeta } from '@/api'
 
 /**
  * The one heading anything on a page gets: its name, its row count when it has rows, and its note
  * on hover.
  *
  * Shared by the pane, the single-table page and every chart, so the three can never drift into
- * three ways of naming the thing above them. The note is on the heading, never in the body; the
- * glyph says there is something to hover, because a description a reader has no reason to suspect
- * is not a description.
+ * three ways of naming the thing above them. The note is on the heading, never in the body.
+ *
+ * NO GLYPH AND NO ROW COUNT. The glyph was a bordered "?" saying there was something to hover, and
+ * it sat beside every heading on the page as a small grey box that reads as a control and is not
+ * one. The row count was already stated by the table itself, at the bottom, where the pager says
+ * "1 to 12 of 200"; a heading saying "200 rows" over a pager saying the same is the number twice.
  *
  * CHARTS COME THROUGH HERE TOO, and that is the point. A chart had no note field at all, so ten
  * captions across the tabs printed as loose paragraphs and one chart carried its explanation IN
@@ -29,49 +32,31 @@ export function joinNotes(...notes: (string | null | undefined)[]): string | nul
 export function Heading({
   name,
   note,
-  count,
   as: Tag = 'h3',
 }: {
   name: string
   note: string | null
-  /** Rows behind this heading, omitted for a chart, which has no row count to state. */
-  count?: number
   as?: 'h1' | 'h2' | 'h3'
 }) {
   return (
     <Tag
-      className="flex items-baseline gap-2 text-md font-semibold text-ink-dim"
+      className="text-md font-semibold text-ink-dim"
       title={note ?? undefined}
       aria-description={note ?? undefined}
     >
-      <span>{name}</span>
-      {count !== undefined && (
-        <span className="text-2xs font-normal tabular-nums text-ink-faint">
-          {count.toLocaleString()} {count === 1 ? 'row' : 'rows'}
-        </span>
-      )}
-      {note && (
-        <span
-          aria-hidden="true"
-          className="rounded border border-edge px-1 text-2xs font-normal leading-4 text-ink-faint"
-        >
-          ?
-        </span>
-      )}
+      {name}
     </Tag>
   )
 }
 
 export function TableHeading({
   name,
-  table,
   note,
   as,
 }: {
   name: string
-  table: Table
   note: string | null
   as?: 'h1' | 'h2' | 'h3'
 }) {
-  return <Heading name={name} note={note} count={table.rows.length} as={as} />
+  return <Heading name={name} note={note} as={as} />
 }

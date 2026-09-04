@@ -79,7 +79,7 @@ def sessions_scatter(rows):
     # where a reader is most likely to take the count as the population.
     fig.update_layout(title="Transcript Rows Against Peak Resident Tokens",
                       title_font=dict(color=TEXT, size=13),
-                      xaxis_title="turns (log)", yaxis_title="peak resident tokens (log)")
+                      xaxis_title="Turns (Log)", yaxis_title="Peak Resident Tokens (Log)")
     fig.update_xaxes(type="log")
     fig.update_yaxes(type="log")
     return dark_fig(fig, 400)

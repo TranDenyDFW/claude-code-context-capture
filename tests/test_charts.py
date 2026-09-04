@@ -201,7 +201,7 @@ def cost_pane(pane, has_store):
 
 
 def test_the_curve_is_cumulative_and_reaches_the_whole_population(cost_pane):
-    curve = figure_titled(cost_pane, "Concentration of re-reading")
+    curve = figure_titled(cost_pane, "Reread Concentration")
     y = list(curve.data[0].y)
     assert y == sorted(y), "a cumulative share that goes down is not cumulative"
     assert 99.9 <= y[-1] <= 100.1, f"the curve ends at {y[-1]}, not 100%"
@@ -211,7 +211,7 @@ def test_the_curve_is_cumulative_and_reaches_the_whole_population(cost_pane):
 def test_the_curve_is_measured_over_more_groups_than_the_table_shows(cost_pane, q):
     """The table carries LIMIT 200. A share measured inside it is a share of the head, and the top
     ten of a top-200 list is 5% of the rows by construction rather than by finding anything."""
-    points = len(figure_titled(cost_pane, "Concentration of re-reading").data[0].y)
+    points = len(figure_titled(cost_pane, "Reread Concentration").data[0].y)
     total = int(q("""SELECT COUNT(*) AS n FROM (
                        SELECT session_id, target FROM tool_calls
                         WHERE tool_name IN ('Read', 'NotebookRead') AND target IS NOT NULL

@@ -58,7 +58,7 @@ def _reread_curve(read_tools, where, args, dup_min):
     share = repeats.cumsum() / total * 100
     rank = list(range(1, len(share) + 1))
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=rank, y=share, mode="lines", name="cumulative share",
+    fig.add_trace(go.Scatter(x=rank, y=share, mode="lines", name="Cumulative Share",
                             line=dict(color=DANGER, width=2), fill="tozeroy",
                             fillcolor="rgba(248,81,73,0.12)",
                             hovertemplate="top %{x:,} groups<br>%{y:.1f}% of all "
@@ -66,13 +66,13 @@ def _reread_curve(read_tools, where, args, dup_min):
     # The diagonal is what "no concentration at all" looks like. Without it a curve that bends
     # slightly reads as concentrated, because every cumulative curve bends.
     fig.add_trace(go.Scatter(x=[1, len(share)], y=[100 / len(share), 100], mode="lines",
-                            name="if every group were equal",
+                            name="If Every Group Were Equal",
                             line=dict(color=MUTED, width=1, dash="dot"),
                             hoverinfo="skip"))
-    fig.update_layout(title="Concentration of Re-Reading",
+    fig.update_layout(title="Reread Concentration",
                       title_font=dict(color=TEXT, size=13),
-                      xaxis_title="groups, largest first",
-                      yaxis_title="% of all re-reads")
+                      xaxis_title="Groups, Largest First",
+                      yaxis_title="% of All Rereads")
     fig.update_yaxes(range=[0, 101])
     top10 = float(share[min(9, len(share) - 1)])
     half = int(next((i + 1 for i, v in enumerate(share) if v >= 50), len(share)))
@@ -129,7 +129,7 @@ def _estimated_cost(where, args):
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap",
                   "margin": "18px 0 10px 0"}),
         evidence_block(
-            "What these tokens would have cost", pd.DataFrame(rows), sql, args,
+            "Token Costs", pd.DataFrame(rows), sql, args,
             columns=numeric_columns(
                 ["model", "calls", "input_tokens", "output_tokens",
                  "cache_read_input_tokens", "cache_creation_input_tokens", "est_usd", "priced"],
@@ -171,7 +171,7 @@ def _subagent_types(where, args):
         df[column] = df[column].astype(str).str.slice(0, 16).str.replace("T", " ")
     unknown = int(df.loc[df["agent"] == "(not recorded)", "calls"].sum())
     return evidence_block(
-        "Subagents, by the kind that was asked for", df, sql, args,
+        "Subagent Calls", df, sql, args,
         columns=numeric_columns(
             ["agent", "calls", "sessions", "bytes", "errors", "first_seen", "last_seen"],
             {"calls", "sessions", "bytes", "errors"},
@@ -223,7 +223,7 @@ def _repeated_inputs(where, args, session_id=None):
     # asked from here", and only one of those is true.
     if session_id:
         return empty_panel(
-            "The same input, issued in more than one session",
+            "Multi-Session Input",
             "Not answerable with a single session selected: this table compares sessions to each "
             "other. Clear the session in the header, or pick a project, to see which inputs repeat "
             "across a whole population.")
@@ -239,7 +239,7 @@ def _repeated_inputs(where, args, session_id=None):
                       FROM tool_calls WHERE input_sha1 IS NOT NULL """ + where + """
                      GROUP BY input_sha1 HAVING sessions > 1)""", args).iloc[0]
     return evidence_block(
-        "The same input, issued in more than one session", df, sql, args,
+        "Multi-Session Input", df, sql, args,
         columns=numeric_columns(
             ["tool", "target", "sessions", "calls", "beyond_one_each", "bytes",
              "first_seen", "last_seen"],
@@ -369,7 +369,7 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "18px"}),
 
         evidence_block(
-            "Files read repeatedly inside one session", dup, sql_dup, dup_args,
+            "Session Rereads", dup, sql_dup, dup_args,
             columns=["reads", "bytes", "variants", "session_id", "target"],
             heat=["reads", "bytes"], table_id="tbl-reread",
             note=f"Every re-read is re-billed on every later request in that session, so the cost "
@@ -392,7 +392,7 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         _repeated_inputs(wsid, wargs, session_id),
 
         evidence_block(
-            "MCP servers by invocation count", srv, sql_srv, wargs,
+            "MCP Calls", srv, sql_srv, wargs,
             columns=["server", "calls", "bytes", "last_call"],
             # The shared help for "calls" was written for the repeated-inputs table and says these
             # count calls "with this exact input". Here they count every call to the server.
@@ -402,7 +402,7 @@ def waste_layout(session_id=None, scope="main", cohort=None):
                  "store and tools/waste.mjs --servers reports. This is invocations only."),
 
         evidence_block(
-            "Tool invocations", tools, sql_tools, wargs,
+            "Tool Calls", tools, sql_tools, wargs,
             columns=["tool", "calls", "bytes", "errors"], heat=["calls", "bytes", "errors"],
             help_for={"calls": "Every call to this tool, whatever the input."}),
     ])

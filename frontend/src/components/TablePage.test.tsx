@@ -33,7 +33,7 @@ describe('the single-table page', () => {
     render(<TablePage payload={payload} index={0} onBack={() => {}} />)
     const heading = screen.getByRole('heading', { level: 1 })
     expect(heading.textContent).toContain('Files read repeatedly')
-    expect(heading.textContent).toContain('2 rows')
+    expect(heading.textContent).not.toContain('2 rows')
     expect(heading.getAttribute('title')).toBe('why it matters')
     expect(screen.queryByTestId('chart')).toBeNull()
     expect(screen.queryByText('prose that belongs to the tab')).toBeNull()
@@ -109,11 +109,10 @@ describe('the standalone page does everything the pane does with that table', ()
     }
     render(<TablePage payload={two} index={0} filter={{ key: 'session_id', value: 's2' }} onBack={() => {}} />)
     expect(screen.getByText(/Filtered to session_id = s2, 1 of 2 rows/)).toBeTruthy()
-    // The heading counts what the page DRAWS. Counting the unfiltered table would put "2 rows"
-    // directly above a line saying 1 of 2.
+    // The heading names the table; the filter line above states what the filter left, and
+    // the pager under the table states the count. The heading restates neither.
     const heading = screen.getByRole('heading', { level: 1 })
-    expect(heading.textContent).toContain('1 row')
-    expect(heading.textContent).not.toContain('2 rows')
+    expect(heading.textContent).toBe('Messages')
     expect(screen.getByText('11:00')).toBeTruthy()
     expect(screen.queryByText('10:00')).toBeNull()
   })

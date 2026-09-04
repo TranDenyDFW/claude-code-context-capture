@@ -83,7 +83,7 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
             # the table would be. The query stays a sibling: it is a collapsible of its own and
             # folding it in would claim the SQL twice.
             empty_panel(title, "No rows."),
-            accordion("The query that returned nothing", "reproduce it yourself",
+            accordion("Query", "returned nothing; reproduce it yourself",
                       html.Pre(sql_preview(sql, params),
                                style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
         ])
@@ -127,7 +127,7 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
             style_cell=TABLE_STYLE["style_cell"],
             style_header=TABLE_STYLE["style_header"],
         ),
-        accordion("The query behind this table", "copy it, or export the rows above",
+        accordion("Query", "copy it, or export the rows above",
                   html.Pre(sql_preview(sql, params),
                            style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
     ])
@@ -304,7 +304,7 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
             ratio, verdict = None, "one arm has none"
         rows.append({"metric": label, "unit": kind,
                      "A": round(av, 1), "B": round(bv, 1),
-                     "B vs A": None if ratio is None else round(ratio, 2), "verdict": verdict,
+                     "B / A": None if ratio is None else round(ratio, 2), "verdict": verdict,
                      "basis": ("per unit" if per_unit else
                                "total, arms are the same size" if same_size else
                                "total, arms are different sizes")})
@@ -312,16 +312,16 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
     # arrived as four loose lines ("A", the label, "B", the label) with nothing tying them to the
     # columns they named; the note is paired to the table and shown on its heading.
     return html.Div([
-        html.Div("Side by side", style=SECTION_HEAD),
+        html.Div("Compare", style=SECTION_HEAD),
         html.Div(f"A is {a_label}. B is {b_label}. One row per metric, both arms measured the "
-                 "same way. B vs A is the ratio where both arms have a value; the verdict names "
+                 "same way. B / A is the ratio where both arms have a value; the verdict names "
                  "the direction only when the ratio clears 5% and the metric has a direction "
                  "that is worse.", style=SECTION_NOTE),
         DataTable(
             columns=(_cols := numeric_columns(
-                ["metric", "unit", "A", "B", "B vs A", "verdict", "basis"],
-                {"A", "B", "B vs A"},
-                {"B vs A": Format(precision=2, scheme=Scheme.fixed)})),
+                ["metric", "unit", "A", "B", "B / A", "verdict", "basis"],
+                {"A", "B", "B / A"},
+                {"B / A": Format(precision=2, scheme=Scheme.fixed)})),
             tooltip_header=header_help(_cols),
             data=rows,
             export_format="csv",

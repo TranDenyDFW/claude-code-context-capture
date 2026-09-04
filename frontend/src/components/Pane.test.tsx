@@ -477,7 +477,7 @@ describe('the table controls every table now has', () => {
 })
 
 describe('a card caption', () => {
-  it('is SHOWN, not left to a hover', () => {
+  it('is the card HOVER, so a row of figures does not read as a row of paragraphs', () => {
     /**
      * On at least half of these the caption is what the number MEANS: "Peak Resident" is the
      * largest single API call in the store and not any session's peak, "Sessions" counts every
@@ -489,8 +489,11 @@ describe('a card caption', () => {
       { label: 'Sessions', value: '1,325', sub: 'in the store, 317 listed on All sessions' },
       { label: 'Peak Resident', value: '999.8k', sub: 'largest single API call, any session' },
     ] })} />)
-    expect(screen.getByText('in the store, 317 listed on All sessions')).toBeTruthy()
-    expect(screen.getByText('largest single API call, any session')).toBeTruthy()
+    // Shown under every figure the caption wrapped and the card width cut it off, so half
+    // of each one ALREADY existed only on the hover. Now all of it is there.
+    expect(screen.queryByText('in the store, 317 listed on All sessions')).toBeNull()
+    const card = screen.getByText('1,325').closest('div')!
+    expect(card.getAttribute('title')).toBe('in the store, 317 listed on All sessions')
   })
 })
 
@@ -525,20 +528,21 @@ describe('every table is named and explained the same way', () => {
     expect(screen.queryByText('Each row is one spawned session answering the control protocol.')).toBeNull()
   })
 
-  it('says "1 row" for one row, the way the table footer already does', () => {
+  it('does NOT restate the row count, which the table states at the bottom', () => {
     render(
       <Pane payload={payload({ tables: [table('t', [{ a: 1 }])], meta: [meta({ title: 'One' })] })} />,
     )
     const heading = screen.getByRole('heading', { level: 3 }).textContent ?? ''
-    expect(heading).toContain('1 row')
-    expect(heading).not.toContain('1 rows')
+    // The pager under the table says "1 to 12 of 200". A heading saying it too is one
+    // number in two places, and two places can disagree.
+    expect(heading).toBe('One')
   })
 
-  it('states the row count beside the name', () => {
+  it('names the table and nothing else, whatever the row count', () => {
     render(
       <Pane payload={payload({ tables: [table('t', [{ a: 1 }, { a: 2 }, { a: 3 }])], meta: [meta({ title: 'Three' })] })} />,
     )
-    expect(screen.getByRole('heading', { level: 3 }).textContent).toContain('3 rows')
+    expect(screen.getByRole('heading', { level: 3 }).textContent).toBe('Three')
   })
 
   it('does not print a stat card label as prose because the server changed its case', () => {

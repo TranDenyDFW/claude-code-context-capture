@@ -156,3 +156,37 @@ def test_each_help_entry_is_a_sentence_not_a_label(column):
     text = COLUMN_HELP[column]
     assert len(text) > 30, f"{column}: too short to say anything useful"
     assert text[0].isupper() or text.startswith("0"), f"{column}: not written as a sentence"
+
+
+def test_the_two_producers_of_a_category_label_agree():
+    """`tools/breakdown.mjs` and `c4x/probe_detail.py` both name the same window categories.
+
+    THIS IS THE THIRD SIBLING SET ONE RENAME BROKE, and the only one nothing caught. A casing pass
+    swept `c4x/**.py`, retitled two of the six KINDS labels, and never looked at the Node tool that
+    names the same columns. The result was a Window tab whose Composition panel said "Custom
+    agents" and whose Configuration panel said "Custom Agents", for one category, on one tab.
+
+    Neither producer is wrong on its own, which is why neither suite noticed. The property is that
+    they AGREE, so it is checked here rather than in either of them.
+
+    Parsed from the source rather than restated: a copy of the list in this file would be a fourth
+    place to forget.
+    """
+    import re
+    from pathlib import Path
+
+    from c4x.probe_detail import KINDS
+
+    text = Path(__file__).resolve().parents[1].joinpath("tools", "breakdown.mjs").read_text(
+        encoding="utf-8")
+    node = {}
+    for col, label in re.findall(r"\{\s*col:\s*'([^']+)'.*?label:\s*'([^']+)'", text):
+        node.setdefault(col, label)
+    assert node, "no FIELDS parsed from tools/breakdown.mjs; the shape changed"
+
+    disagree = [(col, label, node[col])
+                for _kind, label, col, _items in KINDS
+                if col and col in node and node[col] != label]
+    assert not disagree, (
+        "a category is named two ways by its two producers "
+        f"(column, python, node): {disagree}")

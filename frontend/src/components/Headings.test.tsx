@@ -42,7 +42,9 @@ describe('a chart heading', () => {
     })} />)
     const heading = screen.getByRole('heading', { name: /Context Window Over the Session/ })
     expect(heading.getAttribute('title')).toBe('Session 1d3708a2, 1,822 turns.')
-    expect(within(heading).getByText('?')).toBeTruthy()
+    // No glyph: a bordered "?" beside every heading on the page reads as a control and is
+    // not one. The note is the hover, and that is what has to be true.
+    expect(within(heading).queryByText('?')).toBeNull()
     // And the caption is not ALSO printed in the body, which is the whole point of pairing it.
     expect(screen.queryAllByText('Session 1d3708a2, 1,822 turns.')).toHaveLength(0)
   })
@@ -83,7 +85,7 @@ describe('a table heading built from a collapsible label', () => {
     // "What to do about it 6 finding(s), each with an action1 row".
     expect(heading.textContent).not.toContain('each with an action')
     expect(heading.getAttribute('title')).toBe('6 finding(s), each with an action')
-    expect(within(heading).getByText('?')).toBeTruthy()
+    expect(within(heading).queryByText('?')).toBeNull()
   })
 
   it('shows both halves when a table has a section caption AND a note of its own', () => {
@@ -102,21 +104,14 @@ describe('a table heading built from a collapsible label', () => {
 })
 
 describe('what a view IS', () => {
-  it('is drawn once, in a named disclosure, and never as loose prose', () => {
+  it('is claimed by the pane and never printed, because the tab hover carries it', () => {
     render(<Pane payload={payload({
       about: ['This tab describes the capture machinery and the window math.'],
       text: ['This tab describes the capture machinery and the window math.'],
     })} />)
-    // Once, not twice: it is claimed out of the prose block AND rendered in the disclosure, so a
-    // reader meets it in one place, under a heading that says what it is.
-    const hits = screen.getAllByText(/capture machinery/)
-    expect(hits).toHaveLength(1)
-    expect(screen.getByText('About this view')).toBeTruthy()
-    expect(hits[0].closest('details')).toBeTruthy()
-  })
-
-  it('draws no disclosure when the view has nothing to say about itself', () => {
-    render(<Pane payload={payload({ text: [] })} />)
-    expect(screen.queryByText('About this view')).toBeNull()
+    // It moved from a wall in the body, to an 826-character tooltip on a 61-pixel chip, to the
+    // tab's own hover, which is the thing on screen that already answers what am I looking at.
+    // Whatever the pane does with it, printing it here is what must not happen.
+    expect(screen.queryByText(/capture machinery/)).toBeNull()
   })
 })

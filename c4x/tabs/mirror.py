@@ -24,8 +24,8 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
     rows = []
     for t in MATH["thresholds"]:
         rows.append({
-            "window": int(t["window"]), "warn at": int(t["warn"]),
-            "compact at": int(t["compact"]), "blocked at": int(t["blocked"]),
+            "window": int(t["window"]), "warn": int(t["warn"]),
+            "compact": int(t["compact"]), "blocked": int(t["blocked"]),
         })
     return html.Div([
         html.Div([
@@ -50,12 +50,12 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
            style={"display": "flex", "alignItems": "center", "marginBottom": "16px"}),
         html.Div(id="mirror-out", className="dash-only"),
         html.Div([
-            html.Div("Thresholds for every window this build can produce", style=SECTION_HEAD),
+            html.Div("Window Thresholds", style=SECTION_HEAD),
             html.Div("The warn, compact and blocked lines the window math draws for each window "
                      "size, from the same constants the chart above uses.", style=SECTION_NOTE),
             DataTable(
-                columns=(_cols := numeric_columns(["window", "warn at", "compact at", "blocked at"],
-                                        {"window", "warn at", "compact at", "blocked at"})),
+                columns=(_cols := numeric_columns(["window", "warn", "compact", "blocked"],
+                                        {"window", "warn", "compact", "blocked"})),
                 tooltip_header=header_help(_cols),
                 data=rows, **TABLE_STYLE,
             ),

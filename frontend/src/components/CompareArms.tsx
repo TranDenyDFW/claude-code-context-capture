@@ -23,14 +23,12 @@ const SAME_THING = 'Comparing something with itself gives a table of 1.0 ratios 
 
 function Choice({
   label,
-  hint,
   value,
   options,
   disabledValue,
   onChange,
 }: {
   label: string
-  hint: string
   value: string
   options: { value: string; label: string }[]
   /** Excluded from the list, so the two arms cannot be set to the same thing. */
@@ -54,7 +52,6 @@ function Choice({
             </option>
           ))}
       </select>
-      <span className="text-2xs text-ink-faint">{hint}</span>
     </label>
   )
 }
@@ -88,7 +85,6 @@ export function CompareArms({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
         <Choice
           label="Arm A"
-          hint="Also the header selection, so the two cannot disagree."
           value={selection.session ?? ''}
           options={chatOptions}
           disabledValue={kind === 'session' ? armB : null}
@@ -100,7 +96,6 @@ export function CompareArms({
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           <Choice
             label="Arm B"
-            hint={kind === 'session' ? 'One chat.' : 'A whole population, measured the same way.'}
             value={armB}
             options={kind === 'session' ? chatOptions : populationOptions}
             disabledValue={kind === 'session' ? (selection.session ?? null) : null}
@@ -122,7 +117,7 @@ export function CompareArms({
                     : 'border-edge bg-panel text-ink-dim hover:text-ink'
                 }`}
               >
-                {option === 'session' ? 'a chat' : 'a population'}
+                {option === 'session' ? 'Chat' : 'Population'}
               </button>
             ))}
           </div>
@@ -130,12 +125,6 @@ export function CompareArms({
       </div>
       {armB && armB === selection.session && (
         <p className="mt-2 text-xs text-warn">{SAME_THING}</p>
-      )}
-      {!armB && (
-        <p className="mt-2 text-xs text-ink-faint">
-          Arm B is unset, so the server picks the most recently active chat that is not arm A.
-          Choose one to compare a fork against what it came from.
-        </p>
       )}
     </div>
   )

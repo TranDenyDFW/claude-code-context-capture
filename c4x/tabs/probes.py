@@ -52,7 +52,7 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                 html.Pre("node tools/probe.mjs", style=CODE_BLOCK)]
     else:
         body = [
-            html.Div("Probe runs", style=SECTION_HEAD),
+            html.Div("Probe Runs", style=SECTION_HEAD),
             html.Div("Each row is one spawned session answering the control protocol. A spawned "
                      "CLI session is NOT configured like the desktop app, so these numbers "
                      "describe the probe, not your live work. That difference is the finding.",
@@ -68,7 +68,7 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                 # (ts, model) are never null on a real probe, so this changes only the failed row.
                 data=records(probes),
                 **TABLE_STYLE),
-            html.Div("Per-category items and cost", style=SECTION_HEAD),
+            html.Div("Category Items & Costs", style=SECTION_HEAD),
             html.Div("A count with zero tokens means the channel named the items but priced none "
                      "of them, which is exactly what makes the per-item cost unrecoverable from "
                      "this route alone.", style=SECTION_NOTE),
@@ -81,7 +81,7 @@ def probes_layout(session_id=None, scope="main", cohort=None):
         ]
         if not named.empty:
             body += [
-                html.Div("The items that carry a price", style=SECTION_HEAD),
+                html.Div("Items Costs", style=SECTION_HEAD),
                 DataTable(
                     columns=(_cols :=
                         [{"name": c, "id": c} for c in ["probe_id", "kind", "name", "tokens"]]),

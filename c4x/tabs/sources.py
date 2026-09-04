@@ -66,7 +66,7 @@ def sources_layout(session_id=None, scope="main", cohort=None):
                              marker_color=ACCENT))
         fig.update_layout(title="Injected Context by Type",
                           title_font=dict(color=TEXT, size=13),
-                          xaxis_title="occurrences", yaxis_title="")
+                          xaxis_title="Occurrences", yaxis_title="")
 
     # Numbers stay numbers. Comma-formatting them into strings here made the table sort
     # lexicographically (so 9 came after 80,000) and put quoted text in the CSV export, which is
@@ -84,7 +84,7 @@ def sources_layout(session_id=None, scope="main", cohort=None):
                       sub="tool responses, desktop entrypoint"),
             # ev['n'] is an int column now. It was being un-comma'd back into a number here,
             # which only worked while the display formatting was mutating the frame in place.
-            stat_card("Lifecycle events", f"{int(ev['n'].sum()):,}" if not ev.empty else "0",
+            stat_card("Lifecycle Events", f"{int(ev['n'].sum()):,}" if not ev.empty else "0",
                       sub="from the hook channel"),
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"}),
 
@@ -95,17 +95,17 @@ def sources_layout(session_id=None, scope="main", cohort=None):
                  style=SECTION_NOTE),
         dcc.Graph(id="fig-sources", figure=dark_fig(fig, 360),
                   config={"displayModeBar": False}),
-        evidence_block("Injected context by type", att, sql["att"], sid_args),
+        evidence_block("Injected Context by Type", att, sql["att"], sid_args),
 
         evidence_block(
-            "Tool response size, measured by the hooks", hooks, sql["hooks"], sid_args,
+            "Tool Response Sizes", hooks, sql["hooks"], sid_args,
             note="Bytes, not tokens: the store has exact token counts per request and never per "
                  "tool call, so a ratio here would dress an estimate as a measurement."),
 
         html.Div([
-            html.Div(evidence_block("Lifecycle events", ev, sql["ev"], sid_args, page_size=8),
+            html.Div(evidence_block("Lifecycle Events", ev, sql["ev"], sid_args, page_size=8),
                      style={"flex": "1.4"}),
-            html.Div(evidence_block("Transcript record census", rec, sql["rec"], (), page_size=8),
+            html.Div(evidence_block("Transcript Record Census", rec, sql["rec"], (), page_size=8),
                      style={"flex": "1"}),
         ], style={"display": "flex", "gap": "14px", "alignItems": "flex-start"}),
     ])

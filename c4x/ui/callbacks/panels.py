@@ -162,5 +162,5 @@ def _mirror(tokens, window):
         stat_card("percent left", f"{r['pctLeft']}%"),
         stat_card("until compaction", fmt_tokens(r["tokens_until_compact"]),
                   sub=f"trigger at {fmt_tokens(r['reported_threshold'])}"),
-        stat_card("blocked at", fmt_tokens(r["blocked_at"]), color=DANGER),
+        stat_card("blocked", fmt_tokens(r["blocked_at"]), color=DANGER),
     ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
