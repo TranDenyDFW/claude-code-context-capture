@@ -359,8 +359,8 @@ def _marked_notes(node, count, mark, kind):
             index_at[at] = seen
             seen += 1
 
-    notes = {i: [] for i in range(count)}
-    absorbed = {i: [] for i in range(count)}
+    notes: dict[int, list[str]] = {i: [] for i in range(count)}
+    absorbed: dict[int, list[str]] = {i: [] for i in range(count)}
     for at, event in enumerate(events):
         if event[0] != "note":
             continue
@@ -913,7 +913,8 @@ def _details(node, found=None):
                     parts = child.children
                     if not isinstance(parts, (list, tuple)):
                         parts = [parts] if parts else []
-                    heads, subs = [], []
+                    heads: list[str] = []
+                    subs: list[str] = []
                     for part in parts:
                         target = subs if "accordion-sub" in str(
                             getattr(part, "className", "") or "").split() else heads

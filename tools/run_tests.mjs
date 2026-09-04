@@ -188,6 +188,14 @@ const PY = [
   // line says nothing about whether it passed: three stages merged carrying lint errors while the
   // gate reported clean. A check whose result depends on how you read it is not a gate.
   ['-m', ['ruff', 'check', '.'], 'style, as a gate rather than a habit', 'All checks passed'],
+  // MYPY RUNS HERE for exactly the reason ruff and eslint do, and it is the third time this file
+  // has learned it. It was the last blocking CI step the suite did not run, so a branch could pass
+  // 1,648 local checks and fail all three CI legs on four `var-annotated` errors in one file. That
+  // is not hypothetical either: it happened on the branch that added this line, and the four
+  // annotations were written twice, once against a red CI log instead of once against a red suite.
+  //
+  // A check the machine runs and the developer cannot is a check that fails late and by surprise.
+  ['-m', ['mypy'], 'types over c4x/, the same step CI blocks on', 'Success: no issues found'],
 ];
 
 // Files with no self-test, and the reason. Anything NOT listed here is required to have one, so
