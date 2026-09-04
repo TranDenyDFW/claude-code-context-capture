@@ -23,7 +23,9 @@ and message text replaced by `tools/redact.py`. Every number, chart and finding 
 - **Node 24 or newer.** Every tool opens the store through the built-in `node:sqlite`, which
   earlier majors shipped behind a flag.
 - **Python 3.12 or newer**, for the dashboard and the CLI only. Capture itself needs neither.
-- **Nothing from npm.** No dependencies, no lockfile to audit.
+- **Nothing from npm at capture time.** The tools that read your transcripts import nothing but
+  Node's own modules. The two committed lockfiles pin the development toolchain, the linter and the
+  frontend build, which is what CI installs and what you need only if you are changing this repo.
 
 ```bash
 git clone https://github.com/TranDenyDFW/claude-code-context-capture

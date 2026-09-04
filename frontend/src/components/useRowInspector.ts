@@ -5,16 +5,18 @@ import type { InspectorContent } from './Inspector'
 import { shown } from './inspect'
 
 /**
- * Opening a table row: every field, and the message itself where a column was cut.
+ * What the drawer is showing, and the fetch that fills it in.
  *
  * A hook, because the pane and the single-table page both need it and the page shipped without it:
  * the Messages table carries the note "Click a row to read it in full", the page showed that note,
- * and a click there did nothing. Found by a review.
+ * and a click there did nothing.
  *
- * THE STALE GUARD IS A TOKEN, not the drawer's title. The title is the same string for every row of
- * a table ("Messages: row"), so two quick opens could put the first row's text under the second
- * row's fields, and the reader would have no way to know. Each open takes the next token and only
- * the current one may write.
+ * THE STALE GUARD IS A TOKEN, AND THE HOOK DOES NOT HAND OUT THE RAW SETTER. Every change of
+ * subject takes the next token; only the current one may write. The first version exported
+ * `setContent`, and the chart-click path used it without taking a token, so a row fetch still in
+ * flight wrote that message's whole text into a drawer headed with a chart point's name. A guard a
+ * caller can step around is documentation, not a guard. `close` takes one too, so nothing issued
+ * before a close can land after it, rather than that being true by accident of a null check.
  */
 export function useRowInspector(
   payload: TabPayload,
@@ -23,9 +25,19 @@ export function useRowInspector(
 ) {
   const [content, setContent] = useState<InspectorContent | null>(null)
   const token = useRef(0)
+  /** The next token. EVERY change of subject takes one, which is what makes the guard total. */
+  const claim = () => ++token.current
+
+  /** A chart point: no fetch of its own, but it must still retire a row fetch in flight. */
+  const showPoint = (next: InspectorContent) => setContent({ ...next, subject: claim() })
+
+  const close = () => {
+    claim()
+    setContent(null)
+  }
 
   const openRow = (index: number) => (row: Record<string, unknown>) => {
-    const mine = ++token.current
+    const mine = claim()
     const meta = payload.meta?.[index]
     const spec = meta?.full_text
     const fields = Object.entries(row)
@@ -33,11 +45,15 @@ export function useRowInspector(
       .map(([key, value]) => [key, shown(value)] as [string, string])
     const session = row.session_id ?? row.session
     const base: InspectorContent = {
+      subject: mine,
       title: `${names[index]}: row`,
       source: names[index],
       fields,
       onSelectSession: onSelectSession && typeof session === 'string' && session
-        ? () => onSelectSession(row)
+        // Closed as it fires: the pane's query key carries the session, so the page this drawer
+        // was opened from is about to be rebuilt, and a drawer describing a row of the previous
+        // payload would sit over the new one.
+        ? () => { onSelectSession(row); close() }
         : null,
     }
     if (!spec) {
@@ -59,5 +75,5 @@ export function useRowInspector(
       }))
   }
 
-  return { content, setContent, openRow, close: () => setContent(null) }
+  return { content, showPoint, openRow, close }
 }

@@ -77,9 +77,11 @@ export function Plot({
   // chart's listeners or, worse, leave the old closure attached.
   const clickHandler = useRef(onPointClick)
   clickHandler.current = onPointClick
-  // A chunk that fails to download left every chart on the page blank and silent, with nothing
-  // in the DOM or the console naming the cause. Found by a review sweep; pre-existing.
-  const [failed, setFailed] = useState<string | null>(null)
+  // TWO FAILURES, TWO MESSAGES. A chunk that fails to download left every chart on the page blank
+  // and silent, with nothing naming the cause. Then the fix caught both failures in one place, so
+  // a figure the library refused to DRAW reported a download that had in fact succeeded, and threw
+  // away a module every other chart on the page then had to fetch again.
+  const [failed, setFailed] = useState<{ kind: 'library' | 'draw'; why: string } | null>(null)
 
   useEffect(() => {
     const node = holder.current
@@ -97,10 +99,15 @@ export function Plot({
       title: undefined,
       legend: { orientation: 'h' as const, y: -0.18, font: { size: 10 } },
     }
+    const why = (error: unknown) => (error instanceof Error ? error.message : String(error))
+    let drawn: PlotlyModule | null = null
+    // A new attempt is not the previous attempt's failure.
+    setFailed(null)
     plotly().then((Plotly) => {
       // The tab may have changed while the library was downloading. Drawing into a node React has
       // already unmounted throws inside Plotly, where the stack names none of this.
       if (dropped || !holder.current) return
+      drawn = Plotly
       return Plotly.react(node, figure.data ?? [], layout, {
         displayModeBar: false,
         responsive: true,
@@ -122,33 +129,44 @@ export function Plot({
             pointIndex: point.pointIndex ?? point.pointNumber ?? 0,
           })
         })
+      }).catch((error: unknown) => {
+        // THE LIBRARY IS FINE; THIS FIGURE IS NOT. `pending` is deliberately NOT cleared: the
+        // module downloaded, and discarding it would make every other chart on the page fetch
+        // 3.5 MB again because one figure had a bad trace.
+        if (!dropped) setFailed({ kind: 'draw', why: why(error) })
       })
-    }).catch((error: unknown) => {
-      // Forget the failed download so the next chart, or a reload of this one, tries again
-      // rather than inheriting a rejected promise for the life of the page.
+    }, (error: unknown) => {
+      // Only a download failure forgets the shared promise, so the next chart tries again rather
+      // than inheriting a rejected promise for the life of the page.
       pending = null
-      if (!dropped) setFailed(error instanceof Error ? error.message : String(error))
+      if (!dropped) setFailed({ kind: 'library', why: why(error) })
     })
     return () => {
       dropped = true
-      void plotly().then((Plotly) => Plotly.purge(node)).catch(() => { /* never loaded */ })
+      // Synchronous, and only if it loaded. Calling plotly() here after a download failure would
+      // start a fresh 3.5 MB fetch on the unmount of a chart that never drew.
+      drawn?.purge(node)
     }
   }, [figure, height])
 
-  if (failed) {
-    return (
-      <div role="alert" className="flex w-full items-center justify-center text-sm text-ink-dim"
-           style={{ height }}>
-        The chart library could not be loaded ({failed}). Reload the page to try again.
-      </div>
-    )
-  }
+  // THE HOLDER STAYS MOUNTED. Replacing it with the message made `holder.current` null, so the
+  // effect's own guard fired on every later run and an instance that had failed once could never
+  // draw again, even when the next selection brought a good figure to the same component.
   return (
-    <div
-      ref={holder}
-      className={`w-full ${onPointClick ? 'cursor-pointer' : ''}`}
-      style={{ height }}
-      title={onPointClick ? 'Click a point, bar or cell to see the data behind it' : undefined}
-    />
+    <div className="relative w-full" style={{ height }}>
+      <div
+        ref={holder}
+        className={`h-full w-full ${onPointClick && !failed ? 'cursor-pointer' : ''}`}
+        title={onPointClick && !failed ? 'Click a point, bar or cell to see the data behind it' : undefined}
+      />
+      {failed && (
+        <div role="alert" className="absolute inset-0 flex items-center justify-center bg-panel
+                                     px-4 text-center text-sm text-ink-dim">
+          {failed.kind === 'library'
+            ? `The chart library could not be loaded (${failed.why}). Reload the page to try again.`
+            : `This chart could not be drawn (${failed.why}). The other charts on this page are unaffected.`}
+        </div>
+      )}
+    </div>
   )
 }
