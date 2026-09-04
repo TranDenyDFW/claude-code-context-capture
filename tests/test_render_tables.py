@@ -308,3 +308,41 @@ def test_the_shell_rule_is_installed_and_holds_without_any_bundle(client):
     assert cached("/index.html") == "no-cache"
     assert cached("/") == "no-cache"
     assert cached("/assets/index-abc.js") is None
+
+def test_no_two_tables_of_one_surface_share_a_title(app):
+    """A title is how a reader tells one table from another, so two tables must not answer to the
+    same one.
+
+    The collision this pins was mine: the composition table gained the heading "What is in the
+    window, item by item" in the same pass that made every table carry one, and a sub-panel had
+    written that sentence for its own block since before. Only one of the two is served today, so
+    nothing showed it; a reader who switched panels would have seen one heading over two different
+    tables. Checked over every tab AND every registered sub-panel, because the sub-panels are
+    exactly where nothing else looks.
+    """
+    from c4x.api.main import _pane, _table_meta
+    from c4x.ui.subpanels import PANELLED
+
+    surfaces = {}
+    for tab, *_ in app.TABS:
+        surfaces[f"tab {tab}"] = _table_meta(_pane(tab, None, "main", None, None, "session"))
+    for prefix, spec in PANELLED.items():
+        for index in range(len(spec["panels"])):
+            surfaces[f"panel {prefix}[{index}]"] = _table_meta(
+                spec["body"](index, None, "main", None))
+
+    titles = {name: [m["title"] for m in meta if m.get("title")] for name, meta in surfaces.items()}
+
+    for name, names in titles.items():
+        assert len(names) == len(set(names)), f"{name} ships one title twice: {names}"
+
+    # Across the panels of one registry: switching panels must not leave the same heading over
+    # different content. A tab that renders one of its own panels inline is the same table twice,
+    # not a collision, so tabs are not compared against panels here.
+    for prefix, spec in PANELLED.items():
+        panels = [(i, set(titles[f"panel {prefix}[{i}]"])) for i in range(len(spec["panels"]))]
+        for i, mine in panels:
+            for j, theirs in panels:
+                if i < j:
+                    shared = mine & theirs
+                    assert not shared, f"panels {prefix}[{i}] and {prefix}[{j}] share {shared}"

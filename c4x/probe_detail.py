@@ -239,7 +239,13 @@ def probe_detail_blocks(baseline=None):
     # Annotated because the first element is a Div and a dcc.Graph is appended later; inferred
     # from the literal this is a list[Div] and that append is an error.
     blocks: list[Component] = [
-        html.Div("What is in the window, item by item", style=SECTION_HEAD),
+        # NAMED FOR THIS PANEL, not for the window as a whole. The composition panel already
+        # writes "What is in the window, item by item" over its own table, and this block
+        # became the title of the first table under it once every table started carrying a
+        # heading, so two different tables answered to one name. Only one of the two is
+        # served today, which is why nothing showed it. The parallel is the conversation
+        # panel's heading below.
+        html.Div("What the configuration put in the window", style=SECTION_HEAD),
         html.Div(
             f"Read directly from Claude Code by probe {pid} at {when} on {probe['model']}. This is "
             f"a measurement, not a derivation, which makes it the most trustworthy material on "
