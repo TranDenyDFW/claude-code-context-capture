@@ -11,16 +11,18 @@ from c4x.theme import (
     ACCENT,
     GOOD,
     MUTED,
-    SECTION_NOTE,
     TABLE_STYLE,
     TEXT,
     VIOLET,
     WARN,
+    chart_note,
     dark_fig,
     empty_fig,
     header_help,
     heat_cells,
     numeric_columns,
+    stat_card,
+    table_note,
 )
 
 # One colour per section, assigned by sorted position so the same section keeps the same colour
@@ -29,23 +31,13 @@ from c4x.theme import (
 SECTION_COLORS = (ACCENT, GOOD, VIOLET, WARN, "#e8590c", MUTED)
 
 
-def archived_note(df):
-    """How much of the archived flag is actually known, in words, on the page.
-
-    An archived chat has \\archived appended to its path so it sorts beside the project it came
-    from rather than into a section of its own. The flag is real and readable, but it is knowable
-    only for chats the desktop app has a record of, and that is a minority here. Without this
-    sentence an unmarked path reads as "not archived" when it usually means "no record".
-    """
+def archived_counts(df):
+    """(marked, recorded as not archived, no record at all) for these sessions."""
     if df.empty or "archived" not in df:
-        return ""
-    marked = int((df["archived"] == True).sum())          # noqa: E712 - tri-state, not truthiness
-    known_not = int((df["archived"] == False).sum())       # noqa: E712 - None must not count here
-    unknown = int(df["archived"].isna().sum())
-    # The COUNTS stay on the page; what the marker MEANS moved to the `project` column tooltip.
-    # A reader needs to know that 226 of these are unknown without hovering to find out.
-    return (f"Archived: {marked:,} marked, {known_not:,} recorded as not archived, "
-            f"{unknown:,} with no desktop record at all.")
+        return 0, 0, 0
+    return (int((df["archived"] == True).sum()),        # noqa: E712 - tri-state, not truthiness
+            int((df["archived"] == False).sum()),        # noqa: E712 - None must not count here
+            int(df["archived"].isna().sum()))
 
 
 def sessions_scatter(rows):
@@ -85,8 +77,7 @@ def sessions_scatter(rows):
         ))
     # "sessions" alone read as all of them. It is the LISTED ones, and the chart is the surface
     # where a reader is most likely to take the count as the population.
-    fig.update_layout(title=f"{len(rows):,} listed sessions: transcript rows against peak "
-                            f"resident tokens",
+    fig.update_layout(title="Transcript Rows Against Peak Resident Tokens",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="turns (log)", yaxis_title="peak resident tokens (log)")
     fig.update_xaxes(type="log")
@@ -119,29 +110,43 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             "current": int(r.current or 0),
             "compactions": int(r.compactions or 0),
         })
-    breakdown = " · ".join(f"{k} {v:,}" for k, v in counts.items()) or "none"
+    marked, known_not, unknown = archived_counts(df)
     return html.Div([
-        html.Div(f"{len(rows):,} sessions with {SESSION_TURN_FLOOR} or more turns. {breakdown}.",
-                 style=SECTION_NOTE),
-        html.Div("Click a row to make it the header selection. Sections come from disk: the "
-                 "working directory, the entrypoint, and whether the transcript still exists.",
-                 style=SECTION_NOTE),
-        # This paragraph is now the `turns` column tooltip. It was written here because there was
-        # nowhere else to put it; the gap it describes is real (one session holds 59,864 rows of
-        # which 690 are main thread) and the tooltip states it on the column it concerns.
-        html.Div(archived_note(df), style=SECTION_NOTE),
+        # THE COUNTS ARE CARDS. This tab opened with three grey paragraphs and no figures at all,
+        # while every number in those paragraphs is exactly what a card is for. The sentences that
+        # remain say what to DO, and they now say it on the thing they are about.
+        html.Div([
+            stat_card("listed sessions", f"{len(rows):,}",
+                      sub=f"{SESSION_TURN_FLOOR} or more turns"),
+            stat_card("projects", f"{counts.get('Projects', 0):,}",
+                      sub=" · ".join(f"{k.lower()} {v:,}"
+                                     for k, v in counts.items() if k != "Projects") or "only"),
+            stat_card("archived", f"{marked:,}" if marked or known_not or unknown else "-",
+                      sub=(f"{known_not:,} recorded as not archived, {unknown:,} with no desktop "
+                           f"record at all") if (marked or known_not or unknown) else ""),
+        ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap",
+                  "marginBottom": "12px"}),
+        # Written above the chart and above the table, and about the table, so it is marked: the
+        # chart between them resets the forward pairing, and this reached the reader as a
+        # paragraph at the top of the tab instead of as the table's hover.
+        table_note("Click a row to make it the header selection. Sections come from disk: the "
+                   "working directory, the entrypoint, and whether the transcript still exists.",
+                   for_id="tbl-session"),
         # The mode bar stays ON here, unlike every other chart in the app, because it carries the
         # box and lasso tools that drive the cross-filter below. A hidden mode bar would leave the
         # feature reachable only by a drag nobody was told about.
         dcc.Graph(id="fig-sessions", figure=sessions_scatter(rows),
                   config={"displayModeBar": True, "displaylogo": False,
                           "modeBarButtonsToRemove": ["autoScale2d", "toggleSpikelines"]}),
-        html.Div(
-            "One point per session. The table below holds the same rows sixteen at a time, "
-            "which is the right shape for looking one session up and the wrong shape for seeing "
-            "that a handful of them are unlike all the others. Shaded cells in the table mark "
-            "the same outliers in whatever order you have sorted it into.",
-            style=SECTION_NOTE),
+        # THE CHART'S OWN CAPTION, and it says so. The forward pairing carried this over the
+        # chart and served it as the hover of the table below, which opens "One point per session"
+        # over a table of rows.
+        chart_note(
+            f"{len(rows):,} listed sessions, one point each. The table below holds the same rows "
+            "sixteen at a time, which is the right shape for looking one session up and the wrong "
+            "shape for seeing that a handful of them are unlike all the others. Shaded cells in "
+            "the table mark the same outliers in whatever order you have sorted it into.",
+            for_id="fig-sessions"),
         # Every row, unfiltered, so the cross-filter can narrow AND restore without a query. The
         # table's own `data` is the filtered view, so it cannot be the source: reading it back
         # would make each selection narrow the previous one and never widen.

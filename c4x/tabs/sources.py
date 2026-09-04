@@ -93,7 +93,8 @@ def sources_layout(session_id=None, scope="main", cohort=None):
                  "agent listings, deferred-tool deltas. It occupies the same window as everything "
                  "else, and no native view shows it historically.",
                  style=SECTION_NOTE),
-        dcc.Graph(figure=dark_fig(fig, 360), config={"displayModeBar": False}),
+        dcc.Graph(id="fig-sources", figure=dark_fig(fig, 360),
+                  config={"displayModeBar": False}),
         evidence_block("Injected context by type", att, sql["att"], sid_args),
 
         evidence_block(

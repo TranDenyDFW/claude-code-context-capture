@@ -34,6 +34,7 @@ from c4x.theme import (
     heat_cells,
     numeric_columns,
     stat_card,
+    table_note,
 )
 
 
@@ -331,7 +332,7 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
             tooltip_duration=None,
             style_cell=TABLE_STYLE["style_cell"], style_header=TABLE_STYLE["style_header"],
             style_table={"overflowX": "auto"}),
-        html.Div("Values are raw, in the unit each row names, so the export carries numbers "
+        table_note("Values are raw, in the unit each row names, so the export carries numbers "
                  "rather than labels. Only rows where a bigger number is unambiguously worse are "
                  "marked, and only "
                  "where the comparison means something. Peak resident and output tokens carry no "

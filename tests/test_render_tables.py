@@ -379,6 +379,8 @@ def _loose_prose(payload):
             claim(line)
     for line in payload.get("dash_only") or []:
         claim(line)
+    for line in payload.get("about") or []:
+        claim(line)
     population = payload.get("population")
     return [line for line in payload["text"]
             if line != population
@@ -401,7 +403,8 @@ def _surfaces(app):
         out[f"tab {tab}"] = _render_payload(_pane(tab, None, "main", None, None, "session"))
     for prefix, spec in PANELLED.items():
         for index in range(len(spec["panels"])):
-            out[f"panel {prefix}[{index}]"] = _render_payload(spec["body"](index, None, "main", None))
+            pane = spec["body"](index, None, "main", None)
+            out[f"panel {prefix}[{index}]"] = _render_payload(pane)
     return out
 
 

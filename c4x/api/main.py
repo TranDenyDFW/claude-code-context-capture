@@ -209,6 +209,91 @@ def tab(tab_id: str,
 def _figure_meta(node, count):
     """The caption belonging to each chart, by figure index, for `count` charts.
 
+    Two sources, in the order a reader meets them: the heading and note written directly ABOVE the
+    chart, which `_table_meta` sees and throws away with the comment "a heading before a chart
+    names the chart", and every caption explicitly marked for it by `theme.chart_note()`. The first
+    needs no mark because it is already unambiguous; the second exists for the captions written
+    below a chart, or in a different list from it, which position cannot resolve.
+    """
+    above = _preceding_notes(node, count, "Graph")
+    marked = _marked_notes(node, count, "chart-note", "Graph")
+    out = []
+    for first, second in zip(above, marked, strict=True):
+        lines = [t for t in (first["note"], second["note"]) if t]
+        out.append({"note": "\n".join(lines) or None,
+                    "absorbed": list(first["absorbed"]) + list(second["absorbed"])})
+    return out
+
+
+def _preceding_notes(node, count, kind):
+    """The heading and note written directly above each chart, which `_table_meta` discards.
+
+    It discards them for a good reason: they are not the next table's. But it had nowhere to put
+    them, so "Context injected by the harness" and the paragraph under it, written above the
+    Injected panel's chart, reached the reader as two loose lines while the chart they name was
+    drawn with no explanation at all.
+
+    The same rule as `_table_meta` uses, so the two cannot disagree about what a heading is: a
+    SECTION_HEAD or an H-tag is the heading, any other text sibling is the note, and a table or a
+    section resets both.
+    """
+    from c4x.cli import extract
+    from c4x.theme import SECTION_HEAD
+    found = []
+
+    def plain_text(node):
+        if not hasattr(node, "_prop_names") or type(node).__name__ not in (
+                "Div", "P", "H2", "H3", "H4", "H5", "Span", "Small"):
+            return None
+        children = getattr(node, "children", None)
+        if isinstance(children, str):
+            return children
+        if isinstance(children, (list, tuple)) and children and all(
+                isinstance(c, str) for c in children):
+            return " ".join(children)
+        return None
+
+    def walk(node, pending):
+        if isinstance(node, (list, tuple)):
+            pending = {"head": None, "note": None}
+            for child in node:
+                walk(child, pending)
+            return
+        if not hasattr(node, "_prop_names"):
+            return
+        seen = type(node).__name__
+        marks = {"chart-note", "dash-only", "table-note", "about-note"}
+        if set(str(getattr(node, "className", "") or "").split()) & marks:
+            return
+        text = plain_text(node) if pending is not None else None
+        if text is not None and text.strip():
+            if getattr(node, "style", None) == SECTION_HEAD or seen.startswith("H"):
+                pending["head"], pending["note"] = text, None
+            else:
+                pending["note"] = text
+            return
+        if seen == kind:
+            head = (pending or {}).get("head")
+            note = (pending or {}).get("note")
+            if pending is not None:
+                pending["head"], pending["note"] = None, None
+            lines = [t for t in (head, note) if t]
+            found.append({"note": " ".join(lines) or None, "absorbed": lines})
+            return
+        if pending is not None and seen in (extract.TABLE_TYPE, "Details"):
+            pending["head"], pending["note"] = None, None
+        for name in node._prop_names:
+            value = getattr(node, name, None)
+            if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
+                walk(value, None if seen in (extract.TABLE_TYPE, "Details") else pending)
+
+    walk(node, None)
+    return (found + [{"note": None, "absorbed": []}] * count)[:count]
+
+
+def _marked_notes(node, count, mark, kind):
+    """The captions MARKED for each chart or table, by index, for `count` of them.
+
     THE COUNTERPART OF `_table_meta`, AND IT DOES NOT GUESS. A table's heading and note are always
     written directly above the rows, so pairing them by position works. A chart's caption is not:
     `sources.py` writes it above the chart, `waste.py` and `compactions.py` write it below, and
@@ -217,14 +302,20 @@ def _figure_meta(node, count):
     and the Compactions scatter's caption are both served as the hover of a table they say nothing
     about, and left ten more as loose paragraphs because a chart had no note field at all.
 
-    So a caption is paired because `theme.chart_note()` MARKED it. `for_id` binds it to that chart
-    exactly; otherwise it binds to the nearest chart in its own list, preferring the one above it,
-    because a caption written below a chart is about the chart above it. Anything that binds to
-    nothing stays in `text` and fails the gate on loose prose, which is the point: an unreachable
-    caption should be a failure, not a disappearance.
+    So a caption is paired because `theme.chart_note()` or `theme.table_note()` MARKED it. `for_id`
+    binds it to that chart or table exactly; otherwise it binds to the nearest one in its own list,
+    preferring the one above it, because a caption written below a thing is about the thing above
+    it. Anything that binds to nothing stays in `text` and fails the gate on loose prose, which is
+    the point: an unreachable caption should be a failure, not a disappearance.
+
+    Tables come through here as well as charts. `_table_meta` pairs FORWARD ONLY, because a
+    heading is always written above its rows, and six captions across the tabs are written below
+    them: "Click a row to read the summary it produced, and what it dropped." sits under the
+    Compactions table and reached the reader as a paragraph at the bottom of the page.
     """
     from c4x.cli import extract
     events = []
+    prefix = mark + "-for-"
 
     def walk(node, owner):
         if isinstance(node, (list, tuple)):
@@ -233,13 +324,13 @@ def _figure_meta(node, count):
             return
         if not hasattr(node, "_prop_names"):
             return
-        kind = type(node).__name__
-        if "chart-note" in str(getattr(node, "className", "") or "").split():
-            target = getattr(node, "id", None) or ""
-            target = target[len("chart-note-"):] if target.startswith("chart-note-") else None
+        seen = type(node).__name__
+        classes = str(getattr(node, "className", "") or "").split()
+        if mark in classes:
+            target = next((c[len(prefix):] for c in classes if c.startswith(prefix)), None)
             events.append(("note", extract.texts(node), target, owner))
             return
-        if kind == "Graph":
+        if seen == kind:
             events.append(("graph", getattr(node, "id", None), None, owner))
             return
         for name in node._prop_names:
@@ -249,8 +340,7 @@ def _figure_meta(node, count):
 
     walk(node, None)
 
-    # Figure indices in the order `_figures()` and `extract.figures()` count them, which is the
-    # order the frontend pairs by.
+    # Indices in the order the extractor counts them, which is the order the frontend pairs by.
     index_at, seen = {}, 0
     for at, event in enumerate(events):
         if event[0] == "graph":
@@ -268,9 +358,12 @@ def _figure_meta(node, count):
             chosen = next((index_at[j] for j, other in enumerate(events)
                            if other[0] == "graph" and other[1] == target), None)
         else:
-            before = [j for j in range(at) if events[j][0] == "graph" and events[j][3] == owner]
-            after = [j for j in range(at + 1, len(events))
-                     if events[j][0] == "graph" and events[j][3] == owner]
+            # DOCUMENT ORDER, not the enclosing list. A table is often wrapped in a Div of its own,
+            # so "the nearest table in my own list" found nothing for a caption sitting right
+            # beside it on the page. The preceding one still wins, because a caption written below
+            # a thing is about the thing above it.
+            before = [j for j in range(at) if events[j][0] == "graph"]
+            after = [j for j in range(at + 1, len(events)) if events[j][0] == "graph"]
             if before:
                 chosen = index_at[before[-1]]
             elif after:
@@ -314,10 +407,23 @@ def _render_payload(pane):
     # would rename a column that does not exist on it, which is worse than showing the raw id.
     meta = _table_meta(pane)
     payload["meta"] = meta if len(meta) == len(payload["tables"]) else []
+    # THE CAPTIONS WRITTEN BELOW A TABLE, which the forward-only pairing above cannot see. Appended
+    # to whatever it did pair, so a table with both a note above it and a caption below it carries
+    # them in the order they were written.
+    if payload["meta"]:
+        marked = _marked_notes(pane, len(payload["meta"]), "table-note", extract.TABLE_TYPE)
+        for entry, extra in zip(payload["meta"], marked, strict=True):
+            joined = "\n".join(
+                t for t in (entry.get("note"), extra["note"]) if t)
+            entry["note"] = joined or None
+            entry["absorbed"] = list(entry.get("absorbed") or []) + list(extra["absorbed"])
     # TEXT THAT BELONGS TO A DASH-ONLY CONTROL. The window calculator's labels and constants
     # sentence are marked in the tree; the page drops these lines rather than printing the
     # labels of inputs it does not draw. The parity surface keeps them: they are real text.
     payload["dash_only"] = _dash_only(pane)
+    # WHAT THIS VIEW IS, as opposed to what any one chart on it shows. The page puts these on the
+    # population chip, which is the thing a reader already looks at to ask what they are reading.
+    payload["about"] = _marked_lines(pane, "about-note")
     # THE CAPTION EACH CHART ANSWERS TO, paired by index the same way `meta` is, and only when this
     # walk saw the same charts the extractor did. A caption under the wrong chart is a caption that
     # lies, which is worse than one the reader has to look for.
@@ -557,7 +663,8 @@ def _table_meta(node, found=None):
         # table and the chart it describes would otherwise become that table's hover, which is
         # exactly what happens on All sessions and on Compactions today, and the label of a control
         # this page never draws would become the note of whatever table came next.
-        if set(str(getattr(node, "className", "") or "").split()) & {"chart-note", "dash-only"}:
+        if set(str(getattr(node, "className", "") or "").split()) & {
+                "chart-note", "dash-only", "table-note", "about-note"}:
             return
         text = plain_text(node) if pending is not None else None
         if text is not None and text.strip():
@@ -641,24 +748,28 @@ def _table_meta(node, found=None):
     return found
 
 
-def _dash_only(node, found=None):
+def _dash_only(node):
     """Every text line under a component marked className="dash-only", in document order."""
+    return _marked_lines(node, "dash-only")
+
+
+def _marked_lines(node, mark, found=None):
+    """Every text line under a component carrying `mark`, in document order."""
     from c4x.cli import extract
     found = [] if found is None else found
     if isinstance(node, (list, tuple)):
         for child in node:
-            _dash_only(child, found)
+            _marked_lines(child, mark, found)
         return found
     if not hasattr(node, "_prop_names"):
         return found
-    classes = str(getattr(node, "className", "") or "").split()
-    if "dash-only" in classes:
+    if mark in str(getattr(node, "className", "") or "").split():
         found.extend(extract.texts(node))
         return found
     for name in node._prop_names:
         value = getattr(node, name, None)
         if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
-            _dash_only(value, found)
+            _marked_lines(value, mark, found)
     return found
 
 
@@ -755,7 +866,9 @@ def _details(node, found=None):
                     # "What to do about it 6 finding(s), each with an action" was the heading of the
                     # Summary tab's findings table, over a table whose own name is "Findings". The
                     # caption is marked, so the title is everything else.
-                    parts = list(child.children) if isinstance(child.children, (list, tuple))                         else ([child.children] if child.children else [])
+                    parts = child.children
+                    if not isinstance(parts, (list, tuple)):
+                        parts = [parts] if parts else []
                     heads, subs = [], []
                     for part in parts:
                         target = subs if "accordion-sub" in str(

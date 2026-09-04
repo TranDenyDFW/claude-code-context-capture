@@ -625,8 +625,43 @@ def chart_note(text, for_id: str | None = None, style: dict | None = None):
     Dash renders it exactly as `SECTION_NOTE` always did, so the page it was written for is
     unchanged; `style` overrides that for the few that are warnings.
     """
-    marked = {"id": f"chart-note-{for_id}"} if for_id else {}
-    return html.Div(text, className="chart-note", style={**SECTION_NOTE, **(style or {})}, **marked)
+    return _marked_note("chart-note", text, for_id, style)
+
+
+def table_note(text, for_id: str | None = None, style: dict | None = None):
+    """The sentence that explains a table when it is written BELOW the rows.
+
+    A heading and a note written above a table are paired by position and need no mark. Six
+    captions in this app are written under their table instead, because that is where a "click a
+    row to..." instruction belongs on the page, and a forward-only pairing cannot see them: all six
+    reached the browser as loose paragraphs at the bottom of a tab.
+
+    Use this only for the ones written below. Above the table, keep writing a plain `SECTION_NOTE`:
+    the pairing already handles it and a mark there would be noise.
+    """
+    return _marked_note("table-note", text, for_id, style)
+
+
+def about_note(children, style: dict | None = None):
+    """What this view IS, as opposed to what any one chart or table on it shows.
+
+    Some sentences are about the page. "Nothing on this tab answers to the header selection",
+    "A reading describes the moment it was taken", a sub-panel's statement of which half of the
+    window it covers: none of them belong on a chart's hover, because they are not about a chart,
+    and all of them were printing as loose paragraphs for want of anywhere else.
+
+    They go where a reader already looks to ask what they are reading: the population chip in the
+    header, which states what the numbers cover and now states this too. The Dash page draws them
+    exactly where they are written.
+    """
+    return html.Div(children, className="about-note", style={**SECTION_NOTE, **(style or {})})
+
+
+def _marked_note(mark: str, text, for_id: str | None, style: dict | None):
+    # THE TARGET RIDES IN THE CLASS, NOT IN THE ID. An id must be unique in a Dash page, so binding
+    # by id allowed exactly one caption per chart and the Window tab needs three on one of them.
+    classes = f"{mark} {mark}-for-{for_id}" if for_id else mark
+    return html.Div(text, className=classes, style={**SECTION_NOTE, **(style or {})})
 
 
 def accordion(title: str, sub: str, children, open_by_default: bool = False):

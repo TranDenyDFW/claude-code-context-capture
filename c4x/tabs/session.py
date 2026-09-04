@@ -36,6 +36,7 @@ from c4x.theme import (
     TEXT,
     VIOLET,
     WARN,
+    chart_note,
     dark_fig,
     empty_fig,
     fmt_cost,
@@ -224,10 +225,13 @@ def session_layout(session_id=None, scope="main", cohort=None):
                 html.Div("Nothing in this population has turns recorded." + extra,
                          style=SECTION_NOTE),
             ])
-        defaulted = html.Div(
+        # THE WARNING SAYS WHICH SESSION THE CHART IS OF, so it belongs to the chart. It used to
+        # open the tab as the first of five loose paragraphs, which is where a reader stops reading
+        # them.
+        defaulted = chart_note(
             "Nothing is selected in the header, so this is the most recently active session in "
             "the population. Pick one in the header, or click a row on All sessions, to change it.",
-            style={**SECTION_NOTE, "color": WARN})
+            style={"color": WARN})
     turns = session_turns(session_id, include_sidechain=(scope != "main"))
     n = max(len(turns), 1)
     default_budget = 80
@@ -239,28 +243,41 @@ def session_layout(session_id=None, scope="main", cohort=None):
         defaulted,
         html.Div([
             html.Div([
-                html.Span("Budget, as a share of the window", style=CONTROL_LABEL),
+                html.Span("Budget, as a share of the window", className="dash-only",
+                          style=CONTROL_LABEL),
                 dcc.Slider(id="budget-pct", min=50, max=100, step=5, value=default_budget,
                            marks={v: f"{v}%" for v in (50, 60, 70, 80, 90, 100)},
                            tooltip={"placement": "bottom"}),
             ], style={"flex": "1", "minWidth": "260px"}),
             html.Div([
-                html.Span("Compare turns A and B", style=CONTROL_LABEL),
+                html.Span("Compare turns A and B", className="dash-only", style=CONTROL_LABEL),
                 dcc.RangeSlider(id="turn-range", min=1, max=n, step=1, value=[1, n],
                                 marks=marks, tooltip={"placement": "bottom"},
                                 allowCross=False),
             ], style={"flex": "2", "minWidth": "320px"}),
         ], style={"display": "flex", "gap": "28px", "flexWrap": "wrap",
                   "padding": "10px 6px 2px 6px"}),
-        html.Div("The shaded bands are the warn, compact and blocked zones for the model in use, "
-                 "so headroom is read off the chart rather than computed. The budget line is a "
-                 "share of the window rather than a token count, because the windows here differ "
-                 "by a factor of five. Move A and B apart to see what entered the window between "
-                 "two turns, and what it cost.", style=SECTION_NOTE),
+        chart_note("The shaded bands are the warn, compact and blocked zones for the model in "
+                   "use, so headroom is read off the chart rather than computed. The budget line "
+                   "is a share of the window rather than a token count, because the windows here "
+                   "differ by a factor of five."),
+        # The last sentence of that paragraph told the reader to move two sliders. It is marked
+        # rather than deleted: the Dash page still has the sliders, and the React page never drew
+        # them, so it was an instruction to use a control that was not on screen.
+        html.Div("Move A and B apart to see what entered the window between two turns, and what "
+                 "it cost.", className="dash-only", style=SECTION_NOTE),
         dcc.Graph(id="session-fig", figure=fig, config={"displayModeBar": False}),
         html.Div(cards, style={"marginTop": "10px"}),
         html.Div(id="session-diff", style={"marginTop": "18px"}),
     ])
+
+
+def _model_names(turns) -> str:
+    """The models this session ran, saying so when there are more than the card can show."""
+    names = real_models(turns["model"])
+    if len(names) <= 2:
+        return ", ".join(names)
+    return f"{', '.join(names[:2])}, +{len(names) - 2} more"
 
 
 def session_view(session_id, scope="main", budget_pct=None, mark=None, with_cards=True):
@@ -352,13 +369,21 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                                font=dict(color=DANGER, size=10, family=MONO), textangle=-90,
                                xanchor="right", yanchor="top")
 
-    comp_note = f" | {len(comps)} compactions (red)" if len(comps) else ""
+    # THE TITLE NAMES THE CHART AND NOTHING ELSE. It used to read
+    # "1d3708a2 | 1822 turns | peak 995.6k | 1 compactions (red) | 5 model segments", which is a
+    # note wearing a title's slot: five facts, four of them already on a stat card, in the one
+    # place on the page that should say what is being plotted. They move to the hover, where the
+    # colour key at least has somewhere to live.
+    facts = [f"Session {session_id[:8]}, {len(turns):,} turns, peak {fmt_tokens(peak)}."]
+    if len(comps):
+        facts.append(f"{len(comps)} compaction{'s' if len(comps) != 1 else ''}, marked in red.")
     if len(segs) > 1:
-        comp_note += f" | {len(segs)} model segments"
+        facts.append(f"{len(segs)} model segments: the model changed {len(segs) - 1} time"
+                     f"{'s' if len(segs) > 2 else ''} inside this session.")
     if unresolved:
-        comp_note += f" | {unresolved} segment(s) with an undetermined window"
-    fig.update_layout(title=f"{session_id[:8]} | {len(turns)} turns | "
-                            f"peak {fmt_tokens(peak)}{comp_note}",
+        facts.append(f"{unresolved} segment(s) with an undetermined window.")
+    chart_facts = " ".join(facts)
+    fig.update_layout(title="Context Window Over the Session",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="turn", yaxis_title="tokens")
 
@@ -469,9 +494,13 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     # window and no stated sigma is something a reader has to guess the meaning of, and the guess
     # available here is the wrong one: the dashed lines above it are published model limits, so an
     # unexplained band reads as another of those rather than as this session's own spread.
-    band_explainer = html.Div(band_note, style={**SECTION_NOTE,
-                                                "color": VIOLET if band else MUTED,
-                                                "margin": "2px 0 12px 0"})
+    # BOUND TO THE CHART BY ID, not by position: this sits inside the card block, which is a
+    # different list from the one holding the chart, so nothing about where it is drawn says what
+    # it describes. `for_id` says it.
+    band_explainer = chart_note([
+        html.Div(chart_facts, style={"marginBottom": "4px"}),
+        html.Div(band_note, style={"color": VIOLET if band else MUTED}),
+    ], for_id="session-fig", style={"margin": "2px 0 12px 0"})
 
     cards = html.Div([
         stat_card("current", fmt_tokens(latest), color=ACCENT, sub=latest_sub),
@@ -483,7 +512,15 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                       else "transcript rows, main thread"),
         stat_card("output", fmt_tokens(total_out), sub=f"{fmt_tokens(think)} thinking"),
         stat_card("compactions", str(len(comps)), color=DANGER if len(comps) else TEXT),
-        stat_card("models", ", ".join(real_models(turns["model"])[:2]) or "-"),
+        # "+1 more" RATHER THAN SILENCE. This showed the first two names and dropped the rest with
+        # nothing saying so, and the session this was written against ran three: the card read
+        # "claude-fable-5-1, claude-opus-4-8" over a chart segmented five ways by three models.
+        stat_card("models", _model_names(turns) or "-"),
+        # The one fact the old chart title carried that no card did. Segments are not models: this
+        # session has three models and five segments, because it changed model and changed back.
+        stat_card("model segments", str(max(len(segs), 1)),
+                  sub=f"the model changed {max(len(segs) - 1, 0)} time"
+                      f"{'' if len(segs) == 2 else 's'} inside the session"),
         # BLANK, not zero, when this session ran a model the price table does not carry. A cost
         # card reading $0.00 says the session was free, which is a claim; an empty one says this
         # app does not know what it cost, which is true. The sub-line carries the price table's

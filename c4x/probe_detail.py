@@ -28,6 +28,8 @@ from c4x.theme import (
     SECTION_NOTE,
     TABLE_STYLE,
     TEXT,
+    about_note,
+    chart_note,
     header_help,
     numeric_columns,
     toward_background,
@@ -246,25 +248,25 @@ def probe_detail_blocks(baseline=None):
         # served today, which is why nothing showed it. The parallel is the conversation
         # panel's heading below.
         html.Div("What the configuration put in the window", style=SECTION_HEAD),
-        html.Div(
+        about_note(
             f"Read directly from Claude Code by probe {pid} at {when} on {probe['model']}. This is "
             f"a measurement, not a derivation, which makes it the most trustworthy material on "
             f"this tab and also the narrowest: it describes the session that ran the probe, and "
-            f"that session is not the one you are reading this in.",
-            style=SECTION_NOTE),
+            f"that session is not the one you are reading this in."),
     ]
 
     # A probe that reported no system prompt did not observe a session without one. Say so before
     # any number below is read, because everything else here inherits that doubt.
     missing = [n for n in ("System prompt", "System tools") if n not in names]
     if missing:
-        blocks.append(html.Div(
+        # A caveat over every number on the panel, so it is a statement about the view rather
+        # than a caption on any one of them.
+        blocks.append(about_note(
             f"THIS READING IS PARTIAL. It reports no {' and no '.join(missing)}, which no session "
             f"can actually run without, so the probe returned less than the full payload. Its item "
             f"lists are still real, but treat them as what this reading saw rather than as your "
             f"whole configuration, and prefer the baseline totals above for category sizes.",
-            style={"color": DANGER, "fontSize": "11.5px", "margin": "0 0 10px 0",
-                   "maxWidth": "900px", "lineHeight": "1.55"}))
+            style={"color": DANGER, "margin": "0 0 10px 0"}))
 
     rows = detail_rollup(pid, baseline)
     if rows:
@@ -290,7 +292,8 @@ def probe_detail_blocks(baseline=None):
 
     figure, shown, dropped = configuration_treemap(pid)
     if figure is not None:
-        blocks.append(dcc.Graph(figure=figure, config={"displayModeBar": False}))
+        blocks.append(dcc.Graph(id="fig-probe-kinds", figure=figure,
+                                config={"displayModeBar": False}))
         note = (f"{shown:,} items with a recorded size, grouped by kind. The tables below carry "
                 f"the same items with their sources and their loaded state.")
         if dropped:
@@ -298,7 +301,7 @@ def probe_detail_blocks(baseline=None):
                      f"are not drawn: an item recorded at zero was seen but is not occupying the "
                      f"window, and giving it an area would say the opposite. They are still in "
                      f"the tables.")
-        blocks.append(html.Div(note, style=SECTION_NOTE))
+        blocks.append(chart_note(note))
 
     tables = [
         item_table(pid, "skill", "Every skill, largest first",
@@ -318,10 +321,10 @@ def probe_detail_blocks(baseline=None):
                    "name AS path, extra AS type, tokens", ["path", "type", "tokens"], {"tokens"}),
     ]
     blocks += [t for t in tables if t is not None]
-    blocks.append(html.Div(
+    blocks.append(about_note(
         "A reading describes the moment it was taken. Record another after adding an MCP server, "
         "installing a skill, or editing CLAUDE.md.",
-        style={"color": MUTED, "fontSize": "11.5px", "margin": "14px 0 4px 0"}))
+        style={"margin": "14px 0 4px 0"}))
     blocks.append(probe_command_hint())
     return blocks
 
@@ -344,13 +347,17 @@ def conversation_blocks(baseline=None):
         ]
     pid = int(probe["id"])
     when = str(probe["ts"])[:19].replace("T", " ")
+    # ONE `about_note`, HEADING INCLUDED. The panel draws no chart at all when a probe recorded
+    # no message breakdown, so a heading bound to a chart would be bound to nothing on exactly the
+    # stores where it is the only thing naming the panel.
     return [
-        html.Div("What the conversation put in the window", style=SECTION_HEAD),
-        html.Div(
-            f"Read by probe {pid} at {when}. A probe spawns a fresh session, so its conversation "
-            f"half is small by construction: what matters here is the SHAPE, which categories "
-            f"carry the tokens, not the totals.",
-            style=SECTION_NOTE),
+        about_note([
+            html.Div("What the conversation put in the window", style=SECTION_HEAD),
+            html.Div(
+                f"Read by probe {pid} at {when}. A probe spawns a fresh session, so its "
+                f"conversation half is small by construction: what matters here is the SHAPE, "
+                f"which categories carry the tokens, not the totals."),
+        ]),
     ] + message_blocks(pid)
 
 
@@ -401,7 +408,8 @@ def stacked_message_figure(rows):
     fig.update_layout(barmode="stack", title="The message half, by category, per probe",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="", yaxis_title="tokens")
-    return dcc.Graph(figure=dark_fig(fig, 340), config={"displayModeBar": False})
+    return dcc.Graph(id="fig-probe-messages", figure=dark_fig(fig, 340),
+                     config={"displayModeBar": False})
 
 
 def message_blocks(probe_id):
@@ -455,9 +463,12 @@ def message_blocks(probe_id):
 
 def probe_command_hint():
     """How to record a fresh reading, shown where a stale one is being displayed."""
+    # Marked with the sentence above it: how to refresh a reading is a fact about this view, not
+    # a caption on any chart or table on it.
     return html.Pre(
         "node tools/probe.mjs            # record a new reading\n"
         "node tools/probe.mjs --backfill # recover fields from readings already stored",
+        className="about-note",
         style={"background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
                "padding": "10px 12px", "color": TEXT, "fontFamily": MONO, "fontSize": "11.5px",
                "display": "inline-block", "margin": "4px 0 0 0"})

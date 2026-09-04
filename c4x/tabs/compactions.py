@@ -15,9 +15,12 @@ from c4x.theme import (
     MUTED,
     TABLE_STYLE,
     TEXT,
+    chart_note,
     dark_fig,
     header_help,
     numeric_columns,
+    stat_card,
+    table_note,
 )
 
 
@@ -52,8 +55,7 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
         hovertemplate="%{text}<br>pre %{x:,.0f}<br>overshoot %{y:,.0f}<extra></extra>",
     ))
     fig.add_hline(y=0, line=dict(color=MUTED, width=1, dash="dash"))
-    fig.update_layout(title=f"Overshoot past the predicted trigger ({len(df)} compactions, "
-                            f"{neg} below threshold)",
+    fig.update_layout(title="Overshoot Past the Predicted Trigger",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="tokens at compaction", yaxis_title="tokens past threshold")
 
@@ -63,11 +65,25 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
             "dropped", "survivors", "fitted_window", "confidence", "threshold", "overshoot"]
 
     return html.Div([
+        # The two numbers the chart title used to carry. A tab with a chart, a table and no cards
+        # made a reader read the title to learn how many compactions there are.
+        html.Div([
+            stat_card("compactions", f"{len(df):,}", sub="charted, whole store"),
+            stat_card("below threshold", f"{neg:,}", color=DANGER if neg else TEXT,
+                      sub="fired under their own predicted trigger"),
+        ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "12px"}),
         dcc.Graph(figure=dark_fig(fig, 400), config={"displayModeBar": False}),
+        # The chart's half of what used to be one paragraph the pairing handed wholesale to the
+        # table below: red points are a fact about the chart.
+        chart_note(
+            f"{len(df):,} compactions, {neg} of them below threshold. Overshoot must be "
+            "non-negative: a compaction cannot fire below its own threshold, so red points are "
+            "the falsifying observations and are worth reading one by one.",
+            style={"margin": "8px 0 14px 0"},
+        ),
+        # The table's half. It names two of the table's own columns.
         html.Div(
-            "Overshoot must be non-negative: a compaction cannot fire below its own threshold, "
-            "so red points are the falsifying observations and are worth reading one by one. The "
-            "window is resolved from the model segment the compaction sits in; the confidence "
+            "The window is resolved from the model segment the compaction sits in; the confidence "
             "column says on what evidence, and token-fit means segmentation could not resolve it.",
             style={"color": MUTED, "fontSize": "11.5px", "margin": "8px 0 14px 0"},
         ),
@@ -85,7 +101,9 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
             style_filter={"backgroundColor": "#ffffff", "color": "#10141a"},
             **TABLE_STYLE,
         ),
-        html.Div(
+        # Written below the rows, where the instruction belongs on the page, so it is marked:
+        # the pairing above the table cannot see anything under it.
+        table_note(
             "Click a row to read the summary it produced, and what it dropped.",
             style={"color": MUTED, "fontSize": "11.5px", "margin": "10px 0 0 0"},
         ),
