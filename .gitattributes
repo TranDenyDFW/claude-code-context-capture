@@ -10,7 +10,11 @@
 # universal newlines, so a CRLF file arrives as LF and any "preserve what was there" logic that
 # inspects the decoded string sees LF and preserves that. Reading with newline="" is what actually
 # preserves them. Declaring the convention here means it no longer matters which one a script does.
-* text=auto eol=lf
+# `text=auto` and NOT `eol=lf`: the repository stores LF, and the working tree keeps whatever
+# the platform checks out. Forcing LF into the working tree as well would change what every
+# Windows contributor sees on disk, which is a different decision from what git stores and one
+# this file has no reason to make.
+* text=auto
 
 # Built assets: whatever the bundler emitted, byte for byte.
 frontend/dist/** -text
