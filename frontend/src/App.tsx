@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
+import { FigurePage } from '@/components/FigurePage'
 import { TablePage } from '@/components/TablePage'
 import { readState, tableUrl, writeState, type ViewState } from '@/state'
 import { Palette, type Choice } from '@/components/Palette'
@@ -25,6 +26,7 @@ export default function App() {
   const [selection, setSelection] = useState<Selection>(initial.selection)
   const [view, setView] = useState<ViewState['view']>(initial.view)
   const [tableIndex, setTableIndex] = useState<number | null>(initial.table)
+  const [figureIndex, setFigureIndex] = useState<number | null>(initial.figure)
   const [tableQuery, setTableQuery] = useState(initial.query)
   const [tableFilter, setTableFilter] = useState(initial.filter)
   const [live, setLive] = useState(false)
@@ -48,12 +50,13 @@ export default function App() {
   }, [tab, tabs.data])
 
   const state: ViewState = {
-    tab, selection, view, table: tableIndex, query: tableQuery, filter: tableFilter,
+    tab, selection, view, table: tableIndex, figure: figureIndex,
+    query: tableQuery, filter: tableFilter,
   }
   // The deps are `state`'s own fields, listed rather than the object, which is rebuilt every
   // render and would make this run every render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { writeState(state) }, [tab, selection, view, tableIndex, tableQuery, tableFilter])
+  useEffect(() => { writeState(state) }, [tab, selection, view, tableIndex, figureIndex, tableQuery, tableFilter])
 
   // replaceState writes no history entry, so this page pushes none of its own and Back leaves the
   // app rather than stepping through it. The handler is still right for the cases that DO fire: a
@@ -74,6 +77,12 @@ export default function App() {
   }, [])
 
   /** One table of the current tab, in a window of its own, with the current selection. */
+  /** Open one chart full width, in a window of its own, the way a table opens. */
+  const openFigure = (index: number) => {
+    setFigureIndex(index)
+    setView('figure')
+  }
+
   const openTable = (
     index: number,
     focus: { query?: string; filter?: { key: string; value: string } | null } = {},
@@ -161,6 +170,36 @@ export default function App() {
   const selectedWhen = parts.length >= 3
     ? `${parts[parts.length - 1]}  ·  ${parts[0]}`
     : (selected?.label ?? `${selection.session?.slice(0, 8)}…`)
+
+  // THE SINGLE-CHART PAGE. Same shape as the single-table page below and for the same reason: a
+  // window opened for one chart shows that chart, at the height a window allows rather than the
+  // height a dashboard panel allows.
+  if (view === 'figure' && figureIndex !== null) {
+    const back = () => {
+      setView('dashboard')
+      setFigureIndex(null)
+    }
+    return (
+      <div className="flex min-h-full flex-col">
+        {/* The way back is drawn before the payload arrives, so an address naming a tab that
+            failed to build still has a control rather than an address to edit by hand. */}
+        {!pane.data && (
+          <div className="px-6 pt-5">
+            <button onClick={back} className="text-sm text-accent hover:underline">
+              Back to the dashboard
+            </button>
+          </div>
+        )}
+        {pane.isError && <Failure error={pane.error} />}
+        {!pane.data && !pane.isError && <Waiting />}
+        {pane.data && (
+          <div data-tab={pane.data.tab} data-view="figure">
+            <FigurePage payload={pane.data} index={figureIndex} onBack={back} />
+          </div>
+        )}
+      </div>
+    )
+  }
 
   // THE SINGLE-TABLE PAGE. No sidebar, no header, no other content: a window opened for one
   // table shows that table. The same queries feed it, so it is exactly what the pane would draw.
@@ -375,7 +414,8 @@ export default function App() {
             data-loading={pane.isFetching ? 'true' : 'false'}
             className={pane.isFetching ? 'opacity-60 transition-opacity' : undefined}
           >
-            <Pane payload={pane.data} onRowClick={selectFromRow} onOpenTable={openTable} />
+            <Pane payload={pane.data} onRowClick={selectFromRow} onOpenTable={openTable}
+                  onOpenFigure={openFigure} />
           </div>
         )}
       </main>

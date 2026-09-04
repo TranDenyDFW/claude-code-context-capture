@@ -10,6 +10,7 @@ const full: ViewState = {
   selection: { session: 'abc-123', scope: 'all', cohort: 'project::P:\\x', compareWith: 'def', compareKind: 'cohort' },
   view: 'table',
   table: 3,
+  figure: null,
   query: 'categories.json',
   filter: { key: 'session_id', value: 's-1' },
 }

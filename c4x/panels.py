@@ -304,7 +304,7 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
             ratio, verdict = None, "one arm has none"
         rows.append({"metric": label, "unit": kind,
                      "A": round(av, 1), "B": round(bv, 1),
-                     "B vs A": None if ratio is None else round(ratio, 2), "verdict": verdict,
+                     "B / A": None if ratio is None else round(ratio, 2), "verdict": verdict,
                      "basis": ("per unit" if per_unit else
                                "total, arms are the same size" if same_size else
                                "total, arms are different sizes")})
@@ -314,14 +314,14 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
     return html.Div([
         html.Div("Compare", style=SECTION_HEAD),
         html.Div(f"A is {a_label}. B is {b_label}. One row per metric, both arms measured the "
-                 "same way. B vs A is the ratio where both arms have a value; the verdict names "
+                 "same way. B / A is the ratio where both arms have a value; the verdict names "
                  "the direction only when the ratio clears 5% and the metric has a direction "
                  "that is worse.", style=SECTION_NOTE),
         DataTable(
             columns=(_cols := numeric_columns(
-                ["metric", "unit", "A", "B", "B vs A", "verdict", "basis"],
-                {"A", "B", "B vs A"},
-                {"B vs A": Format(precision=2, scheme=Scheme.fixed)})),
+                ["metric", "unit", "A", "B", "B / A", "verdict", "basis"],
+                {"A", "B", "B / A"},
+                {"B / A": Format(precision=2, scheme=Scheme.fixed)})),
             tooltip_header=header_help(_cols),
             data=rows,
             export_format="csv",

@@ -11,11 +11,14 @@ export function Pane({
   payload,
   onRowClick,
   onOpenTable,
+  onOpenFigure,
 }: {
   payload: TabPayload
   onRowClick?: (row: Record<string, unknown>) => void
   /** Open table `index` of this tab in a window of its own; the toolbar shows the control. */
   onOpenTable?: (index: number, focus?: { query: string; filter: { key: string; value: string } | null }) => void
+  /** Open chart `index` of this tab in a window of its own, for the same reason a table can be. */
+  onOpenFigure?: (index: number) => void
 }) {
   const figures = payload.plotly ?? []
   const sections = payload.details ?? []
@@ -157,7 +160,21 @@ export function Pane({
         const note = joinNotes(noteFor('figure', index), figureMeta[index]?.note)
         return (
           <section key={index} className="rounded-lg bg-panel shadow-panel p-4">
-            {name && <div className="mb-2"><Heading name={name} note={note} /></div>}
+            <div className="mb-2 flex items-baseline justify-between gap-3">
+              {name ? <Heading name={name} note={note} /> : <span />}
+              {/* THE SAME AFFORDANCE A TABLE HAS. A chart on a dashboard is drawn at the height
+                  the panel allows; one somebody is reading wants the window, and the address
+                  carries the tab, the selection and the index, so it is also a link. */}
+              {onOpenFigure && (
+                <button
+                  onClick={() => onOpenFigure(index)}
+                  className="shrink-0 rounded border border-edge px-2 py-0.5 text-2xs text-ink-dim
+                             hover:text-ink"
+                >
+                  Window
+                </button>
+              )}
+            </div>
             <Plot figure={figure} onPointClick={inspectPoint(index)} />
           </section>
         )

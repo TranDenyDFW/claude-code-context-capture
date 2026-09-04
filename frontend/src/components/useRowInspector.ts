@@ -71,6 +71,7 @@ export function useRowInspector(
         fetch(`${detail.url}/${encodeURIComponent(key)}`)
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
           .then((body) => write({
+            dropped: body?.dropped ?? null,
             text: body?.summary?.text
               ?? 'No summary message was harvested for this compaction. Older boundaries record '
                + 'token counts only.',

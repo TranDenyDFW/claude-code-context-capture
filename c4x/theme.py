@@ -550,6 +550,11 @@ def column_label(column_id) -> str:
         bare = word.lower().strip(".")
         if bare in _ACRONYMS:
             return word.upper()
+        # A SINGLE LETTER IS A NAME, NOT A MINOR WORD. The Compare table's ratio column is
+        # "B / A" and the minor-word rule read that trailing A as the article, so the header
+        # rendered "B / a" over a column of ratios between two arms called A and B.
+        if len(bare) == 1 and bare.isalpha():
+            return word.upper()
         if not first and bare in _MINOR:
             return word.lower()
         return word.capitalize()
