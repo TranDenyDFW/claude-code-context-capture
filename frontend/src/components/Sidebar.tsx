@@ -88,6 +88,12 @@ export function Sidebar({
             id={`btn-${tab.id}`}
             onClick={() => onPick(tab.id)}
             aria-current={current ? 'page' : undefined}
+            // NAMED BY THE LABEL. With the description in `title` and the label hidden when
+            // collapsed, the accessible name was the whole sentence, so a screen reader read a
+            // paragraph per tab and the name did not contain the visible text. The label is the
+            // name; the sentence is the description.
+            aria-label={tab.label}
+            aria-description={tab.help}
             // WHAT THIS TAB IS, on the tab. The sentence used to be printed across the top of
             // every pane; it belongs on the thing it describes. When collapsed the label leads,
             // because the rail shows only an icon.

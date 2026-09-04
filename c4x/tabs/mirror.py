@@ -41,8 +41,13 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
                 value=1000000, clearable=False,
                 style={"width": "150px", **FIELD}, className="c4x-dd",
             ),
-        ], style={"display": "flex", "alignItems": "center", "marginBottom": "16px"}),
-        html.Div(id="mirror-out"),
+        # DASH-ONLY. The calculator's inputs and its answer exist only in the Dash tree; the React
+        # page has no calculator, and without the mark its labels and constants arrived there as
+        # loose prose ("Resident tokens", "Window", the constants sentence) with nothing to act on.
+        # /render lists the text under this class and the page leaves it out.
+        ], className="dash-only",
+           style={"display": "flex", "alignItems": "center", "marginBottom": "16px"}),
+        html.Div(id="mirror-out", className="dash-only"),
         html.Div([
             html.Div("Thresholds for every window this build can produce", style=SECTION_HEAD),
             html.Div("The warn, compact and blocked lines the window math draws for each window "
@@ -61,6 +66,9 @@ def mirror_layout(session_id=None, scope="main", cohort=None):
             f"warn offset {MATH['K']['WARN_OFFSET']}, "
             f"max-output reserve {MATH['K']['MAX_OUTPUT_RESERVE']}. "
             f"Predictions are computed by tools/mirror.mjs, not reimplemented here.",
+            # CONTENT, not a control label: these four constants are the only place either page
+            # states them, and marking the sentence dash-only removed them from the React page
+            # entirely. Only the calculator's own inputs and its answer are Dash-only.
             style={"color": MUTED, "fontSize": "11.5px", "marginTop": "18px"},
         ),
     ])

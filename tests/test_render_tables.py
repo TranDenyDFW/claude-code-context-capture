@@ -238,3 +238,23 @@ def test_a_one_row_evidence_block_says_row_not_rows():
     assert any(line.startswith("1 row.") for line in one), one
     assert not any("1 rows" in line for line in one), one
     assert any(line.startswith("2 rows.") for line in two), two
+
+
+def test_dash_only_lines_are_named_and_are_real_text_lines(rendered):
+    """The window calculator lives only in the Dash tree. Its labels reached the React page as
+    loose prose; now /render names them and the page leaves them out."""
+    diagnostics = rendered["tab-diagnostics"]
+    lines = diagnostics.get("dash_only") or []
+    assert any("Resident tokens" in line for line in lines), lines
+    for line in lines:
+        assert line in diagnostics["text"], f"dash_only line is not a text line: {line[:60]!r}"
+    # CONTENT IS NOT A CONTROL LABEL. The constants sentence is the only place either page states
+    # the four window-math numbers, and marking it dash-only removed them from the React page
+    # entirely; a review caught it. It stays in the text the page prints.
+    constants = [line for line in diagnostics["text"] if "Constants read from" in line]
+    assert constants, "the window-math constants are not stated at all"
+    for line in constants:
+        assert line not in lines, "the constants sentence is hidden from the page"
+    for tid, p in rendered.items():
+        for line in p.get("dash_only") or []:
+            assert line in p["text"], (tid, line[:60])

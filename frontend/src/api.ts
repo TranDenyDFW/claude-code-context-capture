@@ -116,6 +116,8 @@ export interface TabPayload {
   meta?: TableMeta[]
   /** Only on /render. The tab's headline figures, already separated into label/value/sub. */
   stats?: Stat[]
+  /** Only on /render. Text under a Dash-only control the page does not draw; never printed. */
+  dash_only?: string[]
   /** Whether the header selection changes this tab at all. From the app's SELECTION_SCOPED. */
   scoped?: boolean
   /** The one sentence saying which population this tab describes. */
