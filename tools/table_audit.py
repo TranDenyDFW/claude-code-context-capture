@@ -1031,6 +1031,23 @@ def self_test():
     check("unreached site", len(unreached) == len(sites),
           f"{len(unreached)} of {len(sites)} sites reported when none is reached")
 
+    # --render-only DROPS THE REACHABILITY GATES AND NOTHING ELSE, asserted here rather than
+    # trusted from the flag's own banner. It was first written as one `if` around this whole
+    # function, and an independent reviewer broke two unrelated gates and watched the audit pass:
+    # a discarded DataTable printed "105 constructed, 102 walked" and AUDIT PASS on one screen.
+    # A flag that can silently widen what it suppresses is the defect this file exists to catch.
+    off = coverage_errors(set(), set(), {}, set(), sites, [], {}, set(), reachability=False)
+    check("--render-only silences the unreached-site gate", not off, f"{len(off)} still reported")
+    stray = {1: "a", 2: "b"}
+    for flag in (True, False):
+        kept = coverage_errors(set(), set(), stray, {1}, [], [], {}, set(), reachability=flag)
+        check(f"constructed-but-never-walked survives reachability={flag}", len(kept) == 1,
+              f"{len(kept)} reported")
+        blind = coverage_errors(set(), set(), {}, set(), [], [], {}, set(),
+                                opaque=[("fn", ("app.py", 1, 0))], reachability=flag)
+        check(f"the opaque-call gate survives reachability={flag}", len(blind) == 1,
+              f"{len(blind)} reported")
+
     # A pane that raised. _render_tab renders the exception rather than raising it, so an audit
     # driving tabs through it would otherwise call a broken tab a success.
     check("a rendered exception panel is not a success",
