@@ -14,7 +14,7 @@ remove and fails if any survived. A flag scattered across the render path cannot
 way, which is the whole argument.
 
     python tools/redact.py                       # data/context.db  ->  tmp/demo-store.db
-    C4X_DB=tmp/demo-store.db python app.py       # the dashboard, over the copy
+    C4X_DB=tmp/demo-store.db python -m c4x.api   # the dashboard, over the copy
     python tools/screenshots.py                  # photograph it
 
 The mapping is DETERMINISTIC and rank-ordered, so the same store always produces the same names and
@@ -368,7 +368,7 @@ def main(argv=None):
         print("\nthe copy was written but MUST NOT be photographed")
         return 1
     print(f"\nclean: no real project path, server, title or user name survives in {out}")
-    print(f"  C4X_DB={out} python app.py")
+    print(f"  C4X_DB={out} python -m c4x.api")
     return 0
 
 

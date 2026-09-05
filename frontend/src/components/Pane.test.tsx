@@ -91,6 +91,19 @@ describe('a pane shows everything the payload carries', () => {
     expect(screen.getAllByTestId('chart')).toHaveLength(2)
   })
 
+  it('does NOT say so over a tab that raised, which produced an error rather than nothing', () => {
+    // The banner used to fire whenever tables and figures were both empty, so a crashed tab
+    // printed "could not be rendered" AND "produced nothing" together, the second contradicting
+    // the first by implying there was simply nothing to show.
+    render(<Pane payload={payload({ text: ['Summary could not be rendered', 'KeyError: x'] })} />)
+    expect(screen.queryByText(/produced nothing/)).toBeNull()
+  })
+
+  it('nor over a tab whose answer is stat cards rather than a table', () => {
+    render(<Pane payload={payload({ stats: [{ label: 'Sessions', value: '3', sub: 'in the store' }] })} />)
+    expect(screen.queryByText(/produced nothing/)).toBeNull()
+  })
+
   it('says so when a selection produces nothing, rather than showing a blank page', () => {
     render(<Pane payload={payload()} />)
     expect(screen.getByText(/produced nothing/)).toBeTruthy()

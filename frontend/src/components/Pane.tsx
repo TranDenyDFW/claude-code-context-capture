@@ -241,7 +241,18 @@ export function Pane({
         )
       })}
 
-      {figures.length === 0 && payload.tables.length === 0 && (
+      {/* GENUINELY BLANK, not merely "no chart and no table".
+
+          The banner fired whenever tables and figures were both empty, which is true of several
+          panes that DID produce something a reader can use: the stat cards, the written empty
+          states, and the prose a tab shows when it has a real answer that is not a table. Worst of
+          all it fired UNDER the apology panel a raised tab renders, so a crashed tab said both
+          "could not be rendered" and "produced nothing", and the second sentence contradicted the
+          first by implying there was simply nothing to show.
+
+          Every local here already existed above; the gate was just narrower than the sentence. */}
+      {figures.length === 0 && payload.tables.length === 0 && prose.length === 0
+        && stats.length === 0 && empties.length === 0 && loose.length === 0 && (
         <div className="rounded-lg bg-panel shadow-panel p-8 text-center text-ink-dim">
           This tab produced nothing for the current selection.
         </div>

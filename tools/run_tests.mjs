@@ -334,6 +334,40 @@ let total = 0;
 let failed = 0;
 let skipped = 0;
 
+// IS THE SHIPPED BUNDLE THE ONE THE SOURCE WOULD PRODUCE?
+//
+// `frontend/dist` is TRACKED on purpose - .gitignore explains that the README's headline is an
+// install of three commands that pulls nothing from npm, so the built page is committed and
+// `python -m c4x.api` serves it. Nothing checked it was current. The tests all run against `src`,
+// so a contributor who edits a component and forgets to rebuild gets a green suite and ships last
+// week's page, which is the failure c4x/api/main.py:1318 records having hit twice in one hour.
+//
+// Compared by COMMIT TIME rather than by rebuilding, because a vite build inside the suite would
+// cost more than the check is worth and would need node_modules that a fresh clone does not have.
+// Test files are excluded from the source side: editing a test changes nothing the bundle carries,
+// and a check that cries wolf is one people learn to skip.
+if (!NODE_ONLY) {
+  const at = (args) => {
+    const r = spawnSync('git', ['log', '-1', '--format=%ct', '--', ...args],
+                        { encoding: 'utf8', cwd: ROOT, windowsHide: true });
+    return r.status === 0 ? Number((r.stdout || '').trim()) || 0 : 0;
+  };
+  const src = at([':(exclude)frontend/src/**/*.test.*', ':(exclude)frontend/src/**/*.spec.*',
+                  'frontend/src']);
+  const dist = at(['frontend/dist']);
+  if (src && dist && src > dist) {
+    failed++;
+    const drift = Math.round((src - dist) / 60);
+    results.push({ rel: 'frontend/dist is current', state: 'FAIL',
+                   note: `frontend/src was committed ${drift} min after frontend/dist, so the `
+                       + 'bundle this repo SERVES is older than the source. Run '
+                       + '`npm run build --prefix frontend` and commit the result.' });
+  } else {
+    results.push({ rel: 'frontend/dist is current', state: 'pass', count: null,
+                   note: 'the committed bundle is no older than the source it is built from' });
+  }
+}
+
 // THE PYTHON COVERAGE GATE. Runs before anything is spawned, because it is a statement about the
 // repo rather than about a run, and a new uncovered tool should be reported even on --node-only.
 {

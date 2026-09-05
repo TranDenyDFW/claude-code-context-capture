@@ -24,7 +24,7 @@ import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { rootFrom, resolveDb, ensureStoreDir } from './paths.mjs';
+import { rootFrom, resolveDb, ensureStoreDir, posix } from './paths.mjs';
 import { homedir } from 'node:os';
 
 const ROOT = rootFrom(import.meta.url);
@@ -1257,7 +1257,7 @@ function stats() {
   const db = openDb(DB_PATH);
   const q = (s) => db.prepare(s).all();
   const out = {
-    db: DB_PATH,
+    db: posix(DB_PATH),
     files: q('SELECT COUNT(*) n, SUM(bytes_read) bytes FROM files')[0],
     sessions: q('SELECT COUNT(*) n FROM sessions')[0].n,
     // Counted over api_calls, not turns: a SUM across turns double-counts every streamed message
