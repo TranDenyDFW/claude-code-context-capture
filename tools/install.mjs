@@ -293,7 +293,7 @@ export const receiptDescribes = (receipt, settingsPath) => {
 };
 
 function saveReceipt(extra) {
-  ensureStoreDir(join(ROOT, 'data'));
+  ensureStoreDir(join(ROOT, 'data'), { force: true });
   const prior = loadReceipt();
   writeJsonAtomic(RECEIPT, {
     tool: 'install.mjs', version: RECEIPT_VERSION, root: posix(ROOT), settings: posix(SETTINGS),
@@ -312,9 +312,23 @@ function saveReceipt(extra) {
 function looseGrants(dir) {
   if (process.platform !== 'win32' || !existsSync(dir)) return [];
   try {
-    const out = execFileSync('icacls', [dir], { encoding: 'utf8', timeout: 15_000 });
-    return ['Authenticated Users', 'BUILTIN\Users', 'Everyone']
-      .filter((g) => out.includes(`${g}:`));
+    const out = execFileSync('icacls', [dir],
+                             { encoding: 'utf8', timeout: 15_000, windowsHide: true });
+    // NO BACKSLASH IN ANY LITERAL HERE, deliberately, because that character is what broke this
+    // check the first time. Written as 'BUILTIN\Users' in the source it silently held
+    // "BUILTINUsers": in a JavaScript string `\U` is not an escape, so the backslash is DROPPED
+    // rather than kept, and the test for the group icacls prints could never match. An
+    // independent reviewer found it by widening a directory to exactly that group and watching
+    // `status` say nothing at all.
+    //
+    // icacls prints one ACE per line as `<trailing spaces><PRINCIPAL>:(FLAGS)`, and a principal
+    // is `DOMAIN\NAME` or a bare name. Splitting on the `:(` and comparing the TAIL needs no
+    // escape and cannot silently degrade the way a literal did.
+    const principals = out.split(String.fromCharCode(10))
+      .map((line) => line.split(':(')[0].trim())
+      .filter(Boolean)
+      .map((p) => p.slice(p.lastIndexOf(String.fromCharCode(92)) + 1));
+    return ['Authenticated Users', 'Users', 'Everyone'].filter((g) => principals.includes(g));
   } catch { return []; }
 }
 
@@ -338,7 +352,11 @@ function cmdStatus() {
     findings.push({ level: 'warn', event: 'data/',
                     why: `readable by ${loose.join(', ')}. It holds the text of your `
                        + 'conversations. Fix: icacls "' + posix(join(ROOT, 'data'))
-                       + '" /inheritance:r /grant:r "%USERNAME%":(OI)(CI)F SYSTEM:(OI)(CI)F /T' });
+                       // NO /T. It re-runs the whole command against every child, and (OI)(CI) on
+                       // a FILE grants nothing, so each existing file is left with an empty DACL
+                       // that not even its owner can read. Watched happen to data/raw here.
+                       // Without /T the children inherit the new narrow ACL, which is the point.
+                       + '" /inheritance:r /grant:r "%USERNAME%":(OI)(CI)F SYSTEM:(OI)(CI)F' });
   }
   for (const f of findings) console.log(`${f.level.toUpperCase().padEnd(5)} ${String(f.event).padEnd(16)} ${f.why}`);
   const errors = findings.filter((f) => f.level === 'error').length;
@@ -360,7 +378,7 @@ function cmdInstall(argv) {
     if (!existsSync(src)) { console.error(`--adopt: no store at ${posix(src)}`); return 2; }
     if (existsSync(dest)) console.log(`adopt skipped: ${posix(dest)} already exists`);
     else if (dry) adopted = `would copy ${posix(src)} -> ${posix(dest)}`;
-    else { ensureStoreDir(join(ROOT, 'data')); copyFileSync(src, dest); adopted = `copied ${posix(src)} -> ${posix(dest)}`; }
+    else { ensureStoreDir(join(ROOT, 'data'), { force: true }); copyFileSync(src, dest); adopted = `copied ${posix(src)} -> ${posix(dest)}`; }
   }
 
   const settings = readSettings();
@@ -376,7 +394,7 @@ function cmdInstall(argv) {
   // Taken from what was actually on disk at write time, not from the earlier snapshot, so a
   // statusLine that arrived in between is still the one we record as the prior value.
   const priorStatusLine = ownsCommand(before?.statusLine?.command, ROOT) ? undefined : (before?.statusLine ?? null);
-  if (!rewire) ensureStoreDir(join(ROOT, 'data', 'raw'));
+  if (!rewire) ensureStoreDir(join(ROOT, 'data', 'raw'), { force: true });
   saveReceipt({ settingsBackup: backup ? posix(backup) : null, ...(priorStatusLine === undefined ? {} : { priorStatusLine }) });
   console.log(`wrote ${posix(SETTINGS)}${backup ? ` (backup: ${posix(backup)})` : ''}`);
   // Measured, not assumed: the first hook fired nine seconds after this write, in a session that

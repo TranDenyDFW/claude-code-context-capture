@@ -26,6 +26,7 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSyn
 import { execFileSync, spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
+import { ensureStoreDir } from '../tools/paths.mjs';
 import { pathToFileURL } from 'node:url';
 import { audit, applyWiring, backupSettings } from '../tools/install.mjs';
 
@@ -86,7 +87,7 @@ export function summarise(payload, { maxBytes = MAX_PAYLOAD_BYTES } = {}) {
 }
 
 export function record(payload, outPath = OUT, isProbe = (outPath === DEFAULT_OUT ? IS_PROBE : true)) {
-  mkdirSync(dirname(outPath), { recursive: true });
+  ensureStoreDir(dirname(outPath));
   appendFileSync(outPath, JSON.stringify({
     captured_at: new Date().toISOString(), probe: isProbe, ...summarise(payload),
   }) + '\n');
@@ -159,7 +160,7 @@ function runHarvest(mode = 'inline') {
   } else {
     execFileSync(process.execPath, args, { stdio: 'ignore', timeout: 8000 });
   }
-  mkdirSync(dirname(STAMP), { recursive: true });
+  ensureStoreDir(dirname(STAMP));
   writeFileSync(STAMP, new Date().toISOString());
 }
 
