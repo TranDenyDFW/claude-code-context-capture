@@ -129,6 +129,18 @@ function nodeTargets() {
 // quietly dropped by fourteen while the run still said PASS.
 const PY = [
   ['tools/table_audit.py', ['--self-test'], 'gate self-test', 'SELF-TEST PASS'],
+  // The tool that decides what leaves this machine, and it had no checks at all. Its determinism
+  // claim was false for every value that reached the fallback, which is exactly the path nobody
+  // reads. No store: it works on a copy it is given.
+  ['tools/redact.py', ['--self-test'], 'the public-image redaction, and its leak gate',
+   'SELF-TEST PASS', { noStore: true }],
+  // The gate against fabricated documentation, which was itself unchecked. Its own docstring
+  // records a run that produced 51 unsupported claims out of 315.
+  ['tools/docgen/check_notes.py', ['--self-test'], 'refuses notes the spec cannot support',
+   'SELF-TEST PASS', { noStore: true }],
+  // Had a self-test since it was written; the runner simply never called it.
+  ['tools/pty-control-arm.py', ['--self-test'], 'the status-line control arm, parsing only',
+   'SELF-TEST PASS', { noStore: true }],
   // Does constraints-ci.txt still pin everything the requirements files name? Offline, so it
   // runs anywhere. It exists because mypy sat unpinned in that file from the commit that
   // created it through the commit that made the mypy step blocking, and the file's own
@@ -222,6 +234,51 @@ const PY = [
 
 // Files with no self-test, and the reason. Anything NOT listed here is required to have one, so
 // adding a tool without checks fails this runner instead of slipping through.
+/**
+ * Python tools discovered from DISK, so a new one cannot arrive uncovered.
+ *
+ * The node side has enumerated its targets since it was written and states the guarantee at the top
+ * of this file: anything not listed as exempt is REQUIRED to have a self-test, so adding a tool
+ * without checks fails the runner instead of slipping through. The Python side was a hand-written
+ * list, which cannot make that promise: it says what someone remembered, and says nothing at all
+ * about what they did not. Nine Python tools were outside it, eight with no checks of any kind,
+ * including `redact.py` - the tool that decides what leaves this machine.
+ *
+ * This does not RUN them; the PY list above still decides what runs and with which store. It makes
+ * the absence visible: every discovered file must be either exercised there or exempt WITH A REASON.
+ */
+function pythonTargets() {
+  const out = [];
+  for (const dir of ['tools', join('tools', 'docgen')]) {
+    const abs = join(ROOT, dir);
+    if (!existsSync(abs)) continue;
+    for (const name of readdirSync(abs)) {
+      if (name.endsWith('.py') && !name.startsWith('__')) {
+        out.push(`${dir.replace(/\\/g, '/')}/${name}`);
+      }
+    }
+  }
+  return out.sort();
+}
+
+// Every Python tool that is neither run above nor given checks, WITH the reason. A file here is a
+// declared gap, which is the point: an undeclared one now fails the runner.
+const PY_EXEMPT = new Map([
+  ['tools/screenshots.py', 'drives a live browser against a running dashboard; it cannot assert '
+    + 'anything without one, and the images it produces are reviewed by eye'],
+  // The six docgen stages BELOW check_notes.py. They transform artifacts produced by a live run
+  // (a DOM walk, a screenshot pass, a model call), so a check here would be a check on a fixture
+  // nobody maintains. The one stage that is a GATE rather than a transform - check_notes.py, which
+  // refuses claims the spec cannot support - is exercised above instead, because that is the one
+  // whose silence costs something.
+  ['tools/docgen/annotate.py', 'calls a model over a live spec; nothing to assert offline'],
+  ['tools/docgen/assemble.py', 'writes the .docx from artifacts a live run produced'],
+  ['tools/docgen/enrich.py', 'decorates a live spec with values read from the running app'],
+  ['tools/docgen/inventory.py', 'walks the running dashboard DOM'],
+  ['tools/docgen/merge.py', 'joins artifacts from the stages above'],
+  ['tools/docgen/spec.py', 'derives the page spec from a live render'],
+]);
+
 const EXEMPT = new Map([
   ['tools/mirror-core.mjs', 'pure math, no I/O; covered by mirror.mjs --self-test and --validate'],
 
@@ -276,6 +333,23 @@ const results = [];
 let total = 0;
 let failed = 0;
 let skipped = 0;
+
+// THE PYTHON COVERAGE GATE. Runs before anything is spawned, because it is a statement about the
+// repo rather than about a run, and a new uncovered tool should be reported even on --node-only.
+{
+  const covered = new Set(PY.map(([rel]) => rel).filter((r) => r.endsWith('.py')));
+  const uncovered = pythonTargets().filter((p) => !covered.has(p) && !PY_EXEMPT.has(p));
+  if (uncovered.length) {
+    failed++;
+    results.push({ rel: 'python tool coverage', state: 'FAIL',
+                   note: `${uncovered.length} Python tool(s) are neither exercised by this runner `
+                       + `nor exempt with a reason: ${uncovered.join(', ')}. Give each one a `
+                       + '--self-test and an entry in PY, or add it to PY_EXEMPT saying why not.' });
+  } else {
+    results.push({ rel: 'python tool coverage', state: 'pass', count: pythonTargets().length,
+                   note: 'every Python tool is either exercised or exempt with a reason' });
+  }
+}
 
 for (const rel of nodeTargets()) {
   if (EXEMPT.has(rel)) {

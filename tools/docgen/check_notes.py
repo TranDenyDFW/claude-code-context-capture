@@ -153,5 +153,51 @@ def main(argv=None):
     return 1 if total else 0
 
 
+def self_test() -> int:
+    """Feed the gate a fabricated note and confirm it refuses it.
+
+    This file exists because a generation run produced 51 unsupported claims out of 315, and its
+    docstring says so. Nothing exercised it: it sat outside the runner's Python list with the rest
+    of docgen, so the check against fabricated documentation was itself unchecked. `check_page` is
+    pure over (spec, notes, source), which is all this needs.
+    """
+    checks = []
+
+    def add(what, ok, detail=""):
+        checks.append((what, ok, detail))
+
+    spec = {"items": [{"table_id": "table-abcd1234"}], "page": "cost"}
+    real_path = "tools/docgen/check_notes.py"
+
+    def kinds(notes, source=""):
+        return {k for _n, k, _v in check_page(spec, notes, source)}
+
+    add("a note quoting a table id the spec does not have is refused (gate can fail)",
+        "fabricated-id" in kinds([{"n": 1, "purpose": "see table-99999999 above"}]))
+    add("a note naming a file that does not exist is refused",
+        "missing-path" in kinds([{"n": 2, "purpose": "built in tools/nope/gone.py"}]))
+    add("a note claiming to have SEEN the screenshot is refused",
+        bool(kinds([{"n": 3, "purpose": "the screenshot shows a spike"}])))
+    add("a live figure supported by nothing is refused",
+        bool(kinds([{"n": 4, "purpose": "resident reached 863,412 tokens"}])))
+
+    # The negative controls. Without these the gate could simply refuse everything and still pass.
+    add("a clean note is accepted (gate can fail)",
+        not check_page(spec, [{"n": 5, "purpose": f"described in {real_path}"}]))
+    add("the spec's OWN table id is accepted",
+        not kinds([{"n": 6, "purpose": "table-abcd1234 lists it"}]))
+    add("a figure that appears in the SOURCE is accepted, not called a fabrication",
+        not kinds([{"n": 7, "purpose": "the threshold is 967000"}], source="967000"))
+
+    bad = 0
+    for what, ok, detail in checks:
+        if not ok:
+            bad += 1
+        print(f"{'PASS' if ok else 'FAIL'}  {what}" + ("" if ok else f"   [{detail}]"))
+    print(f"SELF-TEST {'FAIL' if bad else 'PASS'} "
+          f"({f'{bad}/{len(checks)} failed' if bad else f'{len(checks)} checks'})")
+    return 1 if bad else 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(self_test() if "--self-test" in sys.argv else main())
