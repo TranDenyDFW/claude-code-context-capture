@@ -150,18 +150,29 @@ export function harvestModeFor(event) {
  *
  * A child process rather than an import: harvest.mjs dispatches when it is the entry point, and
  * importing it would run a harvest inside THIS process. hooks/compact-hook.mjs already shells out
- * the same way for the same reason. The stamp marks a harvest STARTED, which is what the debounce
- * needs; a detached run that then fails leaves the store where it was and the next event retries.
+ * the same way for the same reason.
+ *
+ * THE STAMP IS WRITTEN FIRST, which is what the sentence above it always claimed and what the
+ * debounce actually needs. It used to be written after the run, and on the inline path
+ * `execFileSync` BLOCKS, so it recorded a COMPLETION rather than a start. Worse, an inline harvest
+ * that hit its eight second timeout threw, the write never happened, and the caller's bare catch
+ * swallowed it - so a slow harvest removed the debounce entirely and the very next event started
+ * another eight second harvest, and the one after that, each one making the store busier and the
+ * next harvest slower.
+ *
+ * The trade is stated rather than assumed: a run that fails now waits out the debounce instead of
+ * being retried immediately. That is the right way round. The store is unharmed either way, the
+ * next event picks it up, and the failure mode this replaces was unbounded.
  */
 function runHarvest(mode = 'inline') {
   const args = [join(ROOT, 'tools', 'harvest.mjs')];
+  ensureStoreDir(dirname(STAMP));
+  writeFileSync(STAMP, new Date().toISOString());
   if (mode === 'detached') {
     spawn(process.execPath, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
   } else {
     execFileSync(process.execPath, args, { stdio: 'ignore', timeout: 8000 });
   }
-  ensureStoreDir(dirname(STAMP));
-  writeFileSync(STAMP, new Date().toISOString());
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@
 //   node install.mjs install --dry-run      print the diff, write nothing
 //   node install.mjs install --adopt <dir>  carry an older install's store forward first
 //   node install.mjs uninstall [--purge]    remove only our entries; --purge also drops the store
+//   node install.mjs install --evict-missing  also remove c4x entries whose script file is gone
 //   node install.mjs reset --data|--settings|--all
 //   node install.mjs --self-test
 //
@@ -186,7 +187,79 @@ export function removeWiring(settings, root, receipt = null) {
 }
 
 // Findings are what `status` reports. Each one names a way the config can be present and dead.
-export function audit(settings, root, { rootExists = true } = {}) {
+/**
+ * Hook entries and a statusLine that name one of OUR scripts under a root that is GONE.
+ *
+ * `ownsCommand` is root-scoped on purpose, and the self-tests assert that a sibling install is NOT
+ * owned - that is what stops this tool from ripping out another checkout's wiring. But it leaves a
+ * gap it cannot see: a command ending in hooks/event-hook.mjs, hooks/compact-hook.mjs or
+ * tools/statusline.mjs, under a directory that does not exist, is unambiguously OUR dead wiring and
+ * nobody else's. Nothing looked for it.
+ *
+ * What that cost, observed on this machine: a previous install was deleted, its seven hooks and its
+ * status line stayed in settings.json erroring on every event, `status` said HEALTHY, and a plain
+ * reinstall would have produced FOURTEEN hook entries plus a receipt whose priorStatusLine pointed
+ * at the deleted path - so a later uninstall would have "restored" a dead status line.
+ *
+ * THE FILE MUST BE ABSENT, not merely a different root. A live sibling checkout is somebody's
+ * working install and is left alone, which is the whole reason ownsCommand is scoped the way it is.
+ */
+export function deadWiring(settings, exists = existsSync) {
+  const out = [];
+  const dead = (command, where) => {
+    if (typeof command !== 'string') return;
+    for (const script of OUR_SCRIPTS) {
+      const tail = script.replace(/^tools[/\\]|^hooks[/\\]/, '');
+      const m = command.match(new RegExp(`["'\\s]([^"'\\s]*[/\\\\](?:tools|hooks)[/\\\\]${tail.replace('.', '\\.')})["'\\s]?`));
+      if (!m) continue;
+      const file = m[1];
+      if (exists(file)) return;                   // a live install, ours or a sibling: leave it
+      out.push({ where, script, file });
+      return;
+    }
+  };
+  for (const [event, raw] of Object.entries(settings?.hooks ?? {})) {
+    const { groups } = asGroups(raw);
+    for (const g of groups) for (const h of (g?.hooks ?? [])) dead(h?.command, event);
+  }
+  dead(settings?.statusLine?.command, 'statusLine');
+  return out;
+}
+
+
+/**
+ * Settings with every dead-root c4x entry removed, and the list of what went.
+ *
+ * A pure transform for the same reason applyWiring is one: the decision can be asserted without
+ * writing a settings file, and --dry-run reports exactly what the real run will do because both
+ * call this.
+ *
+ * An emptied matcher group is dropped too. Leaving `{matcher:'*',hooks:[]}` behind would keep
+ * `status` reporting a group for the event while nothing in it fires, which is the shape this file
+ * was written to catch in the first place.
+ */
+export function evictDead(settings, exists = existsSync) {
+  const gone = deadWiring(settings, exists);
+  if (!gone.length) return { next: settings, gone };
+  const files = new Set(gone.map((d) => d.file));
+  const hit = (cmd) => typeof cmd === 'string' && [...files].some((f) => cmd.includes(f));
+  const next = JSON.parse(JSON.stringify(settings));
+  for (const [event, raw] of Object.entries(next.hooks ?? {})) {
+    const { groups } = asGroups(raw);
+    const kept = [];
+    for (const g of groups) {
+      const hooks = (g?.hooks ?? []).filter((h) => !hit(h?.command));
+      if (hooks.length) kept.push({ ...g, hooks });
+    }
+    if (kept.length) next.hooks[event] = kept;
+    else delete next.hooks[event];
+  }
+  if (hit(next.statusLine?.command)) delete next.statusLine;
+  return { next, gone };
+}
+
+
+export function audit(settings, root, { rootExists = true, exists = existsSync } = {}) {
   const findings = [];
   const hooks = settings?.hooks;
 
@@ -205,8 +278,19 @@ export function audit(settings, root, { rootExists = true } = {}) {
     }
   }
 
+  // A DEAD ROOT, NAMED. `rootExists` used to carry this, and it could never fire: cmdStatus passed
+  // `existsSync(ROOT)` where ROOT comes from import.meta.url, so it is true by construction and the
+  // branch was reachable only from this file's own self-test. The parameter stays for that test and
+  // for any caller that genuinely knows the root is gone; the finding that matters is this one,
+  // which looks at what settings.json actually points at.
   if (!rootExists) {
     findings.push({ level: 'error', event: '*', why: `settings point at ${posix(root)}, which does not exist; every session fires a hook that errors` });
+  }
+  for (const d of deadWiring(settings, exists)) {
+    findings.push({ level: 'error', event: d.where,
+                    why: `points at ${posix(d.file)}, which does not exist. That is c4x wiring from `
+                       + 'an install that was moved or deleted; it errors on every event. '
+                       + 'Remove it with: node tools/install.mjs install --evict-missing' });
   }
   const sl = settings?.statusLine;
   if (!sl) findings.push({ level: 'warn', event: 'statusLine', why: 'not set' });
@@ -385,6 +469,10 @@ function cmdStatus() {
 function cmdInstall(argv) {
   const dry = argv.includes('--dry-run');
   const rewire = argv.includes('--rewire');
+  // Opt-in, never automatic. Removing entries from the user's settings.json without being asked is
+  // exactly the behaviour ownsCommand's root scoping exists to prevent, so this is a flag and
+  // `status` tells you when to reach for it.
+  const evict = argv.includes('--evict-missing');
 
   const adoptAt = argv.indexOf('--adopt');
   let adopted = null;
@@ -400,15 +488,23 @@ function cmdInstall(argv) {
   }
 
   const settings = readSettings();
-  const { changes } = applyWiring(settings, ROOT);
+  const { gone } = evictDead(settings);
+  if (gone.length && !evict) {
+    console.log(`${gone.length} dead c4x entr${gone.length === 1 ? 'y' : 'ies'} found, pointing at a `
+      + 'root that no longer exists. Re-run with --evict-missing to remove them:');
+    for (const d of gone) console.log(`  ${d.where.padEnd(18)} ${posix(d.file)}`);
+  }
+  const base = evict ? evictDead(settings).next : settings;
+  const { changes } = applyWiring(base, ROOT);
+  if (evict) for (const d of gone) console.log(`${dry ? 'would ' : ''}evict ${d.where} -> ${posix(d.file)}`);
 
-  if (!changes.length && !adopted) { console.log('no changes: already converged'); return 0; }
+  if (!changes.length && !adopted && !(evict && gone.length)) { console.log('no changes: already converged'); return 0; }
   for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
   if (adopted) console.log(adopted);
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
 
   const backup = backupSettings();
-  const { before } = writeSettingsAtomic((s) => applyWiring(s, ROOT).next);
+  const { before } = writeSettingsAtomic((s) => applyWiring(evict ? evictDead(s).next : s, ROOT).next);
   // Taken from what was actually on disk at write time, not from the earlier snapshot, so a
   // statusLine that arrived in between is still the one we record as the prior value.
   const priorStatusLine = ownsCommand(before?.statusLine?.command, ROOT) ? undefined : (before?.statusLine ?? null);
@@ -646,10 +742,14 @@ function selfTest() {
   const roundTrip = applyWiring(removeWiring(good, R, null).next, R).next;
   add('uninstall then install returns the identical file', JSON.stringify(roundTrip) === JSON.stringify(good));
 
-  add('a healthy config audits clean', audit(good, R).filter((f) => f.level === 'error').length === 0);
-  const badFindings = audit(malformed, R);
+  // `live` stubs existsSync, because every fixture here points at X:/fake/root and the new
+  // dead-wiring finding would otherwise fire on all of them. The dead-root behaviour itself is
+  // asserted separately below, with the stub saying the file is gone.
+  const live = () => true;
+  add('a healthy config audits clean', audit(good, R, { exists: live }).filter((f) => f.level === 'error').length === 0);
+  const badFindings = audit(malformed, R, { exists: live });
   add('the malformed config audits as an error', badFindings.some((f) => f.level === 'error' && f.why.includes('never fires')));
-  add('a missing install root is reported', audit(good, R, { rootExists: false }).some((f) => f.why.includes('does not exist')));
+  add('a missing install root is reported', audit(good, R, { rootExists: false, exists: live }).some((f) => f.why.includes('does not exist')));
   add('an empty settings file audits as errors, not silence', audit({}, R).filter((f) => f.level === 'error').length === WIRING.length);
 
   // A store is db + -wal + -shm. Losing the second two behind a move is how a stale write-ahead
@@ -660,8 +760,8 @@ function selfTest() {
     `${'/x/data/context.db.bak-T'}${s[1].slice('/x/data/context.db'.length)}` === '/x/data/context.db.bak-T-wal');
 
   // Falsification gate: the audit must be capable of failing, or "audits clean" proves nothing.
-  const realErrors = audit(good, R).filter((f) => f.level === 'error').length;
-  const mutantErrors = audit(good, 'Y:/different/root').filter((f) => f.level === 'error').length;
+  const realErrors = audit(good, R, { exists: live }).filter((f) => f.level === 'error').length;
+  const mutantErrors = audit(good, 'Y:/different/root', { exists: live }).filter((f) => f.level === 'error').length;
   add('pointing the audit at a different root makes it FAIL (gate can fail)', mutantErrors > realErrors, `real=${realErrors} mutant=${mutantErrors}`);
 
   // --purge REACHES data/snapshots. Driven end to end against a scratch root holding a real file,
@@ -689,6 +789,46 @@ function selfTest() {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  }
+
+  // DEAD WIRING: found, evicted, and NOT confused with a live sibling.
+  //
+  // The third case is the one that matters most and the reason ownsCommand is root-scoped: another
+  // checkout's hooks are somebody's working install. This must remove entries whose FILE is gone
+  // and nothing else.
+  {
+    const deadRoot = 'V:/DELETED/old-root';
+    const sibling = 'D:/other-checkout';
+    const cfg = {
+      hooks: {
+        PostToolUse: [{ matcher: '*', hooks: [
+          { type: 'command', command: `node "${deadRoot}/hooks/event-hook.mjs"` },
+          { type: 'command', command: `node "${sibling}/hooks/event-hook.mjs"` },
+          { type: 'command', command: 'node "D:/someone-else/watch.mjs"' },
+        ] }],
+        Stop: [{ hooks: [{ type: 'command', command: `node "${deadRoot}/hooks/compact-hook.mjs"` }] }],
+      },
+      statusLine: { type: 'command', command: `node "${deadRoot}/tools/statusline.mjs"` },
+    };
+    // Everything exists EXCEPT the deleted root, which is the real-world shape.
+    const exists = (f) => !String(f).includes('DELETED');
+
+    const found = deadWiring(cfg, exists);
+    add('dead c4x wiring is found', found.length === 3, JSON.stringify(found.map((d) => d.where)));
+    add('a LIVE sibling install is NOT touched (gate can fail)',
+      !found.some((d) => d.file.includes(sibling)));
+    add("and another tool's hook is not ours to judge",
+      !found.some((d) => d.file.includes('someone-else')));
+
+    const { next } = evictDead(cfg, exists);
+    const left = (next.hooks.PostToolUse ?? []).flatMap((g) => g.hooks).map((h) => h.command);
+    add('eviction keeps the sibling and the foreign hook', left.length === 2
+      && left.some((c) => c.includes(sibling)) && left.some((c) => c.includes('someone-else')));
+    add('eviction drops the dead one', !left.some((c) => c.includes('DELETED')));
+    add('an emptied event is removed, not left as a hollow group', next.hooks.Stop === undefined);
+    add('a dead statusLine is dropped', next.statusLine === undefined);
+    add('audit REPORTS it rather than staying silent (gate can fail)',
+      audit(cfg, 'P:/live/root', { exists }).some((f) => f.why.includes('--evict-missing')));
   }
 
   let bad = 0;
