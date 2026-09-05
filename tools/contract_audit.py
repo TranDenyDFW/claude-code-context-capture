@@ -37,6 +37,7 @@ from table_audit import (  # noqa: E402
     NUMERIC_LOOKING,
     PLACEHOLDER,
     PROSE_MIN_LENGTH,
+    RENDER_FAILED,
     TEXT_BY_NATURE,
 )
 
@@ -93,6 +94,18 @@ def table_faults(where, table):
 def contract_faults(where, payload):
     """Every way a payload breaks the shape a frontend is entitled to rely on."""
     out = []
+
+    # A FAILED TAB IS A WELL FORMED PAYLOAD, which is exactly why this has to be checked here.
+    # `_render_tab` catches the exception and returns the apology panel as ordinary content, so the
+    # response is a 200 carrying tables=[] figures=[] and the error as prose. Every shape rule
+    # below is satisfied by that, and this audit is the one meant to outlive Dash: `table_audit.py`
+    # already carries the detector (:136, :640) and `tests/test_tabs_render.py` asserts it across 8
+    # tabs, but neither of those looks at the PAYLOAD. So a tab could raise on every request and the
+    # payload contract would report AUDIT PASS over it.
+    if any(RENDER_FAILED in str(line) for line in payload.get("text", [])):
+        out.append(f"{where}: this is the apology panel _render_tab builds for a tab that raised, "
+                   "not the tab. The payload is well formed and says nothing true.")
+
     for key in ("tables", "figures", "text"):
         if key not in payload:
             out.append(f"{where}: the payload has no {key!r}")
@@ -251,7 +264,18 @@ def self_test():
     """The rules, fed data they MUST reject. An audit that only ever passes is furniture."""
     ok = {"id": "t", "columns": ["n", "name"],
           "rows": [{"n": 1, "name": "fine"}], "tooltips": {}}
+    # THE APOLOGY PANEL, which is a WELL FORMED payload carrying no truth. Both directions are
+    # asserted: a tab that raised must be a fault, and an ordinary empty tab must not, or the rule
+    # would just be "empty is broken" and every legitimately empty selection would fail.
+    crashed = {"tables": [], "figures": [],
+               "text": ["Diagnostics could not be rendered",
+                        "DatabaseError: no such table: probes"]}
+    empty_but_fine = {"tables": [], "figures": [], "text": ["Nothing matched this selection."]}
     cases = [
+        ("a tab that RAISED is a contract fault (gate can fail)",
+         any("apology panel" in f for f in contract_faults("w", crashed))),
+        ("an ordinary empty tab is NOT a fault",
+         contract_faults("w", empty_but_fine) == []),
         ("clean data produces no faults", table_faults("w", ok) == []),
         # The defect this rule exists for: a count arriving as text, which sorts and sums wrongly
         # everywhere downstream and looks identical on screen.
