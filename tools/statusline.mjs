@@ -19,10 +19,11 @@
 //   node statusline.mjs            read stdin, capture, print
 //   node statusline.mjs --self-test
 
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assess } from './mirror-core.mjs';
+import { ensureStoreDir } from './paths.mjs';
 
 const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 // Production capture path. Tests and benchmarks MUST redirect via C4X_STATUSLINE_OUT so they
@@ -111,7 +112,7 @@ export function claudeEnv(env = process.env) {
 }
 
 export function capture(raw, outPath = OUT, isProbe = (outPath === DEFAULT_OUT ? IS_PROBE : true)) {
-  mkdirSync(dirname(outPath), { recursive: true });
+  ensureStoreDir(dirname(outPath));
   // Wrap rather than mutate: the captured payload stays byte-faithful to what Claude Code sent,
   // and our own receive timestamp sits beside it instead of inside it.
   //

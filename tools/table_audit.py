@@ -515,8 +515,21 @@ def finish_scan(sites, edges, opaque, module):
 
 
 def coverage_errors(built, chain, constructed, walked, sites, calls,
-                    entries=None, exercised=None, opaque=None):
+                    entries=None, exercised=None, opaque=None, reachability=True):
     """The five coverage gates. One definition, called by the audit and by its own self-test.
+
+    `reachability=False` drops the TWO gates that ask whether a table-building path was taken, and
+    nothing else. It exists for a store on which some paths are legitimately not taken - a first
+    run, with no probe recorded, where the Window sub-panels correctly return a written "no probe
+    reading yet" panel and never build their tables.
+
+    IT IS DELIBERATELY NOT A SWITCH ON THIS WHOLE FUNCTION. It was written that way first, as one
+    `if` around the call, and an independent reviewer broke two of the other four gates and watched
+    the run pass: a stale EXEMPT_CALLS entry went unreported, and a DataTable constructed and
+    discarded printed "105 constructed, 102 walked" and PASS on the same screen. Three tables' rows
+    had never been inspected while the flag's own banner said cell values were checked. Suppressing
+    a gate you did not mean to suppress is the failure this file exists to catch, so the narrowing
+    happens per gate, here, where each gate is written.
 
     They were written twice once, and a reviewer deleted a gate out of the audit while the
     self-test, which restated the same rule inline, stayed green over a run that then printed
@@ -543,9 +556,14 @@ def coverage_errors(built, chain, constructed, walked, sites, calls,
                           f"runs, so anything it builds is invisible to every other gate here")
 
     for fn, position in sites:
-        if position not in built:
-            errors.append(f"{at(position)} builds a DataTable inside {fn}(), "
-                          f"which this audit never reached")
+        if position in built:
+            continue
+        # GATE 1 OF 2 that `reachability=False` drops. Everything else in this function keeps
+        # running, because nothing else here depends on what the store happens to contain.
+        if not reachability:
+            continue
+        errors.append(f"{at(position)} builds a DataTable inside {fn}(), "
+                      f"which this audit never reached")
 
     # A shared builder reached through one caller says nothing about its other callers, and
     # evidence_block has eight.
@@ -556,8 +574,9 @@ def coverage_errors(built, chain, constructed, walked, sites, calls,
 
     for caller, callee, position in calls:
         if position not in reached:
-            errors.append(f"{at(position)} in {caller}() calls {callee}(), which can build "
-                          f"a table, and this audit never takes that path")
+            if reachability:
+                errors.append(f"{at(position)} in {caller}() calls {callee}(), which can build "
+                              f"a table, and this audit never takes that path")
 
     # A construction the static scan did not predict means the scan is blind to how it was written:
     # an alias or a wrapper rather than dash_table.DataTable spelled out.
@@ -867,9 +886,8 @@ def main():
     #
     # The full audit is unchanged and still the default. This flag only ever REMOVES a check, and
     # says so on the line above the verdict, so a --render-only run can never be mistaken for one.
-    if not RENDER_ONLY:
-        errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries,
-                                  exercised, opaque)
+    errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries,
+                              exercised, opaque, reachability=not RENDER_ONLY)
 
     # The audit must be able to fail, or a clean run means nothing. Every shape it claims to catch
     # is fed to it: a formatted number, a dash placeholder in a declared numeric column, and an
@@ -905,8 +923,9 @@ def main():
     print(f"  known-bad fixture fully detected: {fixture_ok}  {sorted(fixture_kinds)}")
 
     if RENDER_ONLY:
-        print("  --render-only: construction reachability NOT checked, because a first-run store "
-              "cannot reach a panel that needs a probe. Exception panels and cell values ARE.")
+        print("  --render-only: the two REACHABILITY gates are off, because a first-run store "
+              "cannot take a path that needs a probe. Every other gate is on, including "
+              "constructed-but-never-walked, so a table whose rows went uninspected still fails.")
     ok = not seen and not errors and fixture_ok
     # The store must be byte-for-byte the size it was. A grown store means something harvested
     # into it, which is the defect above; a shrunk one means something worse. Measured on the

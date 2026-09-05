@@ -30,15 +30,31 @@ export function defaultDb(root) {
 // different drives. So the tool copies transcripts out of a user-only directory and lands them
 // somewhere every local account can read, and nothing said so.
 //
-// EVERY creation site goes through here, not just the installer's. `openDb` in harvest.mjs creates
-// data/ too, and on a store that was never installed - a --db elsewhere, a hook running before
-// install - that is the site that runs first. Hardening one and not the other leaves the path that
-// actually bootstraps a fresh machine wide open.
+// EVERY site that can create a directory under data/ goes through here. That list is longer than
+// it looks and getting it wrong is invisible: an independent reviewer found `harvest.mjs`'s
+// unknown-records writer still bare-mkdir'ing data/raw after the first pass "fixed" this, and the
+// comment here claimed the job was done. The full set, all wired:
+//
+//   tools/install.mjs   data/, the --adopt copy, data/raw
+//   tools/harvest.mjs   openDb (store dir + raw), the unknown-records writer
+//   tools/probe.mjs     the store dir and its raw log
+//   tools/statusline.mjs the sample log
+//   tools/otel-ingest.mjs the store dir and its unparsed log
+//   hooks/event-hook.mjs  the events log and the harvest stamp - THE FIRST WRITER on a fresh
+//                         machine, since a hook fires before anyone runs a harvest by hand
+//   hooks/compact-hook.mjs the compaction log and data/snapshots, which holds verbatim
+//                         transcripts and is the most sensitive directory this tool creates
 //
 // chmodSync, NOT mkdir's `mode`: mode is masked by the process umask, and it is ignored outright
 // when the directory already exists, which is every run after the first.
-export function ensureStoreDir(dir) {
-  mkdirSync(dir, { recursive: true });
+export function ensureStoreDir(dir, { force = false } = {}) {
+  // HARDEN ON CREATION, NOT ON EVERY CALL. mkdirSync(recursive) returns the first path it made,
+  // or undefined when the directory was already there. The hooks call this on every event, and
+  // spawning icacls per tool call would put a process spawn on the PostToolUse path that Claude
+  // Code waits for - the cost the README already has to apologise for. `install` passes
+  // force:true, because it runs rarely and is the command that should repair an existing tree.
+  const created = mkdirSync(dir, { recursive: true });
+  if (!created && !force) return dir;
   try {
     if (process.platform === 'win32') {
       // Break inheritance on THE DIRECTORY, and grant inheritable full control to this user and
@@ -59,7 +75,7 @@ export function ensureStoreDir(dir) {
       execFileSync('icacls', [dir, '/inheritance:r',
                               '/grant:r', `${process.env.USERNAME}:(OI)(CI)F`,
                               '/grant:r', 'SYSTEM:(OI)(CI)F', '/C', '/Q'],
-                   { stdio: 'ignore', timeout: 30_000 });
+                   { stdio: 'ignore', timeout: 30_000, windowsHide: true });
     } else {
       chmodSync(dir, 0o700);
     }

@@ -287,7 +287,7 @@ for (const rel of nodeTargets()) {
   // than a hung process reports a green suite as red, which teaches people to re-run rather than
   // to read. Still bounded, because a genuinely hung self-test must not stall the suite forever.
   const run = spawnSync(process.execPath, [join(ROOT, rel), '--self-test'],
-                        { encoding: 'utf8', cwd: ROOT, timeout: 300_000 });
+                        { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
   const text = plain(run.stdout) + plain(run.stderr);
   const match = text.match(CHECKS);
   const count = match ? Number(match[1]) : 0;
@@ -334,7 +334,7 @@ if (NODE_ONLY) {
     rmSync(fixture, { force: true });
     const built = spawnSync(process.execPath, [join(ROOT, 'tools', 'make_fixture.mjs'),
                                                '--out', fixture],
-                            { encoding: 'utf8', cwd: ROOT, timeout: 300_000 });
+                            { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
     fixtureBuilt = built.status === 0 && existsSync(fixture);
     if (!fixtureBuilt) {
       failed++;
@@ -348,7 +348,7 @@ if (NODE_ONLY) {
     rmSync(bare, { force: true });
     const built = spawnSync(process.execPath, [join(ROOT, 'tools', 'make_fixture.mjs'),
                                                '--out', bare, '--no-optional'],
-                            { encoding: 'utf8', cwd: ROOT, timeout: 300_000 });
+                            { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
     bareBuilt = built.status === 0 && existsSync(bare);
     if (!bareBuilt) {
       failed++;
@@ -386,7 +386,7 @@ if (NODE_ONLY) {
     // a broken test rather than a broken runner.
     const argv = rel.startsWith('-') ? [rel, ...args] : [join(ROOT, rel), ...args];
     const run = spawnSync('python', argv, {
-      encoding: 'utf8', cwd: ROOT, timeout: 900_000,
+      encoding: 'utf8', cwd: ROOT, timeout: 900_000, windowsHide: true,
       // C4X_DB is the store override the app already honours, so the fixture run needs no special
       // support anywhere else in the codebase.
       env: opts?.fixture ? { ...process.env, C4X_DB: fixture }
@@ -444,7 +444,7 @@ if (!NODE_ONLY) {
       continue;
     }
     const run = spawnSync('npm', [...args, '--prefix', frontend], {
-      encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: process.platform === 'win32',
+      encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: process.platform === 'win32', windowsHide: true,
     });
     const text = plain(run.stdout) + plain(run.stderr);
     // NOT the shared CHECKS pattern. Vitest prints "Test Files  2 passed (2)" BEFORE
@@ -497,7 +497,7 @@ if (!NODE_ONLY) {
   // The pinned eslint from the root lockfile, via the `lint` script, so the suite and CI run
   // the same version. `npx --yes` fetched whatever was newest at that moment.
   const run = spawnSync('npm', ['run', 'lint'], {
-    encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: process.platform === 'win32',
+    encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: process.platform === 'win32', windowsHide: true,
   });
   const text = plain(run.stdout) + plain(run.stderr);
   if (run.status !== 0 || run.signal) {
