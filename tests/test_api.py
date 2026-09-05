@@ -408,8 +408,7 @@ def test_every_column_is_named_for_a_reader(client, session_id):
                     f"{tab}/{column['id']} is shown as its raw id"
 
 
-def test_compare_actually_answers_to_the_selection_it_claims_to(client, session_id,
-                                                               other_session_id):
+def test_compare_actually_answers_to_the_selection_it_claims_to(client, session_id, q):
     """Not a restatement of SELECTION_SCOPED. Measured against what the pane returns.
 
     Compare was in neither the scoped set nor the help text, so the page told the reader "the
@@ -429,10 +428,22 @@ def test_compare_actually_answers_to_the_selection_it_claims_to(client, session_
     assert one["scoped"] is True, "Compare answers to the selection but does not say so"
 
     # And arm B is steerable, which is the whole reason a fork can be compared to its parent.
+    #
+    # THE ARM CHOSEN MUST NOT BE THE ONE ALREADY SHOWING. `other_session_id` is "the busiest
+    # session that is not arm A", and the default arm B is picked by a similar rule, so on a store
+    # where those coincide this compared a pane against itself and failed for a reason that has
+    # nothing to do with steerability. It did exactly that here once the store grew. Asking for the
+    # arm that is ALREADY selected is not a test of selection, so the test picks one that differs.
     default_b = pane(session=session_id)
-    chosen_b = pane(session=session_id, compare_with=other_session_id, compare_kind="session")
-    assert default_b["tables"] != chosen_b["tables"], (
-        "compare_with did not change the pane, so the page cannot choose arm B at all")
+    others = [r["session_id"] for _, r in q(
+        """SELECT session_id, COUNT(*) AS n FROM turns WHERE session_id <> ?
+            GROUP BY session_id ORDER BY n DESC, session_id LIMIT 4""", (session_id,)).iterrows()]
+    moved = [s for s in others
+             if pane(session=session_id, compare_with=s, compare_kind="session")["tables"]
+             != default_b["tables"]]
+    assert moved, (
+        "compare_with did not change the pane for ANY of the busiest sessions, so the page cannot "
+        f"choose arm B at all. Tried: {others}")
 
 
 def test_compare_names_the_two_chats_rather_than_counting_them(client, session_id,
