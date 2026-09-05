@@ -17,7 +17,7 @@ from dash.development.base_component import Component
 
 from c4x.dash_compat import DataTable
 from c4x.panels import evidence_block
-from c4x.store import q
+from c4x.store import q, tables_present
 from c4x.theme import (
     BORDER,
     DANGER,
@@ -54,6 +54,19 @@ def latest_probe():
     Newest by timestamp rather than by id, because a backfilled or imported row can carry an id
     that does not order the same way.
     """
+    # THE WHOLE FAMILY, NOT JUST THE PARENT. Nothing on the install path creates any of these -
+    # `tools/probe.mjs` does, and the README does not mention it - so on a fresh store this used to
+    # raise before either caller could reach the "No probe reading yet" panel written for exactly
+    # that case, and both Window sub-panels rendered an exception panel instead.
+    #
+    # Guarding only `probes` fixed the instance and left the class: every caller below goes on to
+    # read probe_categories, probe_details and probe_message_breakdown unguarded, so a store with
+    # the parent and not the children crashed in the same place for the same reason. Returning None
+    # unless the whole set is present is the honest reading anyway - a probe is those four tables
+    # together, and three of them is not a partial reading, it is no reading.
+    if not tables_present("probes", "probe_categories", "probe_details",
+                          "probe_message_breakdown"):
+        return None
     df = q("""SELECT id, ts, model, total_tokens, max_tokens, percentage
                 FROM probes WHERE ok = 1 AND raw_json IS NOT NULL
                ORDER BY ts DESC LIMIT 1""")

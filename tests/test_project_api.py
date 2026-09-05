@@ -24,7 +24,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "store.db")
     monkeypatch.delenv("C4X_NO_WRITES", raising=False)
     forget_cached_rows()
-    yield TestClient(api)
+    # A LOOPBACK Host, because the server requires one. `/api/project/*` and the other
+    # mutating routes are refused outright unless the Host header names loopback, which is what
+    # closes DNS rebinding: an Origin check alone cannot see it, since a rebound name makes the
+    # attacker's page same-origin. TestClient defaults to `Host: testserver` and would be refused
+    # exactly as a rebound host is - correctly, but it would test the guard instead of the API.
+    yield TestClient(api, base_url="http://127.0.0.1:8059")
     forget_cached_rows()
 
 
@@ -58,6 +63,31 @@ class TestCohortHandling:
 
 
 class TestExport:
+    def test_the_file_it_built_is_gone_once_the_response_is_sent(self, client, tmp_path,
+                                                                monkeypatch):
+        """An export WRITES the file it serves, and nothing used to delete it.
+
+        Every call wrote into one shared `tmp/exports`, named after the project, and the largest
+        project in this store exports to 180 MB. Nothing in the repo removed them, so a route
+        documented as a read grew the checkout without bound. The fix is a directory per call
+        removed by a BackgroundTask, which runs after the body is sent, so this asserts on the
+        state AFTER the response rather than during it.
+
+        Two exports, because a per-call directory is also what stops two concurrent exports of the
+        same project from deleting each other's file, and one call cannot show that.
+        """
+        import c4x.api.main as main
+        monkeypatch.setattr(main, "ROOT", tmp_path)
+        exports = tmp_path / "tmp" / "exports"
+
+        for _ in range(2):
+            r = client.get("/api/project/export", params={"cohort": f"project::{ALPHA}"})
+            assert r.status_code == 200, r.text
+            assert len(r.content) > 0, "the response carried no file"
+
+        left = sorted(p for p in exports.rglob("*") if p.is_file()) if exports.exists() else []
+        assert left == [], f"the export files outlived their responses: {left}"
+
     def test_it_serves_a_file_that_verifies(self, client, tmp_path):
         r = client.get("/api/project/export", params={"cohort": f"project::{ALPHA}"})
         assert r.status_code == 200, r.text

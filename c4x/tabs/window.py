@@ -16,7 +16,7 @@ from dash import html
 
 from c4x.breakdown import composition_blocks
 from c4x.probe_detail import conversation_blocks, probe_detail_blocks
-from c4x.store import q
+from c4x.store import q_optional
 from c4x.tabs.sources import sources_layout
 from c4x.ui.subpanels import body_id, description_note, register, strip
 
@@ -69,7 +69,12 @@ def _latest_baseline():
     probe_detail_blocks compares what a probe recorded against what the calibration counted, and
     prints both. Without a baseline it prints only what the probe saw, which is still true.
     """
-    df = q("SELECT * FROM context_baselines ORDER BY ts DESC LIMIT 1")
+    # The guarded twin of this is c4x/breakdown.py latest_baseline(), whose docstring already
+    # says "Missing table is a valid 'never calibrated' state". This copy did not carry the guard,
+    # so on a store where `breakdown.mjs --calibrate` had never run - which is every fresh
+    # install - the query raised and took both sub-panels down before the None branch below could
+    # say the true thing, which is that there is no baseline yet.
+    df = q_optional("SELECT * FROM context_baselines ORDER BY ts DESC LIMIT 1")
     return None if df.empty else df.iloc[0]
 
 

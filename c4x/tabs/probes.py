@@ -6,10 +6,8 @@ from dash import html
 
 from c4x.dash_compat import DataTable
 from c4x.frames import records
-from c4x.store import q
+from c4x.store import q, q_optional
 from c4x.theme import (
-    CODE_BLOCK,
-    MUTED,
     SECTION_HEAD,
     SECTION_NOTE,
     TABLE_STYLE,
@@ -31,15 +29,23 @@ def probes_layout(session_id=None, scope="main", cohort=None):
     a different build returns a different vocabulary, which is why the rows are shown per probe
     rather than merged into one number.
     """
-    probes = q("""SELECT id, ts, ok, model, total_tokens, percentage,
+    # q_optional, because `probes` and `probe_details` are tools/probe.mjs's tables and nothing
+    # on the install path runs it, so on a fresh store they do not exist. `harvest_runs` below
+    # stays on `q`: harvest creates that one, and its absence means the store is broken.
+    probes = q_optional("""SELECT id, ts, ok, model, total_tokens, percentage,
                          auto_compact_threshold, is_auto_compact_enabled, error
-                  FROM probes ORDER BY id""")
-    details = q("""SELECT probe_id, kind, COUNT(*) AS items, SUM(COALESCE(tokens,0)) AS tokens
+                  FROM probes ORDER BY id""",
+                        columns=["id", "ts", "ok", "model", "total_tokens", "percentage",
+                                 "auto_compact_threshold", "is_auto_compact_enabled", "error"])
+    details = q_optional("""SELECT probe_id, kind, COUNT(*) AS items,
+                          SUM(COALESCE(tokens,0)) AS tokens
                    FROM probe_details GROUP BY probe_id, kind
-                   ORDER BY probe_id, SUM(COALESCE(tokens,0)) DESC""")
-    named = q("""SELECT probe_id, kind, name, COALESCE(tokens,0) AS tokens
+                   ORDER BY probe_id, SUM(COALESCE(tokens,0)) DESC""",
+                         columns=["probe_id", "kind", "items", "tokens"])
+    named = q_optional("""SELECT probe_id, kind, name, COALESCE(tokens,0) AS tokens
                  FROM probe_details WHERE COALESCE(tokens,0) > 0
-                 ORDER BY tokens DESC LIMIT 60""")
+                 ORDER BY tokens DESC LIMIT 60""",
+                       columns=["probe_id", "kind", "name", "tokens"])
     runs = q("""SELECT COUNT(*) AS runs,
                        SUM(CASE WHEN files_read = 0 THEN 1 ELSE 0 END) AS empty_runs,
                        SUM(COALESCE(files_read,0)) AS files_read,
@@ -47,13 +53,21 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                        MAX(ts) AS last_run
                 FROM harvest_runs""")
 
-    if probes.empty:
-        body = [html.Div("No probe has been run against this store.", style={"color": MUTED}),
-                html.Pre("node tools/probe.mjs", style=CODE_BLOCK)]
-    else:
-        body = [
+    # ONE PATH, NOT TWO. This used to build the three tables only when probes existed and print a
+    # sentence otherwise. `c4x/tabs/diagnostics.py:30-35` records exclusions_layout being rewritten
+    # away from exactly that shape, because `tools/table_audit.py` correctly refuses a DataTable on
+    # a branch nothing normally reaches: "A branch that is unreachable in the normal case is a
+    # branch nothing checks." On every fresh install the reachable branch was the one with no
+    # table in it, so the audit only ever walked the other one. The tables are built either way and
+    # the note carries the emptiness, which is how the rest of this app states "none".
+    no_probe = probes.empty
+    body = [
             html.Div("Probe Runs", style=SECTION_HEAD),
-            html.Div("Each row is one spawned session answering the control protocol. A spawned "
+            html.Div("No probe has been run against this store, so these three tables are empty. "
+                     "`node tools/probe.mjs` asks a spawned Claude Code session for its own "
+                     "context breakdown; it costs one billable session of about twelve seconds."
+                     if no_probe else
+                     "Each row is one spawned session answering the control protocol. A spawned "
                      "CLI session is NOT configured like the desktop app, so these numbers "
                      "describe the probe, not your live work. That difference is the finding.",
                      style=SECTION_NOTE),
@@ -78,17 +92,14 @@ def probes_layout(session_id=None, scope="main", cohort=None):
                 tooltip_header=header_help(_cols),
                 data=records(details), page_size=12,
                 style_table={"overflowX": "auto"}, **TABLE_STYLE),
-        ]
-        if not named.empty:
-            body += [
-                html.Div("Items Costs", style=SECTION_HEAD),
-                DataTable(
-                    columns=(_cols :=
-                        [{"name": c, "id": c} for c in ["probe_id", "kind", "name", "tokens"]]),
-                    tooltip_header=header_help(_cols),
-                    data=records(named), page_size=12,
-                    style_table={"overflowX": "auto"}, **TABLE_STYLE),
-            ]
+            html.Div("Items Costs", style=SECTION_HEAD),
+            DataTable(
+                columns=(_cols :=
+                    [{"name": c, "id": c} for c in ["probe_id", "kind", "name", "tokens"]]),
+                tooltip_header=header_help(_cols),
+                data=records(named), page_size=12,
+                style_table={"overflowX": "auto"}, **TABLE_STYLE),
+    ]
 
     r = runs.iloc[0] if not runs.empty else None
     cards = []

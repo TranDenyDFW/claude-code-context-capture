@@ -190,11 +190,19 @@ describe('axe finds no WCAG A or AA violation in', () => {
   // The dialog that can delete a project. It is the densest set of form controls in the app: a
   // file input, a checkbox, a text field and three buttons, and every one of them used to be
   // unlabelled until this ran.
+  // A real Windows path: the backslash is doubled so the literal holds exactly one.
+  const PROJECT = 'F:\\SecDb'
+
   it('the project dialog', async () => {
     const { container } = render(
       <ProjectMoves
-        cohort="project::F:\SecDb"
-        cohorts={[{ value: 'project::F:\SecDb', label: 'Project: F:\SecDb (12)' }]}
+        // ONE CONSTANT FOR BOTH, because these two lines are escaped by DIFFERENT rules and
+        // looked identical. A JSX attribute processes no escapes, so the `cohort=` string was
+        // already a real Windows path; the line below is a JavaScript literal, where a lone
+        // backslash before S is not an escape and is dropped without a word. So this a11y
+        // check ran against `project::F:SecDb`, a cohort shape the app cannot produce.
+        cohort={`project::${PROJECT}`}
+        cohorts={[{ value: `project::${PROJECT}`, label: `Project: ${PROJECT} (12)` }]}
         writesEnabled
         onChanged={() => {}}
       />,

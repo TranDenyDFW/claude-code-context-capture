@@ -164,6 +164,56 @@ def q(sql: str, params=()) -> pd.DataFrame:
         con.close()
 
 
+def tables_present(*names) -> bool:
+    """Whether EVERY named table exists. One round trip, no query against the tables themselves.
+
+    For a family of tables that is created together and is meaningless apart. `tools/probe.mjs`
+    writes `probes` and its three child tables in one `ensureProbeSchema`, so a store either has
+    the set or has none of it - but nothing enforces that, and guarding only the parent query left
+    the children to raise. Proved by dropping one child from a fixture that had probe rows: the
+    Window tab's Configuration panel went straight back to an exception panel.
+    """
+    if not DB_PATH.exists():
+        return False
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    try:
+        have = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+    except sqlite3.Error:
+        return False
+    finally:
+        con.close()
+    return set(names) <= have
+
+
+def q_optional(sql: str, params=(), columns=()) -> pd.DataFrame:
+    """`q`, but a table that was never created reads as "nothing here yet".
+
+    FIVE TABLES IN THIS SCHEMA ARE NOT CREATED BY THE INSTALL PATH. `probes`, `probe_categories`,
+    `probe_details` and `probe_message_breakdown` come from `tools/probe.mjs`; `context_baselines`
+    comes from `tools/breakdown.mjs --calibrate`. Nothing in `install.mjs`, the hooks, or the
+    README runs either - the README does not contain the word "probe" - so on every fresh install
+    those tables do not exist, and a bare `q` against one raises `no such table` and takes the tab
+    down with it. Four call sites had a written empty-state branch sitting BELOW the query that
+    raised before it could be reached.
+
+    NOT FOLDED INTO `q` ITSELF, deliberately. `q`'s FileNotFoundError above is a contract every
+    other tab depends on, and a missing HARVEST table means the store is broken and must stay
+    loud. Only the caller knows which of its tables are optional, so only the caller opts in.
+
+    Anything that is not a missing table re-raises: a typo in a column name must not read as an
+    empty result, which is how a silent wrong answer gets shipped.
+    """
+    try:
+        return q(sql, params)
+    except FileNotFoundError:
+        raise
+    except Exception as exc:                       # noqa: BLE001 - narrowed by the message below
+        if "no such table" not in str(exc).lower():
+            raise
+        return pd.DataFrame(columns=list(columns))
+
+
 def overview_stats() -> dict:
     """Headline figures, each one tied to a stated population.
 

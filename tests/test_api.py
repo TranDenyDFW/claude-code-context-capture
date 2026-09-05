@@ -21,7 +21,12 @@ def client(has_store):
     from fastapi.testclient import TestClient
 
     from c4x.api.main import api
-    return TestClient(api)
+    # A LOOPBACK Host, because the server requires one. `/api/project/*` and the other
+    # mutating routes are refused outright unless the Host header names loopback, which is what
+    # closes DNS rebinding: an Origin check alone cannot see it, since a rebound name makes the
+    # attacker's page same-origin. TestClient defaults to `Host: testserver` and would be refused
+    # exactly as a rebound host is - correctly, but it would test the guard instead of the API.
+    return TestClient(api, base_url="http://127.0.0.1:8059")
 
 
 @pytest.fixture(scope="module")

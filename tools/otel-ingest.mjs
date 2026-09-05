@@ -27,7 +27,8 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { rootFrom, resolveDb } from './paths.mjs';
+import { rootFrom, resolveDb, ensureStoreDir } from './paths.mjs';
+
 import { inspectBody } from './otel-gate.mjs';
 
 // Three writers share this store by design: a manual harvest, the SessionEnd and UserPromptSubmit
@@ -96,7 +97,7 @@ export function toolRows(json) {
 }
 
 export function openStore(dbPath) {
-  mkdirSync(join(dbPath, '..'), { recursive: true });
+  ensureStoreDir(join(dbPath, '..'));
   const db = new DatabaseSync(dbPath);
   db.exec(BUSY_TIMEOUT);
   db.exec(SCHEMA);
@@ -138,7 +139,7 @@ export function ingestDir(db, dir, { probe = false, unparsedLog = null, now = ()
       // Never drop it silently. The sidecar records WHICH file and why, the same contract
       // harvest.mjs keeps with unknown record types.
       if (unparsedLog) {
-        mkdirSync(join(unparsedLog, '..'), { recursive: true });
+        ensureStoreDir(join(unparsedLog, '..'));
         appendFileSync(unparsedLog, `${JSON.stringify({
           captured_at: now(), file: p, bytes: raw.length, reason: 'body did not parse as JSON',
         })}\n`);

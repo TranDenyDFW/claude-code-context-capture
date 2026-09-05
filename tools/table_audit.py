@@ -515,8 +515,21 @@ def finish_scan(sites, edges, opaque, module):
 
 
 def coverage_errors(built, chain, constructed, walked, sites, calls,
-                    entries=None, exercised=None, opaque=None):
+                    entries=None, exercised=None, opaque=None, reachability=True):
     """The five coverage gates. One definition, called by the audit and by its own self-test.
+
+    `reachability=False` drops the TWO gates that ask whether a table-building path was taken, and
+    nothing else. It exists for a store on which some paths are legitimately not taken - a first
+    run, with no probe recorded, where the Window sub-panels correctly return a written "no probe
+    reading yet" panel and never build their tables.
+
+    IT IS DELIBERATELY NOT A SWITCH ON THIS WHOLE FUNCTION. It was written that way first, as one
+    `if` around the call, and an independent reviewer broke two of the other four gates and watched
+    the run pass: a stale EXEMPT_CALLS entry went unreported, and a DataTable constructed and
+    discarded printed "105 constructed, 102 walked" and PASS on the same screen. Three tables' rows
+    had never been inspected while the flag's own banner said cell values were checked. Suppressing
+    a gate you did not mean to suppress is the failure this file exists to catch, so the narrowing
+    happens per gate, here, where each gate is written.
 
     They were written twice once, and a reviewer deleted a gate out of the audit while the
     self-test, which restated the same rule inline, stayed green over a run that then printed
@@ -543,9 +556,14 @@ def coverage_errors(built, chain, constructed, walked, sites, calls,
                           f"runs, so anything it builds is invisible to every other gate here")
 
     for fn, position in sites:
-        if position not in built:
-            errors.append(f"{at(position)} builds a DataTable inside {fn}(), "
-                          f"which this audit never reached")
+        if position in built:
+            continue
+        # GATE 1 OF 2 that `reachability=False` drops. Everything else in this function keeps
+        # running, because nothing else here depends on what the store happens to contain.
+        if not reachability:
+            continue
+        errors.append(f"{at(position)} builds a DataTable inside {fn}(), "
+                      f"which this audit never reached")
 
     # A shared builder reached through one caller says nothing about its other callers, and
     # evidence_block has eight.
@@ -556,8 +574,9 @@ def coverage_errors(built, chain, constructed, walked, sites, calls,
 
     for caller, callee, position in calls:
         if position not in reached:
-            errors.append(f"{at(position)} in {caller}() calls {callee}(), which can build "
-                          f"a table, and this audit never takes that path")
+            if reachability:
+                errors.append(f"{at(position)} in {caller}() calls {callee}(), which can build "
+                              f"a table, and this audit never takes that path")
 
     # A construction the static scan did not predict means the scan is blind to how it was written:
     # an alias or a wrapper rather than dash_table.DataTable spelled out.
@@ -656,6 +675,11 @@ def exercise(name, errors, exercised, call, hits=None, walked=None):
     if hits is not None:
         hits += findings(f"callback / {name}", result, walked)
     return result
+
+
+# Set from argv at dispatch, read by main(). A module-level flag rather than a parameter because
+# main() takes none and the coverage check is buried three hundred lines below its own call.
+RENDER_ONLY = False
 
 
 def main():
@@ -846,8 +870,24 @@ def main():
                       f"not see it. Import it at module level, or this audit is reading a "
                       f"different set of files than the one that executed.")
     sites, calls, entries, opaque = table_sites(m)
-    errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries, exercised,
-                              opaque)
+    # --render-only DROPS THE REACHABILITY HALF, and only that half.
+    #
+    # This audit answers two questions at once: did any surface render an exception panel, and was
+    # every table-construction site reached. The first is answerable on ANY store. The second is
+    # answerable only on a store rich enough to take every branch, and on a FIRST-RUN store it is
+    # not merely unanswerable, it is guaranteed to report: with no probe recorded, the Window
+    # sub-panels correctly return "No probe reading yet" and never build their tables, so every
+    # site inside them is honestly unreached.
+    #
+    # That difference is why a first-run store had never been audited at all. Running the whole
+    # audit there fails for a reason that is not a defect, so nobody ran it, so the reason that IS
+    # a defect - three surfaces raising - went unseen for as long as they existed. Splitting the
+    # questions is what makes the first one askable.
+    #
+    # The full audit is unchanged and still the default. This flag only ever REMOVES a check, and
+    # says so on the line above the verdict, so a --render-only run can never be mistaken for one.
+    errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries,
+                              exercised, opaque, reachability=not RENDER_ONLY)
 
     # The audit must be able to fail, or a clean run means nothing. Every shape it claims to catch
     # is fed to it: a formatted number, a dash placeholder in a declared numeric column, and an
@@ -882,6 +922,10 @@ def main():
     print(f"  columns holding a number as text: {len(seen)}")
     print(f"  known-bad fixture fully detected: {fixture_ok}  {sorted(fixture_kinds)}")
 
+    if RENDER_ONLY:
+        print("  --render-only: the two REACHABILITY gates are off, because a first-run store "
+              "cannot take a path that needs a probe. Every other gate is on, including "
+              "constructed-but-never-walked, so a table whose rows went uninspected still fails.")
     ok = not seen and not errors and fixture_ok
     # The store must be byte-for-byte the size it was. A grown store means something harvested
     # into it, which is the defect above; a shrunk one means something worse. Measured on the
@@ -987,6 +1031,23 @@ def self_test():
     check("unreached site", len(unreached) == len(sites),
           f"{len(unreached)} of {len(sites)} sites reported when none is reached")
 
+    # --render-only DROPS THE REACHABILITY GATES AND NOTHING ELSE, asserted here rather than
+    # trusted from the flag's own banner. It was first written as one `if` around this whole
+    # function, and an independent reviewer broke two unrelated gates and watched the audit pass:
+    # a discarded DataTable printed "105 constructed, 102 walked" and AUDIT PASS on one screen.
+    # A flag that can silently widen what it suppresses is the defect this file exists to catch.
+    off = coverage_errors(set(), set(), {}, set(), sites, [], {}, set(), reachability=False)
+    check("--render-only silences the unreached-site gate", not off, f"{len(off)} still reported")
+    stray = {1: "a", 2: "b"}
+    for flag in (True, False):
+        kept = coverage_errors(set(), set(), stray, {1}, [], [], {}, set(), reachability=flag)
+        check(f"constructed-but-never-walked survives reachability={flag}", len(kept) == 1,
+              f"{len(kept)} reported")
+        blind = coverage_errors(set(), set(), {}, set(), [], [], {}, set(),
+                                opaque=[("fn", ("app.py", 1, 0))], reachability=flag)
+        check(f"the opaque-call gate survives reachability={flag}", len(blind) == 1,
+              f"{len(blind)} reported")
+
     # A pane that raised. _render_tab renders the exception rather than raising it, so an audit
     # driving tabs through it would otherwise call a broken tab a success.
     check("a rendered exception panel is not a success",
@@ -1080,4 +1141,5 @@ def self_test():
 
 
 if __name__ == "__main__":
+    RENDER_ONLY = "--render-only" in sys.argv
     sys.exit(self_test() if "--self-test" in sys.argv else main())
