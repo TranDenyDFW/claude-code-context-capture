@@ -25,7 +25,14 @@
 // baseline for a configuration is known, the whole breakdown follows for ALL of history,
 // retroactively, with no further capture.
 //
-//   node breakdown.mjs --calibrate --system-prompt 5100 --system-tools 19100 --mcp-tools 11000 --skills 6100
+//   node breakdown.mjs --calibrate --system-prompt N --system-tools N --mcp-tools N --skills N //                       --memory-files N --custom-agents N --mcp-tools-deferred N //                       --system-tools-deferred N --mcp-tools-items N --memory-files-items N //                       --custom-agents-items N
+//
+// EVERY FIELD, and no example numbers. The line here used to show four of the eleven flags with
+// values copied from one machine, while c4x/breakdown.py showed six with DIFFERENT values. Two
+// divergent example sets in one repo is worse than none: breakdown.py's own comment explains why,
+// that "a command listing only some of them records a fixed overhead that is too small", and every
+// turn in history then reports that many tokens too many under Messages with nothing saying so.
+// The numbers belong to the reader's own tooltip, not to whoever wrote the comment.
 //   node breakdown.mjs --show [--session ID]
 //   node breakdown.mjs --self-test
 
