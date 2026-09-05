@@ -470,7 +470,15 @@ describe('the table controls every table now has', () => {
   })
 
   it('carries the full value as a cell tooltip, so a truncated cell is still readable', () => {
-    const long = 'P:\ClaudeExt\ccx-engineering-work\tmp\fidpool\F2-p6'
+    // EVERY BACKSLASH DOUBLED. Written singly this was not a long path at all: \C and
+    // \F drop their backslash, while \t and \f are VALID escapes, so the string held a
+    // real TAB and FORM FEED and no separators whatsoever. A tooltip test for a truncated
+    // PATH was asserting on something no filesystem could ever hand it.
+    const long = 'P:\\ClaudeExt\\ccx-engineering-work\\tmp\\fidpool\\F2-p6'
+    // The fixture defends itself. Both assertions below compare `long` against `long`, so
+    // they passed just as happily when the escapes had eaten every separator; this is the
+    // line that would have caught it, and the one PR 3's path shortening will lean on.
+    expect(long.split('\\')).toHaveLength(6)
     render(<Pane payload={payload({ tables: [table('t', [{ project: long }])] })} />)
     expect(screen.getByRole('table').querySelector('tbody td')!.getAttribute('title')).toBe(long)
   })

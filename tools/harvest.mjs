@@ -24,7 +24,7 @@ import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { rootFrom, resolveDb } from './paths.mjs';
+import { rootFrom, resolveDb, ensureStoreDir } from './paths.mjs';
 import { homedir } from 'node:os';
 
 const ROOT = rootFrom(import.meta.url);
@@ -359,8 +359,10 @@ export function messageKind(d) {
 // pragmas the real one uses. A fixture with its own copy of the schema drifts from this file
 // and then CI passes against a database shaped like nothing the app will ever open.
 export function openDb(dbPath = DB_PATH) {
-  mkdirSync(dirname(dbPath), { recursive: true });
-  mkdirSync(RAW_DIR, { recursive: true });
+  // ensureStoreDir, not a bare mkdir: this is the site that creates data/ on a machine where the
+  // installer never ran, so it is the one that decides who can read the conversation text.
+  ensureStoreDir(dirname(dbPath));
+  ensureStoreDir(RAW_DIR);
   const db = new DatabaseSync(dbPath);
   // This store has THREE writers by design: a manual harvest, the SessionEnd and UserPromptSubmit
   // hooks that spawn their own, and the dashboard's refresh loop. SQLite's default busy timeout is
@@ -846,7 +848,7 @@ class Harvest {
     // open() makes this directory, but the self-test runs against an in-memory database and never
     // goes through open(). On a fresh clone, where data/ is gitignored and therefore absent, that
     // turned the FIRST command a new user runs into a stack trace. The writer owns its directory.
-    mkdirSync(dirname(UNKNOWN_LOG), { recursive: true });
+    ensureStoreDir(dirname(UNKNOWN_LOG));
     appendFileSync(UNKNOWN_LOG, JSON.stringify({
       first_seen: new Date().toISOString(), type, sample: line.slice(0, 4000),
     }) + '\n');
@@ -1735,9 +1737,9 @@ async function selfTest() {
     // Through the command line, against the scratch store: the refusal exits 2 before any open,
     // the dry run exits 0, and neither touches the store's bytes.
     const before = statSync(scratch).mtimeMs;
-    const refused = spawnSync(process.execPath, [process.argv[1], '--full', '--db', scratch], { encoding: 'utf8', cwd: ROOT });
+    const refused = spawnSync(process.execPath, [process.argv[1], '--full', '--db', scratch], { encoding: 'utf8', cwd: ROOT, windowsHide: true });
     checks.push(['CLI: --full without --yes exits 2 and names the flag', refused.status === 2 && /--yes/.test(refused.stderr), `${refused.status} ${refused.stderr.slice(0, 120)}`]);
-    const dry = spawnSync(process.execPath, [process.argv[1], '--dry-run', '--db', scratch], { encoding: 'utf8', cwd: ROOT });
+    const dry = spawnSync(process.execPath, [process.argv[1], '--dry-run', '--db', scratch], { encoding: 'utf8', cwd: ROOT, windowsHide: true });
     checks.push(['CLI: --dry-run exits 0 and says nothing was written', dry.status === 0 && /Nothing was written/.test(dry.stdout), `${dry.status} ${(dry.stderr || dry.stdout).slice(0, 160)}`]);
     checks.push(['CLI: neither touched the store', statSync(scratch).mtimeMs === before]);
     rmSync(dir, { recursive: true, force: true });

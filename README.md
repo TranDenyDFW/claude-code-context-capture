@@ -6,8 +6,9 @@ see it coming. **c4x** records that state into a local SQLite store as you work,
 Code's own window arithmetic closely enough to say when the next compaction will fire. Install is
 three commands and pulls nothing from npm.
 
-> Everything stays in `data/context.db` on your disk. While it is installed it captures, and there
-> is no off switch short of `node tools/install.mjs uninstall`. [Why.](#does-this-send-anything-anywhere)
+> Everything stays under `data/` on your disk - the store, the raw capture logs, and a copy of each
+> transcript taken just before it is compacted. While it is installed it captures, and there is no
+> off switch short of `node tools/install.mjs uninstall`. [Why.](#does-this-send-anything-anywhere)
 
 ![One session's context growth, with compaction markers, the predicted trigger line, the model's warn and blocked zones, and a rolling band marking calls unlike the rest of the session](docs/images/session.png)
 
@@ -272,9 +273,28 @@ gitignored.
 compaction summary readable instead of a character count, and what makes a dropped message
 recoverable at all. It is also the thing to know before you install rather than after.
 
+**And there is a second copy.** On every compaction, `hooks/compact-hook.mjs` copies the WHOLE
+transcript into `data/snapshots/` before Claude Code drops the messages, because a compaction is
+the one event after which the original cannot be recovered from anywhere else. These are verbatim
+files, one per boundary, so a long-lived session accumulates several: on the machine this was
+written on, thirteen files and 603 MB. Two things follow.
+
+- A transcript larger than 250 MB is skipped rather than copied, and the skip is recorded in
+  `data/raw/compaction-events.ndjson` with its reason, so a gap in the set always says why.
+- `C4X_SNAPSHOT=0` in the environment Claude Code launches with turns the copies off. Capture
+  continues; only the pre-compaction copy stops.
+
 There is no off switch on purpose. A capture tool you can quietly disable still produces a store
 that *looks* complete, and nothing in it tells you which sessions were recorded and which were not.
-`node tools/install.mjs uninstall` is the way to stop it, and `--purge` deletes what it collected.
+`node tools/install.mjs uninstall` is the way to stop it. It prints what it is keeping, including
+the snapshot count and size; `--purge` deletes all of it - the store, `data/raw/` and
+`data/snapshots/`.
+
+**Who else on the machine can read it.** The installer restricts `data/` to your account and
+SYSTEM when it creates it. A checkout on a data volume rather than under your home directory would
+otherwise inherit that volume's permissions, which on a stock Windows data drive lets every local
+account read the conversation text. `node tools/install.mjs status` warns if it finds that state on
+a directory created before this, and prints the command that fixes it.
 
 ---
 

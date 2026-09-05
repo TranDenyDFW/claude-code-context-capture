@@ -13,7 +13,7 @@
 // The content is deliberately synthetic and says so: session ids are literal, message text names
 // itself as fixture text. Nothing here came from a real conversation.
 //
-// Usage: node tools/make_fixture.mjs [--out <path>] [--force]
+// Usage: node tools/make_fixture.mjs [--out <path>] [--force] [--no-optional]
 //
 // With no --out the fixture lands in a DATED directory under tmp/ and the path is printed. The real
 // store path, data/context.db, is refused without --force even when nothing is there yet: it used
@@ -69,6 +69,8 @@ const OUT = SELF_TEST
   ? join(ROOT, 'tmp', `fixture-self-test-${process.pid}`, 'context.db')
   : arg('--out', defaultOut());
 const FORCE = process.argv.includes('--force') || SELF_TEST;
+// The first-run shape: everything harvest builds, nothing probe.mjs or --calibrate would have.
+const BARE = process.argv.includes('--no-optional');
 
 // A real store is 900 MB of somebody's conversations. Refusing to overwrite one is not politeness,
 // it is the difference between a fixture run and a data loss.
@@ -548,10 +550,32 @@ const bashWithTarget = db.prepare(`
   SELECT COUNT(*) n FROM tool_calls WHERE tool_name = 'Bash' AND target IS NOT NULL`).get().n;
 
 const longMessages = db.prepare('SELECT COUNT(*) n FROM messages WHERE chars > 220').get().n;
+
+// --no-optional: the shape the DOCUMENTED INSTALL PATH actually produces.
+//
+// The five tables dropped here are created by tools nobody runs on that path - probe.mjs makes the
+// four probe tables, breakdown.mjs --calibrate makes context_baselines - and README.md does not
+// contain the word "probe". So the store a new user opens the dashboard against has none of them,
+// while THIS fixture creates all five at line 88 before it writes a row, and the comment at the
+// probes block says why: "with them empty the tab raises and renders an exception panel instead
+// of content, which the table audit reports as a failed tab."
+//
+// That made the fixture MORE COMPLETE than any real first-run store, so every gate in this repo
+// ran against a probed, calibrated store and none of them had ever executed the first-run path.
+// Three surfaces were broken there for as long as they had existed - the Diagnostics tab and two
+// of the Window tab's sub-panels - and the audit that exists to catch exactly that could not see
+// them. Dropped at the END so every count and self-test check above still runs against the full
+// fixture; this variant exists to be RENDERED against, not to be counted.
+if (BARE) {
+  for (const table of ['probes', 'probe_categories', 'probe_details', 'probe_message_breakdown',
+                       'context_baselines', 'request_bodies', 'tool_schemas']) {
+    db.prepare(`DROP TABLE IF EXISTS ${table}`).run();
+  }
+}
 db.close();
 
 if (!SELF_TEST) {
-  console.log(`fixture written to ${OUT}`);
+  console.log(`fixture written to ${OUT}${BARE ? ' (--no-optional: probe and baseline tables dropped)' : ''}`);
   for (const [table, n] of Object.entries(counts)) console.log(`  ${table.padEnd(22)} ${n}`);
   console.log(`  ${'api_calls (view)'.padEnd(22)} ${apiCalls}`);
 } else {

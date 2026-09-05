@@ -189,6 +189,20 @@ def read_manifest(path):
         con.close()
 
 
+def carried_tables(manifest):
+    """The tables an import is allowed to touch: the ones this manifest DIGESTED.
+
+    THE IMPORT USED TO READ A DIFFERENT FIELD FROM THE ONE VERIFY CHECKED. `verify` walks
+    `digests` and `counts`; `import_` walked `tables`, and nothing compared the three. A file whose
+    `tables` listed anything the digests did not cover verified clean and then had that name
+    interpolated straight into `INSERT OR IGNORE INTO main.{table}` on the live store's read-write
+    connection, under a docstring promising "Verified before a single row is written".
+
+    So the verified set is the ONLY set, and it is returned from one place that both callers use.
+    """
+    return sorted((manifest.get("digests") or {}).keys())
+
+
 def verify(path):
     """Recompute every digest in an export and compare it to what the export claims.
 
@@ -199,6 +213,29 @@ def verify(path):
     if not manifest:
         return False, [f"{path} carries no {MANIFEST_TABLE} manifest, so it is not a c4x export"]
     problems = []
+
+    # THE THREE FIELDS MUST NAME THE SAME TABLES. A genuine export writes all three from one
+    # `carried` list (see export()), so disagreement is either corruption or a file built to be
+    # verified on one set and applied to another. Either way it is refused before anything opens.
+    digested = set((manifest.get("digests") or {}).keys())
+    counted = set((manifest.get("counts") or {}).keys())
+    listed = set(manifest.get("tables") or [])
+    for name, seen in (("counts", counted), ("tables", listed)):
+        if seen != digested:
+            problems.append(
+                f"manifest {name} names {sorted(seen - digested) or 'nothing extra'} that digests "
+                f"do not, and omits {sorted(digested - seen) or 'nothing'}; an export writes all "
+                "three from one list, so this file was edited")
+
+    # And every one of them must be a table this module carries. The name reaches SQL as a bare
+    # identifier, so an allow-list is the guard, not the quoting.
+    known = set(BY_SESSION) | set(BY_COMPACTION) | set(BY_TRANSCRIPT)
+    unknown = sorted(digested - known)
+    if unknown:
+        problems.append(f"manifest names tables this store does not export: {unknown}")
+    if problems:
+        return False, problems
+
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         for table, claimed in (manifest.get("digests") or {}).items():
@@ -350,7 +387,8 @@ def import_(path):
     with store.write() as con:
         con.execute("ATTACH DATABASE ? AS src", (str(path),))
         try:
-            for table in manifest.get("tables", []):
+            # The verified set, never manifest["tables"]. See carried_tables().
+            for table in carried_tables(manifest):
                 # `PRAGMA main.table_info(t)`, not `PRAGMA table_info(main.t)`. The schema is a
                 # prefix on the pragma itself; put it inside the parentheses and SQLite reports a
                 # syntax error at the dot.

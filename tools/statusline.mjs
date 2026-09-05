@@ -19,10 +19,11 @@
 //   node statusline.mjs            read stdin, capture, print
 //   node statusline.mjs --self-test
 
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assess } from './mirror-core.mjs';
+import { ensureStoreDir } from './paths.mjs';
 
 const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 // Production capture path. Tests and benchmarks MUST redirect via C4X_STATUSLINE_OUT so they
@@ -51,6 +52,26 @@ function fmtTokens(n) {
 // credential would sit there in plain text forever. Matched on the variable NAME, so a new secret
 // following the usual naming conventions is redacted without anyone remembering to add it.
 const SECRETISH = /KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL|COOKIE/i;
+
+// AND THE ONES WHOSE NAMES DO NOT FOLLOW THAT CONVENTION, which is the gap the comment above
+// admits to without naming. ANTHROPIC_CUSTOM_HEADERS is a documented Claude Code variable and its
+// value is typically `Authorization: Bearer ...` or `x-api-key: ...` for a proxy; the NAME matches
+// nothing in SECRETISH, so the credential was written to data/raw in clear. ANTHROPIC_BASE_URL can
+// carry `user:pass@host`, and that case is caught by value below. Neither is present on this
+// machine - this closes a gap, it does not clean up a leak.
+//
+// CUSTOM_HEADERS ONLY, not BASE_URL. Blanket-redacting the base URL would cost a real diagnostic -
+// 14 of the 16 samples in this store carry it, all holding the public default, and "is this
+// session going through a proxy" is exactly the kind of thing this capture exists to answer. Its
+// dangerous form has credentials in the authority, which SECRET_VALUE recognises whatever the
+// variable is called. CUSTOM_HEADERS has no safe form: its entire purpose is to carry headers.
+const ALWAYS_REDACT = /^ANTHROPIC_CUSTOM_HEADERS$/i;
+
+// A SECOND RULE THAT LOOKS AT THE VALUE, because a name-only rule can only ever be as good as
+// whoever named the variable, and this file already depends on that once. A bearer token, an
+// Anthropic key, or credentials embedded in a URL authority are recognisable whatever they are
+// called, so a variable nobody here has thought of is still caught.
+const SECRET_VALUE = /sk-ant-[\w-]+|Bearer\s+\S|x-api-key|:\/\/[^/@\s]+:[^/@\s]+@/i;
 
 /**
  * The CLAUDE- and ANTHROPIC-prefixed variables Claude Code puts in our environment.
@@ -83,13 +104,15 @@ export function claudeEnv(env = process.env) {
   const out = {};
   for (const k of Object.keys(env).sort()) {
     if (!/^(CLAUDE|ANTHROPIC)/i.test(k)) continue;
-    out[k] = SECRETISH.test(k) ? '[redacted]' : env[k];
+    const value = String(env[k] ?? '');
+    out[k] = (SECRETISH.test(k) || ALWAYS_REDACT.test(k) || SECRET_VALUE.test(value))
+      ? '[redacted]' : env[k];
   }
   return out;
 }
 
 export function capture(raw, outPath = OUT, isProbe = (outPath === DEFAULT_OUT ? IS_PROBE : true)) {
-  mkdirSync(dirname(outPath), { recursive: true });
+  ensureStoreDir(dirname(outPath));
   // Wrap rather than mutate: the captured payload stays byte-faithful to what Claude Code sent,
   // and our own receive timestamp sits beside it instead of inside it.
   //
@@ -234,6 +257,13 @@ function selfTest() {
       CLAUDE_CODE_ENTRYPOINT: 'cli',
       ANTHROPIC_API_KEY: 'FAKE-VALUE-SHOULD-NEVER-BE-WRITTEN',
       CLAUDE_SESSION_TOKEN: 'tok-SHOULD-NEVER-BE-WRITTEN',
+      // THE THREE THE NAME RULE ALONE CANNOT SEE. Every fixture above matches SECRETISH by name,
+      // so this self-test would have passed with the value rule deleted; it was testing the half
+      // of the problem that was already solved. Each of these carries a credential in a variable
+      // whose name says nothing.
+      ANTHROPIC_CUSTOM_HEADERS: 'Authorization: Bearer SHOULD-NEVER-BE-WRITTEN',
+      ANTHROPIC_BASE_URL: 'https://user:SHOULD-NEVER-BE-WRITTEN@proxy.internal',
+      CLAUDE_CODE_PROXY: 'x-api-key: sk-ant-SHOULD-NEVER-BE-WRITTEN',
       PATH: '/should/not/appear',
       HOME: '/should/not/appear',
     };
@@ -242,6 +272,15 @@ function selfTest() {
     add('env capture ignores unrelated variables', got.PATH === undefined && got.HOME === undefined);
     add('env capture REDACTS anything key-shaped (gate can fail)',
       got.ANTHROPIC_API_KEY === '[redacted]' && got.CLAUDE_SESSION_TOKEN === '[redacted]');
+    add('env capture REDACTS a credential whose NAME says nothing (gate can fail)',
+      got.ANTHROPIC_CUSTOM_HEADERS === '[redacted]'
+      && got.ANTHROPIC_BASE_URL === '[redacted]'
+      && got.CLAUDE_CODE_PROXY === '[redacted]');
+    // And the converse, or the rule above is just "redact everything": the ordinary base URL,
+    // which is what this variable actually holds on every machine measured, survives.
+    add('a base URL with no credentials in it is KEPT',
+      claudeEnv({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com' }).ANTHROPIC_BASE_URL
+        === 'https://api.anthropic.com');
     // Negative control: the secret must not survive anywhere in the serialised record.
     const serialised = JSON.stringify({ env: got });
     add('no secret value survives serialisation (gate can fail)',

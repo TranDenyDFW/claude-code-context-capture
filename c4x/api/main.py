@@ -13,9 +13,11 @@ Serving only the summary would give React nothing to draw. Serving only the raw 
 away the one shape the whole test suite already knows how to read.
 """
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -31,7 +33,7 @@ import re  # noqa: E402
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import Response  # noqa: E402
+from fastapi.responses import JSONResponse, Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
 from c4x.api import cache  # noqa: E402
@@ -1163,16 +1165,27 @@ def legacy_health():
     return {"ok": True, "db": str(store.DB_PATH), "port": int(os.environ.get("C4X_API_PORT", 8059))}
 
 
+class _Predict(BaseModel):
+    tokens: int
+    window: int = 1_000_000
+
+
 @api.post("/api/mirror/predict")
-def mirror_predict(tokens: int, window: int = 1_000_000):
+def mirror_predict(body: _Predict):
     """What the window arithmetic says about a token count.
 
     Delegates to `tools/mirror.mjs`, the same module the chart's threshold lines come from, so this
     endpoint cannot drift from the picture.
+
+    A BODY, NOT QUERY PARAMETERS. Declared as bare scalars this bound `?tokens=1`, which makes a
+    POST with no body and no content type - a CORS SIMPLE REQUEST any web page could send, landing
+    in `store.predict` and spawning a node process per call. A JSON body cannot be sent
+    cross-origin without a preflight, so the shape of the request is itself half the guard; the
+    middleware above is the other half.
     """
     from c4x import store
     try:
-        return store.predict(tokens, window)
+        return store.predict(body.tokens, body.window)
     except Exception as exc:                        # noqa: BLE001 - reported, not raised as a 500
         raise HTTPException(
             status_code=503,
@@ -1237,11 +1250,17 @@ def project_export(cohort: str = Query(..., description="project::<the working d
     with --no-writes there is nowhere to put it.
     """
     from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
 
     from c4x import projects
     _require_writes()
     project = _project_of(cohort)
-    out_dir = ROOT / "tmp" / "exports"
+    # A DIRECTORY PER CALL, DELETED AFTER THE RESPONSE. One shared directory kept every export
+    # anyone had ever asked for - 180 MB each here - and nothing in the repo removed them. The
+    # response streams from the file, so the delete has to run after the body is sent, which is
+    # what a BackgroundTask is for; a per-call directory means two concurrent exports of the same
+    # project cannot delete each other's file.
+    out_dir = ROOT / "tmp" / "exports" / uuid4().hex
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / projects.file_name(project)
     try:
@@ -1251,11 +1270,17 @@ def project_export(cohort: str = Query(..., description="project::<the working d
                             detail={"error": str(exc), "project": project}) from exc
     return FileResponse(
         out, media_type="application/vnd.sqlite3", filename=out.name,
+        background=BackgroundTask(shutil.rmtree, out_dir, ignore_errors=True),
         # The counts are in the file too. They are repeated in headers so a caller that streams the
         # download straight to disk can check what it got without opening it.
         headers={"X-C4X-Project": project,
                  "X-C4X-Sessions": str(manifest["sessions"]),
                  "X-C4X-Exported-At": str(manifest["exported_at"])})
+
+
+# The largest project in this store exports to 180 MB, so 1 GB is generous for a real file and
+# still a bound. Without one, an upload is limited only by the disk.
+_IMPORT_MAX_BYTES = 1 << 30
 
 
 @api.post("/api/project/import")
@@ -1267,15 +1292,30 @@ async def project_import(file: UploadFile = File(...)):
     staged.mkdir(parents=True, exist_ok=True)
     # Staged to disk rather than held in memory: the largest project in this store exports to
     # 180 MB, and ATTACH needs a path in any case.
-    path = staged / (Path(file.filename or "upload.db").name or "upload.db")
-    with open(path, "wb") as fh:
-        while chunk := await file.read(1 << 20):
-            fh.write(chunk)
+    #
+    # THE NAME IS OURS AND THE FILE IS TEMPORARY. It used to be `file.filename`, so the caller
+    # chose what appeared in this directory, and a rejected upload was left there afterwards -
+    # every refusal added a file nothing would ever delete. A uuid4 cannot collide, cannot
+    # traverse, and carries nothing of the caller's; the `finally` means the only import that
+    # leaves anything behind is one that succeeded, and that leaves rows, not a file.
+    given = Path(file.filename or "upload.db").name
+    path = staged / f"upload-{uuid4().hex}.db"
+    written = 0
     try:
+        with open(path, "wb") as fh:
+            while chunk := await file.read(1 << 20):
+                written += len(chunk)
+                if written > _IMPORT_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail={
+                        "error": f"an import is capped at {_IMPORT_MAX_BYTES // (1 << 20)} MB",
+                        "file": given})
+                fh.write(chunk)
         return projects.import_(path)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400,
-                            detail={"error": str(exc), "file": path.name}) from exc
+                            detail={"error": str(exc), "file": given}) from exc
+    finally:
+        path.unlink(missing_ok=True)
 
 
 @api.post("/api/project/delete")
@@ -1324,6 +1364,74 @@ def project_include(body: dict):
 # kept a bundle that had no export hydration and no heading notes, twice in an hour, and nothing
 # said so until the script names were read out of the DOM. The hashed assets can be cached for as
 # long as a browser likes, because a new build is a new name; the shell that names them cannot.
+# EVERY ROUTE THAT CHANGES SOMETHING, GUARDED IN ONE PLACE, AND IT HAS TO BE MIDDLEWARE.
+#
+# The trust model is "any local process may call anything", and that is fine: a local process can
+# read the store directly. A BROWSER PAGE IS NOT A LOCAL PROCESS. The CORS allow-list below stops
+# a foreign page READING a response; it stops nothing being SENT, because a multipart form POST is
+# a CORS SIMPLE REQUEST and is dispatched with no preflight at all. `c4x/server.py:157` already
+# writes that threat model out for `/__shutdown__`, which is the one route that was guarded.
+#
+# WHY NOT A ROUTE DEPENDENCY. Because it would run too late to matter. FastAPI awaits
+# `request.form()` while resolving the request BEFORE it calls `solve_dependencies`, so the whole
+# multipart body is received and spooled - past Starlette's 1 MB `spool_max_size`, onto a real
+# file - and only then would `Depends(...)` return the 403. The bytes are already on disk. HTTP
+# middleware runs before routing, which is the only layer that can refuse before the read.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# A read that writes: it builds the export file it serves, so it is guarded like a write.
+_GUARDED_READS = frozenset({"/api/project/export"})
+
+
+def _host_is_local(host) -> bool:
+    """The Host header names this machine's own loopback.
+
+    DNS rebinding is the hole an Origin check alone leaves: a name the attacker controls resolves
+    to 127.0.0.1, so the page becomes same-origin with this server and every Origin test passes.
+    The server binds 127.0.0.1 (c4x/api/__main__.py:124), so a Host that is not loopback did not
+    come from anything that should be talking to it.
+    """
+    if not host:
+        return False
+    # THREE FORMS, and the naive "split on the last colon" gets two of them wrong. A bare IPv6
+    # literal is all colons and must not be split at all; a bracketed one carries its port OUTSIDE
+    # the brackets. Written as `count(":") == 1` first, which left `[::1]:8059` as the nonsense
+    # string `::1]:8059` and refused a caller that is loopback by definition.
+    if host.startswith("["):
+        name = host[1:host.index("]")] if "]" in host else host[1:]
+    elif host.count(":") == 1:
+        name = host.rsplit(":", 1)[0]
+    else:
+        name = host
+    name = name.lower()
+    # `*.localhost` as well as the literals: RFC 6761 reserves that suffix for loopback, and a dev
+    # setup addressing this server as `app.localhost:8059` is a legitimate local caller. Anything
+    # else is a name that resolved somewhere the server did not bind.
+    return name in {"localhost", "127.0.0.1", "::1"} or name.endswith(".localhost")
+
+
+@api.middleware("http")
+async def _local_only_mutations(request: Request, call_next):
+    from c4x.server import origin_is_local
+
+    guarded = request.method not in _SAFE_METHODS or request.url.path in _GUARDED_READS
+    if guarded:
+        # Three independent refusals. Origin covers every browser that sends one; Sec-Fetch-Site
+        # covers the case where it does not but the browser still labels the hop; Host closes
+        # rebinding. Each is checked because each fails differently.
+        why = None
+        if not origin_is_local(request.headers.get("origin")):
+            why = "a cross-origin request cannot change this store"
+        elif request.headers.get("sec-fetch-site") == "cross-site":
+            why = "a cross-site request cannot change this store"
+        elif not _host_is_local(request.headers.get("host")):
+            why = "this server answers only to a loopback Host"
+        if why:
+            return JSONResponse(status_code=403, content={"detail": {
+                "error": why,
+                "hint": "c4x is a local tool; call it from this machine, not from a web page"}})
+    return await call_next(request)
+
+
 @api.middleware("http")
 async def _no_cache_shell(request: Request, call_next):
     response = await call_next(request)

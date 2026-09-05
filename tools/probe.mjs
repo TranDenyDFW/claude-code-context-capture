@@ -21,11 +21,12 @@
 //   node probe.mjs --self-test     parser checks only, spawns nothing
 
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { rootFrom, resolveDb } from './paths.mjs';
+import { rootFrom, resolveDb, ensureStoreDir } from './paths.mjs';
+
 
 // Three writers share this store by design: a manual harvest, the SessionEnd and UserPromptSubmit
 // hooks, and the dashboard's refresh loop. SQLite's default busy timeout is ZERO, so a reader that
@@ -156,8 +157,8 @@ export function extractUsage(lines) {
 }
 
 function store(result, stderrText) {
-  mkdirSync(dirname(DB_PATH), { recursive: true });
-  mkdirSync(dirname(RAW), { recursive: true });
+  ensureStoreDir(dirname(DB_PATH));
+  ensureStoreDir(dirname(RAW));
   appendFileSync(RAW, JSON.stringify({ ts: new Date().toISOString(), ...result, stderr: stderrText?.slice(0, 4000) }) + '\n');
 
   const db = new DatabaseSync(DB_PATH);
@@ -188,7 +189,8 @@ function store(result, stderrText) {
 async function runProbe() {
   const args = argsFor();
   process.stderr.write(`probe: spawning ${CLAUDE} ${args.join(' ')}\n`);
-  const child = spawn(CLAUDE, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: process.platform === 'win32' });
+  const child = spawn(CLAUDE, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: process.platform === 'win32',
+                                      windowsHide: true });
 
   let out = '', err = '';
   child.stdout.on('data', (b) => { out += b.toString(); });

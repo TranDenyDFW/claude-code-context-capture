@@ -21,6 +21,7 @@ import { appendFileSync, copyFileSync, mkdirSync, readFileSync, statSync, exists
 import { join, dirname, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { ensureStoreDir } from '../tools/paths.mjs';
 
 const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 const EVENTS = join(ROOT, 'data', 'raw', 'compaction-events.ndjson');
@@ -32,7 +33,7 @@ const SNAPSHOT_MAX_BYTES = 250 * 1024 * 1024;
 const SNAPSHOT_ENABLED = process.env.C4X_SNAPSHOT !== '0';
 
 function log(obj, path = EVENTS) {
-  mkdirSync(dirname(path), { recursive: true });
+  ensureStoreDir(dirname(path));
   appendFileSync(path, JSON.stringify(obj) + '\n');
 }
 
@@ -67,7 +68,7 @@ export function handle(d, opts = {}) {
         ev.snapshot = { skipped: true, reason: 'over budget', size: st.size, budget: SNAPSHOT_MAX_BYTES };
       } else {
         try {
-          mkdirSync(snapDir, { recursive: true });
+          ensureStoreDir(snapDir);
           const stamp = new Date().toISOString().replace(/[:.]/g, '-');
           const dest = join(snapDir, `${basename(tp, '.jsonl')}.${stamp}.pre-compact.jsonl`);
           copyFileSync(tp, dest);
