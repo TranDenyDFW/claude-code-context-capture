@@ -17,7 +17,7 @@ from dash.development.base_component import Component
 
 from c4x.dash_compat import DataTable
 from c4x.panels import evidence_block
-from c4x.store import q
+from c4x.store import q, q_optional
 from c4x.theme import (
     BORDER,
     DANGER,
@@ -54,9 +54,13 @@ def latest_probe():
     Newest by timestamp rather than by id, because a backfilled or imported row can carry an id
     that does not order the same way.
     """
-    df = q("""SELECT id, ts, model, total_tokens, max_tokens, percentage
+    # q_optional: `probes` is tools/probe.mjs's table and nothing on the install path creates it,
+    # so on a fresh store this raised before either caller could reach the "No probe reading yet"
+    # panel written for exactly this case, and both Window sub-panels rendered the exception panel.
+    df = q_optional("""SELECT id, ts, model, total_tokens, max_tokens, percentage
                 FROM probes WHERE ok = 1 AND raw_json IS NOT NULL
-               ORDER BY ts DESC LIMIT 1""")
+               ORDER BY ts DESC LIMIT 1""",
+                    columns=["id", "ts", "model", "total_tokens", "max_tokens", "percentage"])
     return None if df.empty else df.iloc[0]
 
 

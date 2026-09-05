@@ -24,7 +24,7 @@ import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { rootFrom, resolveDb } from './paths.mjs';
+import { rootFrom, resolveDb, ensureStoreDir } from './paths.mjs';
 import { homedir } from 'node:os';
 
 const ROOT = rootFrom(import.meta.url);
@@ -359,8 +359,10 @@ export function messageKind(d) {
 // pragmas the real one uses. A fixture with its own copy of the schema drifts from this file
 // and then CI passes against a database shaped like nothing the app will ever open.
 export function openDb(dbPath = DB_PATH) {
-  mkdirSync(dirname(dbPath), { recursive: true });
-  mkdirSync(RAW_DIR, { recursive: true });
+  // ensureStoreDir, not a bare mkdir: this is the site that creates data/ on a machine where the
+  // installer never ran, so it is the one that decides who can read the conversation text.
+  ensureStoreDir(dirname(dbPath));
+  ensureStoreDir(RAW_DIR);
   const db = new DatabaseSync(dbPath);
   // This store has THREE writers by design: a manual harvest, the SessionEnd and UserPromptSubmit
   // hooks that spawn their own, and the dashboard's refresh loop. SQLite's default busy timeout is

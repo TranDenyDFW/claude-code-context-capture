@@ -181,6 +181,27 @@ const PY = [
   ['-m', ['pytest', 'tests/', '-q', '-rs', '-p', 'no:warnings'],
    'the same suite against the synthetic fixture, which is the shape CI runs', ' passed',
    { fixture: true }],
+  // AND ONCE MORE, AGAINST THE SHAPE A NEW USER ACTUALLY HAS.
+  //
+  // Both fixtures above create context_baselines and the four probe tables before writing a row
+  // (make_fixture.mjs:88-89), because with them absent the Diagnostics tab raises. So the fixture
+  // was more complete than any store the documented install path produces: probe.mjs and
+  // `breakdown.mjs --calibrate` make those five tables and nothing in install.mjs, the hooks or
+  // the README runs either - README.md does not contain the word "probe".
+  //
+  // The result was a gate that could not see its own subject. `table_audit.py` walks every tab AND
+  // every registered sub-panel and reports an exception panel as a failure; it works; it had never
+  // once been pointed at a store without those tables. Three surfaces raised there from the day
+  // they were written: tab-diagnostics and two of the Window tab's three sub-panels. A reviewer on
+  // a day-old install found one of the three by opening the page.
+  //
+  // These two entries are the whole fix for that class. They are cheap, they run the same code,
+  // and they are the only thing in this repo that executes a first-run store.
+  ['tools/table_audit.py', ['--render-only'],
+   'every tab and sub-panel on a first-run store (no probe, no baseline)',
+   'AUDIT PASS', { bareFixture: true }],
+  ['-m', ['pytest', 'tests/test_tabs_render.py', '-q', '-rs', '-p', 'no:warnings'],
+   'no tab renders an apology on a first-run store', ' passed', { bareFixture: true }],
   // Ruff runs HERE, inside the suite, and not as a command anyone remembers to type.
   //
   // It was a separate step for seven stages, and its verdict was being read off the last line of
@@ -304,6 +325,10 @@ if (NODE_ONLY) {
   // default store path: overwriting a developer's real store to run a test would be a far worse
   // bug than the one this exists to catch.
   const fixture = join(ROOT, 'tmp', 'suite-fixture.db');
+  // The first-run shape, built the same way and then stripped of the five tables no install path
+  // creates. See the bareFixture entries above for why this exists.
+  const bare = join(ROOT, 'tmp', 'suite-fixture-bare.db');
+  let bareBuilt = false;
   let fixtureBuilt = false;
   if (!NODE_ONLY && PY.some(([, , , , o]) => o?.fixture)) {
     rmSync(fixture, { force: true });
@@ -319,7 +344,27 @@ if (NODE_ONLY) {
     }
   }
 
+  if (!NODE_ONLY && PY.some(([, , , , o]) => o?.bareFixture)) {
+    rmSync(bare, { force: true });
+    const built = spawnSync(process.execPath, [join(ROOT, 'tools', 'make_fixture.mjs'),
+                                               '--out', bare, '--no-optional'],
+                            { encoding: 'utf8', cwd: ROOT, timeout: 300_000 });
+    bareBuilt = built.status === 0 && existsSync(bare);
+    if (!bareBuilt) {
+      failed++;
+      results.push({ rel: 'tools/make_fixture.mjs --no-optional', state: 'FAIL',
+                     note: 'could not build the first-run fixture',
+                     tail: tailOf(`${built.stdout || ''}${built.stderr || ''}`) });
+    }
+  }
+
   for (const [rel, args, what, marker, opts] of PY) {
+    if (opts?.bareFixture && !bareBuilt) {
+      skipped++;
+      results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
+                     note: `the first-run fixture could not be built, so this did not run (${what})` });
+      continue;
+    }
     if (opts?.fixture && !fixtureBuilt) {
       skipped++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
@@ -344,7 +389,9 @@ if (NODE_ONLY) {
       encoding: 'utf8', cwd: ROOT, timeout: 900_000,
       // C4X_DB is the store override the app already honours, so the fixture run needs no special
       // support anywhere else in the codebase.
-      env: opts?.fixture ? { ...process.env, C4X_DB: fixture } : process.env,
+      env: opts?.fixture ? { ...process.env, C4X_DB: fixture }
+        : opts?.bareFixture ? { ...process.env, C4X_DB: bare }
+        : process.env,
     });
     const text = plain(run.stdout) + plain(run.stderr);
     const match = text.match(CHECKS);
