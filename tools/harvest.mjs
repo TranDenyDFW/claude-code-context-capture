@@ -762,8 +762,16 @@ const KNOWN_TYPES = new Set([
 ]);
 
 class Harvest {
-  constructor(db) {
+  constructor(db, opts = {}) {
     this.db = db;
+    // INJECTABLE, so the self-test stops writing into the user's capture directory. It wrote three
+    // synthetic `zzz-brand-new-type` rows into the live data/raw/unknown-records.ndjson on every
+    // run; 1,037 of them had accumulated here, making the fixture the single most common "unknown
+    // record type" the tool reports. hooks/compact-hook.mjs already takes its paths this way.
+    // Read AT CONSTRUCTION rather than at module load, so the self-test can redirect every
+    // instance it makes by setting the variable before it builds them - including instances added
+    // later, which an explicit option at today's one relevant call site would not cover.
+    this.unknownLog = opts.unknownLog ?? process.env.C4X_UNKNOWN_LOG ?? UNKNOWN_LOG;
     this.stmt = {
       getFile: db.prepare('SELECT * FROM files WHERE path = ?'),
       putFile: db.prepare(`INSERT INTO files (path,size,mtime_ms,bytes_read,lines_read,rewrites,last_harvest_ts)
@@ -842,16 +850,41 @@ class Harvest {
 
   countType(t) { this.typeCounts.set(t, (this.typeCounts.get(t) || 0) + 1); }
 
+  /**
+   * Types already in the log on disk, so `first_seen` means what it says.
+   *
+   * The dedup set was per-INSTANCE and never read the file, so every harvest that met a familiar
+   * type appended another row stamped with the current time. Measured here: 4,716 rows of which
+   * 3,679 were real types recorded over and over (981 `pr-link`, 953 `relocated`, 844
+   * `history-suppression`), each asserting a first sighting that had happened months earlier.
+   * The store already holds the correct answer in `record_types`, keyed on the type with a
+   * count, so this file was a duplicate of a correct table AND it was lying.
+   *
+   * Read once and lazily: a harvest that meets nothing unknown never opens it.
+   */
+  seenOnDisk() {
+    if (this.unknownLoaded) return;
+    this.unknownLoaded = true;
+    try {
+      for (const line of readFileSync(this.unknownLog, 'utf8').split(String.fromCharCode(10))) {
+        if (!line.trim()) continue;
+        try { this.unknownSeen.add(JSON.parse(line).type); } catch { /* a torn line is not a type */ }
+      }
+    } catch { /* absent is the normal case on a fresh store */ }
+  }
+
   noteUnknown(type, line) {
+    if (this.unknownSeen.has(type)) return;
+    this.seenOnDisk();
     if (this.unknownSeen.has(type)) return;
     this.unknownSeen.add(type);
     // open() makes this directory, but the self-test runs against an in-memory database and never
     // goes through open(). On a fresh clone, where data/ is gitignored and therefore absent, that
     // turned the FIRST command a new user runs into a stack trace. The writer owns its directory.
-    ensureStoreDir(dirname(UNKNOWN_LOG));
-    appendFileSync(UNKNOWN_LOG, JSON.stringify({
+    ensureStoreDir(dirname(this.unknownLog));
+    appendFileSync(this.unknownLog, JSON.stringify({
       first_seen: new Date().toISOString(), type, sample: line.slice(0, 4000),
-    }) + '\n');
+    }) + String.fromCharCode(10));
   }
 
   async file(path, full) {
@@ -1186,6 +1219,13 @@ function stats() {
 async function selfTest() {
   const tmp = join(ROOT, 'tmp', 'selftest');
   rmSync(tmp, { recursive: true, force: true });
+  // NOTHING THIS FUNCTION DOES MAY TOUCH THE USER'S CAPTURE DIRECTORY. The synthetic
+  // `zzz-brand-new-type` record below is deliberately unknown, so it reached noteUnknown, which
+  // appended it to the LIVE data/raw/unknown-records.ndjson on every run. 1,037 of those rows had
+  // accumulated here, making the test fixture the most common "unknown record type" the tool
+  // reports, on the tab whose job is telling the user what it could not parse.
+  process.env.C4X_UNKNOWN_LOG = join(tmp, 'unknown-records.ndjson');
+  const liveUnknownBefore = existsSync(UNKNOWN_LOG) ? statSync(UNKNOWN_LOG).size : -1;
   mkdirSync(join(tmp, 'projects', 'P--fake'), { recursive: true });
   const tf = join(tmp, 'projects', 'P--fake', 'sess.jsonl');
   const rows = [
@@ -1751,9 +1791,33 @@ async function selfTest() {
   const mustFail = !empty.prepare('SELECT * FROM turns WHERE uuid = ?').get('u1');
   checks.push(['negative control: empty store has no turn (gate can fail)', mustFail]);
 
+  // THE SELF-TEST'S OWN FOOTPRINT, asserted rather than assumed. The synthetic unknown record
+  // must have landed in the scratch log and NOT in the live one, and the live file's size must be
+  // exactly what it was when this function started.
+  const scratchLog = join(tmp, 'unknown-records.ndjson');
+  checks.push(['the synthetic unknown type is recorded in the SCRATCH log',
+    existsSync(scratchLog) && readFileSync(scratchLog, 'utf8').includes('zzz-brand-new-type')]);
+  checks.push(['and the live capture log is untouched (gate can fail)',
+    liveUnknownBefore === (existsSync(UNKNOWN_LOG) ? statSync(UNKNOWN_LOG).size : -1)]);
+
+  // first_seen means what it says: a type already on disk is not appended a second time.
+  {
+    const scratchDb = new DatabaseSync(':memory:');
+    scratchDb.exec(SCHEMA);
+    const again = new Harvest(scratchDb, { unknownLog: scratchLog });
+    const before = readFileSync(scratchLog, 'utf8').split(String.fromCharCode(10)).filter(Boolean).length;
+    again.noteUnknown('zzz-brand-new-type', '{}');
+    const after = readFileSync(scratchLog, 'utf8').split(String.fromCharCode(10)).filter(Boolean).length;
+    checks.push(['a type already in the log is NOT re-recorded (gate can fail)', after === before]);
+    again.noteUnknown('zzz-second-new-type', '{}');
+    const third = readFileSync(scratchLog, 'utf8').split(String.fromCharCode(10)).filter(Boolean).length;
+    checks.push(['but a genuinely new type still is', third === before + 1]);
+  }
+
   let bad = 0;
   for (const [name, ok] of checks) { if (!ok) bad++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`); }
   rmSync(tmp, { recursive: true, force: true });
+  delete process.env.C4X_UNKNOWN_LOG;
   console.log(bad === 0 ? `SELF-TEST PASS (${checks.length} checks)` : `SELF-TEST FAIL (${bad}/${checks.length} failed)`);
   return bad === 0 ? 0 : 1;
 }
