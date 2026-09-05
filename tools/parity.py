@@ -33,6 +33,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# The marker a failed tab carries, from the one module that defines it. See c4x/theme.py.
+from c4x.theme import RENDER_FAILED  # noqa: E402
+
 # The five states `tests/test_tabs_render.py` already defines. Named here rather than invented, so
 # the parity surface and the render surface cannot drift apart.
 STATES = [
@@ -244,6 +247,11 @@ def run(only_tab=None, url=None, verbose=False):
         return compare(only_tab, url, verbose, pinned)
 
 
+def render_failed(payload):
+    """Whether a payload is the panel `_render_tab` builds for a tab that raised."""
+    return any(RENDER_FAILED in str(line) for line in (payload or {}).get("text", []))
+
+
 def compare(only_tab=None, url=None, verbose=False, pinned=None):
     import app as module
     from c4x import store
@@ -289,6 +297,15 @@ def compare(only_tab=None, url=None, verbose=False, pinned=None):
             direct = fetch_dash(module, tab, params)
             found_here = differences(served, direct, f"{tab} / {label}")
             checked += 1
+            # PARITY PASSES WHEN BOTH SURFACES ARE BROKEN THE SAME WAY, and that is not a
+            # theoretical hole. `_render_tab` turns an exception into the apology panel as ordinary
+            # content, both surfaces call it, so a tab that raises produces two IDENTICAL payloads
+            # and compares equal. On a store without probe tables, Diagnostics did exactly that,
+            # and the reviewer who found it had used a PASSING parity run as evidence the tabs
+            # worked. Agreement is only worth something once both sides are known to be the tab.
+            if render_failed(direct) or render_failed(served):
+                problems.append(f"{tab} / {label}: BOTH surfaces rendered the apology panel, so "
+                                "they agree about nothing. The tab raised.")
             if not carries_data(direct):
                 empty.append(f"{tab} / {label}")
             if found_here:

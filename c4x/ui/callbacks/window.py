@@ -48,10 +48,10 @@ def _window_panel(index, session_id, scope, cohort):
     except Exception as exc:                        # noqa: BLE001 - a failed panel must say so
         from dash import html
 
-        from c4x.theme import CODE_BLOCK, DANGER, SECTION_HEAD
+        from c4x.theme import CODE_BLOCK, DANGER, RENDER_FAILED, SECTION_HEAD
         label = PANELS[max(0, min(int(index or 0), len(PANELS) - 1))][1]
         return html.Div([
-            html.Div(f"{label} could not be rendered", style={**SECTION_HEAD, "color": DANGER}),
+            html.Div(f"{label} {RENDER_FAILED}", style={**SECTION_HEAD, "color": DANGER}),
             html.Pre(f"{type(exc).__name__}: {exc}",
                      style={**CODE_BLOCK, "color": DANGER, "whiteSpace": "pre-wrap"}),
         ])

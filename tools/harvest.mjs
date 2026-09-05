@@ -17,7 +17,7 @@
 //   node harvest.mjs --self-test     prove the parser detects what it claims to detect
 //   node harvest.mjs --stats         print store contents, harvest nothing
 
-import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, appendFileSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, appendFileSync, readFileSync, writeFileSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { join, dirname } from 'node:path';
@@ -239,13 +239,69 @@ export const ADDED_COLUMNS = {
 };
 const BOOLEAN_EVENT_COLUMNS = new Set(['probe', 'known', 'truncated']);
 
+/**
+ * The hook event log, ingested from where the LAST run stopped.
+ *
+ * THE COST WAS NOT DISK, IT WAS THE RE-READ. This read the whole file and re-offered every row to
+ * INSERT OR IGNORE on every harvest. Nothing rotates the file, so it only grows: on this install it
+ * had reached 36 MB, and 29,049 harvest runs had each read all of it to learn what the previous one
+ * already knew. The tool's own timing excludes ingest, so nothing in the app could see the cost.
+ *
+ * The transcript walk has solved this since it was written. `files.bytes_read` is a per-path
+ * watermark and `Harvest.file` reads from it; this is that mechanism applied to the one file left
+ * out, including its shrink rule, so a file SMALLER than its watermark is read from zero rather
+ * than skipped and a future rotation cannot silently drop records.
+ *
+ * TWO THINGS THAT LOOK RIGHT AND ARE NOT. A byte offset cannot index a JavaScript string, because
+ * `slice` counts CHARACTERS and this file is UTF-8, so a multibyte payload would shift every
+ * subsequent read; the tail is read positionally into a Buffer instead. And the watermark may not
+ * advance past a line that has no terminator yet: the hook appends while this runs, so the last
+ * line can be half written, and recording it as consumed would drop it forever. INSERT OR IGNORE
+ * stays as the backstop, so a wrong watermark degrades to the old behaviour rather than to loss.
+ */
 export function ingestEvents(db, path) {
   if (!existsSync(path)) return { file: path, exists: false, seen: 0, stored: 0, genuine: 0, bad: 0 };
+  const size = statSync(path).size;
+  const prev = db.prepare('SELECT bytes_read FROM files WHERE path = ?').get(path);
+  // SIZE ALONE CANNOT TELL AN APPEND FROM A REPLACEMENT. A log rewritten with different content
+  // of equal or greater length passes `size >= bytes_read`, so the offset lands in the MIDDLE of a
+  // line and every row after it is dropped as unparseable, silently. Caught by this file's own
+  // self-test, where one fixture replaces the log and two unrelated checks went red.
+  //
+  // An append-only file always has a newline immediately before the watermark, because the
+  // watermark is only ever advanced to just past one. So read that byte: if it is not a newline,
+  // this is not the file we measured, and it is read from zero.
+  let rewound = !!prev && size < prev.bytes_read;
+  if (prev && !rewound && prev.bytes_read > 0 && prev.bytes_read <= size) {
+    const fd = openSync(path, 'r');
+    try {
+      const probe = Buffer.allocUnsafe(1);
+      readSync(fd, probe, 0, 1, prev.bytes_read - 1);
+      if (probe[0] !== 0x0a) rewound = true;          // 0x0a is the line feed
+    } finally { closeSync(fd); }
+  }
+  const start = prev && !rewound ? Math.min(prev.bytes_read, size) : 0;
+
+  let text = '';
+  if (size > start) {
+    const fd = openSync(path, 'r');
+    try {
+      const buf = Buffer.allocUnsafe(size - start);
+      const got = readSync(fd, buf, 0, size - start, start);
+      text = buf.subarray(0, got).toString('utf8');
+    } finally { closeSync(fd); }
+  }
+
+  // Only whole lines count as consumed. Anything after the last newline is still being written.
+  const lastBreak = text.lastIndexOf(String.fromCharCode(10));
+  const complete = lastBreak === -1 ? '' : text.slice(0, lastBreak + 1);
+  const consumed = start + Buffer.byteLength(complete, 'utf8');
+
   const ins = db.prepare(`INSERT OR IGNORE INTO hook_events
     (${HOOK_EVENT_COLUMNS.join(',')})
     VALUES (${new Array(HOOK_EVENT_COLUMNS.length).fill('?').join(',')})`);
   let seen = 0, stored = 0, genuine = 0, bad = 0;
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
+  for (const line of complete.split(String.fromCharCode(10))) {
     if (!line.trim()) continue;
     seen++;
     let d;
@@ -259,7 +315,16 @@ export function ingestEvents(db, path) {
     if (r.changes > 0) stored++;
     if (d.probe === false) genuine++;
   }
-  return { file: path, exists: true, seen, stored, genuine, bad };
+
+  db.prepare(`INSERT INTO files (path,size,mtime_ms,bytes_read,lines_read,rewrites,last_harvest_ts)
+    VALUES (?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
+    size=excluded.size, mtime_ms=excluded.mtime_ms, bytes_read=excluded.bytes_read,
+    lines_read=excluded.lines_read, rewrites=excluded.rewrites,
+    last_harvest_ts=excluded.last_harvest_ts`)
+    .run(path, size, Math.round(statSync(path).mtimeMs), consumed, 0,
+         rewound ? 1 : 0, new Date().toISOString());
+
+  return { file: path, exists: true, seen, stored, genuine, bad, from: start, rewound };
 }
 
 /**
@@ -762,8 +827,16 @@ const KNOWN_TYPES = new Set([
 ]);
 
 class Harvest {
-  constructor(db) {
+  constructor(db, opts = {}) {
     this.db = db;
+    // INJECTABLE, so the self-test stops writing into the user's capture directory. It wrote three
+    // synthetic `zzz-brand-new-type` rows into the live data/raw/unknown-records.ndjson on every
+    // run; 1,037 of them had accumulated here, making the fixture the single most common "unknown
+    // record type" the tool reports. hooks/compact-hook.mjs already takes its paths this way.
+    // Read AT CONSTRUCTION rather than at module load, so the self-test can redirect every
+    // instance it makes by setting the variable before it builds them - including instances added
+    // later, which an explicit option at today's one relevant call site would not cover.
+    this.unknownLog = opts.unknownLog ?? process.env.C4X_UNKNOWN_LOG ?? UNKNOWN_LOG;
     this.stmt = {
       getFile: db.prepare('SELECT * FROM files WHERE path = ?'),
       putFile: db.prepare(`INSERT INTO files (path,size,mtime_ms,bytes_read,lines_read,rewrites,last_harvest_ts)
@@ -842,16 +915,41 @@ class Harvest {
 
   countType(t) { this.typeCounts.set(t, (this.typeCounts.get(t) || 0) + 1); }
 
+  /**
+   * Types already in the log on disk, so `first_seen` means what it says.
+   *
+   * The dedup set was per-INSTANCE and never read the file, so every harvest that met a familiar
+   * type appended another row stamped with the current time. Measured here: 4,716 rows of which
+   * 3,679 were real types recorded over and over (981 `pr-link`, 953 `relocated`, 844
+   * `history-suppression`), each asserting a first sighting that had happened months earlier.
+   * The store already holds the correct answer in `record_types`, keyed on the type with a
+   * count, so this file was a duplicate of a correct table AND it was lying.
+   *
+   * Read once and lazily: a harvest that meets nothing unknown never opens it.
+   */
+  seenOnDisk() {
+    if (this.unknownLoaded) return;
+    this.unknownLoaded = true;
+    try {
+      for (const line of readFileSync(this.unknownLog, 'utf8').split(String.fromCharCode(10))) {
+        if (!line.trim()) continue;
+        try { this.unknownSeen.add(JSON.parse(line).type); } catch { /* a torn line is not a type */ }
+      }
+    } catch { /* absent is the normal case on a fresh store */ }
+  }
+
   noteUnknown(type, line) {
+    if (this.unknownSeen.has(type)) return;
+    this.seenOnDisk();
     if (this.unknownSeen.has(type)) return;
     this.unknownSeen.add(type);
     // open() makes this directory, but the self-test runs against an in-memory database and never
     // goes through open(). On a fresh clone, where data/ is gitignored and therefore absent, that
     // turned the FIRST command a new user runs into a stack trace. The writer owns its directory.
-    ensureStoreDir(dirname(UNKNOWN_LOG));
-    appendFileSync(UNKNOWN_LOG, JSON.stringify({
+    ensureStoreDir(dirname(this.unknownLog));
+    appendFileSync(this.unknownLog, JSON.stringify({
       first_seen: new Date().toISOString(), type, sample: line.slice(0, 4000),
-    }) + '\n');
+    }) + String.fromCharCode(10));
   }
 
   async file(path, full) {
@@ -1186,6 +1284,13 @@ function stats() {
 async function selfTest() {
   const tmp = join(ROOT, 'tmp', 'selftest');
   rmSync(tmp, { recursive: true, force: true });
+  // NOTHING THIS FUNCTION DOES MAY TOUCH THE USER'S CAPTURE DIRECTORY. The synthetic
+  // `zzz-brand-new-type` record below is deliberately unknown, so it reached noteUnknown, which
+  // appended it to the LIVE data/raw/unknown-records.ndjson on every run. 1,037 of those rows had
+  // accumulated here, making the test fixture the most common "unknown record type" the tool
+  // reports, on the tab whose job is telling the user what it could not parse.
+  process.env.C4X_UNKNOWN_LOG = join(tmp, 'unknown-records.ndjson');
+  const liveUnknownBefore = existsSync(UNKNOWN_LOG) ? statSync(UNKNOWN_LOG).size : -1;
   mkdirSync(join(tmp, 'projects', 'P--fake'), { recursive: true });
   const tf = join(tmp, 'projects', 'P--fake', 'sess.jsonl');
   const rows = [
@@ -1494,6 +1599,26 @@ async function selfTest() {
   checks.push(['an unparseable event line is counted, not fatal', ev1.bad === 1, String(ev1.bad)]);
   const ev2 = ingestEvents(db, evFile);
   checks.push(['re-ingesting the same file stores nothing new (gate can fail)', ev2.stored === 0, String(ev2.stored)]);
+  // AND IT DOES NOT RE-READ THE FILE TO LEARN THAT. `stored === 0` was already true before the
+  // watermark existed, because INSERT OR IGNORE absorbed every duplicate - so that check passed
+  // just as happily while the whole 44 MB log was being parsed on every one of this install's
+  // 29,049 harvests. `seen` is the number that tells the two apart.
+  checks.push(['and re-ingesting READS nothing (gate can fail)', ev2.seen === 0, String(ev2.seen)]);
+  appendFileSync(evFile, JSON.stringify({ captured_at: '2026-08-22T00:00:02Z', probe: false, event: 'Stop', known: true, session_id: 'wm-append' }) + String.fromCharCode(10));
+  const ev3 = ingestEvents(db, evFile);
+  checks.push(['an appended line is read, and only that one', ev3.seen === 1 && ev3.stored === 1, JSON.stringify(ev3)]);
+  // A line still being written must not be marked consumed, or it is lost for good.
+  appendFileSync(evFile, '{"captured_at":"2026-08-22T00:00:03Z","event":"Pos');
+  const ev4 = ingestEvents(db, evFile);
+  checks.push(['a TORN trailing line is left for next time (gate can fail)', ev4.seen === 0, JSON.stringify(ev4)]);
+  appendFileSync(evFile, 'tToolUse","known":true,"session_id":"wm-torn"}' + String.fromCharCode(10));
+  const ev5 = ingestEvents(db, evFile);
+  checks.push(['and is picked up once it completes', ev5.stored === 1, JSON.stringify(ev5)]);
+  // Smaller than the watermark means cleared or rotated: read it from zero rather than skip it.
+  writeFileSync(evFile, JSON.stringify({ captured_at: '2026-08-22T00:00:04Z', probe: false, event: 'Stop', known: true, session_id: 'wm-shrunk' }) + String.fromCharCode(10));
+  const ev6 = ingestEvents(db, evFile);
+  checks.push(['a SHRUNK log is re-read from zero, not skipped (gate can fail)',
+    ev6.rewound === true && ev6.seen === 1, JSON.stringify(ev6)]);
   checks.push(['a missing event log is zero rows, not an error',
     ingestEvents(db, join(tmp, 'no-such-events.ndjson')).exists === false]);
   checks.push(['probe flag survives into the table',
@@ -1751,9 +1876,33 @@ async function selfTest() {
   const mustFail = !empty.prepare('SELECT * FROM turns WHERE uuid = ?').get('u1');
   checks.push(['negative control: empty store has no turn (gate can fail)', mustFail]);
 
+  // THE SELF-TEST'S OWN FOOTPRINT, asserted rather than assumed. The synthetic unknown record
+  // must have landed in the scratch log and NOT in the live one, and the live file's size must be
+  // exactly what it was when this function started.
+  const scratchLog = join(tmp, 'unknown-records.ndjson');
+  checks.push(['the synthetic unknown type is recorded in the SCRATCH log',
+    existsSync(scratchLog) && readFileSync(scratchLog, 'utf8').includes('zzz-brand-new-type')]);
+  checks.push(['and the live capture log is untouched (gate can fail)',
+    liveUnknownBefore === (existsSync(UNKNOWN_LOG) ? statSync(UNKNOWN_LOG).size : -1)]);
+
+  // first_seen means what it says: a type already on disk is not appended a second time.
+  {
+    const scratchDb = new DatabaseSync(':memory:');
+    scratchDb.exec(SCHEMA);
+    const again = new Harvest(scratchDb, { unknownLog: scratchLog });
+    const before = readFileSync(scratchLog, 'utf8').split(String.fromCharCode(10)).filter(Boolean).length;
+    again.noteUnknown('zzz-brand-new-type', '{}');
+    const after = readFileSync(scratchLog, 'utf8').split(String.fromCharCode(10)).filter(Boolean).length;
+    checks.push(['a type already in the log is NOT re-recorded (gate can fail)', after === before]);
+    again.noteUnknown('zzz-second-new-type', '{}');
+    const third = readFileSync(scratchLog, 'utf8').split(String.fromCharCode(10)).filter(Boolean).length;
+    checks.push(['but a genuinely new type still is', third === before + 1]);
+  }
+
   let bad = 0;
   for (const [name, ok] of checks) { if (!ok) bad++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}`); }
   rmSync(tmp, { recursive: true, force: true });
+  delete process.env.C4X_UNKNOWN_LOG;
   console.log(bad === 0 ? `SELF-TEST PASS (${checks.length} checks)` : `SELF-TEST FAIL (${bad}/${checks.length} failed)`);
   return bad === 0 ? 0 : 1;
 }

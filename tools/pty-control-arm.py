@@ -27,6 +27,8 @@ seconds, killed by pid in the finally block whatever happens.
 
 Exit 0 if the status line ran, 1 if it did not, 2 if the arm could not run.
 """
+import argparse
+import json
 import os
 import re
 import subprocess
@@ -117,7 +119,14 @@ def run_arm():
             else:
                 time.sleep(0.05)
 
-    print('capture file exists BEFORE:', os.path.exists(CAPTURE))
+    # COUNT THE ROWS, DO NOT TEST FOR THE FILE. This arm exists to answer whether a desktop-style
+    # session ever invokes the status line, and the file it watches ALREADY EXISTS on any machine
+    # that has run the status line even once. So `os.path.exists` was true before the spawn, the
+    # settle loop broke instantly, and the run printed "capture file APPEARED" and exited 0 having
+    # measured nothing. The existence test drove the exit code too, so the experiment reported
+    # success on every machine with a sample file.
+    before = _rows()
+    print('genuine rows BEFORE:', before)
     started = time.time()
     p = PtyProcess.spawn(['claude'], cwd=ROOT, dimensions=(40, 130))
     child_pid = p.pid
@@ -141,8 +150,8 @@ def run_arm():
 
         settle_until = time.time() + SETTLE_WAIT
         while time.time() < settle_until and time.time() - started < HARD_DEADLINE:
-            if os.path.exists(CAPTURE):
-                print('capture file APPEARED at t+%.1fs' % (time.time() - started))
+            if _rows() > before:
+                print('a NEW genuine row appeared at t+%.1fs' % (time.time() - started))
                 time.sleep(2)
                 break
             time.sleep(0.5)
@@ -150,8 +159,12 @@ def run_arm():
         stop.set()
         try:
             p.terminate(force=True)
+        except PermissionError as exc:
+            # WinError 5 on this machine. Reported and then handled: the taskkill below is the
+            # fallback, and the liveness check after it is what proves the child actually went.
+            print('terminate raised, falling back to taskkill:', exc)
         except Exception as exc:
-            print('terminate raised:', exc)
+            print('terminate raised, falling back to taskkill:', exc)
         # Belt and braces: terminate did not take on the first run here and
         # left an orphaned claude.exe behind.
         subprocess.run(['taskkill', '/PID', str(child_pid), '/T', '/F'],
@@ -170,16 +183,60 @@ def run_arm():
             print('  ' + line[:126])
 
     print('=== result ===')
-    print('capture file exists AFTER:', os.path.exists(CAPTURE))
-    if os.path.exists(CAPTURE):
-        with open(CAPTURE, encoding='utf-8') as fh:
-            rows = [row for row in fh if row.strip()]
-        print('rows written:', len(rows))
-        print('first row:', rows[0][:300] if rows else '(none)')
+    after = _rows()
+    print('genuine rows AFTER:', after, '(before:', before, ')')
+    if after > before:
+        print(f'{after - before} NEW genuine row(s). The status line ran in this arm.')
         return 0
-    print('NO CAPTURE FILE. The status line did not run in this arm either.')
+    print('NO NEW GENUINE ROW. The status line did not run in this arm.')
     return 1
 
 
+def _rows():
+    """Genuine status-line samples currently on disk.
+
+    Genuine, not total: `probe: true` marks a row this repo's own tooling wrote, and counting those
+    would let the experiment satisfy itself. Missing file is zero, which is a real answer here.
+    """
+    try:
+        with open(CAPTURE, encoding='utf-8') as fh:
+            n = 0
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    if json.loads(line).get('probe') is False:
+                        n += 1
+                except ValueError:
+                    continue
+            return n
+    except OSError:
+        return 0
+
+
+def main(argv=None):
+    """Arguments, because ANY argument used to run the experiment.
+
+    `sys.exit(self_test() if '--self-test' in sys.argv else run_arm())` meant `--help` spawned a
+    real Claude Code session and answered its trust dialog. A tool whose help text is a side effect
+    is a tool nobody can safely inspect.
+    """
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--run', action='store_true',
+                    help='SPAWNS A REAL CLAUDE CODE SESSION in a pty and answers its trust dialog')
+    ap.add_argument('--self-test', action='store_true', help='check the parsing, spawn nothing')
+    args = ap.parse_args(argv)
+    if args.self_test:
+        return self_test()
+    if args.run:
+        return run_arm()
+    ap.print_help()
+    print()
+    print('Nothing was run. This experiment spawns a real session, so it needs --run.')
+    return 0
+
+
 if __name__ == '__main__':
-    sys.exit(self_test() if '--self-test' in sys.argv else run_arm())
+    sys.exit(main())
