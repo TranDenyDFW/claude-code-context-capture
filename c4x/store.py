@@ -164,6 +164,28 @@ def q(sql: str, params=()) -> pd.DataFrame:
         con.close()
 
 
+def tables_present(*names) -> bool:
+    """Whether EVERY named table exists. One round trip, no query against the tables themselves.
+
+    For a family of tables that is created together and is meaningless apart. `tools/probe.mjs`
+    writes `probes` and its three child tables in one `ensureProbeSchema`, so a store either has
+    the set or has none of it - but nothing enforces that, and guarding only the parent query left
+    the children to raise. Proved by dropping one child from a fixture that had probe rows: the
+    Window tab's Configuration panel went straight back to an exception panel.
+    """
+    if not DB_PATH.exists():
+        return False
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    try:
+        have = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}
+    except sqlite3.Error:
+        return False
+    finally:
+        con.close()
+    return set(names) <= have
+
+
 def q_optional(sql: str, params=(), columns=()) -> pd.DataFrame:
     """`q`, but a table that was never created reads as "nothing here yet".
 
