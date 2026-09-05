@@ -682,15 +682,39 @@ def exercise(name, errors, exercised, call, hits=None, walked=None):
 RENDER_ONLY = False
 
 
+class CannotAudit(Exception):
+    """The store does not hold what this audit needs to say anything.
+
+    NOT the same as a failure, and not the same as a pass. On a store with no compactions the audit
+    used to raise IndexError out of `.iloc[0]` and the runner reported a traceback, which reads as
+    a broken audit rather than an unauditable store - the exact confusion this file exists to
+    prevent everywhere else. But it must not print AUDIT PASS either: `tools/run_tests.mjs:14`
+    states the rule this repo runs on, that a check which could not run is a FAILURE and never a
+    warning. So it declines, out loud, with the reason and a distinct exit code, and the runner
+    turns that into a SKIPPED row that still fails under --strict.
+    """
+
+
+def one(frame, column, why):
+    """The first value of a column, or a decline naming what the store would need."""
+    if frame.empty:
+        raise CannotAudit(why)
+    return frame.iloc[0][column]
+
+
 def main():
     hits, errors, exercised = [], [], set()
     built, chain, constructed, walked = set(), set(), {}, set()
 
-    session_id = m.q("""SELECT session_id FROM compactions GROUP BY 1
-                        ORDER BY COUNT(*) DESC LIMIT 1""").iloc[0]["session_id"]
-    other = m.q("""SELECT session_id FROM api_calls WHERE session_id != ?
+    session_id = one(m.q("""SELECT session_id FROM compactions GROUP BY 1
+                        ORDER BY COUNT(*) DESC LIMIT 1"""), "session_id",
+                     "this store records no compaction, and every selection case below is built "
+                     "around a session that has one. Build a fixture: "
+                     "node tools/make_fixture.mjs --out tmp/fixture.db")
+    other = one(m.q("""SELECT session_id FROM api_calls WHERE session_id != ?
                    GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1""",
-                (session_id,)).iloc[0]["session_id"]
+                    (session_id,)), "session_id",
+                "this store holds only one session, so the second-session cases cannot be built")
     cohorts = [o["value"] for o in m.cohort_options()
                if str(o["value"]).startswith("section::")]
     cohort = cohorts[0] if cohorts else None
@@ -704,7 +728,8 @@ def main():
             break
     if uuid is None:
         errors.append("no compaction with dropped rows, so the detail table was never audited")
-    message_uuid = m.q("SELECT uuid FROM messages ORDER BY rowid DESC LIMIT 1").iloc[0]["uuid"]
+    message_uuid = one(m.q("SELECT uuid FROM messages ORDER BY rowid DESC LIMIT 1"), "uuid",
+                       "this store holds no message, so the message drawer cannot be opened")
 
     # An early scan, only to learn WHICH functions to wrap before exercising begins. The
     # authoritative scan happens afterwards, once every module the app touches has been imported.
@@ -1142,4 +1167,12 @@ def self_test():
 
 if __name__ == "__main__":
     RENDER_ONLY = "--render-only" in sys.argv
-    sys.exit(self_test() if "--self-test" in sys.argv else main())
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
+    try:
+        sys.exit(main())
+    except CannotAudit as why:
+        # Exit 3 and a marker of its own, so the runner can tell "this store cannot answer" from
+        # "this audit is broken". Both are non-zero: neither is a pass.
+        print(f"AUDIT SKIPPED: {why}")
+        sys.exit(3)

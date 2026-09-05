@@ -396,7 +396,20 @@ if (NODE_ONLY) {
     const text = plain(run.stdout) + plain(run.stderr);
     const match = text.match(CHECKS);
     const count = match ? Number(match[1] ?? match[2]) : null;
-    if (run.status !== 0 || run.signal) {
+    // EXIT 3 IS "THIS STORE CANNOT ANSWER", which is not the same as a broken check and not the
+    // same as a pass. Until this existed the runner had no graceful decline at all: a non-zero exit
+    // was FAIL and an exit 0 without the marker was also FAIL, so a tool facing a store too small to
+    // audit could only report a traceback. That is how `table_audit.py` presented an empty
+    // `compactions` table as a crash. The child names the reason and it is printed here verbatim,
+    // and SKIPPED still fails under --strict, so the rule at the top of this file holds: a check
+    // that could not run is never quietly a pass.
+    const declined = run.status === 3 && /SKIPPED/.test(text);
+    if (declined) {
+      skipped++;
+      const why = (text.match(/^.*SKIPPED:\s*(.+)$/m) || [, 'no reason given'])[1];
+      results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
+                     note: why.trim().slice(0, 200) });
+    } else if (run.status !== 0 || run.signal) {
       failed++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
                      note: run.signal ? `killed after 300s (${run.signal})` : `exit ${run.status}`,
