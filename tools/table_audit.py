@@ -133,7 +133,8 @@ PROSE_MIN_LENGTH = 40
 
 # _render_tab catches a failing pane and renders the exception rather than raising, which is right
 # for a dashboard and would let this audit call a broken tab a success.
-RENDER_FAILED = "could not be rendered"
+# One definition, in c4x/theme.py, shared with the two callbacks that PRODUCE it.
+from c4x.theme import RENDER_FAILED  # noqa: E402
 
 
 def app_files():
