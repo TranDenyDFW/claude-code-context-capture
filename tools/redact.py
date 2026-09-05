@@ -14,7 +14,7 @@ remove and fails if any survived. A flag scattered across the render path cannot
 way, which is the whole argument.
 
     python tools/redact.py                       # data/context.db  ->  tmp/demo-store.db
-    C4X_DB=tmp/demo-store.db python app.py       # the dashboard, over the copy
+    C4X_DB=tmp/demo-store.db python -m c4x.api   # the dashboard, over the copy
     python tools/screenshots.py                  # photograph it
 
 The mapping is DETERMINISTIC and rank-ordered, so the same store always produces the same names and
@@ -24,6 +24,7 @@ after a UI change therefore produces images that differ only where the UI change
 The original store is opened read-only and is never written to.
 """
 import argparse
+import hashlib
 import os
 import re
 import sqlite3
@@ -222,7 +223,7 @@ def sweep(db, maps):
                         break
                 suffix = ".jsonl" if value.endswith(".jsonl") else ""
                 changes[value] = (f"/work/{stem or 'redacted'}/"
-                                  f"{abs(hash(value)) % 100000}{suffix}")
+                                  f"{stable_id(value)}{suffix}")
             if changes:
                 touched[f"{table}.{column} (swept)"] = _map_update(db, table, column, changes)
     return touched
@@ -242,6 +243,26 @@ def _map_update(db, table, column, mapping):
 
 def _has(db, table, column):
     return any(r[1] == column for r in db.execute(f"PRAGMA table_info({table})"))
+
+
+def stable_id(value: str) -> str:
+    """A five-digit stand-in that is the same on every run, on every machine.
+
+    `abs(hash(value)) % 100000` was NOT that, and the docstring at the top of this file promised it
+    was: "The mapping is DETERMINISTIC ... the same store always produces the same names.
+    Regenerating the images after a UI change therefore produces images that differ only where the
+    UI changed."
+
+    CPython salts `str.__hash__` per process (PEP 456), so that expression is a property of the
+    RUN, not of the value. Measured: three processes, one input, three answers. Every value that
+    reached the sweep got a new stand-in each time, so a regenerated screenshot set differed
+    everywhere those paths appeared and the diff could not be read. The targeted maps above were
+    fine; this was the fallback, which is exactly the path nobody looks at.
+
+    blake2s rather than the built-in hash, because a digest is defined by its input alone.
+    """
+    return str(int(hashlib.blake2s(value.encode("utf-8"), digest_size=8).hexdigest()[:8], 16)
+               % 100000)
 
 
 def leaks(db, needles):
@@ -347,9 +368,52 @@ def main(argv=None):
         print("\nthe copy was written but MUST NOT be photographed")
         return 1
     print(f"\nclean: no real project path, server, title or user name survives in {out}")
-    print(f"  C4X_DB={out} python app.py")
+    print(f"  C4X_DB={out} python -m c4x.api")
     return 0
 
 
+def self_test() -> int:
+    """The checks this file never had, on the tool that decides what leaves the machine.
+
+    It was outside `tools/run_tests.mjs`'s Python list, so nothing here had ever been exercised by
+    anything, on the one path where a mistake is published rather than merely wrong.
+    """
+    checks = []
+
+    def add(what, ok, detail=""):
+        checks.append((what, ok, detail))
+
+    # THE DEFECT THIS FILE'S OWN DOCSTRING PROMISED WAS IMPOSSIBLE.
+    same = stable_id("C:/Users/Someone/x.jsonl")
+    add("a stand-in is stable within a process", stable_id("C:/Users/Someone/x.jsonl") == same)
+    add("different values get different stand-ins", stable_id("a") != stable_id("b"))
+    add("a stand-in is five digits or fewer", same.isdigit() and len(same) <= 5, same)
+    # Pinned, so a future change of algorithm is a decision rather than an accident. If this fails
+    # the screenshots regenerate wholesale, which is the cost the determinism claim exists to avoid.
+    add("and it is the SAME value across runs and machines (gate can fail)",
+        stable_id("C:/Users/Shake/x.jsonl") == "51421", stable_id("C:/Users/Shake/x.jsonl"))
+
+    # The leak gate, fed something it must catch and something it must not.
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE t (path TEXT, n INTEGER)")
+    con.execute("INSERT INTO t VALUES (?, 1)", ("C:/Users/Shake/secret.jsonl",))
+    con.execute("INSERT INTO t VALUES (?, 2)", ("/work/project-a/12345.jsonl",))
+    hits = leaks(con, ["Shake"])
+    add("a surviving real fragment is REPORTED (gate can fail)", len(hits) >= 1, str(hits)[:120])
+    add("a redacted value is not", not any("project-a" in str(h) for h in hits), str(hits)[:120])
+    # Case-exact, which is deliberate: lowercasing matched a user name inside an opaque request id.
+    add("the needle match is case-exact", not leaks(con, ["shake"]))
+    con.close()
+
+    bad = 0
+    for what, ok, detail in checks:
+        if not ok:
+            bad += 1
+        print(f"{'PASS' if ok else 'FAIL'}  {what}" + ("" if ok else f"   [{detail}]"))
+    print(f"SELF-TEST {'FAIL' if bad else 'PASS'} "
+          f"({f'{bad}/{len(checks)} failed' if bad else f'{len(checks)} checks'})")
+    return 1 if bad else 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(self_test() if "--self-test" in sys.argv else main())

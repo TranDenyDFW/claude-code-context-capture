@@ -15,7 +15,7 @@
     "harvest": "node tools/harvest.mjs",
     "install-hooks": "node tools/install.mjs install",
     "uninstall-hooks": "node tools/install.mjs uninstall",
-    "app": "python app.py",
+    "app": "python -m c4x.api",
     "lint": "eslint ."
   },
   "comments": {

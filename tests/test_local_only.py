@@ -166,6 +166,19 @@ def test_an_export_whose_tables_exceed_its_digests_is_refused(tmp_path):
     assert projects.carried_tables(projects.read_manifest(forged)) == ["sessions"]
 
 
+def test_a_manifest_that_claims_nothing_is_refused(tmp_path):
+    """`verify` returning True must mean something was checked.
+
+    With no digests there is nothing to recompute, every set comparison holds trivially, and the
+    function returned True over a file it had not examined. The import then wrote nothing and the
+    user was told it verified. Found by adversarially testing the set-comparison fix itself.
+    """
+    hollow = make_export(tmp_path / "hollow.db", {}, {}, [], {"sessions": "session_id TEXT"})
+    ok, problems = projects.verify(hollow)
+    assert not ok, "a manifest with no digested tables verified clean"
+    assert any("nothing to verify" in p for p in problems), problems
+
+
 def test_a_manifest_naming_a_table_this_store_does_not_export_is_refused(tmp_path):
     """The second, independent guard: an allow-list, because the name reaches SQL as an identifier.
 

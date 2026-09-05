@@ -126,6 +126,23 @@ export function capture(raw, outPath = OUT, isProbe = (outPath === DEFAULT_OUT ?
   // concurrent renders.
   appendFileSync(outPath, JSON.stringify({
     captured_at: new Date().toISOString(), probe: isProbe,
+    // PROVENANCE AS A THIRD STATE, not a fourth meaning for `probe`.
+    //
+    // `probe` says whether WE redirected the output, so a hand-run smoke test with no override
+    // is stored as genuine and counts toward the live-capture total. That has already been
+    // mistaken for evidence twice, which is why the flag exists at all. The docblock above says
+    // CLAUDE_CODE_SESSION_ID can be cross-checked against the payload's session_id; the code
+    // never did it.
+    //
+    // It is recorded rather than folded into `probe` because they answer different questions and
+    // null is a real answer to this one: a surface that sets no session variable is not lying,
+    // it simply cannot be checked. Reclassifying those as probes would understate genuine
+    // capture, which is the error this whole file exists to avoid.
+    session_match: (() => {
+      const env = process.env.CLAUDE_CODE_SESSION_ID ?? null;
+      const said = raw?.session_id ?? null;
+      return env === null || said === null ? null : env === said;
+    })(),
     pid: process.pid, ppid: process.ppid, env: claudeEnv(), payload: raw,
   }) + '\n');
 }
@@ -139,7 +156,7 @@ export function report(outPath = DEFAULT_OUT) {
   } catch {
     return { file: outPath, exists: false, total: 0, genuine: 0, probes: 0, unmarked: 0, sessions: [] };
   }
-  let genuine = 0, probes = 0, unmarked = 0, bad = 0;
+  let genuine = 0, probes = 0, unmarked = 0, bad = 0, mismatched = 0;
   const sessions = new Map();
   let firstGenuine = null, lastGenuine = null;
   for (const l of lines) {
@@ -151,6 +168,9 @@ export function report(outPath = DEFAULT_OUT) {
     // separately rather than assumed genuine, which is the mistake that made this necessary.
     if (d.probe === undefined) { unmarked++; continue; }
     if (d.probe) { probes++; continue; }
+    // A row whose environment named a DIFFERENT session than its payload did was not written by
+    // the session it claims. Counted apart rather than as genuine.
+    if (d.session_match === false) { mismatched++; continue; }
     genuine++;
     const sid = d.payload?.session_id ?? 'unknown';
     sessions.set(sid, (sessions.get(sid) || 0) + 1);
@@ -166,7 +186,8 @@ export function report(outPath = DEFAULT_OUT) {
     ? Math.floor((Date.now() - Date.parse(lastGenuine)) / 86400000)
     : null;
   return {
-    file: outPath, exists: true, total: lines.length, genuine, probes, unmarked, unparseable: bad,
+    file: outPath, exists: true, total: lines.length, genuine, probes, unmarked, mismatched,
+    unparseable: bad,
     distinct_genuine_sessions: sessions.size,
     sessions: [...sessions.entries()].map(([id, n]) => ({ session: id, samples: n })),
     first_genuine: firstGenuine, last_genuine: lastGenuine,
@@ -391,6 +412,26 @@ function selfTest() {
         String(fresh.genuine_age_days));
       add('and the count is unchanged by the age question', fresh.genuine === 2);
     } finally { rmSync(aged, { force: true }); }
+  }
+
+  // PROVENANCE. A row whose environment named a different session than its payload did is not
+  // the session it claims to be, and must not be counted as genuine capture.
+  {
+    const f = join(ROOT, 'tmp', `statusline-prov-${process.pid}.ndjson`);
+    const row = (o) => JSON.stringify({ captured_at: new Date().toISOString(), probe: false,
+      payload: { session_id: 's1' }, ...o }) + NL;
+    try {
+      rmSync(f, { force: true });
+      appendFileSync(f, row({ session_match: true }));
+      appendFileSync(f, row({ session_match: null }));
+      appendFileSync(f, row({ session_match: false }));
+      const r = report(f);
+      add('a matching row counts as genuine', r.genuine >= 1, JSON.stringify(r.genuine));
+      add('an UNCHECKABLE row still counts as genuine, not as a probe',
+        r.genuine === 2, `${r.genuine} genuine, ${r.probes} probes`);
+      add('a MISMATCHED row is counted apart (gate can fail)',
+        r.mismatched === 1 && r.genuine === 2, JSON.stringify({ g: r.genuine, m: r.mismatched }));
+    } finally { rmSync(f, { force: true }); }
   }
 
   let bad = 0;

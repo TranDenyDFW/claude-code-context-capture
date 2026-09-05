@@ -19,6 +19,20 @@ export function rootFrom(importMetaUrl) {
   return join(dirname(new URL(importMetaUrl).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 }
 
+/**
+ * A path as the docs and the receipt spell it: forward slashes, everywhere it is PRINTED.
+ *
+ * This existed as a module-private one-liner in install.mjs, so every other tool printed whatever
+ * the platform handed it. The result is one store described two ways in the same session, and in
+ * otel-ingest's case two ways five lines apart, which reads as two different files.
+ *
+ * For DISPLAY and for the settings file, never for opening anything: Windows accepts both, and
+ * rewriting a path before passing it to the filesystem is how a normaliser becomes a bug.
+ */
+export function posix(p) {
+  return String(p).split(String.fromCharCode(92)).join('/');
+}
+
 export function defaultDb(root) {
   return join(root, 'data', 'context.db');
 }
