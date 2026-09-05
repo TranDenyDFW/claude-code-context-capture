@@ -230,7 +230,7 @@ sessions against 303 makes every total larger for a reason that says nothing.
 Every table on the page prints the query that produced it, and so does the dump:
 
 ```bash
-python -m c4x.cli dump --tab tab-cost | grep -A 12 "The query behind"
+python -m c4x.cli dump --tab tab-cost | grep -A 12 "Query"
 sqlite3 data/context.db
 ```
 

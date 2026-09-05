@@ -883,6 +883,22 @@ def compaction_kept_count(compaction_uuid: str) -> int:
     return int(df.iloc[0]["n"]) if not df.empty else 0
 
 
+def compaction_exists(compaction_uuid: str) -> bool:
+    """Whether this store holds a boundary with that uuid.
+
+    THE TEST IS EXISTENCE, NOT WHETHER A SUMMARY WAS FOUND, and the difference is a real state
+    rather than a nicety. `compactions.summary_uuid` is NULL for a boundary whose summary message
+    was never harvested, `overview_stats` counts those as `unpaired` and puts the number on the
+    page, and the detail route deliberately answers `"summary": null` for one. Gating the 404 on an
+    empty summary would delete the only surface that reports it.
+
+    This store happens to hold zero unpaired boundaries today, so that wrong version would look
+    entirely correct on the machine it was written on.
+    """
+    df = q("SELECT 1 FROM compactions WHERE uuid = ? LIMIT 1", (compaction_uuid,))
+    return not df.empty
+
+
 def compaction_survivors_recorded(compaction_uuid: str) -> int:
     """How many survivors the BOUNDARY recorded, which is what its own row reports.
 

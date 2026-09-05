@@ -218,6 +218,15 @@ def verify(path):
     # `carried` list (see export()), so disagreement is either corruption or a file built to be
     # verified on one set and applied to another. Either way it is refused before anything opens.
     digested = set((manifest.get("digests") or {}).keys())
+    # A MANIFEST THAT CLAIMS NOTHING SATISFIES EVERY CHECK BELOW VACUOUSLY. With no digests there is
+    # nothing to recompute, the set comparisons hold trivially, and `verify` returned True over a
+    # file it had not examined at all - then the import wrote nothing and told the user it had
+    # verified. Harmless in outcome and wrong in what it asserts, which is the failure this whole
+    # function exists to prevent. Found while adversarially testing the fix that added those set
+    # comparisons in the first place.
+    if not digested:
+        return False, [f"{path} carries a manifest with no digested tables, so there is nothing to "
+                       "verify. A c4x export always digests every table it carries."]
     counted = set((manifest.get("counts") or {}).keys())
     listed = set(manifest.get("tables") or [])
     for name, seen in (("counts", counted), ("tables", listed)):

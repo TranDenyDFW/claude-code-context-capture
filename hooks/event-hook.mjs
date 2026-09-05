@@ -36,6 +36,13 @@ const OUT_OVERRIDE = process.env.C4X_EVENTS_OUT || null;
 const OUT = OUT_OVERRIDE || DEFAULT_OUT;
 const IS_PROBE = Boolean(OUT_OVERRIDE);
 
+// AN OPT-OUT, because this is the one place the tool edits a file it does not own. applyHeal
+// rewrites ~/.claude/settings.json unattended on SessionStart, and its own docstring calls it "the
+// most dangerous writer in the repo". Anyone who manages that file another way - a dotfiles repo, a
+// config manager, a deliberate divergence - needs a way to say no that is not uninstalling capture
+// altogether. Set C4X_NO_SELF_HEAL=1 and the wiring is left exactly as found.
+const NO_SELF_HEAL = process.env.C4X_NO_SELF_HEAL === '1';
+
 // One event is a lifecycle marker, not a transcript. Anything past this is the payload carrying
 // content we already have in the transcript, so it is cut rather than duplicated into this file.
 const MAX_PAYLOAD_BYTES = 16 * 1024;
@@ -414,7 +421,7 @@ else if (process.argv.includes('--self-test')) {
       if (!IS_PROBE) {
         const event = payload?.hook_event_name;
 
-        if (event === 'SessionStart') {
+        if (event === 'SessionStart' && !NO_SELF_HEAL) {
           // Each in its own try: a failed repair must not stop the harvest, and vice versa.
           try {
             const repaired = applyHeal();

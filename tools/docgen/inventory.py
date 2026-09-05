@@ -243,7 +243,7 @@ def main(argv=None):
         written = walk(args.url, Path(args.out), args.settle, only)
     except Exception as exc:                        # noqa: BLE001 - report, do not traceback
         print(f"could not walk {args.url}: {type(exc).__name__}: {exc}")
-        print("is the dashboard running?  python app.py")
+        print("is the dashboard running?  python -m c4x.api")
         return 1
 
     total = 0

@@ -26,6 +26,7 @@ from c4x.theme import (
     fmt_bytes,
     fmt_tokens,
     header_help,
+    short_path,
     stat_card,
 )
 
@@ -186,7 +187,11 @@ def project_totals_fig() -> go.Figure:
     fig.update_layout(barmode="stack", title="Tool Bytes by Project",
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="Bytes Returned by Tools", yaxis_title="")
-    fig.update_yaxes(autorange="reversed")
+    # The categories stay the FULL path, so %{y} in the hovertemplate above still reports it and
+    # nothing downstream matches on a shortened string. Only the tick text is abbreviated, and
+    # automargin lets the axis size itself to what is left rather than to a hard-coded margin.
+    fig.update_yaxes(autorange="reversed", tickvals=top,
+                     ticktext=[short_path(p) for p in top], automargin=True)
     return fig
 
 

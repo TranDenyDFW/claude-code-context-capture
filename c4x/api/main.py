@@ -150,7 +150,7 @@ def _pane(tab_id, session, scope, cohort, compare_with=None, compare_kind="sessi
 def health():
     from c4x import store
     return {"ok": True,
-            "db": str(store.DB_PATH),
+            "db": store.DB_PATH.as_posix(),
             # TWO SEPARATE FACTS, reported separately on purpose. `read_only` means this process
             # never harvests and is always true here. `writes_enabled` means the export, import and
             # delete routes will answer. Collapsing them into one flag would leave the UI unable to
@@ -1021,11 +1021,20 @@ def compaction(uuid: str, limit: int = Query(300, ge=1, le=5000)):
     from c4x.store import (
         compaction_dropped,
         compaction_dropped_count,
+        compaction_exists,
         compaction_kept,
         compaction_kept_count,
         compaction_summary_text,
         compaction_survivors_recorded,
     )
+    if not compaction_exists(uuid):
+        # 404 rather than an empty shape. The route used to build its payload unconditionally, so a
+        # uuid this store has never seen came back as HTTP 200 carrying `"summary": null` and empty
+        # kept/dropped sets - which is INDISTINGUISHABLE from a real boundary whose summary was
+        # never harvested, and both surfaces render it as a factual statement about a compaction
+        # that does not exist. Two other routes in this file already 404 on an unknown key.
+        raise HTTPException(status_code=404,
+                            detail={"error": f"unknown compaction {uuid!r}"})
     summary = compaction_summary_text(uuid)
     dropped = compaction_dropped(uuid, limit=limit)
     kept = compaction_kept(uuid, limit=limit)
@@ -1162,7 +1171,8 @@ def shutdown(request: Request, reason: str = Query("user hit /__shutdown__"),
 def legacy_health():
     """The dashboard's health shape, kept so anything watching for it still works."""
     from c4x import store
-    return {"ok": True, "db": str(store.DB_PATH), "port": int(os.environ.get("C4X_API_PORT", 8059))}
+    return {"ok": True, "db": store.DB_PATH.as_posix(),
+            "port": int(os.environ.get("C4X_API_PORT", 8059))}
 
 
 class _Predict(BaseModel):

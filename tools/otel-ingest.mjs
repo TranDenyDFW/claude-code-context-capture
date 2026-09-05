@@ -27,7 +27,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { rootFrom, resolveDb, ensureStoreDir } from './paths.mjs';
+import { rootFrom, resolveDb, ensureStoreDir, posix } from './paths.mjs';
 
 import { inspectBody } from './otel-gate.mjs';
 
@@ -198,13 +198,13 @@ function cmdStatus(argv) {
   console.log(`OTEL var     : ${envVar ? envVar : 'not set in THIS process'}`);
   console.log(`C4X_OTEL_BODIES : ${armed ? '1 (ingest permitted)' : 'not set (ingest refuses)'}`);
 
-  if (!existsSync(dbPath)) { console.log(`store        : ${dbPath} (not created yet)`); return files.length ? 1 : 0; }
+  if (!existsSync(dbPath)) { console.log(`store        : ${posix(dbPath)} (not created yet)`); return files.length ? 1 : 0; }
   const db = new DatabaseSync(dbPath);
   db.exec(BUSY_TIMEOUT);
   db.exec(SCHEMA);
   const b = db.prepare('SELECT COUNT(*) c, COALESCE(SUM(probe),0) p FROM request_bodies').get();
   const t = db.prepare('SELECT COUNT(*) c, COUNT(DISTINCT tool_name) d, COALESCE(SUM(schema_bytes),0) s FROM tool_schemas').get();
-  console.log(`store        : ${dbPath}`);
+  console.log(`store        : ${posix(dbPath)}`);
   console.log(`  bodies ingested : ${b.c}  (${b.p} from gate probe runs)`);
   console.log(`  tool rows       : ${t.c} across ${t.d} distinct tools, ${(t.s / 1024).toFixed(1)} KB of schema`);
   if (t.d) {

@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { rootFrom, defaultDb, ensureStoreDir } from './paths.mjs';
+import { rootFrom, defaultDb, ensureStoreDir, posix } from './paths.mjs';
 import { report, STALE_AFTER_DAYS } from './statusline.mjs';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -47,7 +47,6 @@ const RECEIPT_VERSION = 1;
 
 // Settings hold forward-slash paths even on Windows: backslashes would need escaping inside a
 // JSON string and inside the shell word, and one of the two always gets forgotten.
-const posix = (p) => String(p).replace(/\\/g, '/');
 const mib = (n) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GB` : `${Math.round(n / (1 << 20))} MB`);
 
 // UserPromptSubmit is deliberately matcher-less: the event does not support a matcher at all, and
@@ -278,6 +277,26 @@ export function audit(settings, root, { rootExists = true, exists = existsSync }
     if (w.matcher === null && mine.some((g) => 'matcher' in g) && w.event === 'UserPromptSubmit') {
       findings.push({ level: 'warn', event: w.event, why: 'carries a matcher, which this event does not support' });
     }
+    // DRIFT IN THE COMMAND ITSELF, which nothing compared. `ownsCommand` only asks whether the
+    // string mentions one of our scripts, so a hook wired with a different interpreter, a stale
+    // absolute path to a node that has since been upgraded away, or an edited timeout, all read as
+    // correctly installed. `applyWiring` would rewrite it on the next install; until then `status`
+    // said HEALTHY over a command that may not run.
+    //
+    // DETECTION, NOT A PIN. Writing `process.execPath` into settings.json instead of `node` was the
+    // obvious fix and is the wrong one: it hard-codes one interpreter into a file that outlives it,
+    // so an nvm or fnm switch, or any node upgrade, leaves a command pointing at a binary that is
+    // gone - and that failure looks exactly like the one this is meant to catch. Relying on PATH is
+    // the more durable choice; noticing when the string is no longer what we would write is the
+    // check that was missing.
+    const want = cmdFor(root, w.script);
+    const drifted = mine.flatMap((g) => g.hooks ?? [])
+      .filter((h) => ownsCommand(h?.command, root) && h.command !== want);
+    if (drifted.length) {
+      findings.push({ level: 'warn', event: w.event,
+                      why: `wired as ${JSON.stringify(drifted[0].command)} but this install writes `
+                         + `${JSON.stringify(want)}. Re-run install to bring it back in step.` });
+    }
   }
 
   // A DEAD ROOT, NAMED. `rootExists` used to carry this, and it could never fire: cmdStatus passed
@@ -449,8 +468,15 @@ function looseGrants(dir) {
  * 4 MB a day, and `status` is advertised as a script gate, so line-counting it would put an
  * unbounded read inside the fast command. `hook_events` holds the same rows, indexed.
  */
+// Printed beside the self-heal line so the opt-out is discoverable at the moment it is relevant,
+// rather than only in the source that reads it.
+const NO_SELF_HEAL_HINT = process.env.C4X_NO_SELF_HEAL === '1'
+  ? '  (disabled by C4X_NO_SELF_HEAL=1)'
+  : '  (set C4X_NO_SELF_HEAL=1 to stop it)';
+
 function captureLiveness(root) {
-  const out = { events: null, lastEvent: null, samples: null, lastSample: null, ageDays: null };
+  const out = { events: null, lastEvent: null, samples: null, lastSample: null, ageDays: null,
+                lastHeal: null };
   try {
     const r = report(join(root, 'data', 'raw', 'statusline.ndjson'));
     if (r.exists) { out.samples = r.genuine; out.lastSample = r.last_genuine; out.ageDays = r.genuine_age_days; }
@@ -463,6 +489,13 @@ function captureLiveness(root) {
       const row = con.prepare('SELECT COUNT(*) n, MAX(captured_at) last FROM hook_events').get();
       out.events = row?.n ?? 0;
       out.lastEvent = row?.last ?? null;
+      // WHEN THIS TOOL LAST EDITED YOUR SETTINGS. The SessionStart self-heal rewrites
+      // ~/.claude/settings.json unattended and records itself in hook_events.reason, which is a
+      // good instinct spoiled by nothing ever reading it back. A tool that edits a file it does
+      // not own should say when it last did.
+      const heal = con.prepare(
+        "SELECT MAX(captured_at) last FROM hook_events WHERE reason LIKE 'c4x self-heal%'").get();
+      out.lastHeal = heal?.last ?? null;
     } finally { con.close(); }
   } catch { /* a store mid-migration is not a status failure */ }
   return out;
@@ -495,6 +528,8 @@ function cmdStatus() {
   };
   console.log(`hook capture : ${live.events === null ? 'no store yet' : `${live.events.toLocaleString()} events, last ${ago(live.lastEvent)}`}`);
   console.log(`status line  : ${live.samples === null ? 'no samples file' : `${live.samples.toLocaleString()} genuine samples, last ${ago(live.lastSample)}`}`);
+  console.log(`self-heal    : ${live.lastHeal ? `last rewrote ${posix(SETTINGS)} ${ago(live.lastHeal)}`
+    : 'never rewrote your settings'}${NO_SELF_HEAL_HINT}`);
   if (live.events > 0 && live.samples === 0) {
     findings.push({ level: 'warn', event: 'statusLine',
                     why: `never fired, while the hooks captured ${live.events.toLocaleString()} `
@@ -849,6 +884,19 @@ function selfTest() {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  }
+
+  // COMMAND DRIFT: a hook that mentions our script but is not the string we would write.
+  {
+    const drifted = JSON.parse(JSON.stringify(good));
+    const ev = WIRING[0].event;
+    drifted.hooks[ev][0].hooks[0].command = `"C:/old/node.exe" "${R}/${WIRING[0].script}"`;
+    const f = audit(drifted, R, { exists: live });
+    add('a hook wired with a different interpreter is REPORTED (gate can fail)',
+      f.some((x) => x.event === ev && x.why.includes('but this install writes')),
+      JSON.stringify(f.map((x) => x.why.slice(0, 40))));
+    add('and the unmodified config still reports no drift',
+      !audit(good, R, { exists: live }).some((x) => x.why.includes('but this install writes')));
   }
 
   // DEAD WIRING: found, evicted, and NOT confused with a live sibling.
