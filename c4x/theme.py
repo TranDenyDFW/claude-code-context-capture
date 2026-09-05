@@ -562,6 +562,20 @@ def column_label(column_id) -> str:
     return " ".join(cased(w, i == 0) for i, w in enumerate(words))
 
 
+# THE MARKER A FAILED TAB CARRIES, defined once because it had two producers and five readers.
+#
+# `c4x/ui/callbacks/navigation.py` and `c4x/ui/callbacks/window.py` both build the apology panel a
+# raised tab renders instead of content, and both spelled this string out. `tools/table_audit.py`
+# kept its own copy to detect it. Two producers of one fact is how a rename lands on one of them:
+# the audits would have gone quiet and reported PASS over every broken tab, which is precisely the
+# failure the audits exist to catch.
+#
+# The TESTS keep their own literals on purpose. A test that imports the constant it is checking
+# cannot notice the constant changing, and what a reader sees on screen is worth asserting
+# independently of what the code calls it.
+RENDER_FAILED = "could not be rendered"
+
+
 def table_label(table_id):
     """The heading for a table, or None for one with no id worth showing.
 

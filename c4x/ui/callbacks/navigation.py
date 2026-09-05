@@ -13,6 +13,7 @@ from c4x.tabs.session import most_recent_session
 from c4x.theme import (
     CODE_BLOCK,
     DANGER,
+    RENDER_FAILED,
     SECTION_HEAD,
     population_note,
 )
@@ -68,7 +69,7 @@ def _render_tab(idx, session_id, scope, cohort):
         body = fn(session_id, scope or "main", cohort)
     except Exception as exc:                        # noqa: BLE001 - a failed tab must say so
         return html.Div([
-            html.Div(f"{label} could not be rendered", style={**SECTION_HEAD, "color": DANGER}),
+            html.Div(f"{label} {RENDER_FAILED}", style={**SECTION_HEAD, "color": DANGER}),
             html.Pre(f"{type(exc).__name__}: {exc}", style={**CODE_BLOCK, "color": DANGER,
                                                             "whiteSpace": "pre-wrap"}),
         ])

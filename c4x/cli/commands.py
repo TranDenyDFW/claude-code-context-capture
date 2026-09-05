@@ -11,6 +11,7 @@ what makes `python -m c4x.cli all --via api` a real check on the API rather than
 that happens to print similar numbers.
 """
 from c4x.cli import render, source
+from c4x.theme import RENDER_FAILED
 
 
 def tab_ids():
@@ -67,6 +68,19 @@ def _compare_by_default(args):
     return render_compare("session", target, args.session, args.cohort, args.scope)
 
 
+def raised(payload):
+    """Whether this payload is the apology panel rather than the tab.
+
+    THE EXIT CODE BELOW WAS UNREACHABLE WITHOUT THIS. Both commands wrapped `render_tab` in a
+    try/except and counted failures, but `render_tab` cannot raise: it goes through
+    `_render_tab`, which catches the exception and returns the panel as ordinary content. So the
+    `except` never fired, `failed` was always empty, and `cli all` exited 0 over a tab that had
+    been broken on every request since it was written. The README calls that command the fastest
+    way to ask whether anything broke.
+    """
+    return any(RENDER_FAILED in str(line) for line in payload.get("text", []))
+
+
 def cmd_dump(args):
     if args.tab == "tab-compare" and args.compare_with:
         payload = render_compare(args.compare_kind, args.compare_with, args.session, args.cohort,
@@ -74,7 +88,7 @@ def cmd_dump(args):
     else:
         payload = render_tab(args.tab, args.session, args.scope, args.cohort)
     print(render.as_json(payload) if args.json else render.human(payload))
-    return 0
+    return 1 if raised(payload) else 0
 
 
 def cmd_all(args):
@@ -96,6 +110,14 @@ def cmd_all(args):
         except Exception as exc:                   # noqa: BLE001 - report, do not abort the sweep
             failed.append(tab_id)
             print(f"== {tab_id}\n   RAISED {type(exc).__name__}: {exc}")
+            continue
+        if raised(payload):
+            # Caught upstream, so it arrives as content rather than as an exception. Same bucket
+            # as a raise: the sweep continues and the exit code remembers.
+            failed.append(tab_id)
+            first = next((str(t) for t in payload.get("text", [])), "")
+            print(f"== {tab_id}")
+            print(f"   RAISED {first[:120]}")
             continue
         counts = (f"{len(payload['tables'])} tables, {len(payload['figures'])} figures, "
                   f"{sum(len(t['rows']) for t in payload['tables'])} rows")
