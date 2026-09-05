@@ -8,7 +8,8 @@
 // Precedence, identical everywhere: --db flag, then C4X_DB, then <root>/data/context.db.
 
 import { join, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 
 // import.meta.url is a file:// URL; on Windows that is /C:/... and the drive letter needs the
 // leading slash stripped before it is a usable path. Every tool derived this line for itself.
@@ -18,6 +19,52 @@ export function rootFrom(importMetaUrl) {
 
 export function defaultDb(root) {
   return join(root, 'data', 'context.db');
+}
+
+// Directories this tool creates for its own data, made PRIVATE TO THE USER who created them.
+//
+// The store holds the verbatim text of conversations. Under C:/Users/<you> or ~ it would inherit
+// a user-only ACL and this would be redundant, but the checkout does not have to live there: on a
+// data volume it inherits whatever the volume root grants, which on a stock Windows data drive is
+// `Authenticated Users:(M)` and `BUILTIN\Users:(RX)`. Measured on two different machines and two
+// different drives. So the tool copies transcripts out of a user-only directory and lands them
+// somewhere every local account can read, and nothing said so.
+//
+// EVERY creation site goes through here, not just the installer's. `openDb` in harvest.mjs creates
+// data/ too, and on a store that was never installed - a --db elsewhere, a hook running before
+// install - that is the site that runs first. Hardening one and not the other leaves the path that
+// actually bootstraps a fresh machine wide open.
+//
+// chmodSync, NOT mkdir's `mode`: mode is masked by the process umask, and it is ignored outright
+// when the directory already exists, which is every run after the first.
+export function ensureStoreDir(dir) {
+  mkdirSync(dir, { recursive: true });
+  try {
+    if (process.platform === 'win32') {
+      // Break inheritance on THE DIRECTORY, and grant inheritable full control to this user and
+      // SYSTEM. Existing files inherit the new, narrow ACL automatically, because their own
+      // inheritance is still enabled.
+      //
+      // NO /T, AND THE REASON IS NOT STYLE. /T re-runs this ENTIRE command against every child,
+      // `/inheritance:r` included - and on a FILE the (OI)(CI) flags on the grants are inheritance
+      // flags with nothing to inherit them, so they contribute no access. The child ends with its
+      // inherited ACEs stripped and nothing put back: an EMPTY DACL that even its owner cannot
+      // read. Written that way here first, and it locked this account out of its own
+      // data/raw/*.ndjson on the very next command; `icacls <dir> /reset /T` is what puts a tree
+      // damaged that way back. A store nobody can read is a worse outcome than a store someone
+      // else can.
+      //
+      // Failure is not fatal: `install.mjs status` reports a weak ACL separately, so the condition
+      // is surfaced rather than swallowed, and a harvest that dies over permissions helps nobody.
+      execFileSync('icacls', [dir, '/inheritance:r',
+                              '/grant:r', `${process.env.USERNAME}:(OI)(CI)F`,
+                              '/grant:r', 'SYSTEM:(OI)(CI)F', '/C', '/Q'],
+                   { stdio: 'ignore', timeout: 30_000 });
+    } else {
+      chmodSync(dir, 0o700);
+    }
+  } catch { /* reported by status, never fatal here */ }
+  return dir;
 }
 
 // An EXPLICIT path must already exist. SQLite creates on open, so a typo in --db would otherwise

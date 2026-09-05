@@ -658,6 +658,11 @@ def exercise(name, errors, exercised, call, hits=None, walked=None):
     return result
 
 
+# Set from argv at dispatch, read by main(). A module-level flag rather than a parameter because
+# main() takes none and the coverage check is buried three hundred lines below its own call.
+RENDER_ONLY = False
+
+
 def main():
     hits, errors, exercised = [], [], set()
     built, chain, constructed, walked = set(), set(), {}, set()
@@ -846,8 +851,25 @@ def main():
                       f"not see it. Import it at module level, or this audit is reading a "
                       f"different set of files than the one that executed.")
     sites, calls, entries, opaque = table_sites(m)
-    errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries, exercised,
-                              opaque)
+    # --render-only DROPS THE REACHABILITY HALF, and only that half.
+    #
+    # This audit answers two questions at once: did any surface render an exception panel, and was
+    # every table-construction site reached. The first is answerable on ANY store. The second is
+    # answerable only on a store rich enough to take every branch, and on a FIRST-RUN store it is
+    # not merely unanswerable, it is guaranteed to report: with no probe recorded, the Window
+    # sub-panels correctly return "No probe reading yet" and never build their tables, so every
+    # site inside them is honestly unreached.
+    #
+    # That difference is why a first-run store had never been audited at all. Running the whole
+    # audit there fails for a reason that is not a defect, so nobody ran it, so the reason that IS
+    # a defect - three surfaces raising - went unseen for as long as they existed. Splitting the
+    # questions is what makes the first one askable.
+    #
+    # The full audit is unchanged and still the default. This flag only ever REMOVES a check, and
+    # says so on the line above the verdict, so a --render-only run can never be mistaken for one.
+    if not RENDER_ONLY:
+        errors += coverage_errors(built, chain, constructed, walked, sites, calls, entries,
+                                  exercised, opaque)
 
     # The audit must be able to fail, or a clean run means nothing. Every shape it claims to catch
     # is fed to it: a formatted number, a dash placeholder in a declared numeric column, and an
@@ -882,6 +904,9 @@ def main():
     print(f"  columns holding a number as text: {len(seen)}")
     print(f"  known-bad fixture fully detected: {fixture_ok}  {sorted(fixture_kinds)}")
 
+    if RENDER_ONLY:
+        print("  --render-only: construction reachability NOT checked, because a first-run store "
+              "cannot reach a panel that needs a probe. Exception panels and cell values ARE.")
     ok = not seen and not errors and fixture_ok
     # The store must be byte-for-byte the size it was. A grown store means something harvested
     # into it, which is the defect above; a shrunk one means something worse. Measured on the
@@ -1080,4 +1105,5 @@ def self_test():
 
 
 if __name__ == "__main__":
+    RENDER_ONLY = "--render-only" in sys.argv
     sys.exit(self_test() if "--self-test" in sys.argv else main())

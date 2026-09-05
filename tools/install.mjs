@@ -22,11 +22,12 @@
 // desktop app spawns the CLI with piped stdio and no TTY, and SessionStart fires before any
 // prompt exists. --dry-run is the review path instead.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, copyFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { rootFrom, defaultDb } from './paths.mjs';
+import { execFileSync } from 'node:child_process';
+import { rootFrom, defaultDb, ensureStoreDir } from './paths.mjs';
 
 const ROOT = rootFrom(import.meta.url);
 const SETTINGS = join(homedir(), '.claude', 'settings.json');
@@ -44,6 +45,7 @@ const RECEIPT_VERSION = 1;
 // Settings hold forward-slash paths even on Windows: backslashes would need escaping inside a
 // JSON string and inside the shell word, and one of the two always gets forgotten.
 const posix = (p) => String(p).replace(/\\/g, '/');
+const mib = (n) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GB` : `${Math.round(n / (1 << 20))} MB`);
 
 // UserPromptSubmit is deliberately matcher-less: the event does not support a matcher at all, and
 // supplying one is the kind of silently-ignored key this tool exists to catch.
@@ -291,7 +293,7 @@ export const receiptDescribes = (receipt, settingsPath) => {
 };
 
 function saveReceipt(extra) {
-  mkdirSync(join(ROOT, 'data'), { recursive: true });
+  ensureStoreDir(join(ROOT, 'data'));
   const prior = loadReceipt();
   writeJsonAtomic(RECEIPT, {
     tool: 'install.mjs', version: RECEIPT_VERSION, root: posix(ROOT), settings: posix(SETTINGS),
@@ -304,6 +306,18 @@ function saveReceipt(extra) {
 
 // ---------------------------------------------------------------- commands
 
+// The groups that should not be able to read a store of conversation text. Windows-only: on POSIX
+// `ensureStoreDir` chmods to 0700 and there is no inheritance to fight. Returns [] on any failure,
+// because a status command that dies because icacls is missing helps nobody.
+function looseGrants(dir) {
+  if (process.platform !== 'win32' || !existsSync(dir)) return [];
+  try {
+    const out = execFileSync('icacls', [dir], { encoding: 'utf8', timeout: 15_000 });
+    return ['Authenticated Users', 'BUILTIN\Users', 'Everyone']
+      .filter((g) => out.includes(`${g}:`));
+  } catch { return []; }
+}
+
 function cmdStatus() {
   const settings = readSettings();
   const findings = audit(settings, ROOT, { rootExists: existsSync(ROOT) });
@@ -314,6 +328,18 @@ function cmdStatus() {
   console.log(`settings     : ${posix(SETTINGS)}${existsSync(SETTINGS) ? '' : '  (missing)'}`);
   console.log(`store        : ${posix(db)}${existsSync(db) ? '' : '  (not created yet)'}`);
   console.log(`receipt      : ${receipt ? `written ${receipt.installedAt}` : 'none - this install was not made by install.mjs'}`);
+  // WHO ELSE CAN READ THE CONVERSATION TEXT. Reported rather than fixed here: `ensureStoreDir`
+  // hardens the directory when it creates it, but a store created before that existed, or one
+  // whose ACL was widened afterwards, keeps whatever it had, and nothing would ever say so. A
+  // warning, not an error, because a single-account machine is not at risk and refusing to run
+  // over it would be theatre.
+  const loose = looseGrants(join(ROOT, 'data'));
+  if (loose.length) {
+    findings.push({ level: 'warn', event: 'data/',
+                    why: `readable by ${loose.join(', ')}. It holds the text of your `
+                       + 'conversations. Fix: icacls "' + posix(join(ROOT, 'data'))
+                       + '" /inheritance:r /grant:r "%USERNAME%":(OI)(CI)F SYSTEM:(OI)(CI)F /T' });
+  }
   for (const f of findings) console.log(`${f.level.toUpperCase().padEnd(5)} ${String(f.event).padEnd(16)} ${f.why}`);
   const errors = findings.filter((f) => f.level === 'error').length;
   console.log(errors ? `DRIFTED (${errors} error${errors === 1 ? '' : 's'})` : 'HEALTHY');
@@ -334,7 +360,7 @@ function cmdInstall(argv) {
     if (!existsSync(src)) { console.error(`--adopt: no store at ${posix(src)}`); return 2; }
     if (existsSync(dest)) console.log(`adopt skipped: ${posix(dest)} already exists`);
     else if (dry) adopted = `would copy ${posix(src)} -> ${posix(dest)}`;
-    else { mkdirSync(join(ROOT, 'data'), { recursive: true }); copyFileSync(src, dest); adopted = `copied ${posix(src)} -> ${posix(dest)}`; }
+    else { ensureStoreDir(join(ROOT, 'data')); copyFileSync(src, dest); adopted = `copied ${posix(src)} -> ${posix(dest)}`; }
   }
 
   const settings = readSettings();
@@ -350,7 +376,7 @@ function cmdInstall(argv) {
   // Taken from what was actually on disk at write time, not from the earlier snapshot, so a
   // statusLine that arrived in between is still the one we record as the prior value.
   const priorStatusLine = ownsCommand(before?.statusLine?.command, ROOT) ? undefined : (before?.statusLine ?? null);
-  if (!rewire) mkdirSync(join(ROOT, 'data', 'raw'), { recursive: true });
+  if (!rewire) ensureStoreDir(join(ROOT, 'data', 'raw'));
   saveReceipt({ settingsBackup: backup ? posix(backup) : null, ...(priorStatusLine === undefined ? {} : { priorStatusLine }) });
   console.log(`wrote ${posix(SETTINGS)}${backup ? ` (backup: ${posix(backup)})` : ''}`);
   // Measured, not assumed: the first hook fired nine seconds after this write, in a session that
@@ -375,9 +401,36 @@ function cmdUninstall(argv) {
   if (purge && existsSync(db)) console.log(`${dry ? 'would ' : ''}delete ${posix(db)}`);
   else if (existsSync(db)) console.log(`store kept at ${posix(db)} - pass --purge to delete it`);
 
+  // THE SNAPSHOTS ARE THE MOST SENSITIVE THING THIS TOOL WRITES AND --purge LEFT THEM BEHIND.
+  //
+  // On every PreCompact, hooks/compact-hook.mjs copies the WHOLE transcript into data/snapshots -
+  // verbatim conversation text, up to 250 MB a file, and the same session re-snapshotted at every
+  // boundary so the copies are cumulative. On this machine that is 604 MB in 13 files. Purge
+  // removed the store, its sidecars and data/raw, and nothing in this repo has ever deleted a
+  // snapshot, while README says "--purge deletes what it collected".
+  //
+  // REPORTED OUTSIDE THE existsSync(db) BRANCHES ABOVE, deliberately. Those two lines are one
+  // if/else on the store's presence, and after `reset --data` renames context.db to a .bak the
+  // store is absent - so a snapshot line placed there would print nothing in exactly the state
+  // where a user still has 604 MB of transcripts and is being told the tool has been purged.
+  const snaps = join(ROOT, 'data', 'snapshots');
+  const snapFiles = existsSync(snaps) ? readdirSync(snaps) : [];
+  if (snapFiles.length) {
+    const bytes = snapFiles.reduce((n, f) => n + (statSync(join(snaps, f)).size || 0), 0);
+    const size = `${snapFiles.length} pre-compaction transcript snapshot(s), ${mib(bytes)}`;
+    if (purge) console.log(`${dry ? 'would ' : ''}delete ${posix(snaps)} - ${size}`);
+    else console.log(`snapshots kept at ${posix(snaps)} - ${size}. They are verbatim copies of `
+                     + 'your transcripts; pass --purge to delete them, or set C4X_SNAPSHOT=0 to '
+                     + 'stop taking them.');
+  }
+
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
   if (changes.length) { backupSettings(); writeSettingsAtomic((s) => removeWiring(s, ROOT, loadReceipt()).next); }
-  if (purge) { for (const f of sidecars(db)) rmSync(f, { force: true }); rmSync(join(ROOT, 'data', 'raw'), { recursive: true, force: true }); }
+  if (purge) {
+    for (const f of sidecars(db)) rmSync(f, { force: true });
+    rmSync(join(ROOT, 'data', 'raw'), { recursive: true, force: true });
+    rmSync(snaps, { recursive: true, force: true });
+  }
   if (receiptDescribes(receipt, SETTINGS)) rmSync(RECEIPT, { force: true });
   else console.log(`kept the receipt: it records an install into ${posix(receipt.settings)}, not ${posix(SETTINGS)}`);
   return 0;
@@ -405,7 +458,16 @@ function cmdReset(argv) {
       if (!dry) renameSync(db, bak);
     } else console.log('store already absent');
     const raw = join(ROOT, 'data', 'raw');
-    if (existsSync(raw)) { console.log(`${dry ? 'would ' : ''}clear ${posix(raw)}`); if (!dry) { rmSync(raw, { recursive: true, force: true }); mkdirSync(raw, { recursive: true }); } }
+    if (existsSync(raw)) { console.log(`${dry ? 'would ' : ''}clear ${posix(raw)}`); if (!dry) { rmSync(raw, { recursive: true, force: true }); ensureStoreDir(raw); } }
+    // Same reasoning as --purge: "reset the data" that leaves every transcript copy in place is
+    // not a reset. The store is renamed to a .bak rather than deleted, so the snapshots are
+    // renamed alongside it rather than dropped, and nothing the user had is lost by surprise.
+    const snaps = join(ROOT, 'data', 'snapshots');
+    if (existsSync(snaps) && readdirSync(snaps).length) {
+      const bak = `${snaps}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      console.log(`${dry ? 'would ' : ''}move ${posix(snaps)} -> ${posix(bak)}`);
+      if (!dry) renameSync(snaps, bak);
+    }
   }
 
   if (wantSettings) {
