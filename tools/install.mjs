@@ -29,6 +29,8 @@ import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { rootFrom, defaultDb, ensureStoreDir } from './paths.mjs';
+import { report, STALE_AFTER_DAYS } from './statusline.mjs';
+import { DatabaseSync } from 'node:sqlite';
 
 const ROOT = rootFrom(import.meta.url);
 const SETTINGS = join(homedir(), '.claude', 'settings.json');
@@ -434,6 +436,38 @@ function looseGrants(dir) {
   } catch { return []; }
 }
 
+/**
+ * The two capture channels, side by side, because only the RATIO exposes the failure.
+ *
+ * Neither number is alarming alone. "16 status-line samples" looks like capture working; "43,518
+ * hook events" looks like capture working. Sixteen against forty-three thousand, with the newest
+ * sample nine days old, is the shape of a channel that stopped, and nothing in this tool put the
+ * two side by side, so nobody could see it. The README's whole status-line narrative silently does
+ * not apply to Claude Desktop users, who are the people most likely to install from the app.
+ *
+ * READ FROM THE STORE, not from data/raw/events.ndjson. That file is 44 MB here and grows about
+ * 4 MB a day, and `status` is advertised as a script gate, so line-counting it would put an
+ * unbounded read inside the fast command. `hook_events` holds the same rows, indexed.
+ */
+function captureLiveness(root) {
+  const out = { events: null, lastEvent: null, samples: null, lastSample: null, ageDays: null };
+  try {
+    const r = report(join(root, 'data', 'raw', 'statusline.ndjson'));
+    if (r.exists) { out.samples = r.genuine; out.lastSample = r.last_genuine; out.ageDays = r.genuine_age_days; }
+  } catch { /* absent is a real answer, reported as null */ }
+  const db = defaultDb(root);
+  if (!existsSync(db)) return out;
+  try {
+    const con = new DatabaseSync(`file:${posix(db)}?mode=ro`, { readOnly: true });
+    try {
+      const row = con.prepare('SELECT COUNT(*) n, MAX(captured_at) last FROM hook_events').get();
+      out.events = row?.n ?? 0;
+      out.lastEvent = row?.last ?? null;
+    } finally { con.close(); }
+  } catch { /* a store mid-migration is not a status failure */ }
+  return out;
+}
+
 function cmdStatus() {
   const settings = readSettings();
   const findings = audit(settings, ROOT, { rootExists: existsSync(ROOT) });
@@ -449,6 +483,32 @@ function cmdStatus() {
   // whose ACL was widened afterwards, keeps whatever it had, and nothing would ever say so. A
   // warning, not an error, because a single-account machine is not at risk and refusing to run
   // over it would be theatre.
+  // LIVENESS, not wiring. Everything above answers "is it configured"; this answers "is it
+  // capturing", which is the question the README actually promises `status` will settle.
+  const live = captureLiveness(ROOT);
+  const ago = (ts) => {
+    if (!ts) return 'never';
+    const mins = Math.round((Date.now() - Date.parse(ts)) / 60000);
+    if (mins < 60) return `${mins} min ago`;
+    if (mins < 1440) return `${Math.round(mins / 60)} h ago`;
+    return `${Math.round(mins / 1440)} days ago`;
+  };
+  console.log(`hook capture : ${live.events === null ? 'no store yet' : `${live.events.toLocaleString()} events, last ${ago(live.lastEvent)}`}`);
+  console.log(`status line  : ${live.samples === null ? 'no samples file' : `${live.samples.toLocaleString()} genuine samples, last ${ago(live.lastSample)}`}`);
+  if (live.events > 0 && live.samples === 0) {
+    findings.push({ level: 'warn', event: 'statusLine',
+                    why: `never fired, while the hooks captured ${live.events.toLocaleString()} `
+                       + 'events. The status line renders only in a terminal session; the Claude '
+                       + 'Desktop chat view does not invoke it. Capture continues through the hooks.' });
+  } else if (live.samples > 0 && live.ageDays !== null && live.ageDays >= STALE_AFTER_DAYS
+             && live.events > 0 && ago(live.lastEvent) !== 'never') {
+    findings.push({ level: 'warn', event: 'statusLine',
+                    why: `stopped ${live.ageDays} days ago after ${live.samples} sample(s), while `
+                       + `the hooks have captured ${live.events.toLocaleString()} events. That is `
+                       + 'the Claude Desktop chat view, which never invokes a status line. Capture '
+                       + 'continues through the hooks.' });
+  }
+
   const loose = looseGrants(join(ROOT, 'data'));
   if (loose.length) {
     findings.push({ level: 'warn', event: 'data/',

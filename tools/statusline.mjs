@@ -51,6 +51,11 @@ function fmtTokens(n) {
 // Names that must never have their VALUE written to disk. This file lives in data/raw; a captured
 // credential would sit there in plain text forever. Matched on the variable NAME, so a new secret
 // following the usual naming conventions is redacted without anyone remembering to add it.
+// How old the newest genuine sample may be before the channel counts as STOPPED rather than
+// quiet. Two days: a weekend without opening a terminal is normal, a week of it is not.
+export const STALE_AFTER_DAYS = 2;
+const NL = String.fromCharCode(10);
+
 const SECRETISH = /KEY|TOKEN|SECRET|PASSWORD|AUTH|CREDENTIAL|COOKIE/i;
 
 // AND THE ONES WHOSE NAMES DO NOT FOLLOW THAT CONVENTION, which is the gap the comment above
@@ -152,11 +157,20 @@ export function report(outPath = DEFAULT_OUT) {
     if (!firstGenuine) firstGenuine = d.captured_at;
     lastGenuine = d.captured_at;
   }
+  // AGE, NOT JUST COUNT. The CLI gated on `genuine === 0`, which is a question about whether the
+  // channel EVER worked, not whether it works NOW. On the machine this was written on it answered
+  // 16 and said nothing, while the last of those 16 was nine days old and the hooks had captured
+  // 43,518 events in between. A capture tool that cannot tell "never ran" from "stopped running"
+  // is reporting the wrong thing.
+  const ageDays = lastGenuine
+    ? Math.floor((Date.now() - Date.parse(lastGenuine)) / 86400000)
+    : null;
   return {
     file: outPath, exists: true, total: lines.length, genuine, probes, unmarked, unparseable: bad,
     distinct_genuine_sessions: sessions.size,
     sessions: [...sessions.entries()].map(([id, n]) => ({ session: id, samples: n })),
     first_genuine: firstGenuine, last_genuine: lastGenuine,
+    genuine_age_days: ageDays,
   };
 }
 
@@ -357,6 +371,28 @@ function selfTest() {
 
   rmSync(tmp, { force: true });
 
+  // AGE, which is the half the report was missing. `genuine === 0` answers whether the channel
+  // EVER worked; it cannot answer whether it works now, and on this machine it stayed silent
+  // over 16 samples whose newest was nine days old.
+  {
+    const aged = join(ROOT, 'tmp', `statusline-age-${process.pid}.ndjson`);
+    const day = 86400000;
+    const row = (ts) => JSON.stringify({ captured_at: new Date(ts).toISOString(), probe: false,
+      payload: { session_id: 's' } }) + NL;
+    try {
+      rmSync(aged, { force: true });
+      appendFileSync(aged, row(Date.now() - 9 * day));
+      const old = report(aged);
+      add('report dates the newest genuine sample', old.genuine_age_days === 9, String(old.genuine_age_days));
+      add('and calls it stale past the threshold (gate can fail)', old.genuine_age_days >= STALE_AFTER_DAYS);
+      appendFileSync(aged, row(Date.now()));
+      const fresh = report(aged);
+      add('a sample from today is NOT stale', fresh.genuine_age_days < STALE_AFTER_DAYS,
+        String(fresh.genuine_age_days));
+      add('and the count is unchanged by the age question', fresh.genuine === 2);
+    } finally { rmSync(aged, { force: true }); }
+  }
+
   let bad = 0;
   for (const [n, ok, d] of checks) { if (!ok) bad++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${ok ? '' : '  [' + d + ']'}`); }
   console.log(bad === 0 ? `SELF-TEST PASS (${checks.length} checks)` : `SELF-TEST FAIL (${bad}/${checks.length} failed)`);
@@ -380,9 +416,18 @@ else if (process.argv.includes('--self-test')) {
   console.log(JSON.stringify(r, null, 2));
   if (r.genuine === 0) {
     process.stderr.write(
-      '\nNO GENUINE SAMPLES. The status line has never been invoked by Claude Code itself.\n'
-      + 'Settings are read at session start, so a session that predates the statusLine key will\n'
-      + 'never run it. Open a NEW session, then re-run this report.\n');
+      'NO GENUINE SAMPLES. The status line has never been invoked by Claude Code itself.' + NL
+      + 'Settings are read at session start, so a session that predates the statusLine key will' + NL
+      + 'never run it. Open a NEW session, then re-run this report.' + NL);
+  } else if (r.genuine_age_days !== null && r.genuine_age_days >= STALE_AFTER_DAYS) {
+    // COUNT WITHOUT AGE ANSWERS THE WRONG QUESTION. This gate used to be `genuine === 0`, so on
+    // a machine with 16 samples whose newest was nine days old it printed nothing at all, while
+    // the hooks had captured 43,518 events in the same window.
+    process.stderr.write(
+      `CAPTURE STOPPED. ${r.genuine} genuine sample(s), newest is ${r.genuine_age_days} days old.` + NL
+      + 'The status line renders only in a terminal session. The Claude Desktop chat view never' + NL
+      + 'invokes it, so on that surface this file stops growing while the hooks keep capturing.' + NL
+      + 'See both counts together: node tools/install.mjs status' + NL);
   }
   process.exit(0);
 } else {

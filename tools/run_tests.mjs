@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { winArg } from './paths.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const ROOT = dirname(dirname(SELF));
@@ -223,7 +224,7 @@ const PY = [
 // adding a tool without checks fails this runner instead of slipping through.
 const EXEMPT = new Map([
   ['tools/mirror-core.mjs', 'pure math, no I/O; covered by mirror.mjs --self-test and --validate'],
-  ['tools/paths.mjs', 'path constants only, nothing to exercise'],
+
 ]);
 
 // This runner answers --self-test WITHOUT scanning, for two reasons. Every tool here carries checks
@@ -456,9 +457,13 @@ if (!NODE_ONLY) {
                      note: `frontend/node_modules is absent; run npm install --prefix frontend (${what})` });
       continue;
     }
-    const run = spawnSync('npm', [...args, '--prefix', frontend], {
-      encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: process.platform === 'win32', windowsHide: true,
-    });
+    // Same reasoning as the lint leg, and `frontend` is the argument that actually breaks: it is
+    // an absolute checkout path, so a space anywhere above the repo would re-split it.
+    const argv = [...args, '--prefix', frontend];
+    const run = process.platform === 'win32'
+      ? spawnSync(['npm', ...argv].map(winArg).join(' '),
+                  { encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: true, windowsHide: true })
+      : spawnSync('npm', argv, { encoding: 'utf8', cwd: ROOT, timeout: 900_000, windowsHide: true });
     const text = plain(run.stdout) + plain(run.stderr);
     // NOT the shared CHECKS pattern. Vitest prints "Test Files  2 passed (2)" BEFORE
     // "Tests  22 passed (22)", and CHECKS matches "N passed" anywhere, so it took the file count
@@ -506,12 +511,28 @@ if (!NODE_ONLY) {
 // eslint failed in CI with "'tailOf' is defined but never used", and the fix had to be made twice.
 //
 // A check the machine runs and the developer cannot is a check that fails late and by surprise.
-if (!NODE_ONLY) {
+if (!NODE_ONLY && !existsSync(join(ROOT, 'node_modules', 'eslint'))) {
+  // SKIPPED WITH THE FIX, not failed with a shell error. The frontend legs have said
+  // "run npm install --prefix frontend" since they were written; this one spawned npm regardless
+  // and reported whatever the shell said, which on a fresh clone is "'eslint' is not recognized" -
+  // a message about the developer's PATH, for a situation that is neither their fault nor a lint
+  // failure. Same situation, so the same quality of message. A skip still fails under --strict.
+  skipped++;
+  results.push({ rel: 'eslint .', state: 'SKIPPED',
+                 note: 'root node_modules is absent; run `npm ci` (the node tools lint, the same '
+                     + 'check CI runs at .github/workflows/tests.yml)' });
+} else if (!NODE_ONLY) {
   // The pinned eslint from the root lockfile, via the `lint` script, so the suite and CI run
   // the same version. `npx --yes` fetched whatever was newest at that moment.
-  const run = spawnSync('npm', ['run', 'lint'], {
-    encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: process.platform === 'win32', windowsHide: true,
-  });
+  // A single pre-quoted command line rather than shell:true with an args array. npm on Windows is
+  // a .cmd shim, so the shell is genuinely required here; what is not required is letting node
+  // concatenate the arguments unescaped, which is what DEP0190 warns about.
+  const WIN = process.platform === 'win32';
+  const run = WIN
+    ? spawnSync(['npm', 'run', 'lint'].map(winArg).join(' '),
+                { encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: true, windowsHide: true })
+    : spawnSync('npm', ['run', 'lint'],
+                { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
   const text = plain(run.stdout) + plain(run.stderr);
   if (run.status !== 0 || run.signal) {
     failed++;

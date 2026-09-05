@@ -10,6 +10,8 @@
 import { join, dirname } from 'node:path';
 import { existsSync, mkdirSync, chmodSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 // import.meta.url is a file:// URL; on Windows that is /C:/... and the drive letter needs the
 // leading slash stripped before it is a usable path. Every tool derived this line for itself.
@@ -47,6 +49,24 @@ export function defaultDb(root) {
 //
 // chmodSync, NOT mkdir's `mode`: mode is masked by the process umask, and it is ignored outright
 // when the directory already exists, which is every run after the first.
+/**
+ * One argument, quoted for cmd.exe, for the calls that genuinely need a shell.
+ *
+ * Node emits DEP0190 when `shell: true` is paired with an args ARRAY, and the warning is not
+ * pedantry: with a shell, node concatenates the arguments into one command line without escaping
+ * them, so a path containing a space or an operator is re-split by cmd. The fix is to do the
+ * quoting deliberately and pass a single string, which leaves args.length at 0 so the deprecation
+ * cannot fire either.
+ *
+ * `%` IS IN THE TEST, which is easy to miss. cmd.exe expands `%VAR%` INSIDE double quotes, so a
+ * checkout under a directory whose name contains a percent sign - legal on NTFS - would still be
+ * mangled by a quoting rule that only looked for whitespace.
+ */
+export function winArg(s) {
+  const str = String(s);
+  return /[\s&|<>^"%()]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+
 export function ensureStoreDir(dir, { force = false } = {}) {
   // HARDEN ON CREATION, NOT ON EVERY CALL. mkdirSync(recursive) returns the first path it made,
   // or undefined when the directory was already there. The hooks call this on every event, and
@@ -110,3 +130,53 @@ export function resolveDb(root, argv = process.argv.slice(2), onError = null) {
   }
   return defaultDb(root);
 }
+
+// ---------------------------------------------------------------------------
+// Checks. This file was EXEMPT from the suite's self-test requirement, on the grounds that it held
+// "path constants only, nothing to exercise". That stopped being true when it gained the store
+// directory hardening and the Windows argument quoting, and an exemption that no longer describes
+// its subject is how a gate goes quiet. The exemption is gone and these run with the rest.
+// ---------------------------------------------------------------------------
+function selfTest() {
+  const checks = [];
+  const add = (what, ok, detail = '') => checks.push([what, ok, detail]);
+
+  add('a plain argument is left alone', winArg('lint') === 'lint');
+  add('a path with a space is quoted', winArg('C:/Program Files/x') === '"C:/Program Files/x"');
+  // cmd.exe expands %VAR% INSIDE double quotes, so a percent must force quoting too, and a
+  // whitespace-only rule would have missed it. NTFS allows % in a directory name.
+  add('a percent forces quoting (gate can fail)', winArg('C:/pct%20dir') === '"C:/pct%20dir"');
+  add('a shell operator forces quoting', winArg('a&b') === '"a&b"' && winArg('a|b') === '"a|b"');
+  add('an embedded quote is doubled, not dropped', winArg('a"b') === '"a""b"');
+  add('the result never carries an args array with it', ['npm', 'run', 'lint'].map(winArg).join(' ')
+    === 'npm run lint');
+
+  const slash = (s) => s.split(String.fromCharCode(92)).join('/');
+  add('defaultDb sits under data/', slash(defaultDb('R')) === 'R/data/context.db');
+  add('rootFrom strips the leading slash from a Windows file URL',
+    /^[A-Za-z]:/.test(slash(rootFrom('file:///C:/a/b/c.mjs'))));
+
+  // ensureStoreDir returns its directory and is idempotent; the ACL half is platform behaviour and
+  // is exercised where it can be observed, not asserted here.
+  const scratch = join(rootFrom(import.meta.url), 'tmp', `paths-selftest-${process.pid}`);
+  try {
+    add('ensureStoreDir creates and returns the directory',
+      ensureStoreDir(scratch) === scratch && existsSync(scratch));
+    add('and calling it again is harmless', ensureStoreDir(scratch) === scratch);
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
+
+  let bad = 0;
+  for (const [what, ok, detail] of checks) {
+    if (!ok) bad++;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${what}${ok ? '' : `   [${detail}]`}`);
+  }
+  console.log(bad ? `SELF-TEST FAIL (${bad}/${checks.length} failed)` : `SELF-TEST PASS (${checks.length} checks)`);
+  return bad ? 1 : 0;
+}
+
+const IS_ENTRY = (() => {
+  try {
+    return process.argv[1] ? pathToFileURL(process.argv[1]).href === import.meta.url : false;
+  } catch { return false; }
+})();
+if (IS_ENTRY && process.argv.includes('--self-test')) process.exit(selfTest());
