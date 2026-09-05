@@ -274,6 +274,24 @@ export function backupSettings() {
 // try to replay it. The sidecars travel with the file or they go with it.
 export const sidecars = (db) => [db, `${db}-wal`, `${db}-shm`];
 
+/**
+ * EVERYTHING `--purge` DELETES, as data rather than as four rmSync calls buried in a command.
+ *
+ * `data/snapshots` was the one this list was missing, and missing it is not a small thing: the
+ * compact hook copies the WHOLE transcript there before every compaction, so it holds verbatim
+ * conversation text - 603 MB in 13 files on the machine this was written on - while the README
+ * said "--purge deletes what it collected". A user who ran the documented deletion path kept the
+ * most sensitive artefact the tool produces.
+ *
+ * Exported and pure so the self-test can assert WHAT gets deleted without deleting anything, and
+ * so `--dry-run` and the real run cannot describe different sets. They read the same list.
+ */
+export const purgeTargets = (root, db) => [
+  ...sidecars(db),
+  join(root, 'data', 'raw'),
+  join(root, 'data', 'snapshots'),
+];
+
 function loadReceipt() { return readJson(RECEIPT, null); }
 
 // The receipt lives beside the ROOT, but it describes a particular SETTINGS file. Those are not
@@ -445,9 +463,7 @@ function cmdUninstall(argv) {
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
   if (changes.length) { backupSettings(); writeSettingsAtomic((s) => removeWiring(s, ROOT, loadReceipt()).next); }
   if (purge) {
-    for (const f of sidecars(db)) rmSync(f, { force: true });
-    rmSync(join(ROOT, 'data', 'raw'), { recursive: true, force: true });
-    rmSync(snaps, { recursive: true, force: true });
+    for (const f of purgeTargets(ROOT, db)) rmSync(f, { recursive: true, force: true });
   }
   if (receiptDescribes(receipt, SETTINGS)) rmSync(RECEIPT, { force: true });
   else console.log(`kept the receipt: it records an install into ${posix(receipt.settings)}, not ${posix(SETTINGS)}`);
@@ -647,6 +663,33 @@ function selfTest() {
   const realErrors = audit(good, R).filter((f) => f.level === 'error').length;
   const mutantErrors = audit(good, 'Y:/different/root').filter((f) => f.level === 'error').length;
   add('pointing the audit at a different root makes it FAIL (gate can fail)', mutantErrors > realErrors, `real=${realErrors} mutant=${mutantErrors}`);
+
+  // --purge REACHES data/snapshots. Driven end to end against a scratch root holding a real file,
+  // not asserted off the list, because "the list is right" and "the deletion uses the list" are two
+  // different claims and only one of them was true before.
+  {
+    const root = join(ROOT, 'tmp', `purge-selftest-${process.pid}`);
+    const db = join(root, 'data', 'context.db');
+    const snap = join(root, 'data', 'snapshots', 'sess.2026-01-01.pre-compact.jsonl');
+    const raw = join(root, 'data', 'raw', 'events.ndjson');
+    try {
+      mkdirSync(join(root, 'data', 'snapshots'), { recursive: true });
+      mkdirSync(join(root, 'data', 'raw'), { recursive: true });
+      writeFileSync(db, 'x'); writeFileSync(snap, 'transcript'); writeFileSync(raw, '{}');
+
+      const targets = purgeTargets(root, db);
+      add('purge names the snapshot directory (gate can fail)',
+        targets.some((t) => t.endsWith('snapshots')), targets.join(' | '));
+      add('purge names the store, its sidecars and data/raw',
+        targets.length === 5 && targets.includes(db) && targets.some((t) => t.endsWith('raw')));
+
+      for (const f of targets) rmSync(f, { recursive: true, force: true });
+      add('deleting them REMOVES the transcript snapshot (gate can fail)', !existsSync(snap));
+      add('and removes the store and the raw log', !existsSync(db) && !existsSync(raw));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 
   let bad = 0;
   for (const [n, ok, d] of checks) {
