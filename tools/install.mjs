@@ -27,7 +27,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { rootFrom, defaultDb, ensureStoreDir, posix } from './paths.mjs';
 import { report, STALE_AFTER_DAYS } from './statusline.mjs';
 import { DatabaseSync } from 'node:sqlite';
@@ -476,11 +476,31 @@ const NO_SELF_HEAL_HINT = process.env.C4X_NO_SELF_HEAL === '1'
 
 function captureLiveness(root) {
   const out = { events: null, lastEvent: null, samples: null, lastSample: null, ageDays: null,
-                lastHeal: null };
+                lastHeal: null, rawPending: false, lastRawEvent: null };
   try {
     const r = report(join(root, 'data', 'raw', 'statusline.ndjson'));
     if (r.exists) { out.samples = r.genuine; out.lastSample = r.last_genuine; out.ageDays = r.genuine_age_days; }
   } catch { /* absent is a real answer, reported as null */ }
+  // THE THIRD STATE: captured but not yet harvested.
+  //
+  // The store is the right source and the comment above says why, but reading only the store gave
+  // this line two answers where the user has three situations. Right after install, five events
+  // were already in data/raw/events.ndjson and `hook_events` was empty because no harvest had run,
+  // so `status` printed "0 events, last never" - which is what a DEAD capture looks like, on a
+  // capture that was working perfectly. The surface built to answer "is it still running" reported
+  // the one thing it exists to rule out.
+  //
+  // statSync, not a line count: size and mtime are one inode read whatever the file has grown to,
+  // so the objection above still holds. mtime is when a hook last appended, which is the fact this
+  // line needs. The COUNT still comes from the store, because that is the number that is indexed.
+  try {
+    const raw = join(root, 'data', 'raw', 'events.ndjson');
+    if (existsSync(raw)) {
+      const st = statSync(raw);
+      out.rawPending = st.size > 0;
+      out.lastRawEvent = new Date(st.mtimeMs).toISOString();
+    }
+  } catch { /* an unreadable raw log is not a status failure either */ }
   const db = defaultDb(root);
   if (!existsSync(db)) return out;
   try {
@@ -499,6 +519,29 @@ function captureLiveness(root) {
     } finally { con.close(); }
   } catch { /* a store mid-migration is not a status failure */ }
   return out;
+}
+
+/**
+ * The "hook capture" line, from the store's count and the raw log's timestamp.
+ *
+ * Pure, and separate from cmdStatus, because the sentence is the part that was wrong: the numbers
+ * were always available, and the line drew the wrong conclusion from them. `ago` is passed in so a
+ * check can supply a fixed clock.
+ */
+export function captureLine(live, ago) {
+  const waiting = live.rawPending
+    ? `captured and waiting for a harvest, last ${ago(live.lastRawEvent)}`
+    : null;
+  if (live.events === null) {
+    // No store. Absent a raw log this really is "nothing yet"; with one, capture is already running
+    // and saying "no store" alone would read as a fault.
+    return waiting ? `no store yet, but events are ${waiting}` : 'no store yet';
+  }
+  const counted = `${live.events.toLocaleString()} events, last ${ago(live.lastEvent)}`;
+  const newer = live.rawPending && live.lastRawEvent
+    && (!live.lastEvent || Date.parse(live.lastRawEvent) > Date.parse(live.lastEvent));
+  if (live.events === 0 && live.rawPending) return `none harvested yet; events are ${waiting}`;
+  return newer ? `${counted}; more ${waiting}` : counted;
 }
 
 function cmdStatus() {
@@ -526,7 +569,7 @@ function cmdStatus() {
     if (mins < 1440) return `${Math.round(mins / 60)} h ago`;
     return `${Math.round(mins / 1440)} days ago`;
   };
-  console.log(`hook capture : ${live.events === null ? 'no store yet' : `${live.events.toLocaleString()} events, last ${ago(live.lastEvent)}`}`);
+  console.log(`hook capture : ${captureLine(live, ago)}`);
   console.log(`status line  : ${live.samples === null ? 'no samples file' : `${live.samples.toLocaleString()} genuine samples, last ${ago(live.lastSample)}`}`);
   console.log(`self-heal    : ${live.lastHeal ? `last rewrote ${posix(SETTINGS)} ${ago(live.lastHeal)}`
     : 'never rewrote your settings'}${NO_SELF_HEAL_HINT}`);
@@ -561,6 +604,58 @@ function cmdStatus() {
   return errors ? 1 : 0;
 }
 
+// ONE HARVEST AT THE END OF AN INSTALL THAT FOUND NO STORE.
+//
+// README's very next step after installing is `node tools/harvest.mjs --stats`, under the heading
+// "Confirm it captured something". On day one that ran against a store which did not exist, because
+// install writes wiring and nothing else: the store appears when the first hook fires or when
+// somebody runs a harvest by hand. So the documented way to check a correct install reported a
+// failure, on every correct install.
+//
+// ONLY WHEN THE STORE IS ABSENT. Installing over an existing store is a rewire, the hooks are
+// already harvesting into it, and re-reading a large transcript set there would make `install` cost
+// minutes to tell the user nothing. `--no-harvest` skips it either way.
+//
+// A failure here never fails the install. By this point the wiring is written and correct, which is
+// what `install` promises; the harvest is a convenience on top, and saying so beats a non-zero exit
+// that makes a working install look broken. That is the same mistake in the opposite direction.
+// The decision, separated from the spawn so it can be checked. The spawn needs a scoped ROOT and a
+// real transcript set to exercise, and ROOT comes from import.meta.url, so a test of the whole
+// function would either run a real harvest or not run at all. The part that can be got wrong is
+// which of the four inputs suppresses it, and that part is pure.
+export function shouldFirstHarvest(argv, dry, storeExists) {
+  if (dry) return false;
+  if (argv.includes('--no-harvest')) return false;
+  // --rewire is "touch settings only" by definition; harvesting there would exceed what was asked.
+  if (argv.includes('--rewire')) return false;
+  return !storeExists;
+}
+
+function firstHarvest(argv, dry) {
+  if (!shouldFirstHarvest(argv, dry, existsSync(defaultDb(ROOT)))) return;
+  console.log('no store yet: running one harvest, so there is something to confirm.');
+  const r = spawnSync(process.execPath, [join(ROOT, 'tools', 'harvest.mjs')],
+    { encoding: 'utf8', cwd: ROOT, timeout: 900_000, windowsHide: true });
+  if (r.status !== 0 || r.error) {
+    const why = r.error ? r.error.message : `exit ${r.status}${r.signal ? ` (${r.signal})` : ''}`;
+    console.log(`  harvest did not finish (${why}). The wiring is written; run `
+      + '`node tools/harvest.mjs` when convenient.');
+    return;
+  }
+  let summary = null;
+  try { summary = JSON.parse(r.stdout); } catch { /* fall through to the generic line */ }
+  if (summary) {
+    console.log(`  ${summary.files_read} of ${summary.files_seen} transcripts read, `
+      + `${summary.turn_rows_stored} turns and ${summary.message_rows_stored} messages stored, `
+      + `${summary.seconds}s.`);
+    if (summary.unknown_record_types?.length) {
+      console.log(`  unrecognised record types: ${summary.unknown_record_types.join(', ')}`);
+    }
+  } else {
+    console.log(`  store created at ${posix(defaultDb(ROOT))}`);
+  }
+}
+
 function cmdInstall(argv) {
   const dry = argv.includes('--dry-run');
   const rewire = argv.includes('--rewire');
@@ -593,7 +688,11 @@ function cmdInstall(argv) {
   const { changes } = applyWiring(base, ROOT);
   if (evict) for (const d of gone) console.log(`${dry ? 'would ' : ''}evict ${d.where} -> ${posix(d.file)}`);
 
-  if (!changes.length && !adopted && !(evict && gone.length)) { console.log('no changes: already converged'); return 0; }
+  if (!changes.length && !adopted && !(evict && gone.length)) {
+    console.log('no changes: already converged');
+    firstHarvest(argv, dry);
+    return 0;
+  }
   for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
   if (adopted) console.log(adopted);
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
@@ -937,6 +1036,44 @@ function selfTest() {
     add('a dead statusLine is dropped', next.statusLine === undefined);
     add('audit REPORTS it rather than staying silent (gate can fail)',
       audit(cfg, 'P:/live/root', { exists }).some((f) => f.why.includes('--evict-missing')));
+  }
+
+  // The day-one harvest. README's next step after installing is `harvest --stats`, and on a fresh
+  // machine that ran against a store nothing had created yet, so the documented way to confirm a
+  // correct install reported a failure. Each suppressing input is checked on its own, because a
+  // condition that is never exercised is how this stops firing without anyone noticing.
+  add('a fresh install harvests once, so there is a store to confirm (gate can fail)',
+    shouldFirstHarvest([], false, false) === true);
+  add('an install over an existing store does not re-harvest',
+    shouldFirstHarvest([], false, true) === false);
+  add('--dry-run writes nothing and harvests nothing',
+    shouldFirstHarvest([], true, false) === false);
+  add('--no-harvest opts out even with no store',
+    shouldFirstHarvest(['--no-harvest'], false, false) === false);
+  add('--rewire touches settings only, as it says',
+    shouldFirstHarvest(['--rewire'], false, false) === false);
+
+  // The capture line. The defect was a sentence, not a number: a working capture whose events were
+  // not yet harvested was described exactly like a dead one. A fixed clock, so these do not drift.
+  {
+    const at = (ts) => (ts === 'T0' ? '0 min ago' : ts === null ? 'never' : 'a while ago');
+    const base = { events: null, lastEvent: null, rawPending: false, lastRawEvent: null };
+    add('a fresh install with events on disk does not read as dead (gate can fail)',
+      captureLine({ ...base, rawPending: true, lastRawEvent: 'T0' }, at)
+        === 'no store yet, but events are captured and waiting for a harvest, last 0 min ago');
+    add('and with nothing captured at all it still says so plainly',
+      captureLine(base, at) === 'no store yet');
+    add('a harvested store reports the indexed count',
+      captureLine({ ...base, events: 37, lastEvent: 'T0' }, at) === '37 events, last 0 min ago');
+    add('an empty table with a non-empty log is not reported as zero events',
+      captureLine({ ...base, events: 0, lastEvent: null, rawPending: true, lastRawEvent: 'T0' }, at)
+        === 'none harvested yet; events are captured and waiting for a harvest, last 0 min ago');
+    add('events arriving since the last harvest are reported as pending',
+      captureLine({ events: 5, lastEvent: '2026-01-01T00:00:00Z', rawPending: true,
+                    lastRawEvent: '2026-01-02T00:00:00Z' }, at).includes('more captured and waiting'));
+    add('and a log older than the last harvest adds nothing (gate can fail)',
+      captureLine({ events: 5, lastEvent: '2026-01-02T00:00:00Z', rawPending: true,
+                    lastRawEvent: '2026-01-01T00:00:00Z' }, at) === '5 events, last a while ago');
   }
 
   let bad = 0;
