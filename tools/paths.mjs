@@ -8,7 +8,7 @@
 // Precedence, identical everywhere: --db flag, then C4X_DB, then <root>/data/context.db.
 
 import { join, dirname } from 'node:path';
-import { existsSync, mkdirSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, chmodSync, readdirSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -146,6 +146,137 @@ export function resolveDb(root, argv = process.argv.slice(2), onError = null) {
 }
 
 // ---------------------------------------------------------------------------
+// THE GATE FOR THE CLASS, NOT THE INSTANCE.
+//
+// `winArg` above was written for one defect and then applied to two of the three call sites that
+// had it. The third, tools/probe.mjs, went on emitting DEP0190 on every run, and an external sweep
+// found it still there after the fix and its written rationale had both shipped. That is the shape
+// of the mistake: the helper lands, one caller is converted, and nothing ever asks who else needed
+// it. A helper whose adoption nothing checks is a helper that gets adopted once.
+//
+// So the rule is machine-checked over the source, not remembered. A call is reported when BOTH
+// hold: it passes three or more arguments, so there is an argv distinct from the command, AND its
+// options object names `shell` as anything but false. The single pre-quoted string form that
+// `winArg` exists to build has two arguments and is what this asks for.
+// ---------------------------------------------------------------------------
+
+// A copy of the source with the INSIDE of every string, template, comment and regex replaced by
+// spaces, keeping length and line breaks so offsets still point at the original.
+//
+// Without this the gate reported its own control strings: the checks below pass a bad call as a
+// STRING to prove the detector fires, and scanning this file found those three literals and called
+// them offenders. A detector that cannot tell code from a quoted example of code is a detector
+// that will also miss the real thing behind a quote.
+function blankLiterals(src) {
+  const BACKSLASH = String.fromCharCode(92);
+  const out = src.split('');
+  const blank = (from, to) => {
+    for (let k = from; k < to && k < out.length; k++) if (out[k] !== '\n') out[k] = ' ';
+  };
+  // A slash starts a regex when what precedes it cannot end an expression.
+  const PRE = /[([{,;:=!&|?+\-*%<>~^]/;
+  const WORD = /\b(return|typeof|case|in|of|do|else)$/;
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === "'" || c === '"' || c === '`') {
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === BACKSLASH) { j += 2; continue; }
+        if (src[j] === c) break;
+        j++;
+      }
+      blank(i + 1, j); i = j + 1; continue;
+    }
+    if (c === '/' && src[i + 1] === '/') {
+      let j = i; while (j < src.length && src[j] !== '\n') j++;
+      blank(i, j); i = j; continue;
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      const e = src.indexOf('*/', i + 2); const j = e < 0 ? src.length : e + 2;
+      blank(i, j); i = j; continue;
+    }
+    if (c === '/') {
+      let k = i - 1;
+      while (k >= 0 && (src[k] === ' ' || src[k] === '\n' || src[k] === '\t')) k--;
+      if (k < 0 || PRE.test(src[k]) || WORD.test(src.slice(0, k + 1))) {
+        let j = i + 1, cls = false;
+        while (j < src.length && src[j] !== '\n') {
+          if (src[j] === BACKSLASH) { j += 2; continue; }
+          if (src[j] === '[') cls = true;
+          else if (src[j] === ']') cls = false;
+          else if (src[j] === '/' && !cls) break;
+          j++;
+        }
+        blank(i + 1, j); i = j + 1; continue;
+      }
+    }
+    i++;
+  }
+  return out.join('');
+}
+
+// Top-level arguments of the call whose opening parenthesis is at `open`, or null if the source
+// runs out first. Tracks strings, template literals and comments so a comma or bracket inside one
+// does not split the list.
+function callArgs(src, open) {
+  const parts = [];
+  const BACKSLASH = String.fromCharCode(92);
+  let depth = 0, start = open + 1, quote = null;
+  for (let i = open; i < src.length; i++) {
+    const c = src[i];
+    if (quote) {
+      if (c === BACKSLASH) { i++; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') { quote = c; continue; }
+    if (c === '/' && src[i + 1] === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (c === '/' && src[i + 1] === '*') { const e = src.indexOf('*/', i + 2); if (e < 0) return null; i = e + 1; continue; }
+    if (c === '(' || c === '[' || c === '{') { depth++; if (depth === 1) start = i + 1; continue; }
+    if (c === ')' || c === ']' || c === '}') {
+      depth--;
+      if (depth === 0) { parts.push(src.slice(start, i)); return parts; }
+      continue;
+    }
+    if (c === ',' && depth === 1) { parts.push(src.slice(start, i)); start = i + 1; }
+  }
+  return null;
+}
+
+/** Every child-process call in `source` that pairs a shell with a separate argument vector. */
+export function shellArgvCalls(source) {
+  const found = [];
+  const src = blankLiterals(source);
+  const CALL = /\b(spawnSync|spawn|execFileSync|execFile)\s*\(/g;
+  let m;
+  while ((m = CALL.exec(src)) !== null) {
+    const args = callArgs(src, m.index + m[0].length - 1);
+    if (!args || args.length < 3) continue;
+    const opts = args[args.length - 1];
+    if (!/\bshell\s*:/.test(opts) || /\bshell\s*:\s*false\b/.test(opts)) continue;
+    found.push({ fn: m[1], line: source.slice(0, m.index).split('\n').length });
+  }
+  return found;
+}
+
+/** Every .mjs file under the directories a hook or tool can ship from. */
+export function sourceFiles(root, dirs = ['tools', 'hooks']) {
+  const out = [];
+  const walk = (dir) => {
+    if (!existsSync(dir)) return;
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const full = join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.name.endsWith('.mjs')) out.push(full);
+    }
+  };
+  for (const d of dirs) walk(join(root, d));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Checks. This file was EXEMPT from the suite's self-test requirement, on the grounds that it held
 // "path constants only, nothing to exercise". That stopped being true when it gained the store
 // directory hardening and the Windows argument quoting, and an exemption that no longer describes
@@ -164,6 +295,30 @@ function selfTest() {
   add('an embedded quote is doubled, not dropped', winArg('a"b') === '"a""b"');
   add('the result never carries an args array with it', ['npm', 'run', 'lint'].map(winArg).join(' ')
     === 'npm run lint');
+
+  // The gate for the class. Controls first: a detector that reports nothing passes a clean tree
+  // for the wrong reason, and one that reports everything is equally useless.
+  add('the shell-plus-argv gate catches the bad form (gate can fail)',
+    shellArgvCalls('spawn(CLAUDE, args, { shell: true, windowsHide: true });').length === 1);
+  add('and catches it when the shell is decided per platform',
+    shellArgvCalls("spawn(c, a, { shell: process.platform === 'win32' });").length === 1);
+  add('and ignores the pre-quoted single string this asks for',
+    shellArgvCalls("spawnSync(['npm','run','lint'].map(winArg).join(' '), { shell: true });").length === 0);
+  add('and ignores an argv with no shell at all',
+    shellArgvCalls("spawnSync('npm', ['run', 'lint'], { encoding: 'utf8' });").length === 0);
+  add('and ignores an argv whose shell is explicitly false',
+    shellArgvCalls("spawn(c, a, { shell: false });").length === 0);
+  add('and is not fooled by a comma inside a string argument',
+    shellArgvCalls('spawn("a,b", { shell: true });').length === 0);
+
+  const offenders = [];
+  for (const f of sourceFiles(rootFrom(import.meta.url))) {
+    for (const c of shellArgvCalls(readFileSync(f, 'utf8'))) {
+      offenders.push(`${f.split(String.fromCharCode(92)).join('/').split('/').slice(-2).join('/')}:${c.line} ${c.fn}`);
+    }
+  }
+  add('no tool pairs a shell with an args array (gate can fail)', offenders.length === 0,
+    offenders.join('; '));
 
   const slash = (s) => s.split(String.fromCharCode(92)).join('/');
   add('defaultDb sits under data/', slash(defaultDb('R')) === 'R/data/context.db');

@@ -25,7 +25,10 @@
 // baseline for a configuration is known, the whole breakdown follows for ALL of history,
 // retroactively, with no further capture.
 //
-//   node breakdown.mjs --calibrate --system-prompt N --system-tools N --mcp-tools N --skills N //                       --memory-files N --custom-agents N --mcp-tools-deferred N //                       --system-tools-deferred N --mcp-tools-items N --memory-files-items N //                       --custom-agents-items N
+//   node breakdown.mjs --calibrate --system-prompt N --system-tools N --mcp-tools N --skills N
+//                      --memory-files N --custom-agents N --mcp-tools-deferred N
+//                      --system-tools-deferred N --mcp-tools-items N --memory-files-items N
+//                      --custom-agents-items N
 //
 // EVERY FIELD, and no example numbers. The line here used to show four of the eleven flags with
 // values copied from one machine, while c4x/breakdown.py showed six with DIFFERENT values. Two

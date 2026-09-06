@@ -25,7 +25,7 @@ import { appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { rootFrom, resolveDb, ensureStoreDir } from './paths.mjs';
+import { rootFrom, resolveDb, ensureStoreDir, winArg } from './paths.mjs';
 
 
 // Three writers share this store by design: a manual harvest, the SessionEnd and UserPromptSubmit
@@ -189,8 +189,17 @@ function store(result, stderrText) {
 async function runProbe() {
   const args = argsFor();
   process.stderr.write(`probe: spawning ${CLAUDE} ${args.join(' ')}\n`);
-  const child = spawn(CLAUDE, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: process.platform === 'win32',
-                                      windowsHide: true });
+  // A single pre-quoted command line on Windows rather than shell:true with an args array. The
+  // shell stays: C4X_CLAUDE_BIN may point at a .cmd shim, which cmd must resolve, and `claude`
+  // itself is one on an npm install. What goes is letting node concatenate the arguments
+  // unescaped, which is what DEP0190 warns about and what a checkout path with a space or a
+  // percent sign would have been re-split by. `winArg` and its reasoning were already in the repo
+  // for the two calls in run_tests.mjs; this is the third site, and the one the report was about.
+  const WIN = process.platform === 'win32';
+  const child = WIN
+    ? spawn([CLAUDE, ...args].map(winArg).join(' '),
+            { stdio: ['pipe', 'pipe', 'pipe'], shell: true, windowsHide: true })
+    : spawn(CLAUDE, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
 
   let out = '', err = '';
   child.stdout.on('data', (b) => { out += b.toString(); });

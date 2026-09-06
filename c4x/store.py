@@ -23,6 +23,8 @@ from typing import Any, TypedDict
 
 import pandas as pd
 
+from c4x.labels import distinct_short_paths
+
 ROOT = Path(__file__).resolve().parent.parent
 # C4X_DB, the same override every node tool honours through paths.mjs. That module exists because
 # some tools read the variable and others hardcoded the default, so `C4X_DB=copy.db` silently read
@@ -663,8 +665,17 @@ def cohort_options() -> list:
               .agg(sessions=("session_id", "count"), calls=("_calls", "sum"))
               .sort_values(["calls", "sessions"], ascending=False)
               .head(40))
+    # SHORTENED, AND DISAMBIGUATED. These are working directories, about 150 characters here, and
+    # the control that renders them clips from the right - so two projects under the same scratch
+    # parent arrived as one identical string and the list offered the same choice twice. The chart
+    # axis was given `short_path` for exactly this and the dropdown was not, which is why the
+    # helper now lives in c4x/labels.py with a collision-aware variant beside it.
+    #
+    # The VALUE keeps the full path. The label is ambiguous by construction and nothing matches
+    # on it; `cohort_parts` below splits the value, and a delete resolves through that.
+    labels = distinct_short_paths(list(work.index))
     for proj, row in work.iterrows():
-        opts.append({"label": f"Project: {proj} ({int(row['sessions']):,})",
+        opts.append({"label": f"Project: {labels[proj]} ({int(row['sessions']):,})",
                      "value": f"project::{proj}"})
     return opts
 
