@@ -53,8 +53,17 @@ def summary_layout(session_id=None, scope="main", cohort=None):
         # Both numbers, because they answer different questions and the page shows both
         # elsewhere: this card counts every session in the store, the picker and All sessions list
         # only those with five or more transcript rows.
-        ("sessions", f"{int(s['sessions']):,}",
-         f"in the store, {int(s['listed'] or 0):,} listed on All sessions"),
+        #
+        # THE LABEL CARRIES THE QUALIFIER, not only the caption. The caption below is real and is
+        # computed in the same query as the total, but on the rendered page it is the card's hover
+        # (frontend/src/components/Pane.tsx explains why, and that reasoning stands). So a reader
+        # comparing this figure against All sessions saw the same word, "sessions", over two
+        # different numbers, which is the exact complaint store.py records above cohort_options:
+        # two numbers for one word with nothing to reconcile them. Naming the population in the
+        # label costs nothing and does not put a wrapped second line back on every card.
+        ("sessions in store", f"{int(s['sessions']):,}",
+         f"{int(s['listed'] or 0):,} of them listed on All sessions, which needs five or more "
+         f"transcript rows"),
         ("API calls", f"{api_calls:,}", f"{int(s['turn_rows']):,} transcript rows behind them"),
         ("subagent share", f"{(100.0 * sub_calls / api_calls) if api_calls else 0:.0f}%",
          f"{sub_calls:,} of {api_calls:,} are sidechain"),

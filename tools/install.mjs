@@ -710,6 +710,15 @@ function cmdInstall(argv) {
   // event that has already gone past.
   console.log('hooks take effect immediately, in sessions already running too.');
   console.log('only events that already fired are missed: SessionStart, and any past compaction.');
+  // AFTER the settings write, the receipt and ensureStoreDir, deliberately. A harvest can run for
+  // a while on a long transcript history, and if it is interrupted the wiring is already correct
+  // and the receipt already describes it, so an uninstall still undoes exactly what was done.
+  //
+  // This is the path a REAL first install takes, and until now it was the one path that never
+  // harvested: the only call sat inside the `already converged` branch above, which by definition
+  // runs when there was nothing to install. The feature was inverted - it fired on a no-op
+  // re-install, where a store almost always exists and shouldFirstHarvest returns false anyway.
+  firstHarvest(argv, dry);
   return 0;
 }
 
@@ -1052,6 +1061,30 @@ function selfTest() {
     shouldFirstHarvest(['--no-harvest'], false, false) === false);
   add('--rewire touches settings only, as it says',
     shouldFirstHarvest(['--rewire'], false, false) === false);
+
+  // THE DECISION WAS CHECKED AND THE WIRING WAS NOT, so all five checks above passed while the
+  // feature was dead. firstHarvest had exactly one call site, inside the `already converged`
+  // branch, which by definition runs when there was nothing to install: it fired on a no-op
+  // re-install and never on a real first install, the only case it exists for.
+  //
+  // A self-test cannot spawn an install to prove this - that is what the comment above
+  // shouldFirstHarvest explains - so the call GRAPH is asserted from this module's own source
+  // instead. tests/test_floor.py reads source for the same reason, and
+  // tests/test_render_tables.py states the principle: a dispatch nobody installed is a comment.
+  {
+    const src = readFileSync(new URL(import.meta.url), 'utf8');
+    const from = src.indexOf('function cmdInstall(');
+    const rest = src.slice(from);
+    const stop = rest.indexOf(String.fromCharCode(10) + 'function ');
+    const fn = stop === -1 ? rest : rest.slice(0, stop);
+    const calls = [...fn.matchAll(/firstHarvest\(/g)].map((m) => m.index);
+    const writesAt = fn.indexOf('writeSettingsAtomic(');
+    add('the day-one harvest is called on more than one path (gate can fail)',
+      calls.length >= 2, `${calls.length} call site(s) in cmdInstall`);
+    add('and one call is on the path that actually WRITES the wiring (gate can fail)',
+      writesAt !== -1 && calls.some((i) => i > writesAt),
+      `writeSettingsAtomic at ${writesAt}, calls at ${calls.join(',')}`);
+  }
 
   // The capture line. The defect was a sentence, not a number: a working capture whose events were
   // not yet harvested was described exactly like a dead one. A fixed clock, so these do not drift.

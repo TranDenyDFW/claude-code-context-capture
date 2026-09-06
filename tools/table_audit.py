@@ -134,6 +134,10 @@ PROSE_MIN_LENGTH = 40
 # _render_tab catches a failing pane and renders the exception rather than raising, which is right
 # for a dashboard and would let this audit call a broken tab a success.
 # One definition, in c4x/theme.py, shared with the two callbacks that PRODUCE it.
+# Read only to EXPLAIN a reachability failure, never to change a verdict. Both are already in the
+# graph through `app` above, so naming them here adds nothing the audit did not already load.
+from c4x.breakdown import latest_baseline  # noqa: E402
+from c4x.store import tables_present  # noqa: E402
 from c4x.theme import RENDER_FAILED  # noqa: E402
 
 
@@ -952,6 +956,22 @@ def main():
         print("  --render-only: the two REACHABILITY gates are off, because a first-run store "
               "cannot take a path that needs a probe. Every other gate is on, including "
               "constructed-but-never-walked, so a table whose rows went uninspected still fails.")
+    elif any("which this audit never reached" in e for e in errors):
+        # THE FAILURE EXPLAINS ITSELF, or it gets read as a defect in the code it names.
+        #
+        # An external reviewer pointed a plain run at a first-run store, got this error for
+        # c4x/breakdown.py's composition_blocks, and filed it as a regression. It is not one: that
+        # panel sits behind `if not b:` where b is latest_baseline(), which returns None on a store
+        # that has never been calibrated, so the path is genuinely not taken and the gate is
+        # correctly saying so. The module docstring already prescribes the remedy - "Give the audit
+        # an input that takes the branch. Do not delete the gate." - but it is in the docstring,
+        # and the person reading this output is not reading the docstring.
+        missing = not tables_present("context_baselines") or latest_baseline() is None
+        if missing:
+            print("  NOTE: this store has no calibration baseline, so every path behind one is "
+                  "unreachable here and the reachability errors above are expected on it. For a "
+                  "first-run store the intended command is `--render-only`, which is what the "
+                  "suite runs. To exercise these gates, point the audit at a calibrated store.")
     ok = not seen and not errors and fixture_ok
     # The store must be byte-for-byte the size it was. A grown store means something harvested
     # into it, which is the defect above; a shrunk one means something worse. Measured on the

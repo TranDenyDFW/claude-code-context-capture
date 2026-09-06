@@ -7,7 +7,7 @@ collision. Every case here therefore starts from an input that genuinely collide
 depth, because a test built on paths that already differ would pass against no implementation at
 all.
 """
-from c4x.labels import distinct_short_paths, short_path
+from c4x.labels import distinct_short_paths, plural, short_path
 
 BACKSLASH = chr(92)
 
@@ -76,3 +76,40 @@ def test_the_theme_module_re_exports_the_one_definition():
     second copy is what produced this defect, the chart getting the fix and the dropdown not."""
     from c4x.theme import short_path as via_theme
     assert via_theme is short_path
+
+
+def test_one_of_a_thing_is_singular():
+    """The reported string was "1 sessions in project ...", from a cohort holding exactly one."""
+    assert plural(1, "session") == "1 session"
+
+
+def test_more_than_one_is_plural_and_grouped():
+    assert plural(2, "session") == "2 sessions"
+    assert plural(1234, "session") == "1,234 sessions"
+
+
+def test_zero_is_plural():
+    assert plural(0, "session") == "0 sessions"
+
+
+def test_an_irregular_plural_can_be_given():
+    assert plural(1, "entry", "entries") == "1 entry"
+    assert plural(3, "entry", "entries") == "3 entries"
+
+
+def test_the_population_caption_agrees_with_its_own_count():
+    """The caption builder is where this was wrong, so assert it there and not only on the helper.
+
+    A cohort of one is the case that read as broken, and it sits directly beside a session count
+    the reader is already being asked to reconcile.
+    """
+    from unittest.mock import patch as mock_patch
+
+    import c4x.store as store
+
+    with mock_patch.object(store, "cohort_sessions", return_value=["only-one"]):
+        assert store.population_label(None, "project::X", "main") == (
+            "1 session in project X, main thread only")
+    with mock_patch.object(store, "cohort_sessions", return_value=["a", "b"]):
+        assert store.population_label(None, "project::X", "main") == (
+            "2 sessions in project X, main thread only")
