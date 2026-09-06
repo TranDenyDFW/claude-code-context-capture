@@ -182,11 +182,18 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
                 # counts. A command listing only some of them records a fixed overhead that is
                 # too small, and every turn in history then reports that many tokens too many
                 # under Messages, with nothing on the page saying so.
+                #
+                # AND NO EXAMPLE NUMBERS. This block used to carry six values read off one
+                # machine, while tools/breakdown.mjs carried four DIFFERENT ones, so the repo
+                # shipped two example sets that disagreed and neither was the reader's. Worse
+                # than none: these are the numbers that get pasted, and a wrong fixed overhead
+                # is silent - it just moves tokens into Messages for every turn in history.
+                # The values belong to the reader's own tooltip. `N` is where they go.
                 "node tools/breakdown.mjs --calibrate \\\n"
-                "  --system-prompt 5100 --system-tools 23500 --mcp-tools 8400 \\\n"
-                "  --skills 9900 --memory-files 11700 --custom-agents 1000 \\\n"
-                "  --mcp-tools-deferred 104900 --system-tools-deferred 16200 \\\n"
-                "  --mcp-tools-items 214 --memory-files-items 1 --custom-agents-items 10",
+                "  --system-prompt N --system-tools N --mcp-tools N \\\n"
+                "  --skills N --memory-files N --custom-agents N \\\n"
+                "  --mcp-tools-deferred N --system-tools-deferred N \\\n"
+                "  --mcp-tools-items N --memory-files-items N --custom-agents-items N",
                 style={"background": PANEL, "border": f"1px solid {BORDER}", "borderRadius": "8px",
                        "padding": "12px 14px", "color": TEXT, "fontFamily": MONO,
                        "fontSize": "12px", "display": "inline-block"}),

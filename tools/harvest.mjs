@@ -823,6 +823,15 @@ function fullGate(argv, files = listTranscripts(PROJECTS)) {
 const KNOWN_TYPES = new Set([
   'user', 'assistant', 'attachment', 'system', 'summary', 'ai-title',
   'bridge-session', 'queue-operation', 'last-prompt', 'custom-title', 'atis-latch', 'mode',
+  // Claude Code 2.1.233 writes `permission-mode` where older builds wrote `mode`. BOTH stay: this
+  // set is what the census calls recognised, and dropping the old name would re-flag every
+  // transcript already on disk as unknown drift. Recognised, not stored: nothing reports permission
+  // mode, and adding a column for it is a feature rather than the fix for a false drift signal.
+  //
+  // This is the channel working. An unknown type is logged with a sample and counted, which is how
+  // an upstream rename becomes visible instead of silently misclassified, and it is why the rename
+  // was noticed at all.
+  'permission-mode',
   'file-history-snapshot', 'x-anthropic-log',
 ]);
 
@@ -1244,8 +1253,36 @@ export function backfillSurvivors(dbPath = DB_PATH, { quiet = false } = {}) {
   return out;
 }
 
+// The day-one shape, with every key --stats would print and a note saying why they are all zero.
+//
+// REACHING HERE MEANS THE DEFAULT PATH, WHICH IS WHY THIS IS SAFE. An explicit `--db X` or
+// `C4X_DB=X` naming a store that does not exist is refused by resolveDb with exit 2 and never gets
+// this far, and that refusal is the right answer: you asked for a specific store and it is not
+// there. Only the default `<root>/data/context.db` can be missing at this point, and on day one it
+// always is, because `install` wires hooks and the store appears on the first harvest.
+//
+// Exit 0 and valid JSON, because README's "Confirm it captured something" is the first command a
+// new user runs and it ran before anything could have created a store. Exiting 1 there says
+// something is broken when nothing is.
+function emptyStats() {
+  return {
+    db: posix(DB_PATH),
+    note: 'no store yet - it is created by the first harvest. The hooks run one for you at the '
+        + 'end of a session; `node tools/harvest.mjs` does it now.',
+    files: { n: 0, bytes: 0 },
+    sessions: 0,
+    turns: { n: 0, max_resident: null },
+    api_calls: { n: 0, out_tok: 0, in_tok: 0, rows_behind_them: 0 },
+    compactions: { n: 0, unpaired: 0, with_dropped: 0 },
+    by_trigger: [],
+    record_types: [],
+    top_attachments: [],
+    runs: [],
+  };
+}
+
 function stats() {
-  if (!existsSync(DB_PATH)) { console.error('no store yet at ' + DB_PATH); return 1; }
+  if (!existsSync(DB_PATH)) { console.log(JSON.stringify(emptyStats(), null, 2)); return 0; }
   // openDb rather than a second connection of its own. This opened the real store read-write and
   // ran DDL with NO busy timeout, while every other on-disk connection in the repo had one, so
   // --stats was the one command that still died outright against a concurrent hook harvest. It was

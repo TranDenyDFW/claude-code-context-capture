@@ -13,6 +13,11 @@ import plotly.graph_objects as go
 from dash import html
 from dash.dash_table.Format import Format, Group
 
+# ONE DEFINITION, imported rather than repeated. `short_path` lives in c4x/labels.py because
+# c4x/store.py needs it for the population dropdown and imports nothing from this package: this
+# module pulls in dash and plotly, and the data layer should not.
+from c4x.labels import short_path  # noqa: F401  (re-exported: c4x/tabs/summary.py imports it here)
+
 # ---------------------------------------------------------------------------
 # Dark palette. Every surface sets its colors explicitly; nothing inherits.
 # ---------------------------------------------------------------------------
@@ -574,25 +579,6 @@ def column_label(column_id) -> str:
 # cannot notice the constant changing, and what a reader sees on screen is worth asserting
 # independently of what the code calls it.
 RENDER_FAILED = "could not be rendered"
-
-
-def short_path(value, keep=2):
-    """A path shortened from the LEFT, keeping the tail that identifies it.
-
-    The Summary chart labels its bars with the raw working directory, and on this store those run
-    to about 150 characters, so the labels overflowed the panel and the bars they belong to were
-    pushed off it. Truncating from the right is worse than useless here: every one of these paths
-    shares a long prefix, so the first N characters are the part that is identical between them.
-    The last two segments are what tells one project from another.
-
-    Display only. The full value stays in the hover and in the data, because the shortened form is
-    ambiguous by construction and nothing should ever match on it.
-    """
-    text = str(value or "")
-    parts = [p for p in text.replace(chr(92), '/').split('/') if p]
-    if len(parts) <= keep:
-        return text
-    return ".../" + "/".join(parts[-keep:])
 
 
 def table_label(table_id):

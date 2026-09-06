@@ -3,6 +3,66 @@
 Dates are when the work landed. This project is versioned from 0.1.0, the first release with a test
 runner, CI and a linted tree.
 
+## Unreleased
+
+Everything since 0.1.0. This section exists because the file sat at one entry for 58 commits, long
+enough that it described a build nobody was running: the privacy line it lists under 0.1.0 had been
+removed and nothing here said so.
+
+### Added
+
+- **An HTTP API and a React frontend.** `python -m c4x.api` serves `/api/tab/{id}` and a built
+  bundle from `frontend/dist`, which is tracked on purpose so the documented install pulls nothing
+  from npm. A suite check now compares the bundle's commit time against its source, because the
+  tests run against `src` and the users get `dist`.
+- **A response cache** (`c4x/api/cache.py`) keyed on the store's file state, with a five second
+  upper bound on staleness. Both clauses are load-bearing and the docstring says which does the
+  work.
+- **`tools/contract_audit.py`**, a payload-shaped gate meant to outlive Dash, and a shared
+  `RENDER_FAILED` marker so a crashed tab is visible to the CLI's exit code and to every audit
+  rather than only to a reader.
+- **Capture liveness in `status`**: hook events and their recency, status-line samples against
+  those events, and when the SessionStart self-heal last rewrote your settings. `C4X_NO_SELF_HEAL=1`
+  turns that rewrite off.
+- **`install --evict-missing`**, which removes c4x wiring pointing at a root that no longer exists.
+  Moving a checkout used to strand hooks that `status` never named.
+- **Project import and export**, with the manifest verified before a row is written.
+- **Pre-compaction transcript snapshots are documented**, including where they live, the size cap,
+  `C4X_SNAPSHOT=0`, and that `--purge` deletes them.
+
+### Changed
+
+- **The dashboard header no longer carries a privacy paragraph.** 0.1.0 added it; it repeated the
+  same three sentences on every tab of every session, which is how a standing notice becomes
+  furniture. The store's path is in the header and what is in the store is in the README.
+  `c4x/ui/layout.py` records the reasoning where the paragraph used to be.
+- **`harvest --stats` on a machine with no store yet** prints the zeroed shape with a note and exits
+  0, and `install` runs one harvest when it finds no store. The README's own "confirm it captured
+  something" step used to fail on every correct first install.
+- **Hook events are ingested from the last offset** rather than by re-reading the whole log, which
+  on one install meant 29,049 runs each re-reading a 36 MB file to learn what the previous run
+  already knew.
+
+### Fixed
+
+- **Mutation routes refuse a cross-origin request.** A multipart POST is a CORS simple request, so
+  it reached the import handler and staged the upload to disk before anything validated it. The
+  guard is middleware rather than a route dependency, because FastAPI reads the body first.
+- **The store directory is created with a narrow ACL** on every path that creates it, not just the
+  installer's. On a data drive it had been inheriting `Authenticated Users`.
+- **Redaction covers values, not just variable names**, and its stand-in identifiers are stable
+  across processes; they were derived from `hash()`, which Python salts per process.
+- **Optional tables no longer raise.** A store with no probe or calibration rows renders an empty
+  state instead of an exception panel, and the suite now runs against a first-run fixture that
+  actually has those tables missing.
+
+### Known limits
+
+- A hand-run `tools/statusline.mjs` whose payload session id matches the ambient one is still
+  counted as a genuine sample. The cross-check is a session-id heuristic and `statusline.mjs`
+  says so.
+- `data/raw/events.ndjson` is ingested incrementally but never rotated, so it grows.
+
 ## 0.1.0 - 2026-08-29
 
 First tagged version. Everything below already worked; what changed is that it can now be checked by

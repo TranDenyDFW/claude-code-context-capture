@@ -385,6 +385,59 @@ if (!NODE_ONLY) {
   }
 }
 
+// THE SUITE DEFINES ITS OWN STORE, so an ambient C4X_DB cannot decide the result.
+//
+// Measured: with C4X_DB exported to any path that does not exist, `make_fixture.mjs` exits 2
+// through resolveDb before writing anything, so the fixture is never built, and the self-tests
+// then inherit the same variable and exit 2 as well. Seven legs failed for one exported variable,
+// and none of the messages said so. make_fixture takes --out, so it has no business reading the
+// override at all here.
+//
+// Only the legs the suite pins are affected. The live-store Python leg still inherits the
+// environment, because pointing THAT at a copy is a thing someone may legitimately want.
+function suiteEnv(extra = {}) {
+  const e = { ...process.env, ...extra };
+  if (!('C4X_DB' in extra)) delete e.C4X_DB;
+  return e;
+}
+
+// THE FIXTURE IS BUILT BEFORE THE NODE SELF-TESTS, not only for the Python leg.
+//
+// `mirror.mjs --self-test` and `segments.mjs --self-test` call validate()/audit(), which read a
+// STORE, and the loop below used to hand them whatever `resolveDb` found. On this machine that is
+// a 1.3 GB store with 150 compactions and both pass; on a fresh clone there are no compactions, so
+// the mutant gate has no negatives to compare and both FAIL. Same code, same commit, opposite
+// result, decided by data that is gitignored. That is the whole of the 'red on every fresh clone'
+// complaint for these two legs, and it was invisible here precisely because this store is large.
+//
+// The Python leg already had the answer and the node leg never got it: C4X_DB pointed at a
+// synthetic fixture, which is the shape CI gates on. Same override, same fixture, built once.
+const fixture = join(ROOT, 'tmp', 'suite-fixture.db');
+// The first-run shape: built the same way, then stripped of the five tables no install path
+// creates. Python-only, so it is still built further down beside the leg that asks for it.
+const bare = join(ROOT, 'tmp', 'suite-fixture-bare.db');
+let fixtureBuilt = false;
+let bareBuilt = false;
+
+function buildFixture(out, extra = []) {
+  rmSync(out, { force: true });
+  const built = spawnSync(process.execPath,
+    [join(ROOT, 'tools', 'make_fixture.mjs'), '--out', out, ...extra],
+    { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true, env: suiteEnv() });
+  return { ok: built.status === 0 && existsSync(out),
+           tail: tailOf(`${built.stdout || ''}${built.stderr || ''}`) };
+}
+
+{
+  const r = buildFixture(fixture);
+  fixtureBuilt = r.ok;
+  if (!fixtureBuilt) {
+    failed++;
+    results.push({ rel: 'tools/make_fixture.mjs --out tmp/suite-fixture.db', state: 'FAIL',
+                   note: 'could not build the fixture the suite runs against', tail: r.tail });
+  }
+}
+
 for (const rel of nodeTargets()) {
   if (EXEMPT.has(rel)) {
     results.push({ rel, state: 'exempt', note: EXEMPT.get(rel) });
@@ -396,17 +449,31 @@ for (const rel of nodeTargets()) {
   // than a hung process reports a green suite as red, which teaches people to re-run rather than
   // to read. Still bounded, because a genuinely hung self-test must not stall the suite forever.
   const run = spawnSync(process.execPath, [join(ROOT, rel), '--self-test'],
-                        { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
+    { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true,
+      // Every node self-test, not a hand-picked list: nodeTargets() enumerates from disk so
+      // that nothing can hide, and a per-tool opt-in would put the hand-list straight back.
+      // A self-test that touches no store is unaffected by the variable.
+      env: suiteEnv(fixtureBuilt ? { C4X_DB: fixture } : {}) });
   const text = plain(run.stdout) + plain(run.stderr);
   const match = text.match(CHECKS);
   const count = match ? Number(match[1]) : 0;
 
   // Exit 0 is not enough. A file that never printed a check count did not run a self-test, which
   // is the exact shape of the two exempt files, and the reason a naive runner over-reports.
-  if (run.status !== 0 || run.signal) {
+  // EXIT 3 IS 'THIS STORE CANNOT ANSWER', the same contract table_audit.py already had and the
+  // same one the Python loop already honours. The node loop had no decline state at all: a tool
+  // facing a store too small to check could only exit non-zero, which the runner read as a
+  // broken check. SKIPPED still fails under --strict, so a check that could not run is never
+  // quietly a pass.
+  const declined = run.status === 3 && /SKIPPED/.test(text);
+  if (declined) {
+    skipped++;
+    const why = (text.match(/^.*SKIPPED:\s*(.+)$/m) || [, 'no reason given'])[1];
+    results.push({ rel, state: 'SKIPPED', note: why.trim().slice(0, 200) });
+  } else if (run.status !== 0 || run.signal) {
     failed++;
     results.push({ rel, state: 'FAIL',
-                   note: run.signal ? `killed after 60s (${run.signal})` : `exit ${run.status}`,
+                   note: run.signal ? `killed after 300s (${run.signal})` : `exit ${run.status}`,
                    tail: tailOf(text) });
   } else if (!match) {
     failed++;
@@ -430,29 +497,8 @@ if (NODE_ONLY) {
                    note: `--node-only was passed, so this did not run (${what})` });
   }
 } else {
-  // Built once, before the loop, for the entries that ask for it. In tmp/ rather than at the
-  // default store path: overwriting a developer's real store to run a test would be a far worse
-  // bug than the one this exists to catch.
-  const fixture = join(ROOT, 'tmp', 'suite-fixture.db');
-  // The first-run shape, built the same way and then stripped of the five tables no install path
-  // creates. See the bareFixture entries above for why this exists.
-  const bare = join(ROOT, 'tmp', 'suite-fixture-bare.db');
-  let bareBuilt = false;
-  let fixtureBuilt = false;
-  if (!NODE_ONLY && PY.some(([, , , , o]) => o?.fixture)) {
-    rmSync(fixture, { force: true });
-    const built = spawnSync(process.execPath, [join(ROOT, 'tools', 'make_fixture.mjs'),
-                                               '--out', fixture],
-                            { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
-    fixtureBuilt = built.status === 0 && existsSync(fixture);
-    if (!fixtureBuilt) {
-      failed++;
-      results.push({ rel: 'tools/make_fixture.mjs --out tmp/suite-fixture.db', state: 'FAIL',
-                     note: 'could not build the fixture the suite runs against',
-                     tail: tailOf(`${built.stdout || ''}${built.stderr || ''}`) });
-    }
-  }
-
+  // The main fixture is built above, before the node self-tests, because those need it too.
+  // Only the first-run variant is Python-only, so only it is built here.
   if (!NODE_ONLY && PY.some(([, , , , o]) => o?.bareFixture)) {
     rmSync(bare, { force: true });
     const built = spawnSync(process.execPath, [join(ROOT, 'tools', 'make_fixture.mjs'),
@@ -664,6 +710,23 @@ for (const r of results) {
   } else {
     console.log(`  FAIL     ${label} ${r.note}`);
     if (r.tail) console.log(`           ${r.tail}`);
+  }
+}
+
+// THE STORES THIS RUN BUILT ARE THIS RUN'S TO REMOVE.
+//
+// A local run left about 9 MB of sqlite behind every time, and the only reason it never grew
+// unbounded is that the next run overwrote the same names. CI deletes its store and local did not,
+// so the two disagreed about what a finished run looks like, and a stale fixture from an older
+// schema sat there being reused by anything that reached for it by name.
+//
+// tmp/test-schema.db is NOT in this list. tests/test_projects.py documents it as a build cache,
+// created once and reused with an mtime freshness check, so deleting it would make every run pay
+// to rebuild something the tests deliberately keep.
+for (const f of [fixture, bare, join(ROOT, 'tmp', 'test-store.db')]) {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { rmSync(`${f}${suffix}`, { force: true }); } catch { /* a store still held open is not a
+      suite failure: the checks already ran and their verdicts are printed below. */ }
   }
 }
 
