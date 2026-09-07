@@ -512,9 +512,30 @@ describe('a card caption', () => {
     ] })} />)
     // Shown under every figure the caption wrapped and the card width cut it off, so half
     // of each one ALREADY existed only on the hover. Now all of it is there.
-    expect(screen.queryByText('in the store, 317 listed on All sessions')).toBeNull()
+    //
+    // VISUALLY absent, not absent from the document. This assertion used to be `toBeNull()` on
+    // the text itself, which pinned more than the rule it was written for: the rule is that the
+    // caption takes no vertical space, and reading it as "the caption is not in the DOM" also
+    // banned putting it in the accessibility tree. Measured on the rendered page, the caption was
+    // in a `title` and nowhere else, so it was missing from the accessibility tree and from
+    // anything copied or exported, and `aria-description` is a draft attribute with essentially no
+    // support. `sr-only` is zero pixels, so the visual rule above holds exactly as before.
+    const caption = screen.getByText('in the store, 317 listed on All sessions')
+    expect(caption.className).toBe('sr-only')
     const card = screen.getByText('1,325').closest('div')!
     expect(card.getAttribute('title')).toBe('in the store, 317 listed on All sessions')
+  })
+
+  it('and the caption is reachable without a mouse', () => {
+    /** The Sessions card is the case that made this matter: its caption is the only thing on the
+     * page reconciling the store total against the smaller number All sessions lists. A reader
+     * who cannot hover, or who copies the card, was left with two figures and nothing joining
+     * them. */
+    render(<Pane payload={payload({ stats: [
+      { label: 'Sessions in Store', value: '51', sub: '18 of them listed on All sessions' },
+    ] })} />)
+    const card = screen.getByText('51').closest('div')!
+    expect(card.textContent).toContain('18 of them listed on All sessions')
   })
 })
 

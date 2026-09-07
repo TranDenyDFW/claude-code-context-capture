@@ -23,7 +23,7 @@ INJECTED = _KEYS.index("injected")
 
 
 @pytest.fixture(scope="module")
-def composition(session_id, has_store):
+def composition(session_id, has_store, has_baseline):
     return panel_body(COMPOSITION, session_id, "main", None)
 
 
@@ -39,10 +39,16 @@ def injected(session_id, has_store):
 
 
 @pytest.fixture(scope="module")
-def baseline(q):
+def baseline(q, has_baseline):
+    """The newest calibration, or a skip.
+
+    A store nobody has calibrated cannot answer these three, and saying so beats reporting a defect
+    in the split. The empty state is covered elsewhere: tests/test_tabs_render.py renders Window
+    against a fixture built with no baseline at all and asserts it does not raise.
+    """
     df = q("SELECT * FROM context_baselines ORDER BY ts DESC LIMIT 1")
     if df.empty:
-        pytest.fail("no baseline recorded, so the category split could not be checked")
+        pytest.skip("no baseline recorded: run `node tools/breakdown.mjs --calibrate`")
     return df.iloc[0]
 
 
@@ -57,7 +63,8 @@ def category_table(body):
 # ---------------------------------------------------------------------------
 # The panels themselves
 # ---------------------------------------------------------------------------
-def test_the_tab_renders_its_first_panel_without_a_click(pane, session_id, has_store):
+def test_the_tab_renders_its_first_panel_without_a_click(pane, session_id, has_store,
+                                                        has_baseline):
     """A strip above an empty container reads as a tab with nothing in it."""
     body = pane("tab-window", session=session_id)
     assert extract.tables(body) or extract.figures(body), "Window rendered no content on arrival"
@@ -199,11 +206,11 @@ def test_the_history_chart_covers_every_charted_call(composition):
 # ---------------------------------------------------------------------------
 # Items, from tests/test_breakdown.py
 # ---------------------------------------------------------------------------
-def test_the_item_tables_match_the_probe_rows(items, q):
+def test_the_item_tables_match_the_probe_rows(items, has_probes, q):
     probe = q("""SELECT id FROM probes WHERE ok = 1 AND raw_json IS NOT NULL
                   ORDER BY ts DESC LIMIT 1""")
     if probe.empty:
-        pytest.fail("no probe recorded, so the item detail could not be checked")
+        pytest.skip("no probe recorded: run `node tools/probe.mjs` to check the item detail")
     pid = int(probe.iloc[0]["id"])
     counts = q("SELECT kind, COUNT(*) AS n FROM probe_details WHERE probe_id = ? GROUP BY kind",
                (pid,))
@@ -215,7 +222,7 @@ def test_the_item_tables_match_the_probe_rows(items, q):
                 f"no table holds the {expected[kind]} {kind} rows the probe recorded")
 
 
-def test_a_partial_probe_is_declared_rather_than_shown_as_a_split(items, q):
+def test_a_partial_probe_is_declared_rather_than_shown_as_a_split(items, has_probes, q):
     """A probe reporting no System prompt did not observe a session without one."""
     probe = q("SELECT id FROM probes WHERE ok = 1 ORDER BY ts DESC LIMIT 1")
     if probe.empty:

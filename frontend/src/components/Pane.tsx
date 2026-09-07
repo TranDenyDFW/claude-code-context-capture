@@ -141,14 +141,28 @@ export function Pane({
             // changed is that a row of eight cards each carrying a wrapped second line reads as a
             // row of paragraphs rather than a row of figures, and the captions were being cut off
             // by the card width anyway, so half of each one already only existed on the hover.
+            // AND IT IS ALSO REAL TEXT, sight-hidden. The reasoning above is about what the card
+            // LOOKS like and it stands; this changes only what the card CONTAINS. `sr-only` is
+            // zero pixels, so the row still reads as a row of figures, nothing wraps and no card
+            // grows.
+            //
+            // It was measured absent from everywhere that matters: the caption was in a `title`
+            // and nothing else, so it was missing from the visible text, from anything copied or
+            // exported, and from the accessibility tree. `aria-description` is a draft ARIA 1.3
+            // attribute with essentially no assistive-technology support, so it was doing none of
+            // the work its name suggests, and it is gone rather than left as decoration.
+            //
+            // This matters most for the one caption that reconciles two numbers: the Sessions in
+            // Store card says how many of them All sessions lists, and a reader who does not hover
+            // was left with two figures and nothing joining them.
             <div
               key={index}
               title={stat.sub || undefined}
-              aria-description={stat.sub || undefined}
               className="rounded-lg bg-panel px-4 py-3 shadow-panel"
             >
               <p className="text-2xs tracking-[0.06em] text-ink-faint">{stat.label}</p>
               <p className="mt-1 font-mono text-xl font-bold tabular text-ink">{stat.value}</p>
+              {stat.sub && <p className="sr-only">{stat.sub}</p>}
             </div>
           ))}
         </section>

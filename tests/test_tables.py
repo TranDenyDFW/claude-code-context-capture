@@ -87,11 +87,18 @@ def test_no_tooltip_is_empty(pane, session_id, has_store):
             assert str(text).strip(), f"{label}/{table['id']}: {column} has a blank tooltip"
 
 
-def test_the_registry_has_no_dead_entries(pane, session_id, other_session_id, has_store):
+def test_the_registry_has_no_dead_entries(pane, session_id, other_session_id, has_store,
+                                          has_probes, has_baseline):
     """Every entry in COLUMN_HELP should describe a column that actually exists somewhere.
 
     A stale entry is harmless on screen and misleading in the source: it reads as documentation of
     a column the app no longer has.
+
+    NEEDS A STORE THAT CAN RENDER EVERYTHING. "Dead" here means "no tab rendered this column", and
+    on a store with no probe and no baseline whole panels correctly render an empty state, so nine
+    live columns look dead. That would make this report a stale registry on exactly the store where
+    it knows least. The question is about the CODE, so it is asked only where every table can
+    actually appear.
     """
     rendered = set()
     for _label, table in every_table(pane, session_id, other_session_id):

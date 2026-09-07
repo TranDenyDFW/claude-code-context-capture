@@ -9,15 +9,22 @@ from c4x.cli import extract
 
 
 @pytest.fixture(scope="module")
-def body(pane, has_store):
+def body(pane, has_store, has_probes):
     return pane("tab-diagnostics")
 
 
 @pytest.fixture(scope="module")
-def probe_id(q):
+def probe_id(q, has_probes):
+    """The newest probe, or a skip.
+
+    Was `pytest.fail`, on the reasoning that a store with no probe could not verify this tab. True,
+    but it made a first-run store report a defect instead of a gap, and the empty state IS covered:
+    tests/test_tabs_render.py renders every tab against a fixture built without the probe family.
+    A store that cannot answer is a skip; a store that answers wrongly is still a failure.
+    """
     df = q("SELECT id FROM probes ORDER BY ts DESC LIMIT 1")
     if df.empty:
-        pytest.fail("no probes recorded, so this tab could not be verified")
+        pytest.skip("no probes recorded: run `node tools/probe.mjs` to verify this tab")
     return int(df.iloc[0]["id"])
 
 

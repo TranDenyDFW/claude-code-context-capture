@@ -188,7 +188,14 @@ CREATE TABLE IF NOT EXISTS session_titles (
 CREATE TABLE IF NOT EXISTS excluded_projects (
   cwd TEXT PRIMARY KEY, excluded_at TEXT, note TEXT
 );
-CREATE TABLE IF NOT EXISTS record_types (type TEXT PRIMARY KEY, n INTEGER);
+-- known says whether harvest RECOGNISED the type, the same question hook_events answers with its
+-- own known column. Without it the census renders cost-state in the same two columns as assistant
+-- and nothing says one was parsed and the other counted and discarded, so an upstream schema
+-- change is visible only as a name a reader has no reason to distrust. Claude Code 2.1.250 can
+-- write 37 record types; this build recognises 14, and nine of the rest are already being counted
+-- on stores in the wild.
+-- (No backticks in here: this block sits inside a JS template literal.)
+CREATE TABLE IF NOT EXISTS record_types (type TEXT PRIMARY KEY, n INTEGER, known INTEGER);
 CREATE TABLE IF NOT EXISTS harvest_runs (
   ts TEXT, mode TEXT, files_seen INTEGER, files_read INTEGER, rewrites INTEGER,
   lines INTEGER, mb REAL, turns INTEGER, compactions INTEGER, unpaired INTEGER, ms INTEGER
@@ -463,6 +470,17 @@ export function openDb(dbPath = DB_PATH) {
     const missing = columns.filter((c) => !have.has(c));
     for (const c of missing) db.exec(`ALTER TABLE ${table} ADD COLUMN ${c} TEXT`);
     if (missing.length) console.error(`harvest: ${table} gained ${missing.join(', ')}`);
+  }
+  // SEPARATE FROM THE TABLE ABOVE, because that loop adds every column as TEXT and this one holds
+  // 0 or 1. It backfills nothing: every existing row keeps a NULL known until the next harvest
+  // recounts it, and NULL reads as "this store has not been recounted since the column arrived",
+  // which is the truth and is distinguishable from both 0 and 1.
+  {
+    const have = new Set(db.prepare('PRAGMA table_info(record_types)').all().map((r) => r.name));
+    if (!have.has('known')) {
+      db.exec('ALTER TABLE record_types ADD COLUMN known INTEGER');
+      console.error('harvest: record_types gained known');
+    }
   }
   // AFTER the migration, not inside SCHEMA. An index over a migrated column cannot be created
   // alongside the CREATE TABLE that mentions it: on a store that already has the table, the
@@ -901,6 +919,7 @@ class Harvest {
         VALUES (?,?,?,?,?,?,?,?,?,?,?)`),
     };
     this.typeCounts = new Map();
+    this.typeKnown = new Map();
     this.unknownSeen = new Set();
     this.stats = { filesSeen: 0, filesRead: 0, rewrites: 0, lines: 0, bytes: 0, turns: 0, compactions: 0, paired: 0, toolCalls: 0, toolResults: 0, messages: 0, messageChars: 0, excludedFiles: 0 };
     this.loadExclusions();
@@ -922,7 +941,13 @@ class Harvest {
         .all().map((r) => r.transcript_path));
   }
 
-  countType(t) { this.typeCounts.set(t, (this.typeCounts.get(t) || 0) + 1); }
+  // CARRIED, not re-derived at flush time. The census key can be a composite (`system/foo`)
+  // while recognition is decided on the base type, so a later KNOWN_TYPES.has(key) would call
+  // every system subtype unknown.
+  countType(t, known = 1) {
+    this.typeCounts.set(t, (this.typeCounts.get(t) || 0) + 1);
+    this.typeKnown.set(t, known ? 1 : 0);
+  }
 
   /**
    * Types already in the log on disk, so `first_seen` means what it says.
@@ -988,10 +1013,11 @@ class Harvest {
       if (!line.trim()) continue;
 
       let d;
-      try { d = JSON.parse(line); } catch { this.countType('UNPARSEABLE'); this.noteUnknown('UNPARSEABLE', line); continue; }
+      try { d = JSON.parse(line); } catch { this.countType('UNPARSEABLE', 0); this.noteUnknown('UNPARSEABLE', line); continue; }
 
       const type = typeof d.type === 'string' ? d.type : 'NO_TYPE_FIELD';
-      this.countType(d.type === 'system' && d.subtype ? `system/${d.subtype}` : type);
+      const known = KNOWN_TYPES.has(type);
+      this.countType(d.type === 'system' && d.subtype ? `system/${d.subtype}` : type, known);
       if (!KNOWN_TYPES.has(type) && type !== 'NO_TYPE_FIELD') this.noteUnknown(type, line);
 
       // The first record carrying a cwd decides whether this file is read at all. Abandoning here
@@ -1132,10 +1158,13 @@ class Harvest {
 }
 
 // Batched type flush is O(n) statement calls; do it as a single upsert per type instead.
-function flushTypesFast(db, typeCounts) {
-  const up = db.prepare(`INSERT INTO record_types (type,n) VALUES (?,?)
-    ON CONFLICT(type) DO UPDATE SET n = n + excluded.n`);
-  for (const [t, n] of typeCounts) up.run(t, n);
+function flushTypesFast(db, typeCounts, typeKnown) {
+  const up = db.prepare(`INSERT INTO record_types (type,n,known) VALUES (?,?,?)
+    ON CONFLICT(type) DO UPDATE SET n = n + excluded.n, known = excluded.known`);
+  // `known` is OVERWRITTEN rather than left alone, so adding a name to KNOWN_TYPES reclassifies
+  // the rows already counted under it on the next harvest. Otherwise a type stays marked unknown
+  // for the life of the store after the very fix that recognised it.
+  for (const [t, n] of typeCounts) up.run(t, n, typeKnown?.get(t) ?? 1);
 }
 
 async function run({ full }) {
@@ -1155,7 +1184,7 @@ async function run({ full }) {
       process.stderr.write(`  ${i + 1}/${files.length} files, ${h.stats.turns} turns, ${h.stats.compactions} compactions, ${(h.stats.bytes / 1048576).toFixed(0)} MB\n`);
     }
   }
-  flushTypesFast(db, h.typeCounts);
+  flushTypesFast(db, h.typeCounts, h.typeKnown);
   db.exec('COMMIT');
 
   const unpaired = h.stats.compactions - h.stats.paired;
@@ -1364,7 +1393,7 @@ async function selfTest() {
   db.exec(SCHEMA);
   const h = new Harvest(db);
   await h.file(tf, true);
-  flushTypesFast(db, h.typeCounts);
+  flushTypesFast(db, h.typeCounts, h.typeKnown);
 
   const checks = [];
   const turn = db.prepare('SELECT * FROM turns WHERE uuid = ?').get('u1');
@@ -1934,6 +1963,36 @@ async function selfTest() {
     again.noteUnknown('zzz-second-new-type', '{}');
     const third = readFileSync(scratchLog, 'utf8').split(String.fromCharCode(10)).filter(Boolean).length;
     checks.push(['but a genuinely new type still is', third === before + 1]);
+  }
+
+  // THE CENSUS SAYS WHICH TYPES IT UNDERSTOOD. Both directions, because a flag that is always 1
+  // and a flag that is always 0 are equally useless, and the second is what a wrong default
+  // produces.
+  {
+    const scratchDb = new DatabaseSync(':memory:');
+    scratchDb.exec(SCHEMA);
+    const h2 = new Harvest(scratchDb, { unknownLog: scratchLog });
+    h2.countType('assistant', true);
+    h2.countType('system/init', true);
+    h2.countType('cost-state', false);
+    h2.countType('UNPARSEABLE', 0);
+    flushTypesFast(scratchDb, h2.typeCounts, h2.typeKnown);
+    const row = (t) => scratchDb.prepare('SELECT known FROM record_types WHERE type = ?').get(t)?.known;
+    checks.push(['a recognised type is marked known (gate can fail)', row('assistant') === 1]);
+    checks.push(['a system subtype is known by its BASE type, not its composite key',
+      row('system/init') === 1, String(row('system/init'))]);
+    checks.push(['an unrecognised type is marked unknown (gate can fail)', row('cost-state') === 0]);
+    checks.push(['an unparseable line is unknown too', row('UNPARSEABLE') === 0]);
+
+    // Recognising a type later must reclassify what was already counted under it, or the store
+    // keeps calling it unknown for ever after the fix that recognised it.
+    const h3 = new Harvest(scratchDb, { unknownLog: scratchLog });
+    h3.countType('cost-state', true);
+    flushTypesFast(scratchDb, h3.typeCounts, h3.typeKnown);
+    const after = scratchDb.prepare("SELECT n, known FROM record_types WHERE type = 'cost-state'").get();
+    checks.push(['recognising a type later reclassifies it (gate can fail)', after.known === 1]);
+    checks.push(['and its existing count is kept, not reset', after.n === 2, String(after.n)]);
+    scratchDb.close();
   }
 
   let bad = 0;

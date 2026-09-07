@@ -31,6 +31,7 @@ from c4x.theme import (
     TABLE_STYLE,
     TEXT,
     WARN,
+    about_note,
     chart_note,
     dark_fig,
     fmt_tokens,
@@ -167,9 +168,19 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
     """
     b = latest_baseline()
     if not b:
-        return html.Div([
-            html.Div("No baseline recorded yet", style={"color": TEXT, "fontSize": "15px",
-                                                        "fontWeight": 700, "marginBottom": "10px"}),
+        # SECTION_HEAD, not a hand-rolled bold div. The homeless-text gate in
+        # tests/test_render_tables.py asks who owns every line on the page, and it owned nothing:
+        # this panel's three lines were reported as a wall on a store with no baseline, which is
+        # every store until someone calibrates one. The heading looked like a heading and was not
+        # one, so the gate could not attribute the paragraph or the command beneath it.
+        # about_note, so the lines have an OWNER. tests/test_render_tables.py asks who owns every
+        # line on the page, and an owner is a card, a table, a chart or a page-level note. This
+        # panel was a heading, a paragraph and a command with none of those, so on a store with no
+        # baseline - every store until someone calibrates one - the tab printed three lines the
+        # gate correctly reported as a wall. Restyling the heading did not fix it and would not
+        # have: the gate reads the payload's structure, not a font weight.
+        return about_note([
+            html.Div("No baseline recorded yet", style=SECTION_HEAD),
             html.Div(
                 "The category split is not stored anywhere by Claude Code - it is computed for the "
                 "tooltip and discarded. It becomes derivable once this store knows your "
