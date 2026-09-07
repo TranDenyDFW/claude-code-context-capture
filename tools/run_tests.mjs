@@ -23,6 +23,31 @@ import { fileURLToPath } from 'node:url';
 import { winArg } from './paths.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
+// A CHILD THAT PRINTS TOO MUCH IS KILLED, and the runner called it slow.
+//
+// spawnSync's default maxBuffer is 1 MB. A child that writes past it is killed with SIGTERM and the
+// call returns error.code ENOBUFS with status null. The runner only looked at `signal`, so it
+// reported "killed after 300s", and a leg that failed in eight seconds for writing 1 MB of pytest
+// output was read as one that had run for five minutes. Measured: node -e writing 2 MB returns
+// status null, signal SIGTERM, ENOBUFS, with 1,114,112 bytes captured.
+//
+// 64 MB, and the number is a ceiling rather than an expectation: the point is that a verbose leg
+// fails on its own merits instead of being cut off, and that the failure says which happened.
+const MAX_OUTPUT = 64 * 1024 * 1024;
+
+// WHAT ACTUALLY HAPPENED TO THE CHILD, rather than a guess from `signal` alone.
+//
+// A signal meant "timed out" to this runner, and it printed a hardcoded 300s beside it. Two things
+// were wrong: the number had drifted from the timeouts it claimed to describe, and the commonest
+// signal here is not a timeout but SIGTERM from exceeding maxBuffer, which arrives with error.code
+// ENOBUFS. Reading `error` first tells the two apart, which is the difference between "this leg is
+// slow" and "this leg printed more than the runner would hold".
+function whyItFailed(run) {
+  if (run.error) return `${run.error.code || 'error'}: ${String(run.error.message).slice(0, 160)}`;
+  if (run.signal) return `killed by ${run.signal} (a timeout, or output past ${MAX_OUTPUT >> 20} MB)`;
+  return `exit ${run.status}`;
+}
+
 const ROOT = dirname(dirname(SELF));
 const NODE_ONLY = process.argv.includes('--node-only');
 // A SKIPPED CHECK IS A FAILURE WHERE IT MATTERS. The runner has always SAID so, printing
@@ -349,7 +374,7 @@ let skipped = 0;
 if (!NODE_ONLY) {
   const at = (args) => {
     const r = spawnSync('git', ['log', '-1', '--format=%ct', '--', ...args],
-                        { encoding: 'utf8', cwd: ROOT, windowsHide: true });
+                        { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, windowsHide: true });
     return r.status === 0 ? Number((r.stdout || '').trim()) || 0 : 0;
   };
   const src = at([':(exclude)frontend/src/**/*.test.*', ':(exclude)frontend/src/**/*.spec.*',
@@ -423,7 +448,7 @@ function buildFixture(out, extra = []) {
   rmSync(out, { force: true });
   const built = spawnSync(process.execPath,
     [join(ROOT, 'tools', 'make_fixture.mjs'), '--out', out, ...extra],
-    { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true, env: suiteEnv() });
+    { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, windowsHide: true, env: suiteEnv() });
   return { ok: built.status === 0 && existsSync(out),
            tail: tailOf(`${built.stdout || ''}${built.stderr || ''}`) };
 }
@@ -449,7 +474,7 @@ for (const rel of nodeTargets()) {
   // than a hung process reports a green suite as red, which teaches people to re-run rather than
   // to read. Still bounded, because a genuinely hung self-test must not stall the suite forever.
   const run = spawnSync(process.execPath, [join(ROOT, rel), '--self-test'],
-    { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true,
+    { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, windowsHide: true,
       // Every node self-test, not a hand-picked list: nodeTargets() enumerates from disk so
       // that nothing can hide, and a per-tool opt-in would put the hand-list straight back.
       // A self-test that touches no store is unaffected by the variable.
@@ -473,7 +498,7 @@ for (const rel of nodeTargets()) {
   } else if (run.status !== 0 || run.signal) {
     failed++;
     results.push({ rel, state: 'FAIL',
-                   note: run.signal ? `killed after 300s (${run.signal})` : `exit ${run.status}`,
+                   note: whyItFailed(run),
                    tail: tailOf(text) });
   } else if (!match) {
     failed++;
@@ -503,7 +528,7 @@ if (NODE_ONLY) {
     rmSync(bare, { force: true });
     const built = spawnSync(process.execPath, [join(ROOT, 'tools', 'make_fixture.mjs'),
                                                '--out', bare, '--no-optional'],
-                            { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
+                            { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, windowsHide: true });
     bareBuilt = built.status === 0 && existsSync(bare);
     if (!bareBuilt) {
       failed++;
@@ -541,7 +566,7 @@ if (NODE_ONLY) {
     // a broken test rather than a broken runner.
     const argv = rel.startsWith('-') ? [rel, ...args] : [join(ROOT, rel), ...args];
     const run = spawnSync('python', argv, {
-      encoding: 'utf8', cwd: ROOT, timeout: 900_000, windowsHide: true,
+      encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 900_000, windowsHide: true,
       // C4X_DB is the store override the app already honours, so the fixture run needs no special
       // support anywhere else in the codebase.
       env: opts?.fixture ? { ...process.env, C4X_DB: fixture }
@@ -567,7 +592,7 @@ if (NODE_ONLY) {
     } else if (run.status !== 0 || run.signal) {
       failed++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
-                     note: run.signal ? `killed after 300s (${run.signal})` : `exit ${run.status}`,
+                     note: whyItFailed(run),
                      tail: tailOf(text) });
     } else if (!text.includes(marker)) {
       // Exit 0 with the marker absent means it did not do what it claims to do.
@@ -616,8 +641,8 @@ if (!NODE_ONLY) {
     const argv = [...args, '--prefix', frontend];
     const run = process.platform === 'win32'
       ? spawnSync(['npm', ...argv].map(winArg).join(' '),
-                  { encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: true, windowsHide: true })
-      : spawnSync('npm', argv, { encoding: 'utf8', cwd: ROOT, timeout: 900_000, windowsHide: true });
+                  { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 900_000, shell: true, windowsHide: true })
+      : spawnSync('npm', argv, { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 900_000, windowsHide: true });
     const text = plain(run.stdout) + plain(run.stderr);
     // NOT the shared CHECKS pattern. Vitest prints "Test Files  2 passed (2)" BEFORE
     // "Tests  22 passed (22)", and CHECKS matches "N passed" anywhere, so it took the file count
@@ -684,9 +709,9 @@ if (!NODE_ONLY && !existsSync(join(ROOT, 'node_modules', 'eslint'))) {
   const WIN = process.platform === 'win32';
   const run = WIN
     ? spawnSync(['npm', 'run', 'lint'].map(winArg).join(' '),
-                { encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: true, windowsHide: true })
+                { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, shell: true, windowsHide: true })
     : spawnSync('npm', ['run', 'lint'],
-                { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
+                { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, windowsHide: true });
   const text = plain(run.stdout) + plain(run.stderr);
   if (run.status !== 0 || run.signal) {
     failed++;
