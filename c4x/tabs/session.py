@@ -236,10 +236,15 @@ def session_layout(session_id=None, scope="main", cohort=None):
         # THE WARNING SAYS WHICH SESSION THE CHART IS OF, so it belongs to the chart. It used to
         # open the tab as the first of five loose paragraphs, which is where a reader stops reading
         # them.
+        # LEVEL, not only a colour. Dash renders the amber; the browser app gets extract.texts(),
+        # where a colour does not survive, so this arrived as an ordinary caption and was shown on
+        # hover. It is the sentence that answers "why does All sessions show one session", asked
+        # of a header that was still reading "All sessions (22 listed)". A reader with that
+        # question does not hover the chart heading to find the answer.
         defaulted = chart_note(
             "Nothing is selected in the header, so this is the most recently active session in "
             "the population. Pick one in the header, or click a row on All sessions, to change it.",
-            style={"color": WARN})
+            style={"color": WARN}, level="warn")
     turns = session_turns(session_id, include_sidechain=(scope != "main"))
     n = max(len(turns), 1)
     default_budget = 80

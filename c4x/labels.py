@@ -149,11 +149,11 @@ def stamp(value) -> str:
     THE DATE IS THE POINT. The Messages table cut this to `HH:MM:SS` while the Compactions table on
     the SAME TAB showed the whole thing, so one page spoke two dialects. Worse than untidy: session
     4038e473 holds 97 rows from 2026-09-06 and 281 from 2026-09-07, so at row 97 the column ran
-    backwards from 18:41:52 to 01:28:15 with nothing marking a new day, and sorting on it interleaved
-    the two days. Store-wide, 4 clock times already occur on more than one date.
+    backwards from 18:41:52 to 01:28:15 with nothing marking a new day, and sorting on it
+    interleaved the two days. Store-wide, 4 clock times already occur on more than one date.
 
-    Cutting happened server-side, so the date was missing from the value the table SORTS on, not only
-    from what it displayed. That is why this returns a string the sort can still order: the ISO form
+    Cutting happened server-side, so the date was missing from the value the table SORTS on, not
+    only from what it displayed. That is why this returns a string the sort can order: the ISO form
     with its T replaced sorts identically to the ISO form itself.
 
     Anything that is not a stamp comes back untouched. A formatter that mangles what it does not

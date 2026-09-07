@@ -149,17 +149,31 @@ header = html.Div(
 # 6 written out in four more places (the pane Divs, two range(6) calls in the callback, and the
 # style list). Adding a tab meant editing six things in step, and nothing checked that they agreed.
 # That is the same defect class as every SYNC finding in this store's own audit, so it went first.
+# STORE and SELECTION are the fourth field, not a set kept beside this list.
+#
+# They were a set, `SELECTION_SCOPED`, holding five of these eight ids. That is the same shape
+# this registry was built to remove: two things that must agree, with nothing checking that they
+# do, and it had already drifted once. The exemption tuple in navigation.py held "tab-waste" for a
+# commit after that tab became "tab-cost", which switched the exemption off silently. A tab now
+# declares what it answers to on the same line as its name, so adding one cannot forget to.
+STORE, SELECTION = "store", "selection"
+
 TABS = [
-    ("tab-summary", "Summary", summary_layout),
-    ("tab-sessions", "All sessions", sessions_table_layout),
-    ("tab-session", "Session", session_layout),
-    ("tab-compactions", "Compactions", compactions_layout),
-    ("tab-window", "Window", window_layout),
-    ("tab-cost", "Cost", waste_layout),
-    ("tab-compare", "Compare", compare_layout),
-    ("tab-diagnostics", "Diagnostics", diagnostics_layout),
+    ("tab-summary", "Summary", summary_layout, STORE),
+    ("tab-sessions", "All sessions", sessions_table_layout, STORE),
+    ("tab-diagnostics", "Diagnostics", diagnostics_layout, STORE),
+    ("tab-session", "Session", session_layout, SELECTION),
+    ("tab-compactions", "Compactions", compactions_layout, SELECTION),
+    ("tab-window", "Window", window_layout, SELECTION),
+    ("tab-cost", "Cost", waste_layout, SELECTION),
+    ("tab-compare", "Compare", compare_layout, SELECTION),
 ]
 TAB_IDS = [t[0] for t in TABS]
+
+# THE ORDER ABOVE IS THE GROUPING. The three tabs whose numbers never move now sit together, ahead
+# of the five that answer to the header, because the question "why did this not change when I
+# picked a session" was asked of a list that interleaved them. Summary, All sessions and
+# Diagnostics were positions 1, 2 and 8 of eight.
 
 # Summary is store-wide. Everything after it describes the header selection, and each tab says so
 # on the page rather than leaving the reader to work it out.
@@ -167,10 +181,34 @@ TAB_IDS = [t[0] for t in TABS]
 # comparison is the header selection: measured, the pane goes from 1,292 sessions to 1 the moment a
 # session is chosen. The tab was labelled "the header selection does not change this tab" while
 # being the tab where that selection matters most.
-SELECTION_SCOPED = {"tab-session", "tab-compactions", "tab-window", "tab-cost", "tab-compare"}
+SELECTION_SCOPED = {t[0] for t in TABS if t[3] == SELECTION}
 # Probes describes 3 control-protocol runs that belong to no session, and Mirror is a
 # calculator over published constants. Labelling either as scoped would be the same false
 # statement this restructure removed.
+
+GROUP_LABEL = {"display": "flex", "flexDirection": "column", "gap": "2px",
+               "padding": "0 10px 0 0", "marginRight": "6px",
+               "borderRight": f"1px solid {BORDER}"}
+
+
+def _tab_groups():
+    """The tab row, split into what the header selection reaches and what it does not."""
+    out = []
+    for kind, heading in ((STORE, "WHOLE STORE"), (SELECTION, "CURRENT SELECTION")):
+        mine = [t for t in TABS if t[3] == kind]
+        if not mine:
+            continue
+        if out:
+            out.append(html.Div(style={"width": "1px", "alignSelf": "stretch",
+                                       "background": BORDER, "margin": "0 10px"}))
+        out.append(html.Div([
+            html.Div(heading, style={"color": MUTED, "fontSize": "9px", "fontWeight": 700,
+                                     "letterSpacing": "0.08em", "padding": "4px 18px 0"}),
+            html.Div([tab_button(tid, lbl, TAB_IDS.index(tid) == 0)
+                      for tid, lbl, _, _ in mine], style={"display": "flex", "gap": "2px"}),
+        ]))
+    return out
+
 
 # Panes are rendered ON DEMAND, not up front.
 #
@@ -183,9 +221,17 @@ def build_layout():
     return html.Div(
         [
             header,
-            html.Div([tab_button(tid, lbl, i == 0) for i, (tid, lbl, _) in enumerate(TABS)],
-                     style={"display": "flex", "gap": "2px", "padding": "0 14px",
-                            "borderBottom": f"1px solid {BORDER}", "background": BG}),
+            # THE SAME SPLIT THE SIDEBAR DRAWS, and drawn from the same field, so the two
+            # surfaces cannot disagree about which tabs answer to the header. A row of eight
+            # buttons with the three store-wide ones at positions 1, 2 and 8 gave a reader no way
+            # to tell why picking a session changed five of them and not the other three.
+            #
+            # A LABEL PER GROUP, not a bare gap. A gap alone is a difference somebody has to
+            # notice and then interpret, and the interpretation is the whole content.
+            html.Div(_tab_groups(), style={"display": "flex", "alignItems": "center",
+                                           "gap": "2px", "padding": "0 14px",
+                                           "borderBottom": f"1px solid {BORDER}",
+                                           "background": BG}),
             dcc.Store(id="active-tab", data=0),
             # Drives the header readout. 5s is well under how fast a context window moves, and the
             # harvest behind it is rate-limited and lock-guarded, so a slow tick cannot pile up.

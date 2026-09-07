@@ -475,7 +475,8 @@ def turn_diff_panel(session_id, scope, turns, a, b):
     ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
 
     blocks = [
-        html.Div(f"Between turn {a} ({stamp(ts_a)}) and turn {b} ({stamp(ts_b)})", style=SECTION_HEAD),
+        html.Div(f"Between turn {a} ({stamp(ts_a)}) and turn {b} ({stamp(ts_b)})",
+                 style=SECTION_HEAD),
         cards,
     ]
     if not tools.empty:

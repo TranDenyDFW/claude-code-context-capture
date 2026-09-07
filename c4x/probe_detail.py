@@ -15,8 +15,8 @@ from dash import dcc, html
 from dash.dash_table.Format import Format, Scheme
 from dash.development.base_component import Component
 
-from c4x.labels import stamp
 from c4x.dash_compat import DataTable
+from c4x.labels import stamp
 from c4x.panels import evidence_block
 from c4x.store import q, tables_present
 from c4x.theme import (

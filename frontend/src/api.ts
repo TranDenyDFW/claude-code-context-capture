@@ -82,12 +82,23 @@ export interface ColumnMeta {
   bands: Band[]
 }
 
+export type NoteLevel = 'warn' | null
+
 export interface TableMeta {
   id: string
   /** The heading above the table. Every table has one; the server pairs the heading it wrote. */
   title: string | null
   /** What the table shows, in a sentence or two. Shown on the heading, never in the page body. */
   note?: string | null
+  /**
+   * How loudly to say it. A note with a level is shown on the PAGE; one without is the hover.
+   *
+   * The server marks this where the note is written, because Dash says "warning" with an amber
+   * colour and a colour does not survive the flatten to text. The Session tab's explanation of
+   * why it shows one session when the header says All sessions arrived here indistinguishable
+   * from a caption, and was therefore hidden behind a hover.
+   */
+  note_level?: NoteLevel
   /** The `text` lines the server folded into `title` and `note`, so the page does not print them. */
   absorbed?: string[]
   columns: ColumnMeta[]
@@ -148,7 +159,7 @@ export interface TabPayload {
    */
   empty?: { title: string; note: string | null }[]
   /** Only on /render. The caption each chart answers to, in the same order as `figures`. */
-  figure_meta?: { note: string | null; absorbed: string[] }[]
+  figure_meta?: { note: string | null; absorbed: string[]; note_level?: NoteLevel }[]
   /** Whether the header selection changes this tab at all. From the app's SELECTION_SCOPED. */
   scoped?: boolean
   /** The one sentence saying which population this tab describes. */

@@ -6,8 +6,8 @@ import plotly.graph_objects as go
 from dash import dcc, html
 
 from c4x.dash_compat import DataTable
-from c4x.labels import stamp
 from c4x.frames import records
+from c4x.labels import stamp
 from c4x.store import COMPACTION_WINDOWS, THRESHOLDS, all_compactions, fit_window
 from c4x.theme import (
     BORDER,

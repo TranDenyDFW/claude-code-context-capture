@@ -178,7 +178,9 @@ export function Pane({
         return (
           <section key={index} className="rounded-lg bg-panel shadow-panel p-4">
             <div className="mb-2 flex items-baseline justify-between gap-3">
-              {name ? <Heading name={name} note={note} /> : <span />}
+              {name
+                ? <Heading name={name} note={note} level={figureMeta[index]?.note_level} />
+                : <span />}
               {/* THE SAME AFFORDANCE A TABLE HAS. A chart on a dashboard is drawn at the height
                   the panel allows; one somebody is reading wants the window, and the address
                   carries the tab, the selection and the index, so it is also a link. */}
@@ -239,7 +241,7 @@ export function Pane({
           // Keyed by INDEX, not by id. Five of the Cost tab's six tables report the id
           // `(anonymous)`, so keying on it collided four times and React warned on every render.
           <section key={index} className="flex flex-col gap-2">
-            <TableHeading name={name} note={note} />
+            <TableHeading name={name} note={note} level={meta[index]?.note_level} />
             <DataTable
               table={table}
               meta={meta[index]}

@@ -16,8 +16,8 @@ import plotly.graph_objects as go
 from dash import dcc, html
 from dash.dash_table.Format import Format, Scheme
 
-from c4x.labels import stamp
 from c4x.dash_compat import DataTable
+from c4x.labels import stamp
 from c4x.store import ROOT, q, scoped
 from c4x.theme import (
     ACCENT,

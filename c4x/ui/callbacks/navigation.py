@@ -64,7 +64,7 @@ def _render_tab(idx, session_id, scope, cohort):
     i = int(idx or 0)
     if not (0 <= i < len(TABS)):
         i = 0
-    tab_id, label, fn = TABS[i]
+    tab_id, label, fn, _answers_to = TABS[i]
     try:
         body = fn(session_id, scope or "main", cohort)
     except Exception as exc:                        # noqa: BLE001 - a failed tab must say so

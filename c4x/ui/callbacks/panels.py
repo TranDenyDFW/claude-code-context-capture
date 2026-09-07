@@ -12,6 +12,7 @@ from dash.exceptions import PreventUpdate
 
 from c4x.dash_compat import DataTable
 from c4x.frames import records
+from c4x.labels import stamp
 from c4x.panels import (
     text_panel,
     turn_diff_panel,
@@ -24,7 +25,6 @@ from c4x.store import (
     predict,
     session_turns,
 )
-from c4x.labels import stamp
 from c4x.tabs import session_view
 from c4x.theme import (
     ACCENT,

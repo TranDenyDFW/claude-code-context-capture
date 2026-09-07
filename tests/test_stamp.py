@@ -12,7 +12,6 @@ display and left the sort would have looked fixed.
 Nine sites had hand-rolled the same cut, in four spellings, and the report named one. The last test
 here is the sweep, so the tenth cannot be written without failing.
 """
-import io
 import pathlib
 
 import pytest
@@ -65,7 +64,7 @@ def test_no_module_cuts_a_timestamp_by_hand():
     cuts = ('[:19]', 'slice(0, 19)', 'slice(11, 19)', '[11:19]')
     hits = []
     for path in sorted((ROOT / "c4x").rglob("*.py")):
-        text = io.open(path, encoding="utf-8").read()
+        text = open(path, encoding="utf-8").read()
         # labels.py is where the one implementation lives, so it is the one file allowed to slice.
         if path.name == "labels.py":
             continue
