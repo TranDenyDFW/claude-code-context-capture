@@ -9,7 +9,8 @@ from dash import dcc, html
 
 from c4x.breakdown import latest_baseline
 from c4x.dash_compat import DataTable
-from c4x.store import overview_stats, q
+from c4x.labels import is_folderless, titled_path
+from c4x.store import cohort_sessions, overview_stats, q, titles_for
 from c4x.theme import (
     ACCENT,
     BORDER,
@@ -26,7 +27,6 @@ from c4x.theme import (
     fmt_bytes,
     fmt_tokens,
     header_help,
-    short_path,
     stat_card,
 )
 
@@ -172,6 +172,14 @@ def project_totals_fig() -> go.Figure:
 
     totals = rows.groupby("project")["bytes"].sum().sort_values(ascending=False)
     top = list(totals.head(15).index)
+    # Titles only for the folder-less bars, and only for the fifteen actually drawn: this is a
+    # display lookup, so it must not cost a query proportional to the store.
+    _titles = {}
+    for p in top:
+        if is_folderless(p):
+            ids = cohort_sessions(f"project::{p}")
+            if ids:
+                _titles[p] = titles_for(ids).get(ids[0], {})
     kept = rows[rows["project"].isin(top)]
     ranked = kept.groupby("kind")["bytes"].sum().sort_values(ascending=False)
     named = list(ranked.head(KINDS).index)
@@ -200,7 +208,12 @@ def project_totals_fig() -> go.Figure:
     # nothing downstream matches on a shortened string. Only the tick text is abbreviated, and
     # automargin lets the axis size itself to what is left rather than to a hard-coded margin.
     fig.update_yaxes(autorange="reversed", tickvals=top,
-                     ticktext=[short_path(p) for p in top], automargin=True)
+                     # NAMED when the path names nothing. A scratch workspace bar was labelled
+                     # with a generated id under a generated uuid, which identifies the bar without
+                     # telling the reader what it was. `y` keeps the full path, so the hover still
+                     # reports it exactly.
+                     ticktext=[titled_path(p, _titles.get(p, {})) for p in top],
+                     automargin=True)
     return fig
 
 

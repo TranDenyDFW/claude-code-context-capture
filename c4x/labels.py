@@ -85,3 +85,59 @@ def plural(n, one, many=None):
     """
     word = one if n == 1 else (many or one + "s")
     return f"{n:,} {word}"
+
+
+# A chat started without opening a project. Claude Code puts those in a scratch workspace, and the
+# path is the only signal: `entrypoint` reads `claude-desktop` for these and for ordinary desktop
+# sessions alike, so nothing else in `sessions` tells them apart. Measured on this store, 3 of 1366.
+SCRATCH_MARK = "scratch-workspaces"
+
+# A last-prompt is a fallback, not a title, and tools/harvest.mjs says so where it stores one: "a
+# whole opening request and can be thousands of characters". It arrives here already cut to 200,
+# which is still far too long for a path label, so it is cut again and marked as cut.
+PROMPT_LABEL_MAX = 40
+
+
+def is_folderless(path) -> bool:
+    """Whether this working directory is a scratch workspace rather than a project.
+
+    A PATH HEURISTIC, AND IT LIVES HERE ON PURPOSE. c4x/store.py refuses one in as many words:
+    "Nothing here knows or should know that 'tmp' means scratch: a directory earns its place by the
+    work done in it, which is the same rule for every project." That rule governs which projects are
+    LISTED and RANKED, and it still does. This is a display question, so it lives in the display
+    module and may never reach a WHERE clause, a ranking, or a cohort's membership.
+    """
+    return SCRATCH_MARK in str(path or "").replace(chr(92), "/")
+
+
+def titled_path(path, titles, keep=2):
+    """A shortened path, with the chat's name appended when the path itself names nothing.
+
+    A scratch workspace is a generated id under two more generated ids, so the shortened form is
+    ".../<uuid>/scratch-2026-09-07-433162": correct, unique, and telling the reader nothing about
+    what the chat was. Every other project's path is its own name and needs no help.
+
+    `titles` is a mapping of kind to text for this session. The order is deliberate and the fallback
+    is the risky one: a `custom` title was typed by a person, an `ai` one was written to be a title,
+    and a `last-prompt` is merely whatever was said first. Measured on this store, all three
+    folder-less chats have ONLY a last-prompt, so the fallback is not the rare path, it is the
+    normal one, and it is cut hard and marked so it cannot be mistaken for a name someone chose.
+    """
+    if not is_folderless(path):
+        return short_path(path, keep)
+    # ONE SEGMENT, not two. The parent of a scratch workspace is a uuid, and on this store it is the
+    # SAME uuid for every one of them, so keeping it spends 37 characters saying nothing and pushes
+    # the part that does carry meaning, the chat's own name, off the end of the label. The final
+    # segment already carries a date and a random suffix, so it stays unique on its own.
+    short = short_path(path, 1)
+    for kind in ("custom", "ai", "last-prompt"):
+        text = (titles or {}).get(kind)
+        if not text:
+            continue
+        text = " ".join(str(text).split())
+        if not text:
+            continue
+        if len(text) > PROMPT_LABEL_MAX:
+            text = text[:PROMPT_LABEL_MAX].rstrip() + "..."
+        return f"{short} - {text}"
+    return short

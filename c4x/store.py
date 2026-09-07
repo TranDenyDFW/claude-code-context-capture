@@ -23,7 +23,7 @@ from typing import Any, TypedDict
 
 import pandas as pd
 
-from c4x.labels import distinct_short_paths, plural
+from c4x.labels import distinct_short_paths, is_folderless, plural, titled_path
 
 ROOT = Path(__file__).resolve().parent.parent
 # C4X_DB, the same override every node tool honours through paths.mjs. That module exists because
@@ -749,6 +749,22 @@ def cohort_options() -> list:
     # The VALUE keeps the full path. The label is ambiguous by construction and nothing matches
     # on it; `cohort_parts` below splits the value, and a delete resolves through that.
     labels = distinct_short_paths(list(work.index))
+    # A CHAT WITH NO FOLDER GETS ITS NAME. distinct_short_paths keeps the tail that tells two
+    # projects apart, which is right when the tail is a directory somebody chose and useless when
+    # it is "scratch-2026-09-05-d67fea" under two generated uuids. For those, the chat's own name is
+    # the only thing that identifies it to a reader.
+    #
+    # The VALUE is untouched: cohort_parts splits it, and a delete resolves through that.
+    folderless = [p for p in work.index if is_folderless(p)]
+    if folderless:
+        by_project: dict = {}
+        for p in folderless:
+            for sid in cohort_sessions(f"project::{p}"):
+                by_project.setdefault(p, []).append(sid)
+        every = titles_for([s for ids in by_project.values() for s in ids])
+        for p in folderless:
+            ids = by_project.get(p) or []
+            labels[p] = titled_path(p, every.get(ids[0], {}) if ids else {})
     for proj, row in work.iterrows():
         # "listed", the same qualifier the All sessions option above carries. Without it the
         # number reads as "this project has N sessions", when it is the count the picker will
@@ -817,6 +833,46 @@ def session_name(session_id) -> str:
     return f"{r.get('project')}  ·  {str(r.get('title'))[:60]}  ·  {when}"
 
 
+def titles_for(session_ids) -> dict:
+    """Best-known title per session, as a mapping of session_id to {kind: text}.
+
+    Guarded, because `session_titles` is written by harvest and this package never writes: a store
+    from before that table existed has no such table and a bare query raises rather than returning
+    nothing.
+    """
+    ids = [s for s in (session_ids or []) if s]
+    if not ids or not tables_present("session_titles"):
+        return {}
+    marks = ",".join("?" * len(ids))
+    df = q(f"SELECT session_id, kind, title FROM session_titles WHERE session_id IN ({marks})",
+           tuple(ids))
+    out: dict = {}
+    for _, row in df.iterrows():
+        out.setdefault(row["session_id"], {})[row["kind"]] = row["title"]
+    return out
+
+
+def cohort_label(cohort, ids=None) -> str:
+    """The display form of a cohort's value: shortened, and named when the path names nothing.
+
+    ONE HOME, because this sentence is built in two places that must not drift: the population line
+    on every scoped tab and the two arm labels on Compare. The VALUE is untouched; only what the
+    reader sees changes.
+    """
+    kind, _, value = str(cohort or "").partition("::")
+    if kind != "project" or not value:
+        return value
+    if not is_folderless(value):
+        # UNCHANGED for a real project. Its path is its own name, and shortening it here would be a
+        # different change from the one asked for: this sentence has always printed the full path
+        # and nobody reported it as wrong.
+        return value
+    ids = list(ids if ids is not None else cohort_sessions(cohort))
+    titles = titles_for(ids)
+    best = titles.get(ids[0], {}) if ids else {}
+    return titled_path(value, best)
+
+
 def population_label(session_id, cohort, scope) -> str:
     """One sentence naming exactly what is being described, for the page to print.
 
@@ -829,8 +885,11 @@ def population_label(session_id, cohort, scope) -> str:
         return f"1 session, {side}"
     ids = cohort_sessions(cohort)
     if ids:
-        kind, _, value = str(cohort).partition("::")
-        return f"{plural(len(ids), 'session')} in {kind} {value}, {side}"
+        kind, _, _value = str(cohort).partition("::")
+        # SHORTENED AND NAMED. This printed the raw working directory, and for a chat started
+        # without a project that is a 152-character scratch path in the one sentence telling the
+        # reader what they just selected. It reaches both frontends.
+        return f"{plural(len(ids), 'session')} in {kind} {cohort_label(cohort, ids)}, {side}"
     return f"the whole store, every session, {side}"
 
 
