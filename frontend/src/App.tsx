@@ -360,7 +360,21 @@ export default function App() {
             <Picker
               label="Population"
               value={selection.cohort ?? ''}
-              onChange={(value) => setSelection((was) => ({ ...was, cohort: value || null }))}
+              // CHANGING THE POPULATION CLEARS THE SESSION, because the two can contradict each
+              // other and nothing downstream reconciles them. Picking a session first and then a
+              // population it does not belong to used to keep both, and the app then wrote a URL
+              // carrying the pair and rendered that session's figures under a header naming the
+              // other project. The backend is not at fault: store.scoped() documents that a single
+              // session wins over a cohort, "picking one session while a cohort is set means 'this
+              // one', not 'this one and everything like it'", so the cohort is deliberately inert
+              // for the session-scoped tabs. What was wrong is that the UI let the pair exist and
+              // then showed it to the reader as if it meant something.
+              //
+              // Cleared rather than kept-with-a-warning: the picker below is already narrowed to
+              // the new population, so re-choosing is one click, and the other order (population
+              // first, then session) was never able to build the contradiction.
+              onChange={(value) => setSelection((was) => (
+                { ...was, cohort: value || null, session: null }))}
               // Labels and values straight through. Taking a value apart to prettify it is how the
               // filter broke the first time.
               options={[

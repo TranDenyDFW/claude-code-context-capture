@@ -7,6 +7,7 @@ from dash import dcc, html
 
 from c4x.dash_compat import DataTable
 from c4x.frames import records
+from c4x.labels import plural
 from c4x.panels import baseline_marks
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
@@ -373,10 +374,10 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     # colour key at least has somewhere to live.
     facts = [f"Session {session_id[:8]}, {len(turns):,} turns, peak {fmt_tokens(peak)}."]
     if len(comps):
-        facts.append(f"{len(comps)} compaction{'s' if len(comps) != 1 else ''}, marked in red.")
+        facts.append(f"{plural(len(comps), 'compaction')}, marked in red.")
     if len(segs) > 1:
-        facts.append(f"{len(segs)} model segments: the model changed {len(segs) - 1} time"
-                     f"{'s' if len(segs) > 2 else ''} inside this session.")
+        facts.append(f"{plural(len(segs), 'model segment')}: the model changed "
+                     f"{plural(len(segs) - 1, 'time')} inside this session.")
     if unresolved:
         facts.append(f"{unresolved} segment(s) with an undetermined window.")
     chart_facts = " ".join(facts)

@@ -23,7 +23,7 @@ from typing import Any, TypedDict
 
 import pandas as pd
 
-from c4x.labels import distinct_short_paths
+from c4x.labels import distinct_short_paths, plural
 
 ROOT = Path(__file__).resolve().parent.parent
 # C4X_DB, the same override every node tool honours through paths.mjs. That module exists because
@@ -675,7 +675,12 @@ def cohort_options() -> list:
     # on it; `cohort_parts` below splits the value, and a delete resolves through that.
     labels = distinct_short_paths(list(work.index))
     for proj, row in work.iterrows():
-        opts.append({"label": f"Project: {labels[proj]} ({int(row['sessions']):,})",
+        # "listed", the same qualifier the All sessions option above carries. Without it the
+        # number reads as "this project has N sessions", when it is the count the picker will
+        # SHOW: a project whose sessions fall below SESSION_TURN_FLOOR offers fewer than it holds,
+        # and a reader comparing it against the store has nothing to reconcile the two. Same
+        # defect the first option was fixed for, on the option beside it.
+        opts.append({"label": f"Project: {labels[proj]} ({int(row['sessions']):,} listed)",
                      "value": f"project::{proj}"})
     return opts
 
@@ -750,7 +755,7 @@ def population_label(session_id, cohort, scope) -> str:
     ids = cohort_sessions(cohort)
     if ids:
         kind, _, value = str(cohort).partition("::")
-        return f"{len(ids):,} sessions in {kind} {value}, {side}"
+        return f"{plural(len(ids), 'session')} in {kind} {value}, {side}"
     return f"the whole store, every session, {side}"
 
 

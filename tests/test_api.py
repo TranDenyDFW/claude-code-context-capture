@@ -547,11 +547,25 @@ def test_the_page_says_how_many_sessions_it_is_listing(client):
         pytest.skip("this store lists every session, so there is no gap to disclose")
 
     card = next(c for c in client.get("/api/tab/tab-summary/render").json()["stats"]
-                if c["label"].lower() == "sessions")
+                if c["label"].lower().startswith("sessions"))
     assert f"{stats['listed']:,}" in card["sub"], (
         f"the Sessions card counts {stats['sessions']:,} and never says only "
         f"{stats['listed']:,} are listed: {card['sub']!r}")
-    assert "listed" in cohort_options()[0]["label"], "the picker does not say what its count counts"
+    # THE LABEL, not only the caption. On the rendered page the caption is the card's hover, so a
+    # reader comparing this against All sessions sees only the two labels. If they are the same
+    # word over different numbers, the disclosure has not reached anyone.
+    assert card["label"].lower() != "sessions", (
+        "the Sessions card and the All sessions tab show different numbers under the same word; "
+        f"the card's label must name its population: {card['label']!r}")
+
+    options = cohort_options()
+    assert "listed" in options[0]["label"], "the picker does not say what its count counts"
+    # EVERY option, not only the first. The project entries carry a count from the same floored
+    # frame and omitted the qualifier, so a project holding two sessions offered "(1)" with
+    # nothing saying which of the two numbers that was.
+    unqualified = [o["label"] for o in options
+                   if o["label"].startswith("Project: ") and "listed" not in o["label"]]
+    assert not unqualified, f"project options do not say what their count counts: {unqualified[:3]}"
 
     from c4x.theme import tab_help
     assert "Every session" not in tab_help("tab-sessions"), \

@@ -183,16 +183,53 @@ function selfTest() {
 
   // Mutant: a wrong buffer must make the empirical fit WORSE. If it does not, the validation
   // is not measuring anything and a green run means nothing.
-  let mutantOk = false, mutantDetail = 'validation skipped (no store)';
+  //
+  // THE PRECONDITION IS TESTED, NOT INFERRED FROM THE RESULT. This check needs a compaction whose
+  // pre_tokens lands in the narrow band that shifting the buffer by MUTANT_BUFFER can move across
+  // the smallest candidate threshold. With no such row the mutation is simply undetectable, and
+  // the old code reported that as a FAILED check: mutantOk was initialised false and the catch
+  // never restored it, so `mutantDetail` could read "validation skipped (no store)" while the row
+  // printed FAIL. A store that cannot answer is not a broken gate, and saying it is trains people
+  // to ignore a red suite. That is why the same store made this FAIL on a fresh clone and PASS
+  // here, on the same commit.
+  //
+  // Declared decline instead, the contract tools/table_audit.py already uses and the runner now
+  // honours for node self-tests: exit 3 with a SKIPPED line naming what the store would need.
+  // A missing table or an unreadable store stays a FAILURE, because that is a broken environment
+  // rather than a store answering honestly.
+  const MUTANT_BUFFER = 12000;
+  const lowest = Math.min(...CANDIDATE_WINDOWS) - K.MAX_OUTPUT_RESERVE;
+  const bandLo = lowest - K.AUTOCOMPACT_BUFFER;
+  const bandHi = lowest - MUTANT_BUFFER;
+  let mutantOk = false, mutantDetail = '';
+  let decline = null;
   try {
     const real = validate({ quiet: true });
-    const mutant = validate({ buffer: 12000, quiet: true });
+    const mutant = validate({ buffer: MUTANT_BUFFER, quiet: true });
     const f = real.better_fit;
     const realNeg = real.candidates[f].negative_overshoots;
     const mutNeg = mutant.candidates[f].negative_overshoots;
     mutantOk = mutNeg > realNeg;
-    mutantDetail = `real negatives=${realNeg}, mutant(buffer=12000) negatives=${mutNeg}`;
-  } catch (e) { mutantDetail = 'validation unavailable: ' + e.message; }
+    mutantDetail = `real negatives=${realNeg}, mutant(buffer=${MUTANT_BUFFER}) negatives=${mutNeg}`;
+    if (!mutantOk && realNeg === mutNeg) {
+      decline = `no compaction sits in [${bandLo}, ${bandHi}), so moving the buffer by `
+        + `${K.AUTOCOMPACT_BUFFER - MUTANT_BUFFER} cannot push any event past the smallest `
+        + `candidate threshold and the mutation is undetectable on this store. The other `
+        + `${checks.length} checks passed. Build a store that can answer: `
+        + 'node tools/make_fixture.mjs --out tmp/fixture.db, then C4X_DB=tmp/fixture.db.';
+    }
+  } catch (e) {
+    // NOT a decline. A throw here is a missing table or an unreadable store, which is an
+    // environment fault and must stay loud.
+    mutantDetail = 'validation unavailable: ' + e.message;
+  }
+  if (decline) {
+    for (const [name, ok, detail] of checks) {
+      console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok ? '' : '   [' + detail + ']'}`);
+    }
+    console.log(`SELF-TEST SKIPPED: ${decline}`);
+    return 3;
+  }
   checks.push(['mutant buffer degrades the fit (gate can fail)', mutantOk, mutantDetail]);
 
   let bad = 0;

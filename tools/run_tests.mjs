@@ -723,11 +723,26 @@ for (const r of results) {
 // tmp/test-schema.db is NOT in this list. tests/test_projects.py documents it as a build cache,
 // created once and reused with an mtime freshness check, so deleting it would make every run pay
 // to rebuild something the tests deliberately keep.
+//
+// AND IT SAYS WHEN IT COULD NOT. The first version swallowed the error, on the reasoning that a
+// store still held open is not a suite failure. That reasoning is right and the silence was not:
+// on Windows an open sqlite handle makes rmSync throw EBUSY or EPERM, so the cleanup could do
+// nothing at all and report exactly what a successful cleanup reports. A run that leaves files
+// behind while printing nothing is indistinguishable from one that removed them, which is the
+// silent-skip shape this repo refuses everywhere else.
+const stuck = [];
 for (const f of [fixture, bare, join(ROOT, 'tmp', 'test-store.db')]) {
   for (const suffix of ['', '-wal', '-shm']) {
-    try { rmSync(`${f}${suffix}`, { force: true }); } catch { /* a store still held open is not a
-      suite failure: the checks already ran and their verdicts are printed below. */ }
+    const path = `${f}${suffix}`;
+    try { rmSync(path, { force: true }); } catch (e) { stuck.push(`${path} (${e.code || e.message})`); }
   }
+}
+
+if (stuck.length) {
+  console.log('');
+  console.log(`  note: ${stuck.length} store file(s) could not be removed, still held open. The `
+            + 'next run will reuse them by name rather than rebuild them:');
+  for (const p of stuck) console.log(`    ${p}`);
 }
 
 const exempt = results.filter((r) => r.state === 'exempt').length;

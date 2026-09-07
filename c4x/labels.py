@@ -70,3 +70,18 @@ def distinct_short_paths(values, keep=2):
         if not grew:
             return out
     return {v: short_path(v, depth[v]) for v in values}
+
+
+def plural(n, one, many=None):
+    """A count and its noun, agreeing.
+
+    Four sites spelled this out by hand and a fifth did not, so a cohort holding exactly one
+    session rendered "1 sessions in project ...". The caption sits directly beside a count that
+    readers were already being asked to reconcile, and a sentence that looks broken there
+    undermines the number next to it.
+
+    Here rather than in c4x/theme.py for the same reason short_path is: c4x/store.py builds this
+    caption and imports nothing from the package, while theme.py pulls in dash and plotly.
+    """
+    word = one if n == 1 else (many or one + "s")
+    return f"{n:,} {word}"

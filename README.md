@@ -172,8 +172,8 @@ proves it, so a claim on the front page is one click from its evidence.
 
 The same server serves the data as JSON, so anything you can see you can also fetch:
 `curl 127.0.0.1:8059/api/tab/tab-cost` returns exactly what `python -m c4x.cli dump --tab tab-cost
---json` prints. It holds each answer for five seconds, so the second view of a tab costs about 3 ms
-rather than 1.6 seconds.
+--json` prints. It holds each answer until the store is written to, and for five seconds
+after that, so the second view of a tab costs about 3 ms rather than 1.6 seconds.
 
 The page is React; the numbers are still built by the Python that always built them, and
 `python tools/parity.py` renders all eight tabs both ways and compares them cell by cell to keep it

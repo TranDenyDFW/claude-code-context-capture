@@ -9,6 +9,7 @@ from dash.dash_table.Format import Format, Scheme
 
 from c4x.dash_compat import DataTable
 from c4x.frames import records as frame_records
+from c4x.labels import plural
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     q,
@@ -99,7 +100,7 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
                  if len(records) > page_size else "")
     return html.Div([
         html.Div(title, style=SECTION_HEAD),
-        html.Div(f"{len(records):,} {'row' if len(records) == 1 else 'rows'}.{truncated}"
+        html.Div(f"{plural(len(records), 'row')}.{truncated}"
                  + (f" {note}" if note else ""), style=SECTION_NOTE),
         DataTable(
             # Only the tables a callback drives carry one, so an id here means "something on this
