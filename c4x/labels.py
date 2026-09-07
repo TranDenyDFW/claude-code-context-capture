@@ -141,3 +141,25 @@ def titled_path(path, titles, keep=2):
             text = text[:PROMPT_LABEL_MAX].rstrip() + "..."
         return f"{short} - {text}"
     return short
+
+
+def stamp(value) -> str:
+    """An ISO timestamp as a reader's date and time, or the value unchanged if it is not one.
+
+    THE DATE IS THE POINT. The Messages table cut this to `HH:MM:SS` while the Compactions table on
+    the SAME TAB showed the whole thing, so one page spoke two dialects. Worse than untidy: session
+    4038e473 holds 97 rows from 2026-09-06 and 281 from 2026-09-07, so at row 97 the column ran
+    backwards from 18:41:52 to 01:28:15 with nothing marking a new day, and sorting on it interleaved
+    the two days. Store-wide, 4 clock times already occur on more than one date.
+
+    Cutting happened server-side, so the date was missing from the value the table SORTS on, not only
+    from what it displayed. That is why this returns a string the sort can still order: the ISO form
+    with its T replaced sorts identically to the ISO form itself.
+
+    Anything that is not a stamp comes back untouched. A formatter that mangles what it does not
+    recognise is worse than one that declines, because the mangling is what reaches the page.
+    """
+    text = str(value or "")
+    if len(text) < 19 or text[4] != "-" or text[7] != "-" or text[10] not in "T ":
+        return text
+    return text[:10] + " " + text[11:19]

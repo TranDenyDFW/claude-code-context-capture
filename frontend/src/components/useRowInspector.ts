@@ -42,9 +42,25 @@ export function useRowInspector(
     const mine = claim()
     const meta = payload.meta?.[index]
     const spec = meta?.full_text
+    // THE DRAWER SPEAKS THE TABLE'S LANGUAGE, NOT THE SCHEMA'S. This listed the raw column ids, so
+    // clicking a Messages row produced `ts`, `role`, `type` under a table headed `Date & Time`,
+    // `Record Type`, `Written By`. Same data, two vocabularies, and one of them is the one
+    // DataTable.tsx names as wrong in as many words: "COLUMN NAMES come from column_label(). The
+    // raw ids are schema, not English."
+    //
+    // The two ids it exposed are exactly the two the label map exists to correct, and that
+    // correction is not cosmetic. c4x/theme.py records why: `role` and `type` were BOTH the
+    // transcript record's own type field, so a directory listing and a question both read "user",
+    // and 86.5% of the records typed 'user' were tool results. `Record Type` and `Written By` carry
+    // the whole of that distinction, and the drawer was throwing it away.
+    //
+    // The payload already carries the answer, one label per column, so nothing new is fetched. A
+    // column the payload does not describe keeps its id: an unlabelled field is still worth showing,
+    // and inventing a label for it would be guessing.
+    const labels = new Map((meta?.columns ?? []).map((c) => [c.id, c.label]))
     const fields = Object.entries(row)
       .filter(([key]) => !spec || key !== spec.column)
-      .map(([key, value]) => [key, shown(value)] as [string, string])
+      .map(([key, value]) => [labels.get(key) ?? key, shown(value)] as [string, string])
     const session = row.session_id ?? row.session
     const base: InspectorContent = {
       subject: mine,

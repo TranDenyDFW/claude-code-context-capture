@@ -7,7 +7,7 @@ from dash import dcc, html
 
 from c4x.dash_compat import DataTable
 from c4x.frames import records
-from c4x.labels import plural
+from c4x.labels import plural, stamp
 from c4x.panels import baseline_marks
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
@@ -571,7 +571,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
 
     if not comps.empty:
         show = comps.copy()
-        show["ts"] = show["ts"].astype(str).str.slice(0, 19).str.replace("T", " ", regex=False)
+        show["ts"] = show["ts"].map(stamp)
         cols = ["ts", "trigger", "pre_tokens", "post_tokens", "cumulative_dropped_tokens",
                 "duration_ms", "version"]
         cards = html.Div([cards, html.Div(style={"height": "14px"}),
@@ -590,7 +590,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     msgs = session_messages(session_id)
     if not msgs.empty:
         m = msgs.copy()
-        m["ts"] = m["ts"].astype(str).str.slice(11, 19)
+        m["ts"] = m["ts"].map(stamp)
         # The query is capped, so len(m) is how many are shown, not how many exist. Saying
         # "400 messages" when 400 is the LIMIT reports the cap as if it were a measurement.
         total_msgs = int(q("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",

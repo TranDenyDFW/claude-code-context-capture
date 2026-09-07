@@ -15,6 +15,7 @@ from dash import dcc, html
 from dash.dash_table.Format import Format, Scheme
 from dash.development.base_component import Component
 
+from c4x.labels import stamp
 from c4x.dash_compat import DataTable
 from c4x.panels import evidence_block
 from c4x.store import q, tables_present
@@ -257,7 +258,7 @@ def probe_detail_blocks(baseline=None):
         ]
 
     pid = int(probe["id"])
-    when = str(probe["ts"])[:19].replace("T", " ")
+    when = stamp(probe["ts"])
     cats, names = probe_completeness(pid)
     # Annotated because the first element is a Div and a dcc.Graph is appended later; inferred
     # from the literal this is a list[Div] and that append is an error.
@@ -371,7 +372,7 @@ def conversation_blocks(baseline=None):
             ]),
         ]
     pid = int(probe["id"])
-    when = str(probe["ts"])[:19].replace("T", " ")
+    when = stamp(probe["ts"])
     # ONE `about_note`, HEADING INCLUDED. The panel draws no chart at all when a probe recorded
     # no message breakdown, so a heading bound to a chart would be bound to nothing on exactly the
     # stores where it is the only thing naming the panel.

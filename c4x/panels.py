@@ -9,7 +9,7 @@ from dash.dash_table.Format import Format, Scheme
 
 from c4x.dash_compat import DataTable
 from c4x.frames import records as frame_records
-from c4x.labels import plural
+from c4x.labels import plural, stamp
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     measured_cost,
@@ -231,8 +231,8 @@ def selection_metrics(session_id=None, cohort=None, scope="main") -> dict:
         "compactions": int(comp or 0),
         "tool_calls": int(tools["n"] or 0),
         "tool_bytes": int(tools["bytes"] or 0),
-        "first_ts": str(row["first_ts"] or "")[:19].replace("T", " "),
-        "last_ts": str(row["last_ts"] or "")[:19].replace("T", " "),
+        "first_ts": stamp(row["first_ts"]),
+        "last_ts": stamp(row["last_ts"]),
     }
 
 
@@ -475,7 +475,7 @@ def turn_diff_panel(session_id, scope, turns, a, b):
     ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
 
     blocks = [
-        html.Div(f"Between turn {a} ({ts_a[:19]}) and turn {b} ({ts_b[:19]})", style=SECTION_HEAD),
+        html.Div(f"Between turn {a} ({stamp(ts_a)}) and turn {b} ({stamp(ts_b)})", style=SECTION_HEAD),
         cards,
     ]
     if not tools.empty:

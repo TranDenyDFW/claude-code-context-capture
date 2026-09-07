@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 from dash import dcc, html
 from dash.dash_table.Format import Format, Scheme
 
+from c4x.labels import stamp
 from c4x.dash_compat import DataTable
 from c4x.store import ROOT, q, scoped
 from c4x.theme import (
@@ -325,7 +326,7 @@ def composition_blocks(include_sidechain: bool = False, session_id=None, cohort=
                       title_font=dict(color=TEXT, size=13),
                       xaxis_title="API Call", yaxis_title="Tokens")
 
-    applies = str(b["ts"])[:19].replace("T", " ")
+    applies = stamp(b["ts"])
     notes = [html.Div(
         f"Charting {len(turns):,} API calls: "
         + ("main thread and subagents." if include_sidechain

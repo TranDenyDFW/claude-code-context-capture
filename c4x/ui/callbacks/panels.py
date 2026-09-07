@@ -24,6 +24,7 @@ from c4x.store import (
     predict,
     session_turns,
 )
+from c4x.labels import stamp
 from c4x.tabs import session_view
 from c4x.theme import (
     ACCENT,
@@ -84,7 +85,7 @@ def _message_clicked(active_cell, rows):
         return text_panel("not found", "No stored text for that message.", MUTED)
     r = df.iloc[0]
     return text_panel(
-        f"{r['role']} / {r['type']} - {int(r['chars']):,} chars - {str(r['ts'])[:19]}",
+        f"{r['role']} / {r['type']} - {int(r['chars']):,} chars - {stamp(r['ts'])}",
         str(r["text"]), ACCENT)
 
 @callback(
@@ -121,7 +122,7 @@ def _compaction_clicked(active_cell, rows):
     dropped = compaction_dropped(uuid)
     if not dropped.empty:
         d = dropped.copy()
-        d["ts"] = d["ts"].astype(str).str.slice(11, 19)
+        d["ts"] = d["ts"].map(stamp)
         total = compaction_dropped_count(uuid)
         shown = f"showing the {len(d)} largest of {total:,}" if total > len(d) else f"all {total:,}"
         out.append(html.Div([
