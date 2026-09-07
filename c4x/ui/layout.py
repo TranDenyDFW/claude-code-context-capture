@@ -193,7 +193,7 @@ GROUP_LABEL = {"display": "flex", "flexDirection": "column", "gap": "2px",
 
 def _tab_groups():
     """The tab row, split into what the header selection reaches and what it does not."""
-    out = []
+    out: list = []
     for kind, heading in ((STORE, "WHOLE STORE"), (SELECTION, "CURRENT SELECTION")):
         mine = [t for t in TABS if t[3] == kind]
         if not mine:

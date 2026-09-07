@@ -11,7 +11,7 @@
  * is exactly what the payload exists to replace.
  */
 import { describe, expect, it } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import type { TabInfo } from '@/api'
 import { Sidebar } from './Sidebar'
 

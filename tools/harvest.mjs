@@ -2183,11 +2183,11 @@ async function selfTest() {
     const scratchDb = new DatabaseSync(":memory:");
     scratchDb.exec(SCHEMA);
     const h6 = new Harvest(scratchDb, { unknownLog: scratchLog });
-    const plan = "# Delete results/t16-keep.txt" + "x".repeat(TOOL_INPUT_PREVIEW * 3);
+    const proposal = "# Delete results/t16-keep.txt" + "x".repeat(TOOL_INPUT_PREVIEW * 3);
     h6.scanBlocks({
       sessionId: "s1", uuid: "u1", timestamp: "2026-09-07T05:01:44Z",
       message: { content: [{ type: "tool_use", id: "toolu_1", name: "ExitPlanMode",
-                             input: { plan } }] },
+                             input: { plan: proposal } }] },
     }, "f", 1);
     const row = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_1");
     checks.push(["the head of a tool input is stored, not only its hash (gate can fail)",
