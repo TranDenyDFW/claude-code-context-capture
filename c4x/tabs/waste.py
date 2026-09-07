@@ -10,8 +10,14 @@ from dash.dash_table.Format import Format, Scheme
 from c4x.breakdown import tool_spec
 from c4x.frames import records
 from c4x.panels import evidence_block
-from c4x.pricing import PRICE_TABLE_DATE, cost_of, cost_of_rows, coverage_note
-from c4x.store import q, scoped
+from c4x.pricing import (
+    PRICE_TABLE_DATE,
+    cost_of,
+    cost_of_rows,
+    coverage_note,
+    measured_note,
+)
+from c4x.store import measured_cost, q, scoped
 from c4x.theme import (
     DANGER,
     MUTED,
@@ -112,6 +118,12 @@ def _estimated_cost(where, args):
         return html.Div()
     rows = records(df)
     total, priced_calls, missing = cost_of_rows(rows)
+    # THE SAME POPULATION, derived from the same WHERE rather than re-stated. Two money figures
+    # that quietly cover different sessions are worse than one, because the difference then reads
+    # as a pricing divergence when it is a population difference. Asking api_calls which sessions
+    # this clause selects is the only way to be sure they match.
+    ids = q("SELECT DISTINCT session_id FROM api_calls WHERE 1=1 " + where, args)
+    measured = measured_cost([s for s in ids["session_id"].tolist() if s])
     for row in rows:
         value = cost_of(row["model"], row["input_tokens"], row["output_tokens"],
                         row["cache_read_input_tokens"], row["cache_creation_input_tokens"])
@@ -126,6 +138,14 @@ def _estimated_cost(where, args):
                       sub=f"priced models only, table of {PRICE_TABLE_DATE}"),
             stat_card("Calls priced", f"{priced_calls:,}",
                       sub=f"of {int(df['calls'].sum()):,} in this population"),
+            # BESIDE the estimate, never instead of it. Blank rather than $0.00 when no session in
+            # this population carries a cost-state record, which is every session harvested before
+            # Claude Code began writing one: the same blank-not-zero rule the estimate follows,
+            # because $0.00 claims the sessions were free.
+            stat_card("Measured cost", fmt_cost(measured["total_usd"]) or "-", color=WARN,
+                      sub=(f"Claude Code's own total, {measured['sessions']:,} of "
+                           f"{len(ids):,} sessions here" if measured["total_usd"] is not None
+                           else "no session here carries one yet")),
         ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap",
                   "margin": "18px 0 10px 0"}),
         evidence_block(
@@ -138,7 +158,8 @@ def _estimated_cost(where, args):
                 {"est_usd": Format(precision=2, scheme=Scheme.fixed)}),
             heat=["est_usd", "cache_read_input_tokens"], page_size=10,
             help_for={"calls": "Every API call this model answered in this population."},
-            note=coverage_note(missing, priced_calls)),
+            note=" ".join(x for x in (coverage_note(missing, priced_calls),
+                                      measured_note(measured, total)) if x)),
     ])
 
 

@@ -1,10 +1,25 @@
 """What the recorded tokens would have cost, and the price table that says so.
 
 THE FIRST DERIVED-MONEY FIGURE IN THIS APP. Everything else here reports something the transcripts
-actually recorded. A cost is not recorded anywhere: `turns` carries every token component and the
-model name, and no column of it contains a price. So a cost figure is this app doing arithmetic on
-a number it went and got from somewhere else, and the whole design of this module is about that
-gap being visible rather than papered over.
+actually recorded. So a cost figure is this app doing arithmetic on a number it went and got from
+somewhere else, and the whole design of this module is about that gap being visible rather than
+papered over.
+
+THAT USED TO BE THE WHOLE STORY AND IS NOT ANY MORE. This module opened by saying a cost is not
+recorded anywhere, which was true of `turns`: it carries every token component and the model name
+and no column of it contains a price. Claude Code has since begun writing a `cost-state` record
+carrying its own totalCostUSD, harvested into `cost_state` and read by `store.measured_cost`.
+
+The two are shown SIDE BY SIDE and never merged, and neither is promoted to the truth:
+
+- The estimate is a stated LOWER BOUND, for the two reasons below, and it covers every session in
+  a population whatever its age.
+- The measured figure is what Claude Code billed itself, and it can be INCOMPLETE, which Claude
+  Code says so itself through hasUnknownModelCost. It exists only for sessions harvested since
+  cost-state began appearing, so it covers a subset and the page states which.
+
+A divergence between them is the interesting part, which is why `coverage_note` reports it rather
+than resolving it. Merging them would produce one confident number covering neither population.
 
 Three rules, all of them load-bearing:
 
@@ -162,6 +177,40 @@ def cost_of_rows(rows):
         total += value
         priced += int(row.get("calls") or 0)
     return total, priced, missing
+
+
+def measured_note(measured, estimate):
+    """What Claude Code's own total says, and how far it sits from the estimate.
+
+    SEPARATE SENTENCE, SAME SINGLE HOME as coverage_note and for the same reason: the three places
+    that show a cost must not describe this three different ways.
+
+    Returns "" when nothing measured is available, which is every store harvested before cost-state
+    began appearing and every population of sessions that predate it. Silence is the honest output
+    there; a note explaining an absent figure is noise on most pages.
+
+    THE DIVERGENCE IS REPORTED, NOT RESOLVED. The estimate is a known lower bound, so the measured
+    figure being higher is the EXPECTED direction and says the bound is working. Measured coming in
+    LOWER is the surprising one and is the case a reader most needs pointed at, so the wording
+    names the direction rather than printing an unsigned percentage.
+    """
+    total = measured.get("total_usd")
+    if not measured.get("sessions") or total is None:
+        return ""
+    parts = [f"MEASURED: Claude Code recorded ${total:,.2f} of its own for "
+             f"{measured['sessions']:,} session(s) in this population."]
+    if measured.get("incomplete"):
+        parts.append(f"{measured['incomplete']:,} of those carry hasUnknownModelCost, so Claude "
+                     f"Code is flagging its own total as incomplete.")
+    if estimate:
+        ratio = total / estimate
+        direction = ("ABOVE the estimate, which is the expected direction since the estimate is a "
+                     "lower bound" if ratio >= 1 else
+                     "BELOW the estimate, which the estimate being a lower bound does not explain")
+        parts.append(f"That is {ratio:.2f}x the estimate for the same page, {direction}.")
+    parts.append("The two are not merged: they cover different populations and neither is a "
+                 "correction of the other.")
+    return " ".join(parts)
 
 
 def coverage_note(missing, priced_calls):

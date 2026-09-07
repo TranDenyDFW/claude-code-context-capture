@@ -13,6 +13,7 @@ from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     THRESHOLDS,
     cohort_sessions,
+    measured_cost,
     q,
     real_models,
     scoped,
@@ -483,6 +484,8 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                               AS cache_creation_input_tokens
                        FROM api_calls WHERE 1=1 {cw} GROUP BY model""", cargs)
     cost_usd, cost_calls, _unpriced = cost_of_rows(_by_model.to_dict("records"))
+    # One session, so the population match is exact and needs no derivation.
+    _measured = measured_cost([session_id])
     cost_usd = cost_usd if cost_calls else None
     cache_total = int(cdf.iloc[0]["churn"] or 0) if not cdf.empty else 0
     churn_peak = int(cdf.iloc[0]["peak"] or 0) if not cdf.empty else 0
@@ -537,6 +540,26 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                        if cost_calls else
                        f"no price in c4x/pricing.py for "
                        f"{', '.join(real_models(turns['model'])[:2]) or 'this model'}")),
+        # BESIDE the estimate. This one is not arithmetic: it is what Claude Code recorded for this
+        # session in its own cost-state record. Absent for every session harvested before that
+        # record existed, and blank rather than zero when absent, by the same rule the card above
+        # states. When Claude Code flags its own total incomplete, the card says so instead of
+        # showing a number that looks whole.
+        stat_card("measured cost", fmt_cost(_measured["total_usd"]) or "not recorded",
+                  color=WARN if _measured["total_usd"] is not None else MUTED,
+                  # THE TWO CARDS COVER DIFFERENT THREADS, and the caption has to say so. The
+                  # estimate beside this one runs through scoped(session_id, scope), and the
+                  # header's scope defaults to "main", which drops sidechain rows. cost_state has
+                  # no thread dimension at all: it is what the session cost in total, subagents
+                  # included. On the sessions that ran subagents the measured figure therefore
+                  # covers work the estimate excludes, and without this line the excess reads as
+                  # the price table being wrong rather than the populations differing.
+                  sub=("Claude Code's own total, all threads, which it flags as INCOMPLETE"
+                       if _measured["incomplete"] else
+                       "Claude Code's own total for this session, all threads"
+                       + ("" if scope == "all" else "; the estimate beside it is main thread only")
+                       if _measured["total_usd"] is not None else
+                       "this session predates the cost record, or ran without one")),
     ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
     cards = html.Div([band_explainer, cards])
 

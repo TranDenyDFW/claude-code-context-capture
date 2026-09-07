@@ -166,6 +166,57 @@ def q(sql: str, params=()) -> pd.DataFrame:
         con.close()
 
 
+def measured_cost(session_ids=None) -> dict:
+    """What Claude Code itself says these sessions cost, or an empty answer.
+
+    THE FIRST FIGURE IN THIS APP THAT IS A COST RATHER THAN A PRICING OF TOKENS. c4x/pricing.py
+    derives money from tokens and a committed table; this reads the total Claude Code recorded in
+    its own cost-state record. They are shown side by side and never merged, because the estimate
+    is a stated LOWER BOUND and the measured figure can itself be incomplete.
+
+    GUARDED, and the guard is the point. `cost_state` is created by harvest.mjs, and this package
+    never writes, so a store harvested by an older build has no such table and a bare query would
+    RAISE rather than return nothing. That exact defect shipped once already, on record_types.
+
+    SUMMING ACROSS SESSIONS IS SAFE, and it was worth checking, because a cumulative total that
+    survived a fork would double-count under exactly this SUM. Read out of the Claude Code 2.1.250
+    binary: the writer is gated on `costLedger.belongsTo(currentSessionId)`, ownership is a single
+    field compared by identity, and `restoreSnapshot` restores the owner FROM THE SNAPSHOT rather
+    than re-owning it to the resuming session. So a forked or resumed session does not own the
+    inherited ledger and emits no record at all. Scope of that evidence: a read of a minified
+    binary, not an executed fork, so if a future build re-owns on restore this SUM is the thing
+    that breaks, and the sessions count beside it is what would still be right.
+
+    Returns sessions_with_a_record, total_usd, and incomplete, the count of sessions Claude Code
+    flagged with hasUnknownModelCost. `total_usd` is None when nothing was found, never 0.0: zero
+    is a claim that these sessions were free.
+    """
+    empty = {"sessions": 0, "total_usd": None, "incomplete": 0}
+    if not tables_present("cost_state"):
+        return empty
+    sql = ("SELECT COUNT(*) AS sessions, SUM(total_cost_usd) AS total_usd, "
+           "SUM(COALESCE(has_unknown_model_cost, 0)) AS incomplete FROM cost_state")
+    params: tuple = ()
+    if session_ids is not None:
+        ids = list(session_ids)
+        if not ids:
+            # An optimisation, NOT the correctness guard. SQLite accepts `IN ()` and returns no
+            # rows, so deleting this changes no answer; the guard that matters is `is not None`
+            # above, which keeps an empty selection from meaning "no filter". Measured by mutating
+            # both, see tests/test_cost_state.py.
+            return empty
+        sql += f" WHERE session_id IN ({','.join('?' * len(ids))})"
+        params = tuple(ids)
+    df = q(sql, params)
+    if df.empty:
+        return empty
+    row = df.iloc[0]
+    n = int(row["sessions"] or 0)
+    return {"sessions": n,
+            "total_usd": float(row["total_usd"]) if n and row["total_usd"] is not None else None,
+            "incomplete": int(row["incomplete"] or 0)}
+
+
 def column_present(table: str, column: str) -> bool:
     """Whether a table has a column yet.
 
