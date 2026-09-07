@@ -1117,11 +1117,7 @@ def sessions(limit: int = Query(50, ge=1, le=2000), cohort: str | None = Query(N
     and both would look correct.
     """
     from c4x import store
-    frame = store.session_rows()
-    if cohort:
-        ids = store.cohort_sessions(cohort)
-        if ids:
-            frame = frame[frame["session_id"].isin(ids)]
+    frame = store.restrict_to_cohort(store.session_rows(), cohort)
     total = int(len(frame))
     if "last_ts" in frame.columns:
         frame = frame.sort_values("last_ts", ascending=False)

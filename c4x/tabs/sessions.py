@@ -7,7 +7,12 @@ from dash import dcc, html
 
 from c4x.dash_compat import DataTable
 from c4x.labels import is_folderless, titled_path
-from c4x.store import SESSION_TURN_FLOOR, cohort_sessions, session_rows, titles_for
+from c4x.store import (
+    SESSION_TURN_FLOOR,
+    restrict_to_cohort,
+    session_rows,
+    titles_for,
+)
 from c4x.theme import (
     ACCENT,
     GOOD,
@@ -93,10 +98,7 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
     project and could not be scanned. Sorted by section, then project, then most recently active,
     which is the order the desktop sidebar uses.
     """
-    df = session_rows()
-    ids = cohort_sessions(cohort)
-    if ids:
-        df = df[df["session_id"].isin(ids)]
+    df = restrict_to_cohort(session_rows(), cohort)
     counts = df["section"].value_counts().to_dict() if not df.empty else {}
     # NAMES for the chats that have no folder. Every other row's project is a directory somebody
     # chose; a scratch workspace is a generated id and identifies the row without saying anything

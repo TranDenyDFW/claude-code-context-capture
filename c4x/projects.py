@@ -498,7 +498,24 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
     if confirm != project:
         raise ValueError("confirmation does not match the project path; nothing was deleted")
 
-    out_dir = Path(out_dir or (ROOT / "tmp" / "exports"))
+    # NOT tmp/, AND NOT DERIVED FROM THE REPO ROOT. Two faults in one line.
+    #
+    # This wrote the only backup of a destructive operation into ROOT/tmp/exports, which .gitignore
+    # calls "Scratch. Self-ignoring by convention" and which the download route sweeps: that route
+    # now writes per-call uuid directories and removes them with a BackgroundTask, because one
+    # shared directory had kept every export anyone ever asked for. So the one file that must
+    # SURVIVE was living in the directory designed to be emptied, beside files that are deleted on
+    # purpose, and the natural `rm -rf tmp/*` takes it.
+    #
+    # Deriving from the STORE rather than ROOT fixes a second fault at the same time. The API path
+    # cannot pass out_dir, so every delete driven over HTTP wrote into the developer's real
+    # directory, including the suite's: measured here, 181 files and 34 MB of P--Alpha backups from
+    # tests/test_project_api.py, among which a user's real backup would be indistinguishable. With
+    # the path following C4X_DB, a fixture run writes beside the fixture and production writes
+    # beside production.
+    from c4x import store as _store
+    out_dir = Path(out_dir or (_store.DB_PATH.parent / "deleted-projects"))
+    out_dir.mkdir(parents=True, exist_ok=True)
     backup = out_dir / file_name(project, stamped=True)
     manifest = export(project, backup)             # raises if it cannot be verified
 

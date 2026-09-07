@@ -4,7 +4,7 @@ Two selections measured by the same function, so a difference cannot be an artef
 """
 from dash import dcc, html
 
-from c4x.store import cohort_sessions, q
+from c4x.store import cohort_named, cohort_sessions, q
 from c4x.theme import FIELD, MUTED, SECTION_NOTE
 from c4x.ui.header import selector_options
 
@@ -20,6 +20,9 @@ def default_arm_b(session_id=None, cohort=None):
     if ids:
         where += f" AND session_id IN ({','.join('?' * len(ids))})"
         args += list(ids)
+    elif cohort_named(cohort):
+        # Asked for and unresolvable: an empty arm, not the whole store. See store.cohort_named.
+        where += " AND 1 = 0"
     if session_id:
         where += " AND session_id <> ?"
         args.append(session_id)

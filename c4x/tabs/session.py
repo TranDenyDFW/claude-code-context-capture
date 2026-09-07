@@ -12,6 +12,7 @@ from c4x.panels import baseline_marks
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     THRESHOLDS,
+    cohort_named,
     cohort_sessions,
     measured_cost,
     q,
@@ -201,6 +202,11 @@ def most_recent_session(cohort=None):
     coming back to the app expects the default to follow.
     """
     ids = cohort_sessions(cohort)
+    if not ids and cohort_named(cohort):
+        # A cohort was chosen and nothing answers to it, so there is no session to default to.
+        # Falling through picked the newest session in the STORE, which is how a deleted project
+        # ended up showing a session from somewhere else under its own name.
+        return None
     if ids:
         placeholders = ",".join("?" * len(ids))
         df = q(f"""SELECT session_id FROM turns WHERE session_id IN ({placeholders})

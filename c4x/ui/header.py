@@ -21,8 +21,8 @@ from dash import dcc, html
 from c4x.store import (
     ROOT,
     THRESHOLDS,
-    cohort_sessions,
     q,
+    restrict_to_cohort,
     scoped,
     session_rows,
     session_window,
@@ -290,10 +290,7 @@ def selector_options(cohort=None) -> list:
 
     Narrowed to the cohort, so the picker cannot offer a session the current population excludes.
     """
-    df = session_rows()
-    ids = cohort_sessions(cohort)
-    if ids:
-        df = df[df["session_id"].isin(ids)]
+    df = restrict_to_cohort(session_rows(), cohort)
     if df.empty:
         return []
     # Sorted by PATH then title, both case-insensitively, rather than by the table's

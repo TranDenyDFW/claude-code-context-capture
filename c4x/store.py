@@ -791,6 +791,42 @@ def cohort_parts(cohort) -> tuple:
     return kind, value
 
 
+def restrict_to_cohort(df, cohort, column: str = "session_id"):
+    """Narrow a frame to a cohort, with an ASKED-FOR-BUT-EMPTY cohort meaning nothing, not all.
+
+    ONE HOME FOR THE RULE, because the shape it replaces was copied to five places and every copy
+    had the same hole: `ids = cohort_sessions(...)` then `if ids: df = df[isin]`, so a cohort that
+    resolves to no sessions fell through and left the frame whole. A reader who deleted a project
+    and stayed on the page then saw the entire store under a header naming the project they deleted.
+
+    Five sites, found by sweeping rather than by reading the report, which named two.
+    """
+    ids = cohort_sessions(cohort)
+    if ids:
+        return df[df[column].isin(ids)]
+    if cohort_named(cohort):
+        return df.iloc[0:0]
+    return df
+
+
+def cohort_named(cohort) -> bool:
+    """Whether a COHORT WAS ASKED FOR, regardless of whether anything answers to it.
+
+    THE DISTINCTION `cohort_sessions` CANNOT MAKE. It returns an empty list for two situations that
+    are opposites: nothing was selected, and a project was selected that no longer has any sessions.
+    Every filtering site then reads empty as "no restriction", so deleting a project turns its
+    filter into the whole store, silently, and the page shows more than was asked for rather than
+    less. Proven by executing the functions: a live project emits `AND session_id IN (?,?)` and a
+    deleted one emits byte-identical SQL to no filter at all.
+
+    This repo has met the same conflation twice and both times guarded the INPUT SHAPE. cohort_parts
+    above records one: "the frontend sent a bare path with no `project::` prefix, which resolves
+    here to no restriction ... A delete cannot afford the same mistake." Guarding the shape does
+    nothing for a well-formed cohort whose rows are gone, which is what a delete leaves behind.
+    """
+    return bool(cohort) and cohort != COHORT_ALL and bool(cohort_parts(cohort)[0])
+
+
 def cohort_sessions(cohort, ttl: float = 45.0) -> list:
     """Resolve a cohort to the session ids it contains. Empty list means 'no restriction'.
 
@@ -914,6 +950,16 @@ def scoped(session_id, scope="main", alias="", cohort=None):
         if ids:
             bits.append(f"AND {a}session_id IN ({','.join('?' * len(ids))})")
             args.extend(ids)
+        elif cohort_named(cohort):
+            # A COHORT WAS ASKED FOR AND NOTHING ANSWERS TO IT. Falling through here appended no
+            # clause at all, so the query became the store-wide query and the page answered a
+            # question nobody asked. Deleting a project is the ordinary way to reach this state,
+            # and the app keeps the deleted cohort selected afterwards.
+            #
+            # An empty population is the truthful answer, so the filter matches no row rather than
+            # every row. `1 = 0` rather than `IN ()`: SQLite accepts the latter, but this reads as
+            # what it is to anyone opening the SQL accordion under the table.
+            bits.append("AND 1 = 0")
     if scope != "all":
         bits.append(f"AND COALESCE({a}is_sidechain,0) = 0")
     return " ".join(bits), tuple(args)

@@ -392,9 +392,17 @@ export default function App() {
               // A delete or an import changes what every pane describes, and the cohort list
               // itself: a deleted project must stop appearing under Population. Invalidate rather
               // than reload, so the open tab refetches and nothing else is thrown away.
+              // THE COHORT GOES TOO, not only the session. The project just deleted IS the
+              // selected cohort, by construction: ProjectMoves acts on `selection.cohort`. Keeping
+              // it left the app filtering by a population with no sessions left, and the Picker
+              // below is a plain controlled select, so a value absent from its options renders the
+              // FIRST option and fires no onChange: the control read "No restriction" while a dead
+              // cohort was still set. The backend now answers such a cohort with an empty
+              // population rather than the whole store, so this is no longer a wrong-data bug, but
+              // a control that disagrees with the state it represents is still a lie.
               onChanged={() => {
                 void client.invalidateQueries()
-                setSelection((was) => ({ ...was, session: null }))
+                setSelection((was) => ({ ...was, session: null, cohort: null }))
               }}
             />
             <button
