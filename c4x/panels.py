@@ -12,6 +12,7 @@ from c4x.frames import records as frame_records
 from c4x.labels import plural
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
+    measured_cost,
     q,
     scoped,
 )
@@ -205,7 +206,16 @@ def selection_metrics(session_id=None, cohort=None, scope="main") -> dict:
                               AS cache_creation_input_tokens
                        FROM api_calls WHERE 1=1 {w} GROUP BY model""", args)
     cost, cost_calls, _missing = cost_of_rows(by_model.to_dict("records"))
+    # MATCHED TO THE SAME ARM, from the same WHERE. This function's own docstring says matching the
+    # arms is the whole point and that a difference produced by asking two different questions is
+    # not a finding: a measured cost taken over a different session set than the estimate would be
+    # exactly that. None rather than 0.0 when no session in this arm carries a record, so the
+    # compare table drops the row instead of claiming both arms measured zero.
+    ids = q(f"SELECT DISTINCT session_id FROM api_calls WHERE 1=1 {w}", args)
+    measured = measured_cost([s for s in ids["session_id"].tolist() if s])
     return {
+        "measured_usd": (None if measured["total_usd"] is None
+                         else round(measured["total_usd"], 2)),
         "cost_usd": round(cost, 2),
         "cost_calls": cost_calls,
         "sessions": int(row["sessions"] or 0),
@@ -259,6 +269,10 @@ COMPARE_ROWS = [
     # It scales with population, like the other totals, so it is never marked comparable across
     # arms of different sizes.
     ("cost_usd", "estimated cost, USD", f"estimate, prices of {PRICE_TABLE_DATE}", "higher", False),
+    # BESIDE the estimate, directly under it, so the two are read together. Absent for any arm
+    # whose sessions predate the cost-state record, and the compare table already drops a row where
+    # both arms are empty, so an unmeasured comparison shows no measured row rather than two zeros.
+    ("measured_usd", "measured cost, USD", "Claude Code's own total", "higher", False),
     ("cost_calls", "calls the price table covers", "count", None, False),
 ]
 

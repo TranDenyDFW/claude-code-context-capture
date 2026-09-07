@@ -48,8 +48,14 @@ if str(ROOT) not in sys.path:
 #
 # `files` is here because the harvest offset is part of the project's footprint: leave it and the
 # transcript is skipped forever; remove it and the next harvest re-reads from the beginning.
+# cost_state and cost_state_models are BY SESSION, not store-wide, and the distinction decides
+# whether an exported project carries what it actually cost. Both are keyed on session_id, both
+# describe one session's work, and leaving them out would hand someone an export whose Cost tab
+# shows the ESTIMATE and silently drops the measurement beside it: two figures on the source page,
+# one on the copy, with nothing saying which went missing.
 BY_SESSION = ("hook_events", "attachments", "tool_calls", "messages", "turns",
-              "session_titles", "compactions", "sessions")
+              "session_titles", "compactions", "sessions",
+              "cost_state", "cost_state_models")
 
 # Reached another way, and named so nothing depends on remembering it.
 BY_COMPACTION = ("compaction_survivors",)

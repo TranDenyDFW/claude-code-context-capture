@@ -196,6 +196,47 @@ CREATE TABLE IF NOT EXISTS excluded_projects (
 -- on stores in the wild.
 -- (No backticks in here: this block sits inside a JS template literal.)
 CREATE TABLE IF NOT EXISTS record_types (type TEXT PRIMARY KEY, n INTEGER, known INTEGER);
+-- WHAT CLAUDE CODE SAYS THE SESSION COST, as opposed to what this app computes it would have.
+--
+-- c4x/pricing.py opens by stating that no cost is recorded anywhere and that every money figure is
+-- arithmetic over tokens times a committed price table. That was true until Claude Code began
+-- writing a cost-state record carrying its own totalCostUSD. Storing it does not replace the
+-- estimate: the two are shown side by side, because they can disagree and the disagreement is the
+-- interesting part. The estimate is a stated LOWER BOUND (cache TTL and inference geography are
+-- not recorded), and the measured figure can itself be incomplete, which Claude Code flags with
+-- has_unknown_model_cost.
+--
+-- ONE ROW PER SESSION, and the values are CUMULATIVE, so a later record supersedes an earlier one.
+-- The upsert only ever moves a total upward. An incremental harvest can re-read a byte range and
+-- meet an older record again, and without that guard the stored cost would walk backwards for no
+-- reason a reader could see.
+CREATE TABLE IF NOT EXISTS cost_state (
+  session_id TEXT PRIMARY KEY,
+  started_at TEXT,
+  total_cost_usd REAL,
+  total_api_ms INTEGER,
+  total_api_ms_no_retries INTEGER,
+  total_tool_ms INTEGER,
+  total_duration_ms INTEGER,
+  lines_added INTEGER,
+  lines_removed INTEGER,
+  has_unknown_model_cost INTEGER,
+  file_path TEXT,
+  line_no INTEGER
+);
+-- The per-model half of the same record. Separate table because modelUsage is a map, and folding
+-- it into columns would need one set per model name and a migration every time a model ships.
+CREATE TABLE IF NOT EXISTS cost_state_models (
+  session_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  cache_read_input_tokens INTEGER,
+  cache_creation_input_tokens INTEGER,
+  web_search_requests INTEGER,
+  cost_usd REAL,
+  PRIMARY KEY (session_id, model)
+);
 CREATE TABLE IF NOT EXISTS harvest_runs (
   ts TEXT, mode TEXT, files_seen INTEGER, files_read INTEGER, rewrites INTEGER,
   lines INTEGER, mb REAL, turns INTEGER, compactions INTEGER, unpaired INTEGER, ms INTEGER
@@ -850,6 +891,9 @@ const KNOWN_TYPES = new Set([
   // an upstream rename becomes visible instead of silently misclassified, and it is why the rename
   // was noticed at all.
   'permission-mode',
+  // STORED, not merely recognised, which is the exception this set's rule calls out. It carries a
+  // measured cost and a per-model breakdown, and the Cost tab has only ever had an estimate.
+  'cost-state',
   'file-history-snapshot', 'x-anthropic-log',
 ]);
 
@@ -915,6 +959,32 @@ class Harvest {
         ON CONFLICT(session_id,type) DO UPDATE SET n = n + 1`),
       bumpType: db.prepare(`INSERT INTO record_types (type,n) VALUES (?,1)
         ON CONFLICT(type) DO UPDATE SET n = n + 1`),
+      // MONOTONIC. `WHERE excluded.total_cost_usd >= cost_state.total_cost_usd` is the whole point:
+      // these totals are cumulative, and re-reading an older record must not walk the stored cost
+      // backwards. COALESCE on the stored side so the first row always wins over NULL.
+      putCostState: db.prepare(`INSERT INTO cost_state
+        (session_id,started_at,total_cost_usd,total_api_ms,total_api_ms_no_retries,total_tool_ms,
+         total_duration_ms,lines_added,lines_removed,has_unknown_model_cost,file_path,line_no)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          started_at = excluded.started_at, total_cost_usd = excluded.total_cost_usd,
+          total_api_ms = excluded.total_api_ms,
+          total_api_ms_no_retries = excluded.total_api_ms_no_retries,
+          total_tool_ms = excluded.total_tool_ms, total_duration_ms = excluded.total_duration_ms,
+          lines_added = excluded.lines_added, lines_removed = excluded.lines_removed,
+          has_unknown_model_cost = excluded.has_unknown_model_cost,
+          file_path = excluded.file_path, line_no = excluded.line_no
+        WHERE excluded.total_cost_usd >= COALESCE(cost_state.total_cost_usd, -1)`),
+      putCostModel: db.prepare(`INSERT INTO cost_state_models
+        (session_id,model,input_tokens,output_tokens,cache_read_input_tokens,
+         cache_creation_input_tokens,web_search_requests,cost_usd)
+        VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(session_id,model) DO UPDATE SET
+          input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
+          cache_read_input_tokens = excluded.cache_read_input_tokens,
+          cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+          web_search_requests = excluded.web_search_requests, cost_usd = excluded.cost_usd
+        WHERE excluded.cost_usd >= COALESCE(cost_state_models.cost_usd, -1)`),
       putRun: db.prepare(`INSERT INTO harvest_runs (ts,mode,files_seen,files_read,rewrites,lines,mb,turns,compactions,unpaired,ms)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)`),
     };
@@ -944,6 +1014,42 @@ class Harvest {
   // CARRIED, not re-derived at flush time. The census key can be a composite (`system/foo`)
   // while recognition is decided on the base type, so a later KNOWN_TYPES.has(key) would call
   // every system subtype unknown.
+  /**
+   * The cost Claude Code measured for this session, and its per-model breakdown.
+   *
+   * NUMBERS ARE COERCED, NOT TRUSTED. A record whose totalCostUSD is absent or not a number is
+   * skipped outright rather than stored as 0: a zero cost is a claim, and it is the one claim this
+   * app must never make by accident. Same rule c4x/pricing.py states for a model with no price,
+   * where blank beats zero because zero says these calls were free.
+   */
+  putCostState(d, path, lineNo) {
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const total = num(d.totalCostUSD);
+    if (total === null) return;
+    // startTime IS A NUMBER. The schema in the 2.1.250 bundle declares every numeric field with
+    // one validator, `w.number().nonnegative().finite()`, and startTime is one of them: it comes
+    // from a Date.now() stamped when the cost ledger was reset. Reading it as a string stored NULL
+    // for every record, which looks exactly like a record that carried no start time.
+    const started = typeof d.startTime === 'number' && Number.isFinite(d.startTime)
+      ? new Date(d.startTime).toISOString()
+      : (typeof d.startTime === 'string' ? d.startTime : null);
+    this.stmt.putCostState.run(
+      d.sessionId, started, total,
+      num(d.totalAPIDuration), num(d.totalAPIDurationWithoutRetries), num(d.totalToolDuration),
+      num(d.totalDuration), num(d.totalLinesAdded), num(d.totalLinesRemoved),
+      d.hasUnknownModelCost === true ? 1 : 0, path, lineNo);
+    const usage = d.modelUsage;
+    if (!usage || typeof usage !== 'object') return;
+    for (const [model, u] of Object.entries(usage)) {
+      if (!u || typeof u !== 'object') continue;
+      this.stmt.putCostModel.run(
+        d.sessionId, String(model), num(u.inputTokens), num(u.outputTokens),
+        num(u.cacheReadInputTokens), num(u.cacheCreationInputTokens),
+        num(u.webSearchRequests), num(u.costUSD));
+    }
+    this.stats.costStates = (this.stats.costStates ?? 0) + 1;
+  }
+
   countType(t, known = 1) {
     this.typeCounts.set(t, (this.typeCounts.get(t) || 0) + 1);
     this.typeKnown.set(t, known ? 1 : 0);
@@ -1076,6 +1182,8 @@ class Harvest {
         const chars = typeof c === 'string' ? c.length
           : Array.isArray(c) ? c.reduce((a, b) => a + (typeof b?.text === 'string' ? b.text.length : 0), 0) : 0;
         if (pendingBoundary) { this.stmt.paircompaction.run(d.uuid, chars, pendingBoundary); this.stats.paired++; pendingBoundary = null; }
+      } else if (type === 'cost-state' && d.sessionId) {
+        this.putCostState(d, path, lineNo);
       } else if (d.type === 'attachment') {
         this.stmt.bumpAttachment.run(d.sessionId ?? 'unknown', d.attachment?.type ?? 'unknown');
       } else if (TITLE_FIELD[type] && d.sessionId) {
@@ -1963,6 +2071,56 @@ async function selfTest() {
     again.noteUnknown('zzz-second-new-type', '{}');
     const third = readFileSync(scratchLog, 'utf8').split(String.fromCharCode(10)).filter(Boolean).length;
     checks.push(['but a genuinely new type still is', third === before + 1]);
+  }
+
+  // THE MEASURED COST. Every branch that can silently produce a wrong number is exercised, because
+  // this is the one figure on the page that is money and the app's own rule is that a wrong price
+  // is worse than no price.
+  {
+    const scratchDb = new DatabaseSync(':memory:');
+    scratchDb.exec(SCHEMA);
+    const costH = new Harvest(scratchDb, { unknownLog: scratchLog });
+    const rec = (over = {}) => ({
+      type: 'cost-state', sessionId: 's1', startTime: Date.UTC(2026, 8, 7),
+      totalCostUSD: 0.2, totalAPIDuration: 13888, totalDuration: 20000,
+      modelUsage: { 'claude-opus-5': { inputTokens: 12, outputTokens: 7213, costUSD: 0.2 } },
+      ...over,
+    });
+    const row = () => scratchDb.prepare('SELECT * FROM cost_state WHERE session_id = ?').get('s1');
+    const model = () => scratchDb.prepare(
+      "SELECT * FROM cost_state_models WHERE session_id = 's1' AND model = 'claude-opus-5'").get();
+
+    costH.putCostState(rec(), 'f', 1);
+    checks.push(['a cost-state record is stored (gate can fail)', row()?.total_cost_usd === 0.2]);
+    // startTime is epoch MILLISECONDS in the record, not a string. Reading it as a string stored
+    // NULL for every row, indistinguishable from a record that carried no start time at all.
+    checks.push(['a numeric startTime is stored, not dropped as NULL (gate can fail)',
+      row()?.started_at === '2026-09-07T00:00:00.000Z', String(row()?.started_at)]);
+    checks.push(['and its per-model breakdown with it', model()?.output_tokens === 7213]);
+    checks.push(['hasUnknownModelCost absent reads as 0, not null',
+      row()?.has_unknown_model_cost === 0]);
+
+    // Cumulative: a later record supersedes, an earlier one must NOT walk the total backwards.
+    costH.putCostState(rec({ totalCostUSD: 0.5, modelUsage: {
+      'claude-opus-5': { inputTokens: 20, outputTokens: 9000, costUSD: 0.5 } } }), 'f', 2);
+    checks.push(['a larger later total supersedes', row()?.total_cost_usd === 0.5]);
+    costH.putCostState(rec({ totalCostUSD: 0.1 }), 'f', 3);
+    checks.push(['a re-read of an OLDER record cannot lower it (gate can fail)',
+      row()?.total_cost_usd === 0.5, String(row()?.total_cost_usd)]);
+    checks.push(['and cannot lower the per-model figure either', model()?.cost_usd === 0.5]);
+
+    // A cost of zero is a CLAIM. A record that carries no usable total is not stored at all.
+    costH.putCostState({ type: 'cost-state', sessionId: 's2' }, 'f', 4);
+    const s2 = scratchDb.prepare("SELECT COUNT(*) n FROM cost_state WHERE session_id = 's2'").get();
+    checks.push(['a record with no total is skipped, never stored as zero (gate can fail)',
+      s2.n === 0, String(s2.n)]);
+    costH.putCostState({ type: 'cost-state', sessionId: 's3', totalCostUSD: 'free' }, 'f', 5);
+    const s3 = scratchDb.prepare("SELECT COUNT(*) n FROM cost_state WHERE session_id = 's3'").get();
+    checks.push(['and so is one whose total is not a number', s3.n === 0]);
+    costH.putCostState(rec({ sessionId: 's4', hasUnknownModelCost: true }), 'f', 6);
+    const s4 = scratchDb.prepare("SELECT has_unknown_model_cost h FROM cost_state WHERE session_id = 's4'").get();
+    checks.push(['an incomplete total is flagged as such', s4.h === 1]);
+    scratchDb.close();
   }
 
   // THE CENSUS SAYS WHICH TYPES IT UNDERSTOOD. Both directions, because a flag that is always 1
