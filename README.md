@@ -296,6 +296,19 @@ dump is what the page shows rather than a parallel implementation of it.
 | Compare | `python -m c4x.cli dump --tab tab-compare --compare-with <id>` |
 | Diagnostics | `python -m c4x.cli dump --tab tab-diagnostics` |
 
+**Two tabs need a reading the install does not take.** Window and Diagnostics stay empty until you
+record one, and they say so on the page rather than looking broken:
+
+```bash
+node tools/probe.mjs                  # asks a spawned Claude Code session for its own context
+                                      # breakdown. One billable session, about 12 seconds.
+node tools/breakdown.mjs --calibrate  # records your configuration's fixed overhead, read from the
+                                      # context tooltip. Print the flag list with no arguments.
+```
+
+Nothing else depends on either. Capture, the Summary, Session, Cost and Compare tabs all work
+without them, which is why the install does not run something that costs money on your behalf.
+
 `python -m c4x.cli all` sweeps every tab at once, which is the fastest way to ask "did anything
 break". Three things worth finding that the examples above did not reach: the Window tab's treemap
 of what is in the context right now, item by item; subagent identity, which records what kind of

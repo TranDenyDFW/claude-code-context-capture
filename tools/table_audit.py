@@ -966,7 +966,36 @@ def main():
         # correctly saying so. The module docstring already prescribes the remedy - "Give the audit
         # an input that takes the branch. Do not delete the gate." - but it is in the docstring,
         # and the person reading this output is not reading the docstring.
-        missing = not tables_present("context_baselines") or latest_baseline() is None
+        # BOTH FAMILIES, because --render-only drops TWO reachability gates and this leg has to
+        # decline on the same footing it declines for. The store shapes that make those paths
+        # unreachable are the same two the bare fixture is built without: no calibration baseline,
+        # and no probe tables. Getting this wrong is easy in a way that is invisible: matching only
+        # the first gate's wording left the decline silently unreachable, and the leg went on
+        # failing exactly as before.
+        REACHABILITY = ("which this audit never reached", "never takes that path")
+        missing = (not tables_present("context_baselines") or latest_baseline() is None
+                   or not tables_present("probes", "probe_categories", "probe_details",
+                                         "probe_message_breakdown"))
+        if missing and errors and all(any(p in e for p in REACHABILITY) for e in errors):
+            # A NOTE WAS NOT ENOUGH. Printing the explanation and then exiting 1 still reports a
+            # red leg, so a fresh clone plus the documented install could not produce a green
+            # suite: this leg needs a calibration baseline that only a manual
+            # `breakdown.mjs --calibrate` creates, and nothing tells a new user to create one.
+            #
+            # This leg's ONLY coverage beyond the --render-only leg is the two reachability gates.
+            # If the store cannot take those paths, the leg has nothing left to say, and the
+            # honest answer is the decline this file already defines rather than a failure.
+            #
+            # Narrow on purpose: `all(...)` over the errors, so one genuine unreached table on an
+            # uncalibrated store still FAILS. Only a run whose every error is explained by the
+            # missing baseline declines.
+            raise CannotAudit(
+                "this store has no calibration baseline or no probe recorded, so every path "
+                "behind one is unreachable and the two reachability gates cannot run. Every other "
+                "gate in this leg also runs in the --render-only leg, which the suite points at a "
+                "first-run fixture. To exercise these two, give the audit a store that can take "
+                "the paths: run node tools/probe.mjs and node tools/breakdown.mjs --calibrate, or "
+                "point C4X_DB at a store that already has both.")
         if missing:
             print("  NOTE: this store has no calibration baseline, so every path behind one is "
                   "unreachable here and the reachability errors above are expected on it. For a "

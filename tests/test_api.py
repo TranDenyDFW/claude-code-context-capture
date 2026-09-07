@@ -380,8 +380,11 @@ def test_the_session_picker_is_narrowed_to_the_cohort(client):
     assert len(narrowed) < len(everything)
 
 
-def test_render_carries_the_column_contract(client):
+def test_render_carries_the_column_contract(client, has_baseline):
     """Label, type, alignment and d3 format, which `describe()` drops.
+
+    Needs a store that renders the tab's tables: the assertion is "no column metadata at all", and
+    a panel that correctly shows an empty state has no columns to describe.
 
     Without it the browser guesses. A column declared `.1f` was rendered 43.30, 2.40, 1.20 and then
     a bare 1, because the guess asked `Number.isInteger` instead of asking the app.

@@ -576,7 +576,11 @@ DASH_ONLY = {
 }
 
 
-def test_the_page_may_only_delete_what_this_file_lists(app, q):
+def test_the_page_may_only_delete_what_this_file_lists(app, q, has_baseline):
+    # NEEDS A STORE THAT RENDERS EVERY PANEL. The list is of sentences the page is allowed to stop
+    # showing, so a sentence that merely is not drawn on THIS store reads as one that was deleted.
+    # On a store with no baseline the composition panel is an empty state and its notes are absent,
+    # which made this report a stale registry rather than a first-run store.
     """The silent-deletion channel is a fixed list, not a habit.
 
     This is the one thing on the page that both other guards are blind to at once, so it gets a

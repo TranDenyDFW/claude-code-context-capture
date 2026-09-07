@@ -48,8 +48,20 @@ def sources_layout(session_id=None, scope="main", cohort=None):
                       MIN(captured_at) AS first_seen, MAX(captured_at) AS last_seen
                FROM hook_events {sid_where} GROUP BY event ORDER BY COUNT(*) DESC"""
     ev = q(sql["ev"], sid_args)
-    sql["rec"] = "SELECT type AS record_type, n FROM record_types ORDER BY n DESC"
+    # RECOGNISED OR NOT, because without that column this table rendered a type harvest parsed and
+    # a type it counted and threw away in the same two columns, with nothing telling them apart.
+    # An upstream schema change then looks like an unfamiliar name rather than a gap: Claude Code
+    # writes considerably more record types than any one build of this tool knows, and the ones it
+    # does not know keep only a count and a single sample in data/raw/unknown-records.ndjson.
+    #
+    # NULL is its own answer and is not folded into either: it means this store has not been
+    # harvested since the column arrived, which is different from "known false".
+    sql["rec"] = """SELECT type AS record_type, n,
+                           CASE known WHEN 1 THEN 'parsed' WHEN 0 THEN 'counted only'
+                                      ELSE 'not yet recounted' END AS harvest
+                      FROM record_types ORDER BY n DESC"""
     rec = q(sql["rec"])
+    dropped = int((rec["harvest"] == "counted only").sum()) if not rec.empty else 0
 
     if att.empty and ev.empty and rec.empty:
         return html.Div("Nothing captured yet. Run node tools/harvest.mjs.",
@@ -105,7 +117,15 @@ def sources_layout(session_id=None, scope="main", cohort=None):
         html.Div([
             html.Div(evidence_block("Lifecycle Events", ev, sql["ev"], sid_args, page_size=8),
                      style={"flex": "1.4"}),
-            html.Div(evidence_block("Transcript Record Census", rec, sql["rec"], (), page_size=8),
+            html.Div(evidence_block(
+                "Transcript Record Census", rec, sql["rec"], (), page_size=8,
+                note=("Every record type seen in the transcripts. "
+                      + (f"{dropped} of them this build does not recognise: they are counted here "
+                         "and one sample of each is kept in data/raw/unknown-records.ndjson, but "
+                         "their content is not stored, so a new type upstream shows up as a row "
+                         "nothing else reports."
+                         if dropped else
+                         "Every type in this store is one this build parses."))),
                      style={"flex": "1"}),
         ], style={"display": "flex", "gap": "14px", "alignItems": "flex-start"}),
     ])

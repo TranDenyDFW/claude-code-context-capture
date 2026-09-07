@@ -92,6 +92,42 @@ def rows(store):
 
 
 @pytest.fixture(scope="session")
+def has_probes():
+    """Skip when the store has no probe tables at all, which is every store until someone runs one.
+
+    NOT the same judgement as has_store below, and the difference is the point. Turns arrive from
+    the documented install, so an empty `turns` really is a broken fixture and must fail. The probe
+    family is created only by `node tools/probe.mjs`, which the install path never runs and the
+    README does not mention, so its absence is the NORMAL first-run shape rather than a fault.
+
+    Without this the tests did not skip, they CRASHED: `q` raises DatabaseError "no such table:
+    probes" before any `.empty` check can be reached, so a first-run store produced errors that
+    read like defects in the tab. The app itself already draws this distinction with
+    `store.q_optional` and `store.tables_present`; this is the same rule on the test side.
+    """
+    from c4x.store import tables_present
+    if not tables_present("probes", "probe_categories", "probe_details",
+                          "probe_message_breakdown"):
+        pytest.skip("this store has no probe tables: run `node tools/probe.mjs` to create them")
+
+
+@pytest.fixture(scope="session")
+def has_baseline():
+    """Skip when nothing has calibrated this store.
+
+    Sibling of has_probes, and it exists for the same reason on a different table:
+    `context_baselines` is written only by `node tools/breakdown.mjs --calibrate`, which no install
+    step runs, so every fresh store lacks it and `q` raises "no such table: context_baselines"
+    before any emptiness check. c4x/breakdown.py:latest_baseline already treats the missing table
+    as the valid "never calibrated" state; this is that rule on the test side.
+    """
+    from c4x.store import tables_present
+    if not tables_present("context_baselines"):
+        pytest.skip("this store has no calibration baseline: run "
+                    "`node tools/breakdown.mjs --calibrate`")
+
+
+@pytest.fixture(scope="session")
 def has_store(q):
     """Whether there is anything to test against.
 

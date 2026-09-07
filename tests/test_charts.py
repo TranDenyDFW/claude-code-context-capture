@@ -104,7 +104,7 @@ def test_shading_keeps_the_striping_every_other_table_has():
 
 
 # --- the composition treemap ----------------------------------------------
-def test_the_composition_treemap_parent_is_the_sum_of_its_children(has_store):
+def test_the_composition_treemap_parent_is_the_sum_of_its_children(has_store, has_baseline):
     """branchvalues="total" means a parent states its own value.
 
     If Configuration's value were not exactly the sum of the category slices under it, Plotly would
@@ -115,7 +115,7 @@ def test_the_composition_treemap_parent_is_the_sum_of_its_children(has_store):
     from c4x.breakdown import breakdown_fields, composition_treemap, latest_baseline
     baseline = latest_baseline()
     if baseline is None:
-        pytest.fail("no baseline in this store, so the composition treemap cannot be exercised")
+        pytest.skip("no baseline in this store: run `node tools/breakdown.mjs --calibrate`")
     fields, _err = breakdown_fields()
     resident = [f["col"] for f in fields if f["kind"] == "resident"]
     labels = {f["col"]: f["label"] for f in fields}
@@ -131,11 +131,11 @@ def test_the_composition_treemap_parent_is_the_sum_of_its_children(has_store):
         assert by_label["Configuration"] == int(baseline["static_total"])
 
 
-def test_the_composition_treemap_covers_the_whole_window(has_store):
+def test_the_composition_treemap_covers_the_whole_window(has_store, has_baseline):
     from c4x.breakdown import breakdown_fields, composition_treemap, latest_baseline
     baseline = latest_baseline()
     if baseline is None:
-        pytest.fail("no baseline in this store")
+        pytest.skip("no baseline in this store: run `node tools/breakdown.mjs --calibrate`")
     fields, _err = breakdown_fields()
     resident = [f["col"] for f in fields if f["kind"] == "resident"]
     labels = {f["col"]: f["label"] for f in fields}
@@ -148,12 +148,12 @@ def test_the_composition_treemap_covers_the_whole_window(has_store):
 
 
 # --- the configuration treemap --------------------------------------------
-def test_the_configuration_treemap_draws_every_sized_item(has_store, q):
+def test_the_configuration_treemap_draws_every_sized_item(has_store, has_probes, q):
     """321 skills is the case the proportional bar cannot serve, so all of them must be drawn."""
     from c4x.probe_detail import CONFIGURATION_KINDS, configuration_treemap, latest_probe
     probe = latest_probe()
     if probe is None:
-        pytest.fail("no probe in this store, so the configuration treemap cannot be exercised")
+        pytest.skip("no probe in this store: run `node tools/probe.mjs` to exercise the treemap")
     pid = int(probe["id"])
     figure, shown, dropped = configuration_treemap(pid)
     marks = ",".join("?" * len(CONFIGURATION_KINDS))
@@ -162,7 +162,7 @@ def test_the_configuration_treemap_draws_every_sized_item(has_store, q):
                     FROM probe_details WHERE probe_id = ? AND kind IN ({marks})""",
               (pid, *CONFIGURATION_KINDS)).iloc[0]
     if not int(truth["sized"]):
-        pytest.fail("this probe recorded no sized configuration items")
+        pytest.skip("this probe recorded no sized configuration items")
     assert shown == int(truth["sized"])
     assert dropped == int(truth["flat"])
     assert len(figure.data[0].labels) == shown + int(truth["kinds"]), (
@@ -175,14 +175,14 @@ def test_a_zero_token_item_is_never_given_an_area(has_store):
     from c4x.probe_detail import configuration_treemap, latest_probe
     probe = latest_probe()
     if probe is None:
-        pytest.fail("no probe in this store")
+        pytest.skip("no probe in this store: run `node tools/probe.mjs`")
     figure, _shown, dropped = configuration_treemap(int(probe["id"]))
     if not dropped:
         pytest.skip("this probe recorded no zero-token items")
     assert all(v > 0 for v in figure.data[0].values)
 
 
-def test_item_names_are_qualified_so_two_kinds_cannot_merge(has_store):
+def test_item_names_are_qualified_so_two_kinds_cannot_merge(has_store, has_probes):
     """Plotly identifies a treemap node by its label. Two items sharing one become a single slice
     carrying both values, which is a wrong number rather than a cosmetic collision."""
     from c4x.probe_detail import configuration_treemap, latest_probe

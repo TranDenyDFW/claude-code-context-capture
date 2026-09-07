@@ -239,14 +239,21 @@ def probe_detail_blocks(baseline=None):
     """The whole item-by-item section, or a single line saying why there is none."""
     probe = latest_probe()
     if probe is None:
+        # about_note, for the same reason as the sibling panel in c4x/breakdown.py: an empty state
+        # is still text on the page, and the homeless-prose gate asks who owns it. A heading and a
+        # paragraph own nothing by themselves, so on a store with no probe - the shape of every
+        # store until someone runs one - both Window sub-panels printed a wall.
         return [
-            html.Div("No probe reading yet", style=SECTION_HEAD),
-            html.Div(
-                "The category totals above are derived from a calibrated baseline. A probe asks "
-                "the running Claude Code for the same numbers directly and, unlike the tooltip, "
-                "returns the ITEMS behind them: every skill by name and cost, every MCP tool and "
-                "its server, every memory file. Run node tools/probe.mjs to record one.",
-                style=SECTION_NOTE),
+            about_note([
+                html.Div("No probe reading yet", style=SECTION_HEAD),
+                html.Div(
+                    "The category totals above are derived from a calibrated baseline. A probe "
+                    "asks the running Claude Code for the same numbers directly and, unlike the "
+                    "tooltip, returns the ITEMS behind them: every skill by name and cost, every "
+                    "MCP tool and its server, every memory file. Run node tools/probe.mjs to "
+                    "record one.",
+                    style=SECTION_NOTE),
+            ]),
         ]
 
     pid = int(probe["id"])
@@ -355,11 +362,13 @@ def conversation_blocks(baseline=None):
     probe = latest_probe()
     if probe is None:
         return [
-            html.Div("No probe reading yet", style=SECTION_HEAD),
-            html.Div(
-                "The message half of the window is computed by Claude Code for its tooltip and "
-                "discarded. A probe is the only way this store learns it. Run "
-                "node tools/probe.mjs to record one.", style=SECTION_NOTE),
+            about_note([
+                html.Div("No probe reading yet", style=SECTION_HEAD),
+                html.Div(
+                    "The message half of the window is computed by Claude Code for its tooltip and "
+                    "discarded. A probe is the only way this store learns it. Run "
+                    "node tools/probe.mjs to record one.", style=SECTION_NOTE),
+            ]),
         ]
     pid = int(probe["id"])
     when = str(probe["ts"])[:19].replace("T", " ")
