@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from dash import dcc, html
 
 from c4x.panels import evidence_block
-from c4x.store import q, scoped
+from c4x.store import column_present, q, scoped
 from c4x.theme import (
     ACCENT,
     MUTED,
@@ -56,12 +56,18 @@ def sources_layout(session_id=None, scope="main", cohort=None):
     #
     # NULL is its own answer and is not folded into either: it means this store has not been
     # harvested since the column arrived, which is different from "known false".
-    sql["rec"] = """SELECT type AS record_type, n,
-                           CASE known WHEN 1 THEN 'parsed' WHEN 0 THEN 'counted only'
-                                      ELSE 'not yet recounted' END AS harvest
-                      FROM record_types ORDER BY n DESC"""
+    # GUARDED, because this package cannot add the column it wants to read. `known` arrives when
+    # harvest.mjs next runs, so a store harvested by an older build has the table and not the
+    # column, and a query naming it RAISES rather than returning nothing. That took this tab to an
+    # exception panel and two suite legs with it, on a store that was entirely healthy.
+    knows = column_present("record_types", "known")
+    sql["rec"] = ("""SELECT type AS record_type, n,
+                            CASE known WHEN 1 THEN 'parsed' WHEN 0 THEN 'counted only'
+                                       ELSE 'not yet recounted' END AS harvest
+                       FROM record_types ORDER BY n DESC""" if knows else
+                  "SELECT type AS record_type, n FROM record_types ORDER BY n DESC")
     rec = q(sql["rec"])
-    dropped = int((rec["harvest"] == "counted only").sum()) if not rec.empty else 0
+    dropped = int((rec["harvest"] == "counted only").sum()) if knows and not rec.empty else 0
 
     if att.empty and ev.empty and rec.empty:
         return html.Div("Nothing captured yet. Run node tools/harvest.mjs.",
@@ -120,7 +126,10 @@ def sources_layout(session_id=None, scope="main", cohort=None):
             html.Div(evidence_block(
                 "Transcript Record Census", rec, sql["rec"], (), page_size=8,
                 note=("Every record type seen in the transcripts. "
-                      + (f"{dropped} of them this build does not recognise: they are counted here "
+                      + ("Which of them this build parses is recorded from the next harvest "
+                         "onwards; this store has not been harvested since that arrived."
+                         if not knows else
+                         f"{dropped} of them this build does not recognise: they are counted here "
                          "and one sample of each is kept in data/raw/unknown-records.ndjson, but "
                          "their content is not stored, so a new type upstream shows up as a row "
                          "nothing else reports."

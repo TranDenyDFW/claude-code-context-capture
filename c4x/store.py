@@ -166,6 +166,30 @@ def q(sql: str, params=()) -> pd.DataFrame:
         con.close()
 
 
+def column_present(table: str, column: str) -> bool:
+    """Whether a table has a column yet.
+
+    SAME RULE AS tables_present, ONE LEVEL DOWN, and it exists for a reason worth stating: this
+    package never writes, so it cannot run the migration that adds a column. `harvest.mjs` adds
+    one when it next runs, which may be minutes or days after the code that reads it ships, and
+    until then a query naming that column does not return an empty frame, it RAISES.
+
+    Measured: adding `known` to record_types and reading it here turned the Sources tab into an
+    exception panel and took two suite legs down with it, on a store that was perfectly healthy and
+    had simply not been harvested since. The column existed on this machine within the hour only
+    because a hook fired a harvest, which is exactly the kind of luck a gate must not depend on.
+    """
+    if not DB_PATH.exists():
+        return False
+    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    try:
+        return any(r[1] == column for r in con.execute(f"PRAGMA table_info({table})").fetchall())
+    except sqlite3.Error:
+        return False
+    finally:
+        con.close()
+
+
 def tables_present(*names) -> bool:
     """Whether EVERY named table exists. One round trip, no query against the tables themselves.
 
