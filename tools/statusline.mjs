@@ -76,7 +76,7 @@ const ALWAYS_REDACT = /^ANTHROPIC_CUSTOM_HEADERS$/i;
 // whoever named the variable, and this file already depends on that once. A bearer token, an
 // Anthropic key, or credentials embedded in a URL authority are recognisable whatever they are
 // called, so a variable nobody here has thought of is still caught.
-const SECRET_VALUE = /sk-ant-[\w-]+|Bearer\s+\S|x-api-key|:\/\/[^/@\s]+:[^/@\s]+@/i;
+const SECRET_VALUE = /sk-ant-[\w-]+|\bBearer\s+\S|x-api-key|:\/\/[^/@\s]+:[^/@\s]+@/i;
 
 /**
  * The CLAUDE- and ANTHROPIC-prefixed variables Claude Code puts in our environment.
