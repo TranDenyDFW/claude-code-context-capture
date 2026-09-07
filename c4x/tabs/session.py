@@ -2,6 +2,7 @@
 
 One session in detail: the resident line, the danger bands, and the turn diff.
 """
+import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
 
@@ -22,6 +23,7 @@ from c4x.store import (
     session_compactions,
     session_messages,
     session_survivors,
+    session_tool_calls,
     session_turns,
     session_window,
 )
@@ -593,6 +595,18 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
 
     # What was actually said. The chart shows the window filling; this shows what filled it.
     msgs = session_messages(session_id)
+    # WHAT WAS PROPOSED, beside what was said about it. `messages` holds no tool_use type at all,
+    # store-wide, so a rejected call read as "plan written" then "the user does not want to proceed
+    # with this tool use" with nothing in between naming what was refused. The call was in
+    # tool_calls the whole time, a different table on a different tab, recording a hash and a byte
+    # count and none of the content.
+    #
+    # Concatenated and re-sorted rather than joined, because the two are separate records of the
+    # same moment and the reader wants them in the order they happened. Empty on a store harvest
+    # has not migrated yet, which is the state that existed before this and not a failure.
+    calls = session_tool_calls(session_id)
+    if not calls.empty:
+        msgs = pd.concat([msgs, calls], ignore_index=True).sort_values("ts", kind="stable")
     if not msgs.empty:
         m = msgs.copy()
         m["ts"] = m["ts"].map(stamp)
@@ -600,8 +614,14 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
         # "400 messages" when 400 is the LIMIT reports the cap as if it were a measurement.
         total_msgs = int(q("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
                            (session_id,)).iloc[0]["n"])
-        note = (f"{total_msgs:,} messages in this session, showing the first {len(m):,}"
-                if total_msgs > len(m) else f"{total_msgs:,} messages in this session")
+        # BOTH KINDS, because the table now holds both and reporting only the messages would call
+        # a mixed count a message count. Stated separately rather than summed into one number,
+        # since "1,204 rows" would hide which half the reader is short of.
+        total_calls = len(calls)
+        shown = f", showing the first {len(m):,}" if total_msgs + total_calls > len(m) else ""
+        note = (f"{total_msgs:,} messages and {total_calls:,} tool calls in this session{shown}"
+                if total_calls else
+                (f"{total_msgs:,} messages in this session{shown}"))
         cards = html.Div([
             cards,
             html.Div(f"{note}, oldest first. Click a row to read it in full.",

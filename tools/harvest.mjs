@@ -142,7 +142,17 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   -- Which KIND of subagent an Agent call asked for, e.g. "general-purpose". Carried in the tool
   -- input and discarded until now, so this store held 827 Agent rows that could not say what any
   -- of them ran. NULL on every other tool, which is the honest value: they have no agent type.
-  subagent_type TEXT
+  subagent_type TEXT,
+  -- THE HEAD OF WHAT WAS ASKED FOR. The hash and the byte count were derived from the input and
+  -- the input itself was thrown away, so a row could say a call was 2,655 bytes and rejected and
+  -- not one word of WHAT was proposed. The timeline read "plan written" then "the user does not
+  -- want to proceed with this tool use" with nothing in between, and the plan was sitting in the
+  -- transcript on disk the whole time.
+  --
+  -- 500 characters, measured on this store: it adds 64 MB to a 1.37 GB store, 4.6%, and 174,538
+  -- of 238,632 calls fit inside it whole. A preview, not the input: the transcript remains the
+  -- record, and input_bytes still says how much of it this is.
+  input_preview TEXT
 );
 CREATE INDEX IF NOT EXISTS tool_calls_session ON tool_calls (session_id);
 CREATE INDEX IF NOT EXISTS tool_calls_target ON tool_calls (target);
@@ -280,10 +290,13 @@ export const HOOK_EVENT_COLUMNS = [
 // Columns added to tables that already existed in the wild, by table. Every one is TEXT and
 // nullable, so adding it cannot invalidate a row: an old row simply has nothing in it, which is
 // exactly true. Anything needing a type or a default is a rebuild, not an entry here.
+// How much of a tool input is kept. See the column comment in the schema for the measurement.
+export const TOOL_INPUT_PREVIEW = 500;
+
 export const ADDED_COLUMNS = {
   hook_events: HOOK_EVENT_COLUMNS,
   turns: ['parent_uuid'],
-  tool_calls: ['subagent_type'],
+  tool_calls: ['subagent_type', 'input_preview'],
 };
 const BOOLEAN_EVENT_COLUMNS = new Set(['probe', 'known', 'truncated']);
 
@@ -946,10 +959,10 @@ class Harvest {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`),
       putToolCall: db.prepare(`INSERT OR REPLACE INTO tool_calls
         (tool_use_id,session_id,turn_uuid,ts,tool_name,server_name,target,input_sha1,input_bytes,
-         result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type)
+         result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type,input_preview)
         VALUES (?,?,?,?,?,?,?,?,?,
          COALESCE((SELECT result_bytes FROM tool_calls WHERE tool_use_id = ?), NULL),
-         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?)`),
+         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?,?)`),
       // The result arrives on a LATER line than the use, so this fills the row in place. If the
       // two land in different harvest runs the update finds nothing and result_bytes stays NULL,
       // which reads as "not yet seen" rather than as zero bytes.
@@ -1253,7 +1266,10 @@ class Harvest {
           // Only where the tool actually asked for one. Storing the empty string or "none" on
           // every other tool would make `subagent_type IS NOT NULL` stop meaning "this spawned an
           // agent", which is the one question the column exists to answer.
-          typeof input.subagent_type === 'string' ? input.subagent_type : null);
+          typeof input.subagent_type === 'string' ? input.subagent_type : null,
+          // THE INPUT, KEPT. `raw` was already built here to be hashed and measured, and then
+          // dropped, which is why a rejected call could report its size and not its content.
+          raw.slice(0, TOOL_INPUT_PREVIEW));
         this.stats.toolCalls++;
       } else if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
         const c = b.content;
@@ -2157,6 +2173,50 @@ async function selfTest() {
     checks.push(['the FULL path clears the census before reflushing it (gate can fail)',
       clearAt > 0 && flushAt > clearAt && flushAt - clearAt < 120,
       `clear at ${clearAt}, reflush at ${flushAt}`]);
+    scratchDb.close();
+  }
+
+  // WHAT WAS PROPOSED, not just how big it was. A rejected call could report 2,655 bytes and an
+  // error flag and not one word of its content, so the timeline read "plan written" then "the user
+  // does not want to proceed" with nothing in between.
+  {
+    const scratchDb = new DatabaseSync(":memory:");
+    scratchDb.exec(SCHEMA);
+    const h6 = new Harvest(scratchDb, { unknownLog: scratchLog });
+    const plan = "# Delete results/t16-keep.txt" + "x".repeat(TOOL_INPUT_PREVIEW * 3);
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u1", timestamp: "2026-09-07T05:01:44Z",
+      message: { content: [{ type: "tool_use", id: "toolu_1", name: "ExitPlanMode",
+                             input: { plan } }] },
+    }, "f", 1);
+    const row = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_1");
+    checks.push(["the head of a tool input is stored, not only its hash (gate can fail)",
+      typeof row?.input_preview === "string" && row.input_preview.includes("t16-keep.txt"),
+      String(row?.input_preview).slice(0, 40)]);
+    checks.push(["and it is CUT, so one call cannot carry a megabyte of input",
+      row?.input_preview?.length === TOOL_INPUT_PREVIEW, String(row?.input_preview?.length)]);
+    checks.push(["the byte count still measures the WHOLE input, not the preview (gate can fail)",
+      row?.input_bytes > TOOL_INPUT_PREVIEW * 3, String(row?.input_bytes)]);
+    // A short input is stored whole, which is 73% of the calls on this store.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u2", timestamp: "2026-09-07T05:01:45Z",
+      message: { content: [{ type: "tool_use", id: "toolu_2", name: "Read",
+                             input: { file_path: "C:/x/a.md" } }] },
+    }, "f", 2);
+    const small = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_2");
+    checks.push(["a short input is kept whole",
+      small?.input_preview === JSON.stringify({ file_path: "C:/x/a.md" }), String(small?.input_preview)]);
+    // THE REJECTION PATH, which is the one the finding was about: the result arrives on a later
+    // line and must fill in the error flag WITHOUT clearing what was asked for.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u3", timestamp: "2026-09-07T05:01:51Z",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", is_error: true,
+                             content: "The user doesn't want to proceed with this tool use." }] },
+    }, "f", 3);
+    const after = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_1");
+    checks.push(["a rejected call still says what it proposed (gate can fail)",
+      after?.is_error === 1 && String(after?.input_preview).includes("t16-keep.txt"),
+      `is_error=${after?.is_error} preview=${String(after?.input_preview).slice(0, 30)}`]);
     scratchDb.close();
   }
 

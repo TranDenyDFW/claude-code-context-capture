@@ -1156,6 +1156,47 @@ def session_messages(session_id: str, limit: int = 2000) -> pd.DataFrame:
     )
 
 
+def session_tool_calls(session_id: str, limit: int = 2000) -> pd.DataFrame:
+    """The tool calls of one session, shaped like messages so they can share a timeline.
+
+    WHAT WAS PROPOSED HAS NO MESSAGE. `messages` holds no tool_use type at all, store-wide, so a
+    rejected call read as "plan written" then "the user does not want to proceed with this tool
+    use" with nothing between them naming what was refused. The call itself lived in `tool_calls`,
+    a different table on a different tab, and until harvest kept a preview it recorded only a hash
+    and a byte count.
+
+    Columns are named for the message ones deliberately: the two frames are concatenated and sorted
+    by ts, so the reader meets the proposal and its refusal in the order they happened.
+
+    EMPTY WHEN THE STORE HAS NOT MIGRATED, rather than raising. This package never writes, so it
+    cannot add the column itself; harvest adds it on its next run, which may be days after this
+    code ships. A timeline missing its proposals is the state that existed before this function,
+    and it is a great deal better than a tab that raises.
+    """
+    if not column_present("tool_calls", "input_preview"):
+        return pd.DataFrame(columns=["uuid", "ts", "role", "type", "chars", "preview"])
+    # THE SAME VOCABULARY THE MESSAGES TABLE USES, which theme.COLUMN_HELP defines: `role` is the
+    # transport record's own type, which is why it reads `user` on a tool result, and `type` is
+    # what actually produced the record. A tool_use block sits on an assistant record, so those are
+    # 'assistant' and 'tool_use', the exact mirror of the 'tool_result' row that answers it.
+    #
+    # The tool NAME leads the preview. Without it the row says a call was proposed and not which,
+    # and the name is the first thing a reader needs to make sense of the input that follows.
+    return q(
+        """
+        SELECT tool_use_id AS uuid, ts,
+               'assistant' AS role,
+               'tool_use' AS type,
+               input_bytes AS chars,
+               substr(COALESCE(tool_name, 'tool') || ': ' ||
+                      replace(replace(COALESCE(input_preview, ''), char(10), ' '), char(13), ' '),
+                      1, 220) AS preview
+        FROM tool_calls WHERE session_id = ? AND input_preview IS NOT NULL
+        ORDER BY ts LIMIT ?
+        """,
+        (session_id, limit),
+    )
+
 def messages_text(uuids: list[str]) -> dict[str, str]:
     """{uuid: full text} for the uuids given, in one query. Absent uuids are absent, not empty."""
     if not uuids:
