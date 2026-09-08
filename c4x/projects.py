@@ -74,12 +74,33 @@ MANIFEST_TABLE = "c4x_export"
 # Reading what a project is
 # ---------------------------------------------------------------------------
 def projects():
-    """Every project in the store, with its session count. The cwd is the identity."""
+    """Every project this tool can ACT on, named the way `export` and `delete` resolve them.
+
+    THE LIST IS A MENU, so an entry it prints has to be one those two commands accept. This asked
+    `GROUP BY cwd`, which is not how a project is identified here: `session_rows()` appends
+    `\\archived` to the label when the desktop app has archived the chat, so an archived-only
+    project was listed under its bare cwd and then refused by both commands with "no sessions with
+    cwd", which reads as a broken store rather than a wrong name. Measured on this store, 3 of 25
+    small projects sampled were listed and unusable.
+
+    `session_ids` already had the archived case right and says so in its own docstring. It was this
+    function that never learned, so the two halves below mirror ITS two halves rather than
+    inventing a third answer: the labels the page uses, plus the sessions the page cannot see at
+    all, which are keyed on their own cwd because that is the only evidence those have.
+    """
     from c4x import store
-    frame = store.q("""SELECT cwd AS project, COUNT(*) AS sessions
-                         FROM sessions WHERE cwd IS NOT NULL
-                        GROUP BY 1 ORDER BY 2 DESC""")
-    return records(frame)
+    seen = store.session_rows()
+    counts = {}
+    if not seen.empty:
+        for label, n in seen["project"].value_counts().items():
+            counts[str(label)] = int(n)
+    visible = set(seen["session_id"]) if not seen.empty else set()
+    rest = store.q("SELECT session_id, cwd FROM sessions WHERE cwd IS NOT NULL AND cwd <> ''")
+    for row in rest.itertuples(index=False):
+        if row.session_id not in visible:
+            counts[str(row.cwd)] = counts.get(str(row.cwd), 0) + 1
+    return [{"project": p, "sessions": n}
+            for p, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
 def session_ids(con, project):
