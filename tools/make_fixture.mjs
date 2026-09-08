@@ -129,6 +129,10 @@ const SESSIONS = [
   // (test_pricing:163), and the one session that carries an Agent call with NO subagent_type
   // (test_subagents:80), inserted after the loop below.
   { id: 'fixture-session-0008', turns: 8, overshoots: [], model: 'fixture-unpriced-1' },
+  // A build OLDER than the one that began recording why a call was denied (2.1.202). Its
+  // flagged calls are genuinely unknowable, not errors, and this is the only session where
+  // `unclassified` is the truthful answer rather than an arbitrary label.
+  { id: 'fixture-session-0009', turns: 10, overshoots: [], version: '2.1.121' },
 ];
 // Forty-two projects, each with one listed session of six turns. More than 40 distinct projects
 // is what the Summary tab needs before it ranks any out (test_api:559); more than 20 sessions with
@@ -169,15 +173,27 @@ const insertCompaction = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 const insertSurvivor = db.prepare(
   "INSERT INTO compaction_survivors (compaction_uuid, kind, uuid) VALUES (?, 'message', ?)");
+// THE HAPPY PATH, and the literals now say which path that is. This hard-coded is_error to 0
+// for every row, so the fixture could not exercise a failure OR a refusal and every errors
+// column in every CI run was a column of zeros. A test cannot fail against data that has no
+// instance of the thing it tests.
 const insertTool = db.prepare(`
   INSERT INTO tool_calls (tool_use_id, session_id, turn_uuid, ts, tool_name, server_name, target,
                           input_sha1, input_bytes, result_bytes, is_error, is_sidechain,
-                          file_path, line_no, subagent_type)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`);
+                          file_path, line_no, subagent_type, outcome, denial_kind)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 'ok', NULL)`);
+// The same row with its outcome stated, for the planted ones below. Separate rather than a
+// widened signature, so the seven existing call sites keep their arity and stay readable.
+const insertToolOutcome = db.prepare(`
+  INSERT INTO tool_calls (tool_use_id, session_id, turn_uuid, ts, tool_name, server_name, target,
+                          input_sha1, input_bytes, result_bytes, is_error, is_sidechain,
+                          file_path, line_no, subagent_type, outcome, denial_kind)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, ?, ?)`);
 
 for (const session of SESSIONS) {
   insertSession.run(session.id, session.slug ?? 'C--fixture-project',
-                    session.cwd ?? 'C:\\fixture\\project', 'main', VERSION,
+                    session.cwd ?? 'C:\\fixture\\project', 'main',
+                    session.version ?? VERSION,
                     'claude-desktop', iso(clock + 1), iso(clock + session.turns),
                     'fixture://transcript.jsonl');
 
@@ -294,6 +310,34 @@ for (const session of SESSIONS) {
                      220, 4_000 + turn * 37, 'fixture://transcript.jsonl', turn + 1);
     }
 
+    // ONE OF EACH OUTCOME, so every branch of the derivation has data behind it. Planted by a
+    // modulo rather than appended once, so EVERY session carries them and a test that picks a
+    // session by some other property still finds them.
+    //
+    // A REFUSAL. Two denial kinds, alternating, so a group-by on denial_kind is distinguishable
+    // from a count of refusals: one kind would make the two queries agree by accident.
+    if (turn % 13 === 5) {
+      insertToolOutcome.run(`${uuid}-refused`, session.id, uuid, ts, 'Edit', null,
+                            `C:\\fixture\\refused_${turn % 3}.txt`, `sha1-refused-${turn}`,
+                            240, 96, 1, 'fixture://transcript.jsonl', turn + 1,
+                            'refused', turn % 26 === 5 ? 'permission-rule' : 'user-rejected');
+    }
+    // A GENUINE FAILURE on a modern build: flagged, and the build would have said so had it
+    // been a refusal.
+    if (turn % 17 === 9) {
+      insertToolOutcome.run(`${uuid}-failed`, session.id, uuid, ts, 'Bash', null, null,
+                            `sha1-failed-${turn}`,
+                            180, 64, 1, 'fixture://transcript.jsonl', turn + 1,
+                            'error', null);
+    }
+    // UNKNOWABLE, and only in the pre-era session, where it is the truth rather than a label.
+    if (session.version === '2.1.121' && turn % 3 === 1) {
+      insertToolOutcome.run(`${uuid}-unclassified`, session.id, uuid, ts, 'Read', null,
+                            `C:\\fixture\\old_${turn}.txt`, `sha1-old-${turn}`,
+                            160, 80, 1, 'fixture://transcript.jsonl', turn + 1,
+                            'unclassified', null);
+    }
+
     // An MCP call, so the Sources tab's server table has rows. Its branch was unreached with every
     // server NULL, and the audit reported the four evidence_block calls behind it as untaken.
     if (turn % 7 === 3) {
@@ -352,6 +396,25 @@ for (const session of SESSIONS) {
 insertTool.run('fixture-session-0008-agent-untyped', 'fixture-session-0008',
                'fixture-session-0008-turn-0001', iso(clock + 1), 'Agent', null, null,
                'sha-agent-untyped', 120, 4_000, 'fixture://transcript.jsonl', 2, null);
+
+// A REFUSED Agent call, so the subagent table has an outcome to render. Without it that table
+// shows a blank outcome on every fixture row and CI cannot tell a working column from a dead one.
+insertToolOutcome.run('fixture-session-0008-agent-refused', 'fixture-session-0008',
+                      'fixture-session-0008-turn-0002', iso(clock + 2), 'Agent', null, null,
+                      'sha-agent-refused', 130, 88, 1, 'fixture://transcript.jsonl', 3,
+                      'refused', 'permission-rule');
+
+// A call NOTHING EVER CAME BACK FROM: no result_bytes, no flag, no outcome. That is a sixth state
+// and a different fact from "it succeeded", and it is the only way to exercise the outcome IS NULL
+// half of the derivation. 21 rows on the live store look exactly like this.
+db.prepare(`
+  INSERT INTO tool_calls (tool_use_id, session_id, turn_uuid, ts, tool_name, server_name, target,
+                          input_sha1, input_bytes, result_bytes, is_error, is_sidechain,
+                          file_path, line_no, subagent_type, outcome, denial_kind)
+  VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, 0, ?, ?, NULL, NULL, NULL)`).run(
+  'fixture-session-0008-never-returned', 'fixture-session-0008',
+  'fixture-session-0008-turn-0003', iso(clock + 3), 'Bash', null,
+  'sha-never-returned', 90, 'fixture://transcript.jsonl', 4);
 
 // One baseline, so the derived category breakdown has a calibration to subtract. Values are the
 // shape of a real observation, not a copy of one.
