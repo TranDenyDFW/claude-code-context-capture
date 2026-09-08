@@ -100,9 +100,18 @@ def test_the_registry_has_no_dead_entries(pane, session_id, other_session_id, ha
     it knows least. The question is about the CODE, so it is asked only where every table can
     actually appear.
     """
+    # DRAWN, NOT MERELY DECLARED. A hidden column is declared so it can travel in the row and the
+    # CSV, and it is never shown, so help for it is help nobody can reach: this gate says "nothing
+    # renders", and hidden is exactly what not rendering means.
+    #
+    # THIS WAS BROKEN BY THE COMMIT THAT CITED IT AS PROTECTION. The outcome work deleted
+    # COLUMN_HELP["errors"] and argued that this gate was why the deletion had to ship in the same
+    # commit as the site edits. It then started declaring `errors` on five tables as a hidden
+    # column, which put the name back in this set, and restoring the deleted entry passed again.
+    # The gate went on reporting success while no longer asking its question.
     rendered = set()
     for _label, table in every_table(pane, session_id, other_session_id):
-        rendered |= set(table["columns"] or [])
+        rendered |= set(table["columns"] or []) - set(table.get("hidden_columns") or [])
     dead = sorted(set(COLUMN_HELP) - rendered)
     assert not dead, f"COLUMN_HELP describes columns nothing renders: {dead}"
 

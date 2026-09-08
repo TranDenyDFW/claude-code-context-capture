@@ -63,8 +63,10 @@ removed and nothing here said so.
   evenly: the `ExitPlanMode` row read 39 errors and NONE of them can be proven to have run and
   failed. That row now reads "13 refused, 30 unknown", because the shipped classifier will
   not claim a refusal it cannot prove and 28 of those calls predate the field that would have
-  proved it. Reading their result text suggests about 36 were rejections and 3 were real; only
-  the exact signal ships, so the app says unknown where the exploratory pass said refused.
+  proved it. Reading the result text of the 39 that could be matched: 23 say the user did not
+  want to proceed, 2 are permission failures, and exactly ONE is a genuine tool error. The plan
+  said 3 and two rounds of commit messages repeated it unmeasured. Only the exact signal ships,
+  so the app says unknown where an inference would have said refused.
   Six surfaces now read one merged `outcome`
   column that is BLANK when there is nothing to say, with the three counts kept as hidden
   columns so the CSV export still carries the numbers. It does NOT make them sortable: a hidden

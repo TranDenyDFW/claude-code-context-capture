@@ -7,8 +7,9 @@
 // (26.9%) are refusals and 1,078 more predate the field and cannot be told apart, so 31.9% of
 // everything provable never ran. Per tool it is worse, because refusal is not evenly spread: of
 // the ExitPlanMode row's 41 flagged calls, NONE can be proven to have run and failed: 13 carry
-// a denial kind and 28 predate the field, whose result text suggests about 3 were real. The
-// difference between "none did" and "none is provable" is the whole point of this module.
+// a denial kind and 28 predate the field. Reading the result text of the 39 that could be
+// matched: exactly ONE is a genuine tool error and the other 38 never ran. The difference
+// between "none did" and "none is provable" is the whole point of this module.
 //
 // THE SIGNAL IS EXACT, NOT A GUESS. Claude Code writes `toolDenialKind` at the TOP LEVEL of the
 // record, a sibling of `message`, never inside the content block. Across all transcripts 2,046

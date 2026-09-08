@@ -367,13 +367,20 @@ def waste_layout(session_id=None, scope="main", cohort=None):
     placeholders = ",".join("?" for _ in read_tools)
     sql_dup = f"""SELECT session_id, target, COUNT(*) reads,
                    SUM(COALESCE(result_bytes,0)) bytes,
-                   COUNT(DISTINCT input_sha1) variants
+                   COUNT(DISTINCT input_sha1) variants,
+                   {outcome_sums()}
             FROM tool_calls
             WHERE tool_name IN ({placeholders}) AND target IS NOT NULL {wsid}
             GROUP BY session_id, target HAVING reads >= ?
             ORDER BY reads DESC LIMIT 200"""
     dup_args = tuple(read_tools) + wargs + (dup_min,)
-    dup = q(sql_dup, dup_args) if read_tools else pd.DataFrame()
+    # A REFUSED READ IS NOT A READ, and neither is one that errored. This table was exempted
+    # from carrying an outcome on the argument that the store holds 4 refused reads against
+    # 47,117, which was true and was the wrong question: the column also covers failures and
+    # the unclassifiable, and the worst-200 groups drawn here carry 13 errored and 18
+    # unclassified reads across 12 rows. An exemption argued from one bucket and applied to
+    # the whole column is a claim wider than its evidence.
+    dup = fold_outcomes(q(sql_dup, dup_args)) if read_tools else pd.DataFrame()
     sql_srv = """SELECT server_name AS server, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes,
                   """ + outcome_sums() + """, MAX(ts) last_call
@@ -441,7 +448,8 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
         evidence_block(
             "Session Rereads", dup, sql_dup, dup_args,
-            columns=["reads", "bytes", "variants", "session_id", "target"],
+            columns=["reads", "bytes", "variants", "outcome", "session_id", "target"],
+            hidden_columns=list(OUTCOME_HIDDEN),
             heat=["reads", "bytes"], table_id="tbl-reread",
             note=f"Every re-read is re-billed on every later request in that session, so the cost "
                  f"is the read multiplied by the turns that follow it. THE WORST 200 GROUPS of "

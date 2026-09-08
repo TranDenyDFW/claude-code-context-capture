@@ -248,8 +248,10 @@ def column_present(table: str, column: str) -> bool:
 # calls, 1,848 are refusals (26.9%), 3,945 are genuine failures, and 1,078 predate the field that
 # would settle it. Per tool it is far worse, because refusal is not evenly spread: of the 41 flagged
 # ExitPlanMode calls, this store can PROVE none ran and failed: 13 carry a denial kind and the
-# other 28 predate the field. Reading the result text says roughly 3 were real, which is why
-# the claim here is about what is provable and not about what happened.
+# other 28 predate the field. Reading the result text of all 39 that could be matched: 23 say
+# the user did not want to proceed and 2 are permission failures, both of which are calls that
+# NEVER RAN, and exactly ONE is a genuine tool error. The plan said 3 and two rounds of commit
+# messages repeated it without measuring. The claim here is about what is provable.
 #
 # harvest.mjs records the answer per call; this is the one place that reads it, so no surface can
 # invent a second definition.

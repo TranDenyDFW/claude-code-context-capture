@@ -6,8 +6,9 @@ the two added together. Measured on this store after the backfill: of 6,871 flag
 are refusals and 1,078 more predate the field that would prove it either way, so 26.9% of what
 was called an error never ran and only 57.4% of it is a provable failure. Per tool it is far
 worse, because refusal is not spread evenly: of the 41 flagged ExitPlanMode calls, NONE can be
-proven to have run and failed. Reading their result text suggests about 3 were real, and this
-app reports the provable answer rather than the suggested one.
+proven to have run and failed. Reading the result text of the 39 that could be matched, exactly
+ONE is a genuine tool error and the other 38 never ran; this app reports the provable answer
+rather than the inferred one.
 
 Every check here was watched to FAIL against the defect it names before it was kept. The ones
 marked "gate can fail" are the ones a plausible-looking wrong implementation still passes without.
@@ -165,6 +166,7 @@ def test_no_table_calls_a_refused_tool_an_error(pane, q, has_store):
     if refusers.empty:
         pytest.skip("this store records no tool whose flagged calls are all refusals")
     tool = refusers.iloc[0]["tool_name"]
+    truth = int(refusers.iloc[0]["refused"])
 
     checked = 0
     for table in extract.tables(pane("tab-cost")):
@@ -178,9 +180,20 @@ def test_no_table_calls_a_refused_tool_an_error(pane, q, has_store):
                 f"{tool} never failed: every flagged call was stopped before it ran, but a "
                 f"table reports {row['outcome']!r}")
             assert "refused" in row["outcome"], row["outcome"]
-            # The cell must agree with the row it was folded from, whatever population that row
-            # covers. Comparing to a store-wide total is what coupled this to one table.
-            assert row["outcome"] == outcome_text(row["errors"], row["refused"], row["unknown"])
+            # BOUNDED BY SQL, NOT COMPARED TO THE FOLDER. The first version asserted
+            # row["outcome"] == outcome_text(row["errors"], ...), which is outcome_text
+            # checked against outcome_text: any wrong number passed as long as the same
+            # wrong number reached both sides, and doubling the refused sum passed it.
+            #
+            # The second version compared the cell to the STORE-WIDE total, which coupled it
+            # to one table again: a table grouping by input hash honestly reports a smaller
+            # number and was failed for being right. The bound holds for every population:
+            # a partition of this tool's refusals cannot exceed the tool's refusals, and a
+            # drawn row cannot report none.
+            n = int(row["outcome"].split()[0].replace(",", ""))
+            assert 1 <= n <= truth, (
+                f"{tool} shows {n} refused in a table whose whole population holds at "
+                f"most {truth}")
     assert checked, f"no table on the Cost tab drew an outcome cell for {tool}"
 
 def test_the_denial_vocabulary_reaches_a_table_not_only_a_note(pane, q, has_store):
@@ -405,14 +418,15 @@ def test_a_hidden_column_was_first_a_declared_one(app, pane, session_id, other_s
 
 #: Tables that read tool_calls and deliberately say nothing about how the calls turned out.
 #: Each carries its reason, and the reason is checked, not trusted.
+#:
+#: `reads` WAS HERE AND SHOULD NOT HAVE BEEN. Its reason argued from refusals, 4 store-wide
+#: against 47,117 reads, and concluded about the whole column; an independent reviewer pointed
+#: out that the column also covers failures and the unclassifiable, and that the 200 groups
+#: that table draws carry 13 errored and 18 unclassified reads across 12 rows. The table now
+#: carries the column instead of an excuse.
 OUTCOME_EXEMPT = {
     "denial_kind": "every row IS a refusal, so an outcome column would say `refused` N times",
-    "reads": ("a refused read is not a read, and it would be a real defect in this count, but "
-              "the store holds 4 refused reads against 47,117 and none of them falls in a "
-              "group this table shows. A column blank on every row is the noise the merged "
-              "cell exists to avoid. Revisit if the refused count ever reaches this table."),
 }
-
 
 def test_every_table_that_reports_tool_calls_says_how_they_turned_out(
         app, pane, session_id, other_session_id, has_store):
@@ -431,8 +445,12 @@ def test_every_table_that_reports_tool_calls_says_how_they_turned_out(
     for tab, table, query in _every_table(app, pane, session_id, other_session_id):
         if "tool_calls" not in query:
             continue
+        hidden = set(getattr(table, "hidden_columns", None) or [])
+        # DRAWN, not declared. Asking only whether `outcome` is declared lets one name in a
+        # hide list revert any site past this gate, which is how an independent reviewer got
+        # a table back to a bare invocation count with the whole suite green.
         ids = [c.get("id") for c in _cols_of(table)]
-        if "outcome" in ids:
+        if "outcome" in set(ids) - hidden:
             continue
         excuse = next((k for k in OUTCOME_EXEMPT if k in ids), None)
         if excuse:

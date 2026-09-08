@@ -444,9 +444,15 @@ COLUMN_HELP = {
     "agent": ("Which KIND of subagent the Agent call asked for, read from the call's own input. "
               "\"(not recorded)\" means the call named none and took the default: the transcript "
               "recorded the omission, so this reports the omission rather than the default."),
-    # "errors" IS GONE, not reworded. No table renders a column by that name any more,
-    # and a stale entry fails test_the_registry_has_no_dead_entries, which is why the label
-    # and the five site edits are one commit.
+    # "errors" IS GONE, not reworded. No table DRAWS a column by that name any more, and a stale
+    # entry fails test_the_registry_has_no_dead_entries, which is why the label and the site edits
+    # are one commit.
+    #
+    # "draws", not "renders", and the difference is not pedantry. Five tables now DECLARE `errors`
+    # as a hidden column so the number reaches a row click and the CSV. While that gate counted
+    # declared columns it counted those five, this entry could be restored with everything green,
+    # and the gate cited here as the reason for the atomic commit had quietly stopped protecting
+    # it. The gate now asks about drawn columns; the wording here matches what it asks.
     "outcome": ("What went wrong with these calls, and BLANK when nothing did. \"errors\" ran "
                 "and failed; \"refused\" never ran at all, because a permission rule, a "
                 "hook, or a person stopped it first; \"unknown\" is neither, and says so "
