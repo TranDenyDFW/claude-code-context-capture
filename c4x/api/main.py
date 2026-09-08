@@ -669,6 +669,7 @@ def _table_meta(node, found=None):
     formats live in exactly such a panel.
     """
     from c4x.cli import extract
+    from c4x.panels import QUERY_MARK
     from c4x.theme import SECTION_HEAD, column_label, table_label
     found = [] if found is None else found
 
@@ -685,7 +686,7 @@ def _table_meta(node, found=None):
             return " ".join(children)
         return None
 
-    def walk(node, pending=None):
+    def walk(node, pending=None, query=None):
         # THE HEADING AND THE NOTE ABOVE A TABLE BELONG TO IT. evidence_block() and every hand-built
         # table put a SECTION_HEAD line and a SECTION_NOTE line before the DataTable, as siblings.
         # `describe()` flattens those into `text`, so over the API twelve of eighteen tables had no
@@ -696,11 +697,22 @@ def _table_meta(node, found=None):
         if isinstance(node, (list, tuple)):
             pending = {"head": None, "note": None}
             for child in node:
-                walk(child, pending)
+                walk(child, pending, query)
             return
         if not hasattr(node, "_prop_names"):
             return
         kind = type(node).__name__
+        # THE QUERY THAT PRODUCED THE TABLE INSIDE THIS BLOCK. `panels.with_query` wraps an
+        # evidence_block in a marked Div carrying the SQL as data, so the query reaches the table
+        # it belongs to by CONTAINMENT rather than by index. It used to be a collapsible printed
+        # under the table, paired by position; containment cannot mis-attribute, which matters
+        # because a query shown under a table that did not produce it is worse than no query.
+        if QUERY_MARK in str(getattr(node, "className", "") or "").split():
+            found_query = getattr(node, "data-query", None)
+            if found_query is None:
+                found_query = (node.to_plotly_json().get("props", {}) or {}).get("data-query")
+            if found_query:
+                query = found_query
         # TEXT THAT ANOTHER CHANNEL OWNS IS NOT A TABLE'S NOTE. A chart caption written between a
         # table and the chart it describes would otherwise become that table's hover, which is
         # exactly what happens on All sessions and on Compactions today, and the label of a control
@@ -779,12 +791,15 @@ def _table_meta(node, found=None):
                 "columns": columns,
                 "filterable": getattr(node, "filter_action", "none") != "none",
                 "page_size": getattr(node, "page_size", None),
+                # None for a hand-built table that never went through evidence_block, which is
+                # the honest value: it has no single query behind it.
+                "query": query,
             })
             return
         for name in node._prop_names:
             value = getattr(node, name, None)
             if isinstance(value, (list, tuple)) or hasattr(value, "_prop_names"):
-                walk(value, None if kind in ("Graph", "Details") else pending)
+                walk(value, None if kind in ("Graph", "Details") else pending, query)
 
     walk(node)
     return found
