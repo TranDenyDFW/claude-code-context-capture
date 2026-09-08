@@ -17,7 +17,15 @@ from c4x.pricing import (
     coverage_note,
     measured_note,
 )
-from c4x.store import measured_cost, q, scoped
+from c4x.store import (
+    OUTCOME_HIDDEN,
+    fold_outcomes,
+    measured_cost,
+    outcome_available,
+    outcome_sums,
+    q,
+    scoped,
+)
 from c4x.theme import (
     DANGER,
     MUTED,
@@ -179,12 +187,14 @@ def _subagent_types(where, args):
                     COUNT(*)                                 AS calls,
                     COUNT(DISTINCT session_id)               AS sessions,
                     SUM(COALESCE(result_bytes, 0))           AS bytes,
-                    SUM(COALESCE(is_error, 0))               AS errors,
+                    """ + outcome_sums() + """,
                     MIN(ts) AS first_seen, MAX(ts) AS last_seen
                FROM tool_calls
               WHERE tool_name IN ('Agent', 'Task') """ + where + """
               GROUP BY agent ORDER BY calls DESC"""
-    df = q(sql, args)
+    # FOLDED AT THE QUERY, not at the table. The three counts never reach a caller that
+    # could render them raw by forgetting not to.
+    df = fold_outcomes(q(sql, args))
     if df.empty:
         return html.Div()
     df["bytes"] = (df["bytes"] / 1024).round(1)
@@ -194,10 +204,11 @@ def _subagent_types(where, args):
     return evidence_block(
         "Subagent Calls", df, sql, args,
         columns=numeric_columns(
-            ["agent", "calls", "sessions", "bytes", "errors", "first_seen", "last_seen"],
-            {"calls", "sessions", "bytes", "errors"},
+            ["agent", "calls", "sessions", "bytes", "outcome", "first_seen", "last_seen"],
+            {"calls", "sessions", "bytes"},
             {"bytes": Format(precision=1, scheme=Scheme.fixed)}),
         heat=["calls", "bytes"], page_size=10,
+        hidden_columns=list(OUTCOME_HIDDEN),
         help_for={
             "calls": "Agent calls that asked for this subagent type.",
             "sessions": "How many different sessions used this subagent type.",
@@ -294,6 +305,42 @@ def _rebill_card(session_id=None, cohort=None):
                          f"{fmt_tokens(peak)} peak window")
 
 
+def _refusals(where, args):
+    """Claude Code's own vocabulary for why a call never ran, as a TABLE.
+
+    The merged `outcome` column says a call was refused. It cannot say by what, and the
+    difference decides what a reader does next: a settings rule is theirs to change, a
+    hook is theirs to read, and a rejection at the prompt is not a defect at all.
+
+    A note would have carried the same words. It could not be sorted, filtered or exported,
+    and this is the one place the vocabulary is quoted verbatim rather than summarised, so it
+    is the one place a reader is most likely to want the rows themselves.
+    """
+    if not outcome_available():
+        # Not an empty table: an unmigrated store has no denial_kind column at all, and
+        # querying it raises. The Tool Calls table above already says "N unknown" and names
+        # the command, so this panel would only repeat it.
+        return html.Div()
+    sql = """SELECT denial_kind, COUNT(*) calls,
+                    COUNT(DISTINCT tool_name) tools,
+                    COUNT(DISTINCT session_id) sessions, MAX(ts) last_call
+               FROM tool_calls WHERE denial_kind IS NOT NULL """ + where + """
+              GROUP BY denial_kind ORDER BY calls DESC"""
+    return evidence_block(
+        "Refusals", q(sql, args), sql, args,
+        columns=numeric_columns(["denial_kind", "calls", "tools", "sessions", "last_call"],
+                                {"calls", "tools", "sessions"}),
+        heat=["calls"], page_size=10,
+        help_for={
+            "calls": "Calls Claude Code recorded under this denial kind.",
+            "sessions": "How many different sessions hit this denial kind.",
+        },
+        note="REPORTED UNCHANGED, not grouped. These are Claude Code's values, and one of "
+             "them is ambiguous at the source: `permission-rule` covers a settings deny rule "
+             "AND a hook that blocked the call, because the transcript records the same value "
+             "for both. Splitting them here would be this app guessing rather than that "
+             "record speaking, and the guess leaks both ways, so it is not made.")
+
 def waste_layout(session_id=None, scope="main", cohort=None):
     """Context paid for twice, or paid for and never used.
 
@@ -332,10 +379,10 @@ def waste_layout(session_id=None, scope="main", cohort=None):
     srv = q(sql_srv, wargs)
     sql_tools = """SELECT tool_name AS tool, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes,
-                  SUM(COALESCE(is_error,0)) errors
+                  """ + outcome_sums() + """
            FROM tool_calls WHERE 1=1 """ + wsid + """
            GROUP BY tool_name ORDER BY calls DESC LIMIT 40"""
-    tools = q(sql_tools, wargs)
+    tools = fold_outcomes(q(sql_tools, wargs))
 
     # The three cards below count EVERY group, not the 200 the table shows.
     #
@@ -424,6 +471,13 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
         evidence_block(
             "Tool Calls", tools, sql_tools, wargs,
-            columns=["tool", "calls", "bytes", "errors"], heat=["calls", "bytes", "errors"],
+            # `errors` LEAVES heat, and that is not cosmetic. heat_cells filters to numbers,
+            # so a text column in this list would be a SILENT no-op, a shading feature
+            # quietly doing nothing. It was also shading a count that was 27% refusals,
+            # so the darkest cells were pointing at tools that had not failed at all.
+            columns=["tool", "calls", "bytes", "outcome"], heat=["calls", "bytes"],
+            hidden_columns=list(OUTCOME_HIDDEN),
             help_for={"calls": "Every call to this tool, whatever the input."}),
+
+        _refusals(wsid, wargs),
     ])

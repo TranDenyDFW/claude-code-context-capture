@@ -444,7 +444,21 @@ COLUMN_HELP = {
     "agent": ("Which KIND of subagent the Agent call asked for, read from the call's own input. "
               "\"(not recorded)\" means the call named none and took the default: the transcript "
               "recorded the omission, so this reports the omission rather than the default."),
-    "errors": "Calls whose result block was flagged as an error.",
+    # "errors" IS GONE, not reworded. No table renders a column by that name any more,
+    # and a stale entry fails test_the_registry_has_no_dead_entries, which is why the label
+    # and the five site edits are one commit.
+    "outcome": ("What went wrong with these calls, and BLANK when nothing did. \"errors\" ran "
+                "and failed; \"refused\" never ran at all, because a permission rule, a "
+                "hook, or a person stopped it first; \"unknown\" is neither, and says so "
+                "rather than guessing, because the build that flagged it recorded no reason. "
+                "Refusals were counted as errors until this column existed, and they were "
+                "27% of them."),
+    "denial_kind": ("Claude Code's OWN word for why a call never ran, reported unchanged "
+                    "rather than grouped. \"permission-rule\" covers a settings deny "
+                    "rule AND a hook that blocked the call: the transcript records the "
+                    "same value for both, so splitting them would be this app guessing "
+                    "rather than that record speaking. \"user-rejected\" is a person "
+                    "saying no at the prompt."),
     "last_seen": "Latest call with this input. Still recent means the repetition is not history.",
     "target": ("The file or resource the call named. BLANK where the tool has no target, such as "
                "Bash or ToolSearch: the store keeps a hash of the input, never the input itself, "

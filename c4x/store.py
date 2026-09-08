@@ -316,7 +316,11 @@ def fold_outcomes(df):
 
     Inserted where `errors` sat, so column order is unchanged for every caller.
     """
-    if df is None or getattr(df, "empty", True) or "errors" not in df.columns:
+    # NO getattr HERE. It was written defensively, and tools/table_audit.py reports any call whose
+    # callee it cannot name from the source, because a dynamic call is exactly how a table-building
+    # path evades that scan. The defensiveness bought nothing either: every caller passes a frame
+    # straight from q(), which always returns one, so this asks the question directly.
+    if df is None or df.empty or "errors" not in df.columns:
         return df
     out = df.copy()
     at = list(out.columns).index("errors")

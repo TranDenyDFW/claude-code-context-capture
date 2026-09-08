@@ -4,6 +4,8 @@ Everything here builds a component from data the store returned, so it sits abov
 store.py and below the tabs. `evidence_block` is the busiest thing in the app, built from eight
 different callers, which is why the audit measures coverage per CALLER rather than per line.
 """
+from typing import Any, NamedTuple
+
 from dash import html
 from dash.dash_table.Format import Format, Scheme
 
@@ -12,7 +14,10 @@ from c4x.frames import records as frame_records
 from c4x.labels import plural, stamp
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
+    OUTCOME_HIDDEN,
+    fold_outcomes,
     measured_cost,
+    outcome_sums,
     q,
     scoped,
 )
@@ -88,6 +93,7 @@ def sql_preview(sql: str, params=()) -> str:
 def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size: int = 12,
                    note: str | None = None, style_data_conditional=None, heat=(),
                    table_id=None,
+                   hidden_columns=(),
                    help_for=None):
     """A table, the query that produced it, and a way to take the rows away.
 
@@ -128,6 +134,10 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
             # Only the tables a callback drives carry one, so an id here means "something on this
             # page filters this table" rather than being decoration.
             **({"id": table_id} if table_id else {}),
+            # DECLARED, NOT DROPPED. A hidden column still travels in every row, so a reader can
+            # sort or export by it and a row click can read it; it is simply not drawn. That is
+            # what lets one merged text cell be readable without losing the numbers behind it.
+            hidden_columns=list(hidden_columns),
             columns=(_cols := cols),
             tooltip_header=header_help(_cols, help_for),
             data=records,
@@ -412,6 +422,23 @@ def text_panel(title: str, body: str, colour: str = TEXT) -> html.Div:
     ])
 
 
+class Queried(NamedTuple):
+    """A frame, the EXACT query that produced it, and the arguments it was bound with.
+
+    THREE TABLES ON THE DIFF PANEL WERE HANDED A RETYPING OF THEIR OWN QUERY, and one of the
+    three had already drifted from the query above it: it said SUM(is_error) where the real one
+    said a CASE. All three dropped the scope clause and its bound arguments, so a reader who
+    copied what was shown got the whole store back instead of the session in front of them.
+
+    Fixing the one the plan named would have left the other two, and the gate that catches a
+    retyped query only catches a query someone retyped. Carrying the three together is what
+    removes the place to retype one.
+    """
+
+    df: Any
+    sql: str
+    params: tuple
+
 def turn_diff(session_id, scope, ts_a, ts_b):
     """What entered the window between two turns, and what it cost.
 
@@ -422,37 +449,42 @@ def turn_diff(session_id, scope, ts_a, ts_b):
     """
     w, args = scoped(session_id, scope)
     span = (ts_a, ts_b)
+    # ONE ARGUMENT TUPLE, bound to every query below and handed out with each of them.
+    params = (*span, *args)
 
     spend = q(f"""SELECT COUNT(*) AS calls,
                          COALESCE(SUM(output_tokens), 0) AS output,
                          COALESCE(SUM(thinking_tokens), 0) AS thinking,
                          COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read,
                          COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_write
-                    FROM api_calls WHERE ts > ? AND ts <= ? {w}""",
-              (*span, *args))
+                    FROM api_calls WHERE ts > ? AND ts <= ? {w}""", params)
 
-    tools = q(f"""SELECT tool_name AS tool,
-                         COUNT(*) AS calls,
-                         COALESCE(SUM(result_bytes), 0) AS result_bytes,
-                         COALESCE(SUM(input_bytes), 0) AS input_bytes,
-                         SUM(CASE WHEN is_error THEN 1 ELSE 0 END) AS errors
-                    FROM tool_calls WHERE ts > ? AND ts <= ? {w}
-                   GROUP BY tool ORDER BY result_bytes DESC LIMIT 40""",
-                (*span, *args))
+    # Named, so the block that draws it can be handed the query itself. See Queried, above.
+    sql_tools = f"""SELECT tool_name AS tool,
+                           COUNT(*) AS calls,
+                           COALESCE(SUM(result_bytes), 0) AS result_bytes,
+                           COALESCE(SUM(input_bytes), 0) AS input_bytes,
+                           {outcome_sums()}
+                      FROM tool_calls WHERE ts > ? AND ts <= ? {w}
+                     GROUP BY tool ORDER BY result_bytes DESC LIMIT 40"""
+    tools = fold_outcomes(q(sql_tools, params))
 
-    targets = q(f"""SELECT target, tool_name AS tool, COUNT(*) AS reads,
-                           COALESCE(SUM(result_bytes), 0) AS result_bytes
-                      FROM tool_calls
-                     WHERE ts > ? AND ts <= ? AND target IS NOT NULL AND target != '' {w}
-                     GROUP BY target, tool ORDER BY result_bytes DESC LIMIT 40""",
-                  (*span, *args))
+    sql_targets = f"""SELECT target, tool_name AS tool, COUNT(*) AS reads,
+                             COALESCE(SUM(result_bytes), 0) AS result_bytes
+                        FROM tool_calls
+                       WHERE ts > ? AND ts <= ? AND target IS NOT NULL AND target != '' {w}
+                       GROUP BY target, tool ORDER BY result_bytes DESC LIMIT 40"""
+    targets = q(sql_targets, params)
 
-    said = q(f"""SELECT role, type, COUNT(*) AS messages,
-                        COALESCE(SUM(chars), 0) AS chars
-                   FROM messages WHERE ts > ? AND ts <= ? {w}
-                  GROUP BY role, type ORDER BY chars DESC""",
-              (*span, *args))
-    return spend, tools, targets, said
+    sql_said = f"""SELECT role, type, COUNT(*) AS messages,
+                          COALESCE(SUM(chars), 0) AS chars
+                     FROM messages WHERE ts > ? AND ts <= ? {w}
+                    GROUP BY role, type ORDER BY chars DESC"""
+    said = q(sql_said, params)
+    return (spend,
+            Queried(tools, sql_tools, params),
+            Queried(targets, sql_targets, params),
+            Queried(said, sql_said, params))
 
 
 def turn_diff_panel(session_id, scope, turns, a, b):
@@ -475,7 +507,7 @@ def turn_diff_panel(session_id, scope, turns, a, b):
     # tool results in the range: a compaction can drop context inside it, and the store holds no
     # size for every record. A panel that implied the parts added up would be inviting a wrong
     # conclusion, which is the same defect as a number with no context.
-    accounted = int(tools["result_bytes"].sum()) if not tools.empty else 0
+    accounted = int(tools.df["result_bytes"].sum()) if not tools.df.empty else 0
 
     cards = html.Div([
         stat_card("turns", f"{a} to {b}", sub=f"{b - a} turns"),
@@ -497,26 +529,21 @@ def turn_diff_panel(session_id, scope, turns, a, b):
                  style=SECTION_HEAD),
         cards,
     ]
-    if not tools.empty:
+    if not tools.df.empty:
         blocks.append(evidence_block(
-            "tools called in this range", tools,
-            "SELECT tool_name, COUNT(*), SUM(result_bytes), SUM(input_bytes), SUM(is_error) "
-            "FROM tool_calls WHERE ts > ? AND ts <= ? GROUP BY tool_name",
-            (ts_a, ts_b),
-            columns=numeric_columns(list(tools.columns),
-                                    {"calls", "result_bytes", "input_bytes", "errors"})))
-    if not targets.empty:
+            # THE QUERY THAT RAN AND WHAT IT RAN WITH. See Queried, above.
+            "tools called in this range", tools.df, tools.sql, tools.params,
+            # `outcome` is text and stays out of the numeric set; the three counts behind it
+            # are hidden, so they can sort and export without being drawn.
+            columns=numeric_columns([c for c in tools.df.columns if c not in OUTCOME_HIDDEN],
+                                    {"calls", "result_bytes", "input_bytes"}),
+            hidden_columns=list(OUTCOME_HIDDEN)))
+    if not targets.df.empty:
         blocks.append(evidence_block(
-            "what was read, largest first", targets,
-            "SELECT target, tool_name, COUNT(*), SUM(result_bytes) FROM tool_calls "
-            "WHERE ts > ? AND ts <= ? AND target IS NOT NULL GROUP BY target, tool_name",
-            (ts_a, ts_b),
-            columns=numeric_columns(list(targets.columns), {"reads", "result_bytes"})))
-    if not said.empty:
+            "what was read, largest first", targets.df, targets.sql, targets.params,
+            columns=numeric_columns(list(targets.df.columns), {"reads", "result_bytes"})))
+    if not said.df.empty:
         blocks.append(evidence_block(
-            "what was said", said,
-            "SELECT role, type, COUNT(*), SUM(chars) FROM messages "
-            "WHERE ts > ? AND ts <= ? GROUP BY role, type",
-            (ts_a, ts_b),
-            columns=numeric_columns(list(said.columns), {"messages", "chars"})))
+            "what was said", said.df, said.sql, said.params,
+            columns=numeric_columns(list(said.df.columns), {"messages", "chars"})))
     return html.Div(blocks)
