@@ -638,6 +638,162 @@ async function backfillTitles(dbPath = DB_PATH) {
  * backfilled yet" from "genuinely has no parent", which is the number that says whether a second
  * pass is worth running.
  */
+/**
+ * Fill `outcome` and `denial_kind` for calls already stored, from the transcripts on disk.
+ *
+ * WHY A BACKFILL AND NOT --full. The incremental walk keeps a byte offset per file and never
+ * revisits what it consumed, so a field added to the ingest is not retroactive. --full would do
+ * it, re-reads about 12 GB, is gated behind --yes, and has already lost a race with a hook
+ * harvest halfway through. Every other column added to this store took this route.
+ *
+ * EVERY ROW, not only the flagged ones. A call that succeeded is written `ok` rather than left
+ * to be inferred from the absence of a flag, because the absence of a flag is also what a row
+ * nothing ever came back from looks like, and those two are different facts.
+ *
+ * UPDATE, never INSERT, matched by primary key, and only where the column is still empty. It
+ * cannot create a row, cannot resurrect a deleted one, and cannot touch a column it does not
+ * name. `AND outcome IS NULL` also makes a second run nearly free and makes .changes a true
+ * count of rows filled rather than rows visited.
+ */
+export async function backfillToolOutcomes(dbPath = DB_PATH, { quiet = false } = {}) {
+  const db = openDb(dbPath);
+  // IT ALSO REPAIRS WHAT THE INGEST COULD NOT MATCH. A tool_result can appear on an EARLIER line
+  // than its tool_use: measured, 16 rows on this store. The incremental walk sees the result
+  // first, setToolResult finds no row to update, and putToolCall then creates the row with
+  // result_bytes and is_error NULL. Filling only the outcome would leave a row that says what it
+  // turned out to be while claiming nothing ever came back from it, which breaks the invariant
+  // the self-test asserts and is a contradiction on its face.
+  //
+  // COALESCE on those two, not assignment: a value the ingest DID record is the authority and must
+  // not be overwritten by a re-read. Only a hole is filled.
+  const setOutcome = db.prepare(
+    'UPDATE tool_calls SET outcome = ?, denial_kind = ?,'
+    + ' result_bytes = COALESCE(result_bytes, ?), is_error = COALESCE(is_error, ?)'
+    + ' WHERE tool_use_id = ? AND outcome IS NULL');
+  // The same high-water guard backfillAgents documents: three writers exist by design, so a
+  // COUNT(*) before and after fires on a true statement about a cause this tool had nothing to
+  // do with. Counting only rows that already existed is the fix.
+  const highWater = db.prepare('SELECT COALESCE(MAX(rowid), 0) n FROM tool_calls').get().n;
+  const existing = () => db.prepare(
+    'SELECT COUNT(*) n FROM tool_calls WHERE rowid <= ?').get(highWater).n;
+  const counted = (sql) => db.prepare(sql).get().n;
+  const before = {
+    rows: existing(),
+    total: counted('SELECT COUNT(*) n FROM tool_calls'),
+    filled: counted('SELECT COUNT(*) n FROM tool_calls WHERE outcome IS NOT NULL'),
+  };
+
+  const files = listTranscripts(PROJECTS);
+  let scanned = 0, skipped = 0, filled = 0;
+  const perFile = [];
+  // BATCHED. backfillAgents writes hundreds of rows in autocommit; this writes a quarter of a
+  // million, which is one fsync each without a transaction around them.
+  db.exec('BEGIN');
+  try {
+    for (const path of files) {
+      scanned++;
+      let text;
+      try { text = readFileSync(path, 'utf8'); } catch { skipped++; continue; }
+      let here = 0;
+      for (const line of text.split('\n')) {
+        // A string test before any JSON.parse, like its siblings. Every record carrying a
+        // toolDenialKind also carries a tool_result block, so one prefilter covers both signals.
+        if (!line || !line.includes('"tool_result"')) continue;
+        let d;
+        try { d = JSON.parse(line); } catch { continue; }
+        const content = d?.message?.content;
+        if (!Array.isArray(content)) continue;
+        const denial = (typeof d.toolDenialKind === 'string' && d.toolDenialKind)
+          ? d.toolDenialKind : null;
+        for (const blk of content) {
+          if (blk?.type !== 'tool_result' || typeof blk.tool_use_id !== 'string') continue;
+          const outcome = classifyResult(
+            { isError: !!blk.is_error, denialKind: denial, version: d.version });
+          // The same three-way shape scanBlocks uses, so a repaired row carries the byte count it
+          // would have had. A non-text block contributes 0 there and contributes 0 here.
+          const rc = blk.content;
+          const rb = typeof rc === 'string' ? Buffer.byteLength(rc, 'utf8')
+            : Array.isArray(rc) ? rc.reduce((a, x) => a + (typeof x?.text === 'string'
+              ? Buffer.byteLength(x.text, 'utf8') : 0), 0)
+            : rc == null ? 0 : Buffer.byteLength(JSON.stringify(rc), 'utf8');
+          here += setOutcome.run(
+            outcome, denial, rb, blk.is_error ? 1 : 0, blk.tool_use_id).changes;
+        }
+      }
+      filled += here;
+      if (here) perFile.push({ file: path, filled: here });
+      if (scanned % 200 === 0) { db.exec('COMMIT'); db.exec('BEGIN'); }
+      if (!quiet && scanned % 1000 === 0) {
+        console.error(`  ${scanned}/${files.length} files, ${filled} outcomes`);
+      }
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+
+  // ROWS WHOSE TRANSCRIPT IS GONE. Their outcome cannot be read, but is_error = 0 is proof of
+  // success unconditionally: no denial record in the whole corpus carries a false flag. So a
+  // clean row becomes ok and a flagged one becomes unclassified, which is exactly what it is.
+  //
+  // RESTRICTED TO FILES THAT GENUINELY DO NOT EXIST. A transient read failure, a locked file,
+  // must leave the row NULL for a later run: `outcome IS NULL` is what makes this idempotent,
+  // so a value stamped here is permanent and a wrong one could never be corrected.
+  const orphaned = db.prepare(
+    'SELECT DISTINCT file_path p FROM tool_calls WHERE outcome IS NULL AND file_path IS NOT NULL')
+    .all().map((r) => r.p).filter((path) => !existsSync(path));
+  const sweepOk = db.prepare('UPDATE tool_calls SET outcome = ? ' +
+    'WHERE outcome IS NULL AND is_error = 0 AND file_path = ?');
+  const sweepBad = db.prepare('UPDATE tool_calls SET outcome = ? ' +
+    'WHERE outcome IS NULL AND is_error = 1 AND file_path = ?');
+  let swept = 0;
+  db.exec('BEGIN');
+  for (const path of orphaned) {
+    swept += sweepOk.run(TOOL_OUTCOME.OK, path).changes;
+    swept += sweepBad.run(TOOL_OUTCOME.UNCLASSIFIED, path).changes;
+  }
+  db.exec('COMMIT');
+
+  const after = {
+    rows: existing(),
+    total: counted('SELECT COUNT(*) n FROM tool_calls'),
+    filled: counted('SELECT COUNT(*) n FROM tool_calls WHERE outcome IS NOT NULL'),
+  };
+  const report = {
+    files_scanned: scanned,
+    files_unreadable: skipped,
+    files_that_contributed: perFile.length,
+    // The rows that ALREADY EXISTED, before and after. This is only allowed to fill columns, so
+    // the pair must be identical. Reported rather than assumed: "it only runs UPDATE" is a
+    // claim about source code and this is a measurement.
+    rows_before: before.rows,
+    rows_after: after.rows,
+    rows_unchanged: before.rows === after.rows,
+    // What the OTHER writers did meanwhile, kept separate so it can never read as this tool's
+    // doing. NOTE the one signature that looks alarming and is not: putToolCall is INSERT OR
+    // REPLACE, so a concurrent harvest rewriting an existing row moves it above the high-water
+    // mark, and rows_after falls while total is unchanged. That is a REPLACE, not a deletion.
+    written_by_other_writers_meanwhile: after.total - before.total,
+    outcome: {
+      before: before.filled,
+      after: after.filled,
+      filled_from_transcripts: filled,
+      filled_from_the_stored_flag: swept,
+    },
+    transcripts_no_longer_on_disk: orphaned.length,
+    calls_still_without_an_outcome: counted(
+      'SELECT COUNT(*) n FROM tool_calls WHERE outcome IS NULL'),
+    by_outcome: db.prepare(`SELECT outcome, COUNT(*) n FROM tool_calls
+                                     GROUP BY 1 ORDER BY n DESC`).all(),
+    by_denial_kind: db.prepare(`SELECT denial_kind, COUNT(*) n FROM tool_calls
+                                         WHERE denial_kind IS NOT NULL
+                                         GROUP BY 1 ORDER BY n DESC`).all(),
+    busiest_files: perFile.sort((a, c) => c.filled - a.filled).slice(0, 5),
+  };
+  if (!quiet) console.log(JSON.stringify(report, null, 2));
+  db.close();
+  return report.rows_unchanged ? 0 : 1;
+}
+
+
 export async function backfillAgents(dbPath = DB_PATH, { quiet = false } = {}) {
   const db = openDb(dbPath);
   const setParent = db.prepare('UPDATE turns SET parent_uuid = ? WHERE uuid = ? AND parent_uuid IS NULL');
@@ -2372,6 +2528,28 @@ async function selfTest() {
       survived?.outcome === TOOL_OUTCOME.REFUSED
         && survived?.denial_kind === "some-future-kind",
       `outcome=${survived?.outcome} denial=${survived?.denial_kind}`]);
+    // OUT OF ORDER, which is not hypothetical: 16 rows on the live store have their
+    // tool_result on an EARLIER line than their tool_use. The ingest sees the result first,
+    // setToolResult finds no row to update, and putToolCall then creates the row with
+    // result_bytes and is_error NULL. An independent review found the backfill filling the
+    // outcome on exactly those rows and leaving the hole, so a row said what it turned out to
+    // be while claiming nothing had ever come back from it.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u16", timestamp: "2026-09-07T05:06:00Z", version: "2.1.233",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_16", is_error: true,
+                             content: "Exit code 7" }] },
+    }, "f", 16);
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u17", timestamp: "2026-09-07T05:06:01Z",
+      message: { content: [{ type: "tool_use", id: "toolu_16", name: "Bash",
+                             input: { command: "false" } }] },
+    }, "f", 17);
+    const ooo = scratchDb.prepare(
+      "SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_16");
+    checks.push(["a result seen BEFORE its call leaves the row honest, not half-filled (gate can fail)",
+      ooo?.outcome === null && ooo?.result_bytes === null,
+      `outcome=${ooo?.outcome} bytes=${ooo?.result_bytes}`]);
+
     // A7. The invariant that makes `denial_kind IS NOT NULL` mean exactly "refused".
     const broken = scratchDb.prepare(
       `SELECT COUNT(*) n FROM tool_calls
@@ -2488,6 +2666,8 @@ else if (argv.includes('--stats')) code = stats();
 else if (argv.includes('--backfill-survivors')) code = backfillSurvivors(DB_PATH) ? 0 : 1;
 else if (argv.includes('--backfill-titles')) code = await backfillTitles();
 else if (argv.includes('--backfill-agents')) code = await backfillAgents(resolveDbPath(argv));
+else if (argv.includes('--backfill-tool-outcomes'))
+  code = await backfillToolOutcomes(resolveDbPath(argv));
 else if (argv.includes('--backfill-message-source'))
   code = await backfillMessageSource(resolveDbPath(argv));
 else if (argv.includes('--dry-run')) code = dryRun(resolveDbPath(argv));

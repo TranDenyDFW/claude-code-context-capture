@@ -15,9 +15,10 @@
 // pattern can enumerate, and a loose matcher flags genuine Bash failures whose stdout quotes the
 // word BLOCKED.
 //
-// This module is the one definition of that vocabulary, shared by the writer (harvest.mjs), the
-// readers (waste.mjs, and c4x/store.py which mirrors it) and the fixture builder. A second copy
-// would be a second answer.
+// This module is the one definition of that vocabulary. Today only the writer, harvest.mjs, imports
+// it; the readers (waste.mjs, and c4x/store.py, which will have to mirror it in SQL) come later in
+// the same piece of work. It is written as a module from the start so that when they arrive there
+// is somewhere for them to agree WITH, rather than a second answer to reconcile afterwards.
 //
 //   node tools/outcomes.mjs --self-test
 
