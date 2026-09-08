@@ -450,7 +450,8 @@ COLUMN_HELP = {
     "outcome": ("What went wrong with these calls, and BLANK when nothing did. \"errors\" ran "
                 "and failed; \"refused\" never ran at all, because a permission rule, a "
                 "hook, or a person stopped it first; \"unknown\" is neither, and says so "
-                "rather than guessing, because the build that flagged it recorded no reason. "
+                "rather than guessing: the build that flagged it was older than 2.1.202 and "
+                "recorded no reason at all. "
                 "Refusals were counted as errors until this column existed, and they were "
                 "27% of them."),
     "denial_kind": ("Claude Code's OWN word for why a call never ran, reported unchanged "
