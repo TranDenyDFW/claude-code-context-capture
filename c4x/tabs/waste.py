@@ -451,6 +451,12 @@ def waste_layout(session_id=None, scope="main", cohort=None):
             columns=["reads", "bytes", "variants", "outcome", "session_id", "target"],
             hidden_columns=list(OUTCOME_HIDDEN),
             heat=["reads", "bytes"], table_id="tbl-reread",
+            # The shared entry has to be true of every table drawing `session_id`, and
+            # the Findings table draws it for something else. The reason THIS table
+            # groups within a session belongs here.
+            help_for={"session_id": ("Re-reads are counted WITHIN this session and never pooled "
+                                     "across sessions, because a re-read costs what it costs by "
+                                     "being re-billed on every later request in the same one.")},
             note=f"Every re-read is re-billed on every later request in that session, so the cost "
                  f"is the read multiplied by the turns that follow it. THE WORST 200 GROUPS of "
                  f"{groups:,}: the cards above and the curve below count all of them."),

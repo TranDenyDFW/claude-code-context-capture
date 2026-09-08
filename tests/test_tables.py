@@ -73,7 +73,11 @@ def test_every_table_carries_tooltips_for_the_columns_that_need_them(
     missing = []
     for label, table in every_table(pane, session_id, other_session_id):
         described = set(table["tooltips"])
-        for column in table["columns"] or []:
+        # DRAWN columns only. A hidden column has no header, so it cannot carry a
+        # tooltip, and demanding one asks for something the table cannot do: the
+        # Findings table declares `session_id` hidden so a row click can read it.
+        hidden = set(table.get("hidden_columns") or [])
+        for column in (c for c in (table["columns"] or []) if c not in hidden):
             if column in COLUMN_HELP and column not in described:
                 missing.append(f"{label}/{table['id']}: {column}")
     assert not missing, ("columns with help in the registry that never reach the reader: "
@@ -115,6 +119,29 @@ def test_the_registry_has_no_dead_entries(pane, session_id, other_session_id, ha
     dead = sorted(set(COLUMN_HELP) - rendered)
     assert not dead, f"COLUMN_HELP describes columns nothing renders: {dead}"
 
+
+def test_every_drawn_column_is_explained(pane, session_id, other_session_id, has_store,
+                                         has_probes, has_baseline):
+    """THE OTHER DIRECTION, and the one that was missing entirely.
+
+    The coverage gate above only fires for a column ALREADY in the registry, so a column with
+    no entry was invisible to the whole suite: it could be added, drawn, and never explained,
+    and nothing anywhere would say so. An independent reviewer found 43 of them, which is why
+    this gate exists and why it can be absolute rather than a ceiling.
+
+    Drawn columns only, for the same reason as the two gates around it: a hidden column has no
+    header to hover.
+
+    NEEDS THE SAME COMPLETE STORE as the dead-entry gate. On a store with no probe and no
+    baseline whole panels correctly render an empty state, so the columns they would have
+    drawn are absent and this would pass by not looking.
+    """
+    drawn = set()
+    for _label, table in every_table(pane, session_id, other_session_id):
+        drawn |= set(table["columns"] or []) - set(table.get("hidden_columns") or [])
+    undocumented = sorted(drawn - set(COLUMN_HELP))
+    assert not undocumented, ("columns the app draws and never explains: "
+                              + ", ".join(undocumented))
 
 def test_a_caveat_that_moved_to_a_tooltip_is_still_reachable(pane, session_id, has_store):
     """The statements that were deleted from the page during the tooltip pass.
