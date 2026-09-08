@@ -186,7 +186,7 @@ def _subagent_types(where, args):
     sql = """SELECT COALESCE(subagent_type, '(not recorded)') AS agent,
                     COUNT(*)                                 AS calls,
                     COUNT(DISTINCT session_id)               AS sessions,
-                    SUM(COALESCE(result_bytes, 0))           AS bytes,
+                    ROUND(SUM(COALESCE(result_bytes, 0)) / 1024.0, 1) AS kb,
                     """ + outcome_sums() + """,
                     MIN(ts) AS first_seen, MAX(ts) AS last_seen
                FROM tool_calls
@@ -197,17 +197,16 @@ def _subagent_types(where, args):
     df = fold_outcomes(q(sql, args))
     if df.empty:
         return html.Div()
-    df["bytes"] = (df["bytes"] / 1024).round(1)
     for column in ("first_seen", "last_seen"):
         df[column] = df[column].astype(str).str.slice(0, 16).str.replace("T", " ")
     unknown = int(df.loc[df["agent"] == "(not recorded)", "calls"].sum())
     return evidence_block(
         "Subagent Calls", df, sql, args,
         columns=numeric_columns(
-            ["agent", "calls", "sessions", "bytes", "outcome", "first_seen", "last_seen"],
-            {"calls", "sessions", "bytes"},
-            {"bytes": Format(precision=1, scheme=Scheme.fixed)}),
-        heat=["calls", "bytes"], page_size=10,
+            ["agent", "calls", "sessions", "kb", "outcome", "first_seen", "last_seen"],
+            {"calls", "sessions", "kb"},
+            {"kb": Format(precision=1, scheme=Scheme.fixed)}),
+        heat=["calls", "kb"], page_size=10,
         hidden_columns=list(OUTCOME_HIDDEN),
         help_for={
             "calls": "Agent calls that asked for this subagent type.",
@@ -242,7 +241,7 @@ def _repeated_inputs(where, args, session_id=None):
                     COUNT(DISTINCT session_id) AS sessions,
                     COUNT(*)                   AS calls,
                     COUNT(*) - COUNT(DISTINCT session_id) AS beyond_one_each,
-                    SUM(COALESCE(result_bytes, 0)) AS bytes,
+                    ROUND(SUM(COALESCE(result_bytes, 0)) / 1024.0, 1) AS kb,
                     """ + outcome_sums() + """,
                     MIN(ts) AS first_seen, MAX(ts) AS last_seen
                FROM tool_calls
@@ -263,7 +262,6 @@ def _repeated_inputs(where, args, session_id=None):
     df = fold_outcomes(q(sql, args))
     if df.empty:
         return html.Div()
-    df["bytes"] = (df["bytes"] / 1024).round(1)
     for column in ("first_seen", "last_seen"):
         df[column] = df[column].astype(str).str.slice(0, 16).str.replace("T", " ")
     totals = q("""SELECT COUNT(*) AS groups, COALESCE(SUM(calls), 0) AS calls,
@@ -274,10 +272,10 @@ def _repeated_inputs(where, args, session_id=None):
     return evidence_block(
         "Multi-Session Input", df, sql, args,
         columns=numeric_columns(
-            ["tool", "target", "sessions", "calls", "beyond_one_each", "bytes", "outcome",
+            ["tool", "target", "sessions", "calls", "beyond_one_each", "kb", "outcome",
              "first_seen", "last_seen"],
-            {"sessions", "calls", "beyond_one_each", "bytes"},
-            {"bytes": Format(precision=1, scheme=Scheme.fixed)}),
+            {"sessions", "calls", "beyond_one_each", "kb"},
+            {"kb": Format(precision=1, scheme=Scheme.fixed)}),
         hidden_columns=list(OUTCOME_HIDDEN),
         heat=["sessions", "calls"], page_size=12,
         note=f"{int(totals['groups']):,} inputs repeat across sessions, "
@@ -366,7 +364,7 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         read_tools, dup_min = [], 3
     placeholders = ",".join("?" for _ in read_tools)
     sql_dup = f"""SELECT session_id, target, COUNT(*) reads,
-                   SUM(COALESCE(result_bytes,0)) bytes,
+                   ROUND(SUM(COALESCE(result_bytes,0)) / 1024.0, 1) kb,
                    COUNT(DISTINCT input_sha1) variants,
                    {outcome_sums()}
             FROM tool_calls
@@ -382,13 +380,13 @@ def waste_layout(session_id=None, scope="main", cohort=None):
     # the whole column is a claim wider than its evidence.
     dup = fold_outcomes(q(sql_dup, dup_args)) if read_tools else pd.DataFrame()
     sql_srv = """SELECT server_name AS server, COUNT(*) calls,
-                  SUM(COALESCE(result_bytes,0)) bytes,
+                  ROUND(SUM(COALESCE(result_bytes,0)) / 1024.0, 1) kb,
                   """ + outcome_sums() + """, MAX(ts) last_call
            FROM tool_calls WHERE server_name IS NOT NULL """ + wsid + """
            GROUP BY server_name ORDER BY calls ASC"""
     srv = fold_outcomes(q(sql_srv, wargs))
     sql_tools = """SELECT tool_name AS tool, COUNT(*) calls,
-                  SUM(COALESCE(result_bytes,0)) bytes,
+                  ROUND(SUM(COALESCE(result_bytes,0)) / 1024.0, 1) kb,
                   """ + outcome_sums() + """
            FROM tool_calls WHERE 1=1 """ + wsid + """
            GROUP BY tool_name ORDER BY calls DESC LIMIT 40"""
@@ -419,10 +417,6 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         repeats = int(totals["repeats"])
         repeat_bytes = int(totals["bytes"])
 
-    for frame in (dup, srv, tools):
-        if not frame.empty and "bytes" in frame:
-            frame["bytes"] = (frame["bytes"] / 1024).round(1)
-
     # Why subagents are counted is on the `reads` column tooltip. What stays here is the one thing
     # a tooltip cannot say: which population this page is describing right now.
     scope_note = population_note(
@@ -448,9 +442,9 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
         evidence_block(
             "Session Rereads", dup, sql_dup, dup_args,
-            columns=["reads", "bytes", "variants", "outcome", "session_id", "target"],
+            columns=["reads", "kb", "variants", "outcome", "session_id", "target"],
             hidden_columns=list(OUTCOME_HIDDEN),
-            heat=["reads", "bytes"], table_id="tbl-reread",
+            heat=["reads", "kb"], table_id="tbl-reread",
             # The shared entry has to be true of every table drawing `session_id`, and
             # the Findings table draws it for something else. The reason THIS table
             # groups within a session belongs here.
@@ -482,7 +476,7 @@ def waste_layout(session_id=None, scope="main", cohort=None):
             # live store this row hid 176 errors and 7 unknown behind a bare invocation count for
             # one server. The list was an enumeration; the population is every table that reports
             # tool calls, and a gate now asks that of the rendered app.
-            columns=["server", "calls", "bytes", "outcome", "last_call"],
+            columns=["server", "calls", "kb", "outcome", "last_call"],
             hidden_columns=list(OUTCOME_HIDDEN),
             # The shared help for "calls" was written for the repeated-inputs table and says these
             # count calls "with this exact input". Here they count every call to the server.
@@ -497,7 +491,7 @@ def waste_layout(session_id=None, scope="main", cohort=None):
             # so a text column in this list would be a SILENT no-op, a shading feature
             # quietly doing nothing. It was also shading a count that was 27% refusals,
             # so the darkest cells were pointing at tools that had not failed at all.
-            columns=["tool", "calls", "bytes", "outcome"], heat=["calls", "bytes"],
+            columns=["tool", "calls", "kb", "outcome"], heat=["calls", "kb"],
             hidden_columns=list(OUTCOME_HIDDEN),
             help_for={"calls": "Every call to this tool, whatever the input."}),
 

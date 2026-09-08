@@ -528,10 +528,14 @@ COLUMN_HELP = {
 
     # Tool calls
     "tool": "The tool as the transcript named it, including the full mcp__server__name form.",
-    "bytes": ("KIBIBYTES of tool RESULT, despite the header, because every table drawing this "
-              "column divides by 1024 first. Never tokens: this store records exact token counts "
-              "per request and none per tool call, so converting would dress an estimate as a "
-              "measurement."),
+    # WAS `bytes`, AND HELD KILOBYTES. Five tables drew a column headed `bytes` whose values were
+    # already divided by 1024, so 3790.1 read as four kilobytes when it meant 3.7 megabytes: a
+    # factor of 1024 in a size figure, on the tab about what things cost. Help explaining a wrong
+    # header was the cheap fix and it only works on a reader who hovers.
+    "kb": ("Kilobytes of tool RESULT. The division happens in the query, so the SQL shown under "
+           "the table returns exactly this column and this magnitude. Never tokens: this store "
+           "records exact token counts per request and none per tool call, so converting would "
+           "dress an estimate as a measurement."),
     "tools": "How many DIFFERENT tools were recorded against this denial kind.",
     "last_call": "The most recent call in this group, which says whether it is still happening.",
     # KEYED ON A BARE COLUMN ID, so this has to be true of every table that draws it. The re-read
