@@ -25,6 +25,7 @@ import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { rootFrom, resolveDb, ensureStoreDir, posix } from './paths.mjs';
+import { classifyResult, TOOL_OUTCOME } from './outcomes.mjs';
 import { homedir } from 'node:os';
 
 const ROOT = rootFrom(import.meta.url);
@@ -163,7 +164,21 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   -- Not left to input_preview to carry: JSON.stringify puts the long command first, so on this
   -- store 2,386 of 5,974 descriptions (40%) fall outside a 500-character preview. A note that
   -- survives 60% of the time is not a note you can read a session with.
-  description TEXT
+  description TEXT,
+  -- WHAT THE CALL TURNED OUT TO BE, because is_error meant two opposite things at once: a tool
+  -- that RAN AND FAILED and a tool that NEVER RAN because something refused it. Measured across
+  -- every transcript on this machine, of 6,688 flagged calls 1,828 (27.3%) were refusals, and the
+  -- ExitPlanMode row read 39 errors of which 36 were a person rejecting a plan.
+  --
+  -- One of ok, error, refused, unclassified. NULL means no result block has ever been seen for
+  -- this call, which is a real answer and not the same as any of the four.
+  outcome TEXT,
+  -- Claude Code own word for WHY it never ran, stored verbatim and never grouped. Present only on
+  -- a refusal, so denial_kind IS NOT NULL means exactly that, the same contract subagent_type has.
+  -- Deliberately not translated: permission-rule covers a settings deny rule AND a hook that
+  -- blocked the call, the transcript records the same value for both, so any split would be ours
+  -- rather than the transcript.
+  denial_kind TEXT
 );
 CREATE INDEX IF NOT EXISTS tool_calls_session ON tool_calls (session_id);
 CREATE INDEX IF NOT EXISTS tool_calls_target ON tool_calls (target);
@@ -307,7 +322,7 @@ export const TOOL_INPUT_PREVIEW = 500;
 export const ADDED_COLUMNS = {
   hook_events: HOOK_EVENT_COLUMNS,
   turns: ['parent_uuid'],
-  tool_calls: ['subagent_type', 'input_preview', 'description'],
+  tool_calls: ['subagent_type', 'input_preview', 'description', 'outcome', 'denial_kind'],
 };
 const BOOLEAN_EVENT_COLUMNS = new Set(['probe', 'known', 'truncated']);
 
@@ -968,17 +983,24 @@ class Harvest {
       putMessage: db.prepare(`INSERT OR REPLACE INTO messages
         (uuid,session_id,ts,role,type,text,chars,model,request_id,is_sidechain,file_path,line_no)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`),
+      // EVERY RESULT-SIDE COLUMN IS COALESCED, and that list is load-bearing. A tool_use line
+      // re-read after its result has landed would otherwise REPLACE the row and null whatever the
+      // result had filled in. It is silent: no error, no exception, the data is simply gone. The
+      // self-test drives exactly that sequence, because nothing else would catch it.
       putToolCall: db.prepare(`INSERT OR REPLACE INTO tool_calls
         (tool_use_id,session_id,turn_uuid,ts,tool_name,server_name,target,input_sha1,input_bytes,
-         result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type,input_preview,description)
+         result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type,input_preview,description,
+         outcome,denial_kind)
         VALUES (?,?,?,?,?,?,?,?,?,
          COALESCE((SELECT result_bytes FROM tool_calls WHERE tool_use_id = ?), NULL),
-         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?,?,?)`),
+         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?,?,?,
+         COALESCE((SELECT outcome FROM tool_calls WHERE tool_use_id = ?), NULL),
+         COALESCE((SELECT denial_kind FROM tool_calls WHERE tool_use_id = ?), NULL))`),
       // The result arrives on a LATER line than the use, so this fills the row in place. If the
       // two land in different harvest runs the update finds nothing and result_bytes stays NULL,
       // which reads as "not yet seen" rather than as zero bytes.
       setToolResult: db.prepare(
-        'UPDATE tool_calls SET result_bytes = ?, is_error = ? WHERE tool_use_id = ?'),
+        'UPDATE tool_calls SET result_bytes = ?, is_error = ?, outcome = ?, denial_kind = ? WHERE tool_use_id = ?'),
       bumpAttachment: db.prepare(`INSERT INTO attachments (session_id,type,n) VALUES (?,?,1)
         ON CONFLICT(session_id,type) DO UPDATE SET n = n + 1`),
       bumpType: db.prepare(`INSERT INTO record_types (type,n) VALUES (?,1)
@@ -1284,7 +1306,10 @@ class Harvest {
           // Trimmed, and empty becomes NULL: a blank description is the same as none, and
           // storing "" would make `description IS NOT NULL` stop meaning "this call has a note".
           (typeof input.description === 'string' && input.description.trim())
-            ? input.description.trim() : null);
+            ? input.description.trim() : null,
+          // The two subselect binds for the outcome columns, which keep a result already stored
+          // from being wiped by a re-read of this line.
+          b.id, b.id);
         this.stats.toolCalls++;
       } else if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
         const c = b.content;
@@ -1292,7 +1317,15 @@ class Harvest {
           : Array.isArray(c) ? c.reduce((a, x) => a + (typeof x?.text === 'string'
             ? Buffer.byteLength(x.text, 'utf8') : 0), 0)
           : c == null ? 0 : Buffer.byteLength(JSON.stringify(c), 'utf8');
-        this.stmt.setToolResult.run(bytes, b.is_error ? 1 : 0, b.tool_use_id);
+        // THE DENIAL IS ON THE RECORD, NOT ON THE BLOCK. Claude Code writes toolDenialKind as a
+        // sibling of `message`; nothing inside the content block tells a tool that ran and failed
+        // from one that never ran. `d` has been in scope here the whole time.
+        const denial = (typeof d.toolDenialKind === 'string' && d.toolDenialKind)
+          ? d.toolDenialKind : null;
+        this.stmt.setToolResult.run(
+          bytes, b.is_error ? 1 : 0,
+          classifyResult({ isError: !!b.is_error, denialKind: denial, version: d.version }),
+          denial, b.tool_use_id);
         this.stats.toolResults++;
       }
     }
@@ -2248,17 +2281,103 @@ async function selfTest() {
     const small = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_2");
     checks.push(["a short input is kept whole",
       small?.input_preview === JSON.stringify({ file_path: "C:/x/a.md" }), String(small?.input_preview)]);
-    // THE REJECTION PATH, which is the one the finding was about: the result arrives on a later
-    // line and must fill in the error flag WITHOUT clearing what was asked for.
+    // A RESULT ARRIVES ON A LATER LINE and must fill the flag in WITHOUT clearing what was
+    // asked for. This check used to call the record below "a rejected call", and that sentence
+    // is now false: the record carries no toolDenialKind, so the store cannot prove it was a
+    // refusal and classifies it unclassified. The assertion is still worth making, so it keeps
+    // the record and loses the word it had not earned. The refusal path is the check after it.
     h6.scanBlocks({
-      sessionId: "s1", uuid: "u3", timestamp: "2026-09-07T05:01:51Z",
+      sessionId: "s1", uuid: "u3", timestamp: "2026-09-07T05:01:51Z", version: "2.1.121",
       message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", is_error: true,
                              content: "The user doesn't want to proceed with this tool use." }] },
     }, "f", 3);
     const after = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_1");
-    checks.push(["a rejected call still says what it proposed (gate can fail)",
+    checks.push(["a flagged result still says what the call proposed (gate can fail)",
       after?.is_error === 1 && String(after?.input_preview).includes("t16-keep.txt"),
       `is_error=${after?.is_error} preview=${String(after?.input_preview).slice(0, 30)}`]);
+    // A3. That build predates 2.1.202, so it recorded no reason and this store must not
+    // invent one.
+    checks.push(["a build that could not tell us produces neither error nor refused (gate can fail)",
+      after?.outcome === TOOL_OUTCOME.UNCLASSIFIED && after?.denial_kind === null,
+      `outcome=${after?.outcome} denial=${after?.denial_kind}`]);
+
+    // A1 and A6. THE REFUSAL PATH, proved by the field Claude Code actually writes. The kind is
+    // deliberately one this repo has never seen, so a whitelist of the six known values fails.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u11", timestamp: "2026-09-07T05:03:00Z",
+      message: { content: [{ type: "tool_use", id: "toolu_11", name: "Edit",
+                             input: { file_path: "C:/x/a.md" } }] },
+    }, "f", 11);
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u12", timestamp: "2026-09-07T05:03:01Z", version: "2.1.233",
+      toolDenialKind: "some-future-kind",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_11", is_error: true,
+                             content: "nope" }] },
+    }, "f", 12);
+    const refused = scratchDb.prepare(
+      "SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_11");
+    checks.push(["a denial on the RECORD is read, not looked for on the block (gate can fail)",
+      refused?.outcome === TOOL_OUTCOME.REFUSED, String(refused?.outcome)]);
+    checks.push(["and Claude Code's own word is stored verbatim, even one we have never seen",
+      refused?.denial_kind === "some-future-kind", String(refused?.denial_kind)]);
+
+    // A2. A flagged result on a modern build, with no denial, is a genuine failure.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u13", timestamp: "2026-09-07T05:04:00Z",
+      message: { content: [{ type: "tool_use", id: "toolu_13", name: "Bash",
+                             input: { command: "false" } }] },
+    }, "f", 13);
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u14", timestamp: "2026-09-07T05:04:01Z", version: "2.1.233",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_13", is_error: true,
+                             content: "Exit code 1" }] },
+    }, "f", 14);
+    const failed = scratchDb.prepare(
+      "SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_13");
+    checks.push(["a flagged call on a modern build is a genuine failure",
+      failed?.outcome === TOOL_OUTCOME.ERROR && failed?.denial_kind === null,
+      `${failed?.outcome}/${failed?.denial_kind}`]);
+    // A4. Success is STATED, not inferred from the absence of a flag. Note the row this uses:
+    // toolu_2 has no result at all, so its outcome is NULL, and NULL is the right answer for a
+    // call nothing ever came back from. That is a different fact from "it succeeded", which is
+    // the whole reason ok is written rather than assumed.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u15", timestamp: "2026-09-07T05:05:01Z", version: "2.1.233",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_2",
+                             content: "the file, read" }] },
+    }, "f", 15);
+    const okRow = scratchDb.prepare(
+      "SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_2");
+    checks.push(["a call that was not flagged is positively marked ok",
+      okRow?.outcome === TOOL_OUTCOME.OK, String(okRow?.outcome)]);
+    checks.push(["and a call nothing ever came back from stays NULL, which is not ok (gate can fail)",
+      scratchDb.prepare("SELECT outcome FROM tool_calls WHERE tool_use_id = ?")
+        .get("toolu_13x")?.outcome === undefined
+        && scratchDb.prepare(
+          "SELECT COUNT(*) n FROM tool_calls WHERE result_bytes IS NULL AND outcome IS NOT NULL")
+          .get().n === 0,
+      "a row with no result must carry no outcome"]);
+
+    // A5. THE COALESCE TRAP, and the only failure here a compiler cannot see. Re-reading the
+    // tool_use line REPLACES the row; without the outcome columns in putToolCall's COALESCE
+    // list the result already stored is silently nulled. No error, the data is just gone.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u11", timestamp: "2026-09-07T05:03:00Z",
+      message: { content: [{ type: "tool_use", id: "toolu_11", name: "Edit",
+                             input: { file_path: "C:/x/a.md" } }] },
+    }, "f", 11);
+    const survived = scratchDb.prepare(
+      "SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_11");
+    checks.push(["a re-read of the tool_use line does not wipe the outcome (gate can fail)",
+      survived?.outcome === TOOL_OUTCOME.REFUSED
+        && survived?.denial_kind === "some-future-kind",
+      `outcome=${survived?.outcome} denial=${survived?.denial_kind}`]);
+    // A7. The invariant that makes `denial_kind IS NOT NULL` mean exactly "refused".
+    const broken = scratchDb.prepare(
+      `SELECT COUNT(*) n FROM tool_calls
+        WHERE (outcome = 'refused') <> (denial_kind IS NOT NULL)`).get().n;
+    checks.push(["refused and a denial kind are the same fact, never one without the other",
+      broken === 0, String(broken)]);
     scratchDb.close();
   }
 
