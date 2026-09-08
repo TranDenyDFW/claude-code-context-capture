@@ -108,6 +108,9 @@ export function DataTable({
   const [dragging, setDragging] = useState<string | null>(null)
   const [pageSize, setPageSize] = useState(meta?.page_size ?? 25)
   const [page, setPage] = useState(0)
+  // Closed until asked for. The query used to be a collapsible printed under every table; it is
+  // the same content, moved to where a reader goes when they want something FROM the table.
+  const [showQuery, setShowQuery] = useState(false)
 
   const columns = useMemo<ColumnMeta[]>(() => {
     // The server's metadata is the source. A column with none still renders, described as plainly
@@ -230,6 +233,9 @@ export function DataTable({
       <TableToolbar
         sheet={sheet}
         onOpenWindow={onOpenWindow}
+        hasQuery={Boolean(meta?.query)}
+        queryOpen={showQuery}
+        onToggleQuery={() => setShowQuery((was) => !was)}
         allColumns={columns}
         hidden={hidden}
         onToggleColumn={(id) =>
@@ -296,6 +302,25 @@ export function DataTable({
           </>
         )}
       </TableToolbar>
+
+      {/* FULL WIDTH, not a dropdown. A query is wide and a menu panel would wrap it into
+          unreadability; this is the one place the SQL is meant to be READ. */}
+      {showQuery && meta?.query && (
+        <div className="border-b border-edge/60 px-3 py-2">
+          <div className="mb-1.5 flex items-center gap-2">
+            <span className="text-2xs text-ink-faint">The query that produced this table</span>
+            <button
+              onClick={() => { void navigator.clipboard?.writeText(meta.query ?? '') }}
+              className="rounded border border-edge px-2 py-0.5 text-2xs text-ink-dim
+                         hover:text-ink"
+            >
+              Copy
+            </button>
+          </div>
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-page px-3 py-2
+                          font-mono text-xs leading-relaxed text-ink-dim">{meta.query}</pre>
+        </div>
+      )}
 
       <div className="max-h-[32rem] overflow-auto">
         <table className="w-full border-collapse text-sm">

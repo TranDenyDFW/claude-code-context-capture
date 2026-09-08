@@ -133,33 +133,54 @@ def test_the_render_endpoint_carries_a_drawable_figure(client, tab_ids, session_
     assert drawn, "no figure anywhere carries a series, so nothing could be drawn"
 
 
-def test_render_carries_the_collapsible_sections_the_verify_shape_flattens(client):
+def test_the_query_behind_each_table_survives_the_api(client):
     """"Every table carries the query that built it" is a feature, and `describe()` destroys it.
 
-    `extract.texts()` flattens a pane to a list of strings, so over the API the SQL arrives as loose
-    paragraphs with nothing saying where a query starts or which table it belongs to. A frontend
-    rendering that faithfully prints six queries down the Cost tab as body text.
+    It used to survive as a collapsible under the table. It now survives on the table's own meta,
+    because six collapsibles down the Cost tab put the SQL in the reading flow for something almost
+    nobody opens. What must not change is that it survives AT ALL and stays attributed.
     """
     body = client.get("/api/tab/tab-cost/render").json()
-    assert body["details"], "the Cost tab's queries did not survive the API"
-    assert any("SELECT" in "\n".join(s["body"]).upper() for s in body["details"])
+    meta = body["meta"]
+    assert meta, "the Cost tab reported no table metadata"
+    with_query = [m for m in meta if m.get("query")]
+    assert with_query, "no table on the Cost tab carries the query that built it"
+    assert any("SELECT" in m["query"].upper() for m in with_query)
 
 
-def test_each_section_is_attributed_to_a_real_table(client):
-    """By INDEX, because five of the Cost tab's six tables have no id at all.
+def test_the_query_is_not_ALSO_in_the_body(client):
+    """The other half, and the reason the move happened. Both channels: `details` is the
+    collapsible one and `text` is the prose one, and SQL in either is SQL in the reading flow."""
+    body = client.get("/api/tab/tab-cost/render").json()
+    for section in body["details"]:
+        joined = "\n".join(section["body"]).upper()
+        assert "SELECT" not in joined, f"a query came back as a section: {section['summary']!r}"
+    for line in body["text"]:
+        assert not line.strip().upper().startswith(("SELECT", "WITH ")), (
+            f"query as prose: {line[:60]!r}")
 
-    A section pointing at the wrong table would show a query under a table that did not produce it,
-    which is worse than showing no query: it is a wrong answer that looks checkable.
+
+def test_the_section_channel_still_works_for_real_collapsibles(client):
+    """THE NEGATIVE CONTROL. Removing the query sections must not have broken `details` itself:
+    the Summary tab wraps real content in accordions that have nothing to do with SQL, and a
+    frontend that stopped rendering them would lose those too."""
+    body = client.get("/api/tab/tab-summary/render").json()
+    assert body["details"], "the section channel carries nothing at all any more"
+
+
+def test_each_query_is_attributed_to_its_own_table(client):
+    """Attribution is by CONTAINMENT now, not by index into a flattened list.
+
+    A query shown under a table that did not produce it is worse than showing none: it is a wrong
+    answer that looks checkable. Index pairing is what could get that wrong, and the old shape
+    checked it by comparing `table_index` values. With the queries on the tables themselves the
+    equivalent question is whether two tables ended up claiming the same query.
     """
     body = client.get("/api/tab/tab-cost/render").json()
-    tables = body["tables"]
-    indices = [s["table_index"] for s in body["details"]]
-    for index in indices:
-        assert index is None or -1 <= index < len(tables), f"{index} is not a table on this tab"
-    real = [i for i in indices if isinstance(i, int) and i >= 0]
-    # One query per table, each to a different one. If the walk ever fell out of step with the
-    # extractor's ordering, this is where it would show.
-    assert len(real) == len(set(real)), "two queries were attributed to the same table"
+    assert len(body["meta"]) == len(body["tables"]), "meta and tables disagree"
+    queries = [m["query"] for m in body["meta"] if m.get("query")]
+    assert len(queries) >= 2, "too few queries here for this check to mean anything"
+    assert len(queries) == len(set(queries)), "two tables carry the same query"
 
 
 def test_the_verify_shape_does_NOT_carry_sections(client, session_id):
@@ -776,13 +797,19 @@ def test_a_section_says_what_it_wraps(client):
             assert not section["body"], "a wrapped section should have no prose of its own"
 
 
-def test_a_query_section_is_still_prose(client):
-    """The SQL sections must NOT be swept up by the same rule: they are the feature."""
-    body = client.get("/api/tab/tab-cost/render").json()
-    assert body["details"], "the Cost tab's queries vanished"
-    for section in body["details"]:
-        assert section["wraps"] == "text"
-        assert any("SELECT" in line.upper() for line in section["body"])
+def test_a_section_that_wraps_no_component_keeps_its_prose(client):
+    """The COMPLEMENT of the rule above, and the half that can silently over-reach.
+
+    A section wrapping a table or a figure has no prose of its own, and the check above pins that.
+    Nothing pinned the other direction, so a classifier that stripped one section too many would
+    pass. This used to be checked through the Cost tab's SQL sections; those now live on the table
+    meta, so the live subject is the Summary tab's stat block, which wraps no component and whose
+    twenty-one lines are the only thing in it.
+    """
+    body = client.get("/api/tab/tab-summary/render").json()
+    loose = [s for s in body["details"] if s["wraps"] not in ("table", "figure")]
+    assert loose, "no section here wraps a bare block, so this check has no subject"
+    assert any(s["body"] for s in loose), "a section wrapping no component lost its prose"
 
 
 def test_the_tab_list_says_what_each_tab_is_and_whether_it_is_scoped(client):

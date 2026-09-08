@@ -90,9 +90,6 @@ export function CompareArms({
           disabledValue={kind === 'session' ? armB : null}
           onChange={(value) => onChange({ session: value || null })}
         />
-        <div className="flex flex-col gap-1 sm:pt-5">
-          <span className="text-center text-xs text-ink-faint">against</span>
-        </div>
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           <Choice
             label="Arm B"

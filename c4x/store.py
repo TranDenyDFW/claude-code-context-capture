@@ -1173,14 +1173,21 @@ def session_tool_calls(session_id: str, limit: int = 2000) -> pd.DataFrame:
     code ships. A timeline missing its proposals is the state that existed before this function,
     and it is a great deal better than a tab that raises.
     """
-    if not column_present("tool_calls", "input_preview"):
+    if not (column_present("tool_calls", "input_preview")
+            and column_present("tool_calls", "description")):
         return pd.DataFrame(columns=["uuid", "ts", "role", "type", "chars", "preview"])
     # THE SAME VOCABULARY THE MESSAGES TABLE USES, which theme.COLUMN_HELP defines: `role` is the
     # transport record's own type, which is why it reads `user` on a tool result, and `type` is
     # what actually produced the record. A tool_use block sits on an assistant record, so those are
     # 'assistant' and 'tool_use', the exact mirror of the 'tool_result' row that answers it.
     #
-    # The tool NAME leads the preview. Without it the row says a call was proposed and not which,
+    # THE NAME, THEN THE AGENT'S NOTE, THEN THE INPUT. The note is the short line the agent wrote
+    # about the call ("Located chunk files"), and it is the thing a reader is scanning for. It is
+    # NOT assistant prose: Claude Code never puts text and a tool_use in one record, so it lives
+    # in the tool input and reached no table until it had a column. Ahead of the input because a
+    # 220-character preview of a long command would otherwise push it off the end, which is the
+    # same truncation that loses it inside input_preview 40% of the time.
+    # Without the name the row says a call was proposed and not which,
     # and the name is the first thing a reader needs to make sense of the input that follows.
     return q(
         """
@@ -1189,6 +1196,7 @@ def session_tool_calls(session_id: str, limit: int = 2000) -> pd.DataFrame:
                'tool_use' AS type,
                input_bytes AS chars,
                substr(COALESCE(tool_name, 'tool') || ': ' ||
+                      COALESCE(description || ' - ', '') ||
                       replace(replace(COALESCE(input_preview, ''), char(10), ' '), char(13), ' '),
                       1, 220) AS preview
         FROM tool_calls WHERE session_id = ? AND input_preview IS NOT NULL

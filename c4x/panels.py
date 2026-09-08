@@ -19,7 +19,6 @@ from c4x.store import (
 from c4x.theme import (
     ACCENT,
     BORDER,
-    CODE_BLOCK,
     DANGER,
     GOOD,
     MONO,
@@ -29,7 +28,6 @@ from c4x.theme import (
     TABLE_STYLE,
     TEXT,
     WARN,
-    accordion,
     empty_panel,
     fmt_bytes,
     fmt_tokens,
@@ -40,8 +38,35 @@ from c4x.theme import (
     table_note,
 )
 
-
 # ---- Overview -------------------------------------------------------------
+# The class that says "this block owns a query", and the attribute that carries it.
+#
+# MARKED ON THE BLOCK, NOT PRINTED INSIDE IT. Every table used to carry a collapsible of its own
+# holding the SQL, which is a real feature (a reader can check a number instead of believing it)
+# sitting in the worst possible place: six of them on the Cost tab alone, between the tables, in
+# the reading flow, for a thing almost nobody opens on any given visit. Now the query travels as
+# DATA on the wrapper, the API lifts it onto that table's meta, and each surface draws its own
+# affordance for it. Same device as `theme.population_note`: the server marks what a thing IS
+# rather than leaving a reader of the payload to recognise it from its text.
+QUERY_MARK = "has-query"
+
+
+def with_query(block, sql: str, params=()):
+    """Attach the query that produced this block, as data rather than as content.
+
+    DATA ONLY, NOT `title`. A title was the obvious way to give the Dash tree a hover of its own,
+    and it is wrong here: `extract.texts()` reads `title` deliberately, as one of the things a
+    reader can read, so every query went straight back into the payload's prose and the whole
+    point of moving it was lost. Measured before this was written, not guessed at afterwards.
+
+    The consequence is stated rather than hidden: the Dash tree no longer shows the SQL anywhere.
+    That tree is the internal representation the API renders from, and the server mounts the
+    browser app at "/", which is where the button lives.
+    """
+    return html.Div([block], className=QUERY_MARK,
+                    **{"data-query": sql_preview(sql, params)})  # type: ignore[arg-type]
+
+
 def sql_preview(sql: str, params=()) -> str:
     """The query as run, with its bound values listed rather than interpolated.
 
@@ -80,15 +105,11 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
     table, the MCP server table, the tool table and the subagent-type table at once.
     """
     if df is None or (hasattr(df, "empty") and df.empty):
-        return html.Div([
-            # The heading and its reason are ONE block, so the page can draw a placeholder where
-            # the table would be. The query stays a sibling: it is a collapsible of its own and
-            # folding it in would claim the SQL twice.
-            empty_panel(title, "No rows."),
-            accordion("Query", "returned nothing; reproduce it yourself",
-                      html.Pre(sql_preview(sql, params),
-                               style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
-        ])
+        # The heading and its reason are ONE block, so the page can draw a placeholder where the
+        # table would be. The query rides on the wrapper as DATA rather than as a sibling block:
+        # a table that returned nothing is exactly when a reader wants to see the query, and
+        # exactly when a second panel of SQL under an empty panel is most in the way.
+        return with_query(html.Div([empty_panel(title, "No rows.")]), sql, params)
     records = frame_records(df)
     cols = columns or list(df.columns if hasattr(df, "columns") else records[0].keys())
     # A caller may hand over plain names OR ready-made specs from numeric_columns(). Wrapping a
@@ -99,7 +120,7 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
     cols = [c if isinstance(c, dict) else {"name": c, "id": c} for c in cols]
     truncated = (" (table shows the first page; export gives every row)"
                  if len(records) > page_size else "")
-    return html.Div([
+    return with_query(html.Div([
         html.Div(title, style=SECTION_HEAD),
         html.Div(f"{plural(len(records), 'row')}.{truncated}"
                  + (f" {note}" if note else ""), style=SECTION_NOTE),
@@ -129,10 +150,7 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
             style_cell=TABLE_STYLE["style_cell"],
             style_header=TABLE_STYLE["style_header"],
         ),
-        accordion("Query", "copy it, or export the rows above",
-                  html.Pre(sql_preview(sql, params),
-                           style={**CODE_BLOCK, "whiteSpace": "pre-wrap", "display": "block"})),
-    ])
+    ]), sql, params)
 
 
 def baseline_marks(fig, x_for_ts=None, ts_list=None):

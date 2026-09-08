@@ -102,6 +102,15 @@ export interface TableMeta {
   /** The `text` lines the server folded into `title` and `note`, so the page does not print them. */
   absorbed?: string[]
   columns: ColumnMeta[]
+  /**
+   * The SQL that produced this table, or null for a table that had no single query behind it.
+   *
+   * It used to be printed under the table as a collapsible of its own: six of them on the Cost
+   * tab, in the reading flow, for something almost nobody opens on a given visit. The server now
+   * marks the query on the block that owns the table, so it is attributed by CONTAINMENT rather
+   * than by position, and the page puts it behind a button on the table itself.
+   */
+  query?: string | null
   filterable: boolean
   page_size: number | null
   /**

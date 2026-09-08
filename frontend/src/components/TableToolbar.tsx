@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, Columns3, Download, ExternalLink } from 'lucide-react'
+import { Check, ChevronDown, Code2, Columns3, Download, ExternalLink } from 'lucide-react'
 import type { ColumnMeta } from '@/api'
 import {
   copyToClipboard, downloadCsv, downloadExcel, downloadPdf, hydrate, printSheet, type Sheet,
@@ -104,6 +104,9 @@ export function TableToolbar({
   onPageSize,
   children,
   onOpenWindow,
+  hasQuery,
+  queryOpen,
+  onToggleQuery,
 }: {
   sheet: Sheet
   /** Open this table in a window of its own. Absent on the single-table page itself. */
@@ -117,6 +120,10 @@ export function TableToolbar({
   pageSize: number
   onPageSize: (size: number) => void
   children?: React.ReactNode
+  /** Whether this table HAS a query, which is what decides the button exists at all. */
+  hasQuery?: boolean
+  queryOpen?: boolean
+  onToggleQuery?: () => void
 }) {
   const [said, setSaid] = useState('')
   const say = (message: string) => {
@@ -170,6 +177,25 @@ export function TableToolbar({
             </>
           )}
         </Menu>
+
+        {/* THE QUERY, BEHIND A BUTTON. "Every table carries the query that built it" is a real
+            feature of this tool: it is what lets a reader check a number rather than believe it.
+            It was in the wrong place, printed under every table in the reading flow, not the
+            wrong idea. Beside Window and Export because it is the same kind of thing: something
+            you do WITH this table, when you want it. */}
+        {hasQuery && onToggleQuery && (
+          <button
+            onClick={onToggleQuery}
+            aria-expanded={Boolean(queryOpen)}
+            title="Show the SQL that produced this table"
+            aria-label={`Show the query behind ${sheet.name}`}
+            className={`flex items-center gap-1 rounded border border-edge px-2 py-1 text-xs
+                        hover:text-ink ${queryOpen ? 'text-ink' : 'text-ink-dim'}`}
+          >
+            <Code2 size={13} aria-hidden="true" />
+            Query
+          </button>
+        )}
 
         {onOpenWindow && (
           <button

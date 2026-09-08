@@ -152,7 +152,18 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   -- 500 characters, measured on this store: it adds 64 MB to a 1.37 GB store, 4.6%, and 174,538
   -- of 238,632 calls fit inside it whole. A preview, not the input: the transcript remains the
   -- record, and input_bytes still says how much of it this is.
-  input_preview TEXT
+  input_preview TEXT,
+  -- THE NOTE THE AGENT WROTE ABOUT THIS CALL, in its own column rather than left inside the
+  -- input blob. Claude Code never puts assistant prose and a tool_use in the SAME record:
+  -- measured on one session, 3,111 text-only records, 7,939 tool-call-only records, and ZERO
+  -- carrying both. So the short active-voice line an agent writes before a command is not
+  -- assistant text at all, it is this field, and it lived only in records the messages table
+  -- drops for having no readable text.
+  --
+  -- Not left to input_preview to carry: JSON.stringify puts the long command first, so on this
+  -- store 2,386 of 5,974 descriptions (40%) fall outside a 500-character preview. A note that
+  -- survives 60% of the time is not a note you can read a session with.
+  description TEXT
 );
 CREATE INDEX IF NOT EXISTS tool_calls_session ON tool_calls (session_id);
 CREATE INDEX IF NOT EXISTS tool_calls_target ON tool_calls (target);
@@ -296,7 +307,7 @@ export const TOOL_INPUT_PREVIEW = 500;
 export const ADDED_COLUMNS = {
   hook_events: HOOK_EVENT_COLUMNS,
   turns: ['parent_uuid'],
-  tool_calls: ['subagent_type', 'input_preview'],
+  tool_calls: ['subagent_type', 'input_preview', 'description'],
 };
 const BOOLEAN_EVENT_COLUMNS = new Set(['probe', 'known', 'truncated']);
 
@@ -959,10 +970,10 @@ class Harvest {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`),
       putToolCall: db.prepare(`INSERT OR REPLACE INTO tool_calls
         (tool_use_id,session_id,turn_uuid,ts,tool_name,server_name,target,input_sha1,input_bytes,
-         result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type,input_preview)
+         result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type,input_preview,description)
         VALUES (?,?,?,?,?,?,?,?,?,
          COALESCE((SELECT result_bytes FROM tool_calls WHERE tool_use_id = ?), NULL),
-         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?,?)`),
+         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?,?,?)`),
       // The result arrives on a LATER line than the use, so this fills the row in place. If the
       // two land in different harvest runs the update finds nothing and result_bytes stays NULL,
       // which reads as "not yet seen" rather than as zero bytes.
@@ -1269,7 +1280,11 @@ class Harvest {
           typeof input.subagent_type === 'string' ? input.subagent_type : null,
           // THE INPUT, KEPT. `raw` was already built here to be hashed and measured, and then
           // dropped, which is why a rejected call could report its size and not its content.
-          raw.slice(0, TOOL_INPUT_PREVIEW));
+          raw.slice(0, TOOL_INPUT_PREVIEW),
+          // Trimmed, and empty becomes NULL: a blank description is the same as none, and
+          // storing "" would make `description IS NOT NULL` stop meaning "this call has a note".
+          (typeof input.description === 'string' && input.description.trim())
+            ? input.description.trim() : null);
         this.stats.toolCalls++;
       } else if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
         const c = b.content;
@@ -2203,6 +2218,33 @@ async function selfTest() {
       message: { content: [{ type: "tool_use", id: "toolu_2", name: "Read",
                              input: { file_path: "C:/x/a.md" } }] },
     }, "f", 2);
+    // THE AGENT'S OWN NOTE, kept whole even when the command is long. This is the line the UI
+    // shows above a tool call, and it is not assistant text: it lives in the tool input, in
+    // records the messages table drops. Leaving it to input_preview loses it 40% of the time,
+    // because JSON.stringify puts the command first.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u9", timestamp: "2026-09-07T05:02:00Z",
+      message: { content: [{ type: "tool_use", id: "toolu_9", name: "Bash",
+        input: { command: "grep -rn " + "x".repeat(TOOL_INPUT_PREVIEW * 2) + " .",
+                 description: "Located chunk files" } }] },
+    }, "f", 9);
+    const noted = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_9");
+    checks.push(["the agent's note survives a command longer than the preview (gate can fail)",
+      noted?.description === "Located chunk files", String(noted?.description)]);
+    checks.push(["and the preview really did cut the command off, or the check above proves nothing",
+      typeof noted?.input_preview === "string"
+        && noted.input_preview.length === TOOL_INPUT_PREVIEW
+        && !noted.input_preview.includes("Located chunk files"),
+      String(noted?.input_preview?.length)]);
+    // A call with no description stores NULL, so "has a note" stays a question the column answers.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u10", timestamp: "2026-09-07T05:02:01Z",
+      message: { content: [{ type: "tool_use", id: "toolu_10", name: "Read",
+                             input: { file_path: "C:/x/a.md", description: "   " } }] },
+    }, "f", 10);
+    const blank = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_10");
+    checks.push(["a blank description is stored as NULL, not as an empty string",
+      blank?.description === null, JSON.stringify(blank?.description)]);
     const small = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_2");
     checks.push(["a short input is kept whole",
       small?.input_preview === JSON.stringify({ file_path: "C:/x/a.md" }), String(small?.input_preview)]);

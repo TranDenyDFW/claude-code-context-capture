@@ -109,3 +109,77 @@ def _messages_table(monkeypatch):
 def _note(monkeypatch):
     lines = [t for t in extract.texts(_rendered(monkeypatch)) if "in this session" in t]
     return next((line for line in lines if "message" in line), "")
+
+
+# --------------------------------------------------------------------------- the agent's note
+
+LONG_COMMAND = "grep -rn " + ("x" * 900) + " ."
+
+
+def _store_with_a_call(tmp_path, description, preview=None):
+    """A temp store holding one tool call, so the timeline can be checked without a migration.
+
+    The live store gains a column only when harvest next runs, and this package never writes, so a
+    test that waited for that would be a test that runs on some machines.
+    """
+    import sqlite3
+
+    path = tmp_path / "calls.db"
+    con = sqlite3.connect(path)
+    con.execute("""CREATE TABLE tool_calls (
+        tool_use_id TEXT PRIMARY KEY, session_id TEXT, turn_uuid TEXT, ts TEXT,
+        tool_name TEXT, input_bytes INTEGER, input_preview TEXT, description TEXT)""")
+    con.execute("INSERT INTO tool_calls VALUES (?,?,?,?,?,?,?,?)",
+                ("toolu_1", "s1", "u1", "2026-09-07T08:03:09", "Bash", len(LONG_COMMAND),
+                 preview if preview is not None else LONG_COMMAND[:500], description))
+    con.commit()
+    con.close()
+    return path
+
+
+def test_the_note_the_agent_wrote_is_on_the_row(tmp_path, monkeypatch):
+    """THE DEFECT. "Located chunk files" is the line a reader scans for, and it reached no table:
+    Claude Code never puts assistant text and a tool_use in the same record, so it is not assistant
+    prose, and the record it does live in has no readable text and was dropped."""
+    monkeypatch.setattr(store, "DB_PATH", _store_with_a_call(tmp_path, "Located chunk files"))
+    rows = store.session_tool_calls("s1")
+    assert len(rows) == 1
+    assert "Located chunk files" in rows.iloc[0]["preview"], rows.iloc[0]["preview"]
+
+
+def test_the_note_comes_before_the_command(tmp_path, monkeypatch):
+    """Ordering is the whole fix. A 220-character preview of a 900-character command would push
+    the note off the end, which is the same truncation that loses it inside input_preview."""
+    monkeypatch.setattr(store, "DB_PATH", _store_with_a_call(tmp_path, "Located chunk files"))
+    preview = store.session_tool_calls("s1").iloc[0]["preview"]
+    assert preview.index("Located chunk files") < preview.index("grep -rn"), preview
+
+
+def test_the_tool_name_still_leads(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DB_PATH", _store_with_a_call(tmp_path, "Located chunk files"))
+    assert store.session_tool_calls("s1").iloc[0]["preview"].startswith("Bash: ")
+
+
+def test_a_call_with_no_note_reads_normally(tmp_path, monkeypatch):
+    """THE NEGATIVE CONTROL. A naive concatenation writes "Bash:  - grep..." for a call with no
+    description, and every Read and Edit in the store has none."""
+    monkeypatch.setattr(store, "DB_PATH", _store_with_a_call(tmp_path, None))
+    preview = store.session_tool_calls("s1").iloc[0]["preview"]
+    assert preview.startswith("Bash: grep -rn"), preview
+    assert " - " not in preview[:20], preview
+
+
+def test_the_timeline_declines_until_the_column_exists(tmp_path, monkeypatch):
+    """Harvest adds the column; this package cannot. Until then the timeline is what it was, which
+    is a great deal better than a tab that raises."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE tool_calls (tool_use_id TEXT, session_id TEXT, input_preview TEXT)")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(store, "DB_PATH", path)
+    out = store.session_tool_calls("s1")
+    assert list(out.columns) == COLUMNS
+    assert len(out) == 0
