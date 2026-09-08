@@ -244,10 +244,13 @@ def column_present(table: str, column: str) -> bool:
 # ---- What a tool call turned out to be -------------------------------------------------------
 #
 # `is_error` meant two opposite things at once: a tool that RAN AND FAILED, and a tool that NEVER
-# RAN because something refused it. Measured across every transcript on this machine, of 6,856
-# flagged calls 1,847 (26.9%) were refusals, and the ExitPlanMode row read 39 errors of which 36
-# were a person rejecting a plan. harvest.mjs now records the answer per call; this is the one
-# place that reads it, so no surface can invent a second definition.
+# RAN because something refused it. Measured on this store after the backfill: of 6,871 flagged
+# calls, 1,848 are refusals (26.9%), 3,945 are genuine failures, and 1,078 predate the field that
+# would settle it. Per tool it is far worse, because refusal is not evenly spread: of the 41 flagged
+# ExitPlanMode calls, NOT ONE is a tool that ran and failed.
+#
+# harvest.mjs records the answer per call; this is the one place that reads it, so no surface can
+# invent a second definition.
 
 #: The vocabulary harvest.mjs writes. Mirrored here rather than imported, because that is a JS
 #: module, and pinned by a test that reads the distinct values out of a real store.

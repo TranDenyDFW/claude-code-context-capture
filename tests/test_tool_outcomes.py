@@ -2,10 +2,11 @@
 
 ONE FLAG MEANT TWO OPPOSITE THINGS. Claude Code sets `is_error` on a tool that RAN AND FAILED and
 on a tool that NEVER RAN because something refused it. Every "errors" number this app printed was
-the two added together. Measured across every transcript on this machine, 7,941 files, joined to
-the store: of 6,688 flagged calls, 1,828 were refusals, 27.3%. Per tool it is far worse, because
-refusal is not spread evenly: the ExitPlanMode row read 39 errors of which 36 were a person
-rejecting a plan, so that number was 92.3% wrong.
+the two added together. Measured on this store after the backfill: of 6,871 flagged calls, 1,848
+are refusals and 1,078 more predate the field that would prove it either way, so 26.9% of what
+was called an error never ran and only 57.4% of it is a provable failure. Per tool it is far
+worse, because refusal is not spread evenly: of the 41 flagged ExitPlanMode calls, NOT ONE is a
+tool that ran and failed.
 
 Every check here was watched to FAIL against the defect it names before it was kept. The ones
 marked "gate can fail" are the ones a plausible-looking wrong implementation still passes without.

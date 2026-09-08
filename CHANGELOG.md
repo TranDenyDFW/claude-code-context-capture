@@ -56,10 +56,15 @@ removed and nothing here said so.
   already knew.
 - **`errors` no longer counts calls that never ran.** Claude Code sets `is_error` on a tool
   that RAN AND FAILED and on a tool that was REFUSED before it ran, and every "errors" number
-  this app printed was the two added together. Measured over 7,941 transcripts joined to this
-  store: of 6,688 flagged calls, 1,828 were refusals, 27.3%. Per tool it is far worse, because
-  refusal is not spread evenly: the `ExitPlanMode` row read 39 errors of which 36 were a person
-  rejecting a plan, so that number was 92.3% wrong. Six surfaces now read one merged `outcome`
+  this app printed was the two added together. After the backfill this store reads 6,871 flagged
+  calls: 1,848 refusals, 3,945 genuine failures, and 1,078 that predate the field and cannot be
+  told apart. So 26.9% of what was called an error never ran, and of the calls that can be
+  classified at all it is 31.9%. Per tool it is far worse, because
+  refusal is not spread evenly: the `ExitPlanMode` row read 39 errors and not one of them was a
+  tool that ran and failed. What that row reads NOW is 13 refused and 28 unknown, because
+  the shipped classifier will not claim a refusal it cannot prove and those 28 predate the
+  field that would have proved it. The exploratory pass called all 36 refusals; only the exact
+  signal ships. Six surfaces now read one merged `outcome`
   column that is BLANK when there is nothing to say, with the three counts kept as hidden
   columns so sorting and CSV export still work on the numbers.
 - **A store harvested before those columns existed reports "N unknown", not zero.** A blank

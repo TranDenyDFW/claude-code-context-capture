@@ -333,7 +333,7 @@ function reportTools(db) {
 
   console.log('');
   // THE LEGEND IS PRINTED ONLY WHERE IT APPLIES. `errors` used to be one number covering two
-  // opposite facts, and on this store 27.3% of it was calls that never ran at all.
+  // opposite facts, and on this store 26.9% of it was calls that never ran at all.
   if (shown.some((r) => r.refused)) {
     console.log('  refused = the call NEVER RAN: a permission rule, a hook, or a person stopped it');
     console.log('  first. It was counted as an error until this column existed. Run tools/waste.mjs');

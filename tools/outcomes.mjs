@@ -3,9 +3,10 @@
 //
 // ONE FLAG MEANT TWO OPPOSITE THINGS. Claude Code sets `is_error` on a tool that RAN AND FAILED and
 // on a tool that NEVER RAN because something refused it. Measured across every transcript on this
-// machine, 7,941 files and 11.1 GB, joined to the store: of 6,688 flagged calls, 1,828 (27.3%) were
-// refusals. Per tool it is worse, because refusal is not evenly spread: the ExitPlanMode row read
-// 39 errors of which 36 were a person rejecting a plan and 3 were real.
+// machine, 7,941 files and 11.1 GB, then backfilled into the store: of 6,871 flagged calls, 1,848
+// (26.9%) are refusals and 1,078 more predate the field and cannot be told apart, so 31.9% of
+// everything provable never ran. Per tool it is worse, because refusal is not evenly spread: of
+// the ExitPlanMode row's 41 flagged calls, NONE is a tool that ran and failed.
 //
 // THE SIGNAL IS EXACT, NOT A GUESS. Claude Code writes `toolDenialKind` at the TOP LEVEL of the
 // record, a sibling of `message`, never inside the content block. Across all transcripts 2,046
