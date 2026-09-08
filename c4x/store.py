@@ -241,6 +241,102 @@ def column_present(table: str, column: str) -> bool:
         con.close()
 
 
+# ---- What a tool call turned out to be -------------------------------------------------------
+#
+# `is_error` meant two opposite things at once: a tool that RAN AND FAILED, and a tool that NEVER
+# RAN because something refused it. Measured across every transcript on this machine, of 6,856
+# flagged calls 1,847 (26.9%) were refusals, and the ExitPlanMode row read 39 errors of which 36
+# were a person rejecting a plan. harvest.mjs now records the answer per call; this is the one
+# place that reads it, so no surface can invent a second definition.
+
+#: The vocabulary harvest.mjs writes. Mirrored here rather than imported, because that is a JS
+#: module, and pinned by a test that reads the distinct values out of a real store.
+OUTCOME_OK = "ok"
+OUTCOME_ERROR = "error"
+OUTCOME_REFUSED = "refused"
+OUTCOME_UNCLASSIFIED = "unclassified"
+
+
+def outcome_available() -> bool:
+    """Whether this store has been harvested since the outcome columns arrived."""
+    return (column_present("tool_calls", "outcome")
+            and column_present("tool_calls", "denial_kind"))
+
+
+def outcome_sums(alias: str = "") -> str:
+    """The three SELECT-list expressions every surface counts outcomes with.
+
+    ONE FRAGMENT, SO SIX SITES CANNOT DISAGREE. They already had: one wrote
+    `SUM(CASE WHEN is_error THEN 1 ELSE 0 END)` and the others `SUM(COALESCE(is_error, 0))`, and a
+    seventh place retyped a paraphrase of the query for the reader that matched none of them.
+
+    ON AN UNMIGRATED STORE THIS COUNTS EVERYTHING AS UNKNOWN, and that is deliberate rather than
+    defensive. Returning zeros would render a blank column, which is exactly what a table where
+    everything succeeded looks like, so the page would state the strongest possible claim on the
+    weakest possible evidence. Saying "N unknown" is true, is visible, and names the command that
+    fixes it. Same reasoning as the empty-frame guard on session_tool_calls, one level up.
+    """
+    where = f"{alias}." if alias else ""
+    if not outcome_available():
+        return "0 AS errors, 0 AS refused, COUNT(*) AS unknown"
+    return (f"SUM(CASE WHEN {where}outcome = 'error' THEN 1 ELSE 0 END) AS errors, "
+            f"SUM(CASE WHEN {where}outcome = 'refused' THEN 1 ELSE 0 END) AS refused, "
+            f"SUM(CASE WHEN {where}outcome IS NULL OR {where}outcome = 'unclassified' "
+            f"THEN 1 ELSE 0 END) AS unknown")
+
+
+def outcome_text(errors=0, refused=0, unknown=0) -> str:
+    """The merged cell, and an EMPTY STRING when there is nothing to say.
+
+    A zero is noise. On a table of forty tools most rows have no failures at all, and forty cells
+    reading "0 errors" is forty cells of nothing dressed as a measurement.
+
+    THE WORDS ARE LONG ON PURPOSE, and this is not style. tools/table_audit.py fails any cell
+    matching a number followed by up to four letters, so "3 err" would be reported as a number
+    stored as text while "3 errors" is not; and the bare word "unknown" is one of that audit's
+    placeholder strings, so the count always leads. Mirrors outcomeText in tools/outcomes.mjs.
+    """
+    parts = []
+    for n, one, many in ((errors, "error", "errors"),
+                         (refused, "refused", "refused"),
+                         (unknown, "unknown", "unknown")):
+        n = int(n or 0)
+        if n > 0:
+            parts.append(f"{n:,} {one if n == 1 else many}")
+    return ", ".join(parts)
+
+
+def fold_outcomes(df):
+    """Replace the three counted columns with one merged `outcome`, keeping them for sorting.
+
+    APPLIED IMMEDIATELY AFTER THE QUERY, so no caller can render the three raw columns by
+    forgetting to. The three survive as hidden columns because the merged cell is TEXT and sorts
+    lexicographically, which would put "3 errors" above "36 refused" above "9 refused"; a reader
+    ordering by failures needs the numbers, and so does a CSV export.
+
+    Inserted where `errors` sat, so column order is unchanged for every caller.
+    """
+    if df is None or getattr(df, "empty", True) or "errors" not in df.columns:
+        return df
+    out = df.copy()
+    at = list(out.columns).index("errors")
+    merged = [outcome_text(e, r, u) for e, r, u
+              in zip(out["errors"], out["refused"], out["unknown"], strict=True)]
+    for name in ("errors", "refused", "unknown"):
+        if name in out.columns:
+            out = out.drop(columns=[name])
+    out.insert(at, "outcome", merged)
+    # The numbers, kept and hidden. The table builder declares them in `hidden_columns`.
+    out["errors"] = list(df["errors"])
+    out["refused"] = list(df["refused"])
+    out["unknown"] = list(df["unknown"])
+    return out
+
+
+#: What fold_outcomes leaves behind for a DataTable to hide.
+OUTCOME_HIDDEN = ("errors", "refused", "unknown")
+
+
 def tables_present(*names) -> bool:
     """Whether EVERY named table exists. One round trip, no query against the tables themselves.
 
