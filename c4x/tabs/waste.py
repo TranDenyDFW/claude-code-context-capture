@@ -243,6 +243,7 @@ def _repeated_inputs(where, args, session_id=None):
                     COUNT(*)                   AS calls,
                     COUNT(*) - COUNT(DISTINCT session_id) AS beyond_one_each,
                     SUM(COALESCE(result_bytes, 0)) AS bytes,
+                    """ + outcome_sums() + """,
                     MIN(ts) AS first_seen, MAX(ts) AS last_seen
                FROM tool_calls
               WHERE input_sha1 IS NOT NULL """ + where + """
@@ -259,7 +260,7 @@ def _repeated_inputs(where, args, session_id=None):
             "Not answerable with a single session selected: this table compares sessions to each "
             "other. Clear the session in the header, or pick a project, to see which inputs repeat "
             "across a whole population.")
-    df = q(sql, args)
+    df = fold_outcomes(q(sql, args))
     if df.empty:
         return html.Div()
     df["bytes"] = (df["bytes"] / 1024).round(1)
@@ -273,10 +274,11 @@ def _repeated_inputs(where, args, session_id=None):
     return evidence_block(
         "Multi-Session Input", df, sql, args,
         columns=numeric_columns(
-            ["tool", "target", "sessions", "calls", "beyond_one_each", "bytes",
+            ["tool", "target", "sessions", "calls", "beyond_one_each", "bytes", "outcome",
              "first_seen", "last_seen"],
             {"sessions", "calls", "beyond_one_each", "bytes"},
             {"bytes": Format(precision=1, scheme=Scheme.fixed)}),
+        hidden_columns=list(OUTCOME_HIDDEN),
         heat=["sessions", "calls"], page_size=12,
         note=f"{int(totals['groups']):,} inputs repeat across sessions, "
              f"{int(totals['calls']):,} calls in total. NOT the same cost as the table above: "
@@ -373,10 +375,11 @@ def waste_layout(session_id=None, scope="main", cohort=None):
     dup_args = tuple(read_tools) + wargs + (dup_min,)
     dup = q(sql_dup, dup_args) if read_tools else pd.DataFrame()
     sql_srv = """SELECT server_name AS server, COUNT(*) calls,
-                  SUM(COALESCE(result_bytes,0)) bytes, MAX(ts) last_call
+                  SUM(COALESCE(result_bytes,0)) bytes,
+                  """ + outcome_sums() + """, MAX(ts) last_call
            FROM tool_calls WHERE server_name IS NOT NULL """ + wsid + """
            GROUP BY server_name ORDER BY calls ASC"""
-    srv = q(sql_srv, wargs)
+    srv = fold_outcomes(q(sql_srv, wargs))
     sql_tools = """SELECT tool_name AS tool, COUNT(*) calls,
                   SUM(COALESCE(result_bytes,0)) bytes,
                   """ + outcome_sums() + """
@@ -461,7 +464,12 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
         evidence_block(
             "MCP Calls", srv, sql_srv, wargs,
-            columns=["server", "calls", "bytes", "last_call"],
+            # NOT ON THE PLAN'S LIST OF SIX, and it reads tool_calls like the rest of them. On the
+            # live store this row hid 176 errors and 7 unknown behind a bare invocation count for
+            # one server. The list was an enumeration; the population is every table that reports
+            # tool calls, and a gate now asks that of the rendered app.
+            columns=["server", "calls", "bytes", "outcome", "last_call"],
+            hidden_columns=list(OUTCOME_HIDDEN),
             # The shared help for "calls" was written for the repeated-inputs table and says these
             # count calls "with this exact input". Here they count every call to the server.
             help_for={"calls": "Every call to this server, whatever the input."},

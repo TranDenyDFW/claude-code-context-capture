@@ -124,6 +124,21 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
     # the header picker is no selection. It looked like a broken selection rather than a broken
     # table, and it cost an afternoon. Accept both shapes instead of trusting the caller.
     cols = [c if isinstance(c, dict) else {"name": c, "id": c} for c in cols]
+    # A HIDDEN COLUMN MUST FIRST BE A COLUMN. `hidden_columns` hides one that exists; naming one
+    # that was never declared hides nothing, because there was nothing there. It also has no
+    # header, so it cannot be sorted, no filter cell, and it never reaches the CSV, which reads
+    # `columns` under either export_columns setting.
+    #
+    # THIS REPO ALREADY PAID FOR THAT ONCE, thirty lines from here in c4x/tabs/summary.py, where
+    # an undeclared hidden column kept a row out of derived_viewport_data and every click on the
+    # findings table was a silent no-op. It was reintroduced at all three outcome sites, and the
+    # gate written to protect the property asserted on the DataFrame instead of the table, so it
+    # could not have caught it. Declaring them here fixes every caller at once, including the ones
+    # that do not exist yet.
+    declared = {c["id"] for c in cols}
+    for name in hidden_columns:
+        if name not in declared and any(name in row for row in records[:1]):
+            cols.append({"name": name, "id": name})
     truncated = (" (table shows the first page; export gives every row)"
                  if len(records) > page_size else "")
     return with_query(html.Div([
@@ -134,10 +149,21 @@ def evidence_block(title: str, df, sql: str, params=(), columns=None, page_size:
             # Only the tables a callback drives carry one, so an id here means "something on this
             # page filters this table" rather than being decoration.
             **({"id": table_id} if table_id else {}),
-            # DECLARED, NOT DROPPED. A hidden column still travels in every row, so a reader can
-            # sort or export by it and a row click can read it; it is simply not drawn. That is
-            # what lets one merged text cell be readable without losing the numbers behind it.
+            # DECLARED, NOT DROPPED. A hidden column travels in every row and in the CSV, so a
+            # row click can read it and a reader can take the numbers away; it is simply not drawn.
+            #
+            # WHAT IT DOES NOT BUY IS SORTING. A hidden column has no header, so nothing in the
+            # browser can order by it, and the original plan claimed otherwise. The merged cell is
+            # text and sorts lexicographically, which puts "3 errors" above "36 refused" above
+            # "9 refused"; that is a real limitation of this design and is stated rather than
+            # papered over. The alternative was four columns of mostly zeros, which is the noise
+            # the merged cell exists to remove.
             hidden_columns=list(hidden_columns),
+            # OR THE EXPORT SILENTLY DROPS THEM. Dash's export_columns defaults to "visible", so
+            # a hidden column is excluded from the CSV, and half of what hiding them was supposed
+            # to preserve would have been lost without any error. Set only where there is
+            # something hidden, so no other table's export changes shape.
+            **({"export_columns": "all"} if hidden_columns else {}),
             columns=(_cols := cols),
             tooltip_header=header_help(_cols, help_for),
             data=records,
@@ -534,7 +560,7 @@ def turn_diff_panel(session_id, scope, turns, a, b):
             # THE QUERY THAT RAN AND WHAT IT RAN WITH. See Queried, above.
             "tools called in this range", tools.df, tools.sql, tools.params,
             # `outcome` is text and stays out of the numeric set; the three counts behind it
-            # are hidden, so they can sort and export without being drawn.
+            # are hidden, so they reach the CSV and a row click without being drawn.
             columns=numeric_columns([c for c in tools.df.columns if c not in OUTCOME_HIDDEN],
                                     {"calls", "result_bytes", "input_bytes"}),
             hidden_columns=list(OUTCOME_HIDDEN)))

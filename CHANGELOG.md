@@ -59,14 +59,18 @@ removed and nothing here said so.
   this app printed was the two added together. After the backfill this store reads 6,871 flagged
   calls: 1,848 refusals, 3,945 genuine failures, and 1,078 that predate the field and cannot be
   told apart. So 26.9% of what was called an error never ran, and of the calls that can be
-  classified at all it is 31.9%. Per tool it is far worse, because
-  refusal is not spread evenly: the `ExitPlanMode` row read 39 errors and not one of them was a
-  tool that ran and failed. What that row reads NOW is 13 refused and 28 unknown, because
-  the shipped classifier will not claim a refusal it cannot prove and those 28 predate the
-  field that would have proved it. The exploratory pass called all 36 refusals; only the exact
-  signal ships. Six surfaces now read one merged `outcome`
+  classified at all it is 31.9%. Per tool it is far worse, because refusal is not spread
+  evenly: the `ExitPlanMode` row read 39 errors and NONE of them can be proven to have run and
+  failed. That row now reads "13 refused, 30 unknown", because the shipped classifier will
+  not claim a refusal it cannot prove and 28 of those calls predate the field that would have
+  proved it. Reading their result text suggests about 36 were rejections and 3 were real; only
+  the exact signal ships, so the app says unknown where the exploratory pass said refused.
+  Six surfaces now read one merged `outcome`
   column that is BLANK when there is nothing to say, with the three counts kept as hidden
-  columns so sorting and CSV export still work on the numbers.
+  columns so the CSV export still carries the numbers. It does NOT make them sortable: a hidden
+  column has no header, so nothing in the browser can order by it, and the merged text cell
+  sorts lexicographically. The plan claimed sorting too; that half was not deliverable and is
+  stated here rather than left as a promise the page does not keep.
 - **A store harvested before those columns existed reports "N unknown", not zero.** A blank
   column there would be indistinguishable from "everything succeeded", which is the defect
   being fixed. The page names the command that resolves it.
@@ -109,9 +113,11 @@ removed and nothing here said so.
   says so.
 - `data/raw/events.ndjson` is ingested incrementally but never rotated, so it grows.
 - A refused call cannot be attributed to a hook rather than to a person, or the reverse. Claude
-  Code records `permission-rule` for both a settings deny rule and a hook block, and 15 user
-  rejections landed in `permission-rule` against 28 permission prompts in `user-rejected`. This
-  is a limit of the source, not of the reader, and nothing here guesses at the split.
+  Code records `permission-rule` for both a settings deny rule and a hook block, so this store
+  holds no evidence that would separate them. An earlier draft of this entry put numbers on
+  how often the two recorded kinds cross over; those came from a text heuristic, do not
+  reproduce, and have been removed rather than restated. The limit is in the source, and
+  nothing here guesses at the split.
 - A call flagged by a build older than 2.1.202 can never be classified: that build recorded no
   reason at all, and its refusal records are identical to its failure records.
 

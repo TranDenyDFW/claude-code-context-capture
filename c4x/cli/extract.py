@@ -69,6 +69,12 @@ def tables(node, found=None):
             "id": getattr(node, "id", None) or "(anonymous)",
             "columns": [c.get("id") for c in _seq(getattr(node, "columns", None))
                         if isinstance(c, dict)],
+            # REPORTED, so a gate can ask whether a hidden column was ever declared. It hides only
+            # a column that exists, and naming an undeclared one hides nothing while costing that
+            # column its header, its sort, its filter and its place in the CSV. That shipped twice
+            # in this repo, and both times the check that should have caught it looked at the
+            # DataFrame rather than at the table.
+            "hidden_columns": list(_seq(getattr(node, "hidden_columns", None))),
             "rows": _seq(getattr(node, "data", None)),
             "tooltips": {
                 column: (value.get("value") if isinstance(value, dict) else value)

@@ -175,13 +175,23 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
         html.Div(id="sessions-filter-note"),
         DataTable(
             id="tbl-session",
+            # `session_id` is DECLARED and then hidden, not merely named in hidden_columns.
+            # hidden_columns hides a column that exists; naming an undeclared one hides nothing,
+            # because there was nothing there, and it keeps that column out of the CSV under
+            # either export_columns setting. This table exported a sessions list with no session
+            # id in it, which cannot be joined back to anything. Same trap as c4x/tabs/summary.py,
+            # where an undeclared hidden column made every row click a silent no-op.
             columns=(_cols := numeric_columns(
                 ["section", "title", "project", "last active", "turns", "current", "peak",
                  "compactions"],
-                {"turns", "current", "peak", "compactions"})),
+                {"turns", "current", "peak", "compactions"}) + [
+                {"name": "session_id", "id": "session_id"}]),
             tooltip_header=header_help(_cols),
             data=rows,
             hidden_columns=["session_id"],
+            # Or the id is declared, hidden, and still absent from the export: Dash defaults this
+            # to "visible", and hidden is not visible.
+            export_columns="all",
             page_size=16,
             sort_action="native",
             # This table does not spread TABLE_STYLE, so it needs the tooltip setting explicitly.

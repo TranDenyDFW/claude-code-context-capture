@@ -5,8 +5,9 @@ on a tool that NEVER RAN because something refused it. Every "errors" number thi
 the two added together. Measured on this store after the backfill: of 6,871 flagged calls, 1,848
 are refusals and 1,078 more predate the field that would prove it either way, so 26.9% of what
 was called an error never ran and only 57.4% of it is a provable failure. Per tool it is far
-worse, because refusal is not spread evenly: of the 41 flagged ExitPlanMode calls, NOT ONE is a
-tool that ran and failed.
+worse, because refusal is not spread evenly: of the 41 flagged ExitPlanMode calls, NONE can be
+proven to have run and failed. Reading their result text suggests about 3 were real, and this
+app reports the provable answer rather than the suggested one.
 
 Every check here was watched to FAIL against the defect it names before it was kept. The ones
 marked "gate can fail" are the ones a plausible-looking wrong implementation still passes without.
@@ -80,16 +81,17 @@ def test_a_count_always_leads_the_word_unknown():
 def test_folding_keeps_the_numbers_and_the_column_order(q, has_store):
     """Decision 7, checked rather than asserted in a docstring.
 
-    The merged cell is TEXT and sorts lexicographically, which would put "3 errors" above
-    "36 refused" above "9 refused". A reader ordering a table by failures needs the numbers, and so
-    does a CSV export, so the three survive as hidden columns.
+    The merged cell is TEXT, so the numbers have to survive somewhere: a row click and the CSV
+    both need them. This is the DataFrame half of that property. The table half, that a hidden
+    column was first a declared one, is asserted against the rendered app further down, because
+    checking it here is exactly the mistake that let the argument be a no-op at three sites.
     """
     df = q(f"SELECT tool_name AS tool, COUNT(*) AS calls, {outcome_sums()} "
            "FROM tool_calls GROUP BY tool_name")
     folded = fold_outcomes(df)
     assert list(folded.columns)[:3] == ["tool", "calls", "outcome"], list(folded.columns)
     for name in OUTCOME_HIDDEN:
-        assert name in folded.columns, f"{name} was dropped, so nothing can sort or export by it"
+        assert name in folded.columns, f"{name} was dropped, so nothing can read the number"
         assert list(folded[name]) == list(df[name]), f"{name} was altered on the way through"
 
 
@@ -144,12 +146,17 @@ def test_a_store_without_the_column_reports_unknown_not_zero(unmigrated):
 # ---------------------------------------------------------------------------
 # D5: the defect itself, on the real store
 # ---------------------------------------------------------------------------
-def test_a_tool_whose_failures_are_all_refusals_never_says_error(pane, q, has_store):
+def test_no_table_calls_a_refused_tool_an_error(pane, q, has_store):
     """THE DEFECT, ON WHATEVER STORE THIS SUITE IS POINTED AT.
 
-    Reverting the Tool Calls site makes this read "N errors" for a tool where every flagged call
-    was stopped before it ran. Skipped rather than passed where the store holds no refusals at all,
-    because a check that silently passes on data that cannot exercise it is not a check.
+    Reverting any site makes the tool whose flagged calls were all stopped before they ran read
+    "N errors" again.
+
+    ASSERTED OF EVERY TABLE, not of the first one that looked right. The first version matched by
+    shape, took the first table with a `tool` and an `outcome` column, and compared its cell to
+    the store-wide total. Adding a site broke it, because the table it then matched groups by
+    input hash and honestly reports a smaller number. A gate that can be broken by adding a
+    correct site was testing the site, not the property.
     """
     refusers = q("""SELECT tool_name, SUM(CASE WHEN outcome = 'refused' THEN 1 ELSE 0 END) refused,
                            SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) errors
@@ -158,19 +165,23 @@ def test_a_tool_whose_failures_are_all_refusals_never_says_error(pane, q, has_st
     if refusers.empty:
         pytest.skip("this store records no tool whose flagged calls are all refusals")
     tool = refusers.iloc[0]["tool_name"]
-    n = int(refusers.iloc[0]["refused"])
 
+    checked = 0
     for table in extract.tables(pane("tab-cost")):
         if "outcome" not in (table["columns"] or []):
             continue
         for row in table["rows"]:
-            if row.get("tool") == tool:
-                assert row["outcome"] == f"{n:,} refused", row["outcome"]
-                assert "error" not in row["outcome"], (
-                    f"{tool} never failed; every flagged call was stopped before it ran")
-                return
-    pytest.fail(f"the Cost tab drew no outcome cell for {tool}")
-
+            if row.get("tool") != tool:
+                continue
+            checked += 1
+            assert "error" not in row["outcome"], (
+                f"{tool} never failed: every flagged call was stopped before it ran, but a "
+                f"table reports {row['outcome']!r}")
+            assert "refused" in row["outcome"], row["outcome"]
+            # The cell must agree with the row it was folded from, whatever population that row
+            # covers. Comparing to a store-wide total is what coupled this to one table.
+            assert row["outcome"] == outcome_text(row["errors"], row["refused"], row["unknown"])
+    assert checked, f"no table on the Cost tab drew an outcome cell for {tool}"
 
 def test_the_denial_vocabulary_reaches_a_table_not_only_a_note(pane, q, has_store):
     """Decision 8. A note carries the same words and cannot be sorted, filtered or exported."""
@@ -317,3 +328,117 @@ def test_the_registry_describes_the_columns_that_replaced_it():
         "vocabulary misleads while being technically exact")
     assert "2.1.202" in COLUMN_HELP["outcome"], (
         "the help does not say which builds could not record a reason")
+
+
+# ---------------------------------------------------------------------------
+# The two properties, asked of every table the app renders
+# ---------------------------------------------------------------------------
+def _cols_of(table):
+    """A DataTable's declared column specs. Dash omits an unset prop rather than defaulting"""
+    return [c for c in (getattr(table, "columns", None) or []) if isinstance(c, dict)]
+
+
+def _every_table(app, pane, session_id, other_session_id):
+    """Every table on every tab, with the query that produced it.
+
+    The query travels on the wrapper `panels.with_query` puts around each block, so it reaches
+    its table by CONTAINMENT. Paired by position it could mis-attribute, and a query shown
+    against a table that did not produce it is worse than no query at all. Same walk as
+    `c4x/api/main.py`, for the same reason.
+    """
+    from c4x.panels import QUERY_MARK
+
+    def walk(node, query, found):
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child, query, found)
+            return found
+        if not hasattr(node, "_prop_names"):
+            return found
+        if QUERY_MARK in str(getattr(node, "className", "") or "").split():
+            props = (node.to_plotly_json().get("props", {}) or {})
+            query = props.get("data-query") or query
+        if type(node).__name__ == "DataTable":
+            found.append((node, query))
+        for name in getattr(node, "_prop_names", []):
+            if name != "id":
+                walk(getattr(node, name, None), query, found)
+        return found
+
+    # THE APP'S OWN TAB LIST, never a copy of it here. A copy is a second place to forget, and
+    # a tab this file did not know about is exactly where an unchecked table would sit. Naming the
+    # population's SOURCE rather than its members is the whole point of both gates below.
+    out = []
+    for tab in [t[0] for t in app.TABS]:
+        for table, query in walk(pane(tab, session_id), None, []):
+            out.append((tab, table, query or ""))
+        if other_session_id:
+            for table, query in walk(pane(tab, None), None, []):
+                out.append((tab, table, query or ""))
+    assert out, "no tables rendered, so neither gate below could have failed"
+    return out
+
+
+def test_a_hidden_column_was_first_a_declared_one(app, pane, session_id, other_session_id,
+                                                  has_store):
+    """`hidden_columns` HIDES A COLUMN THAT EXISTS. Naming an undeclared one hides nothing.
+
+    And it costs that column everything a column has: no header, so no native sort; no filter
+    cell; and no place in the CSV, which is built from `columns` under either export_columns
+    setting. Decision 7 exists to keep the three counts EXPORTABLE behind the
+    merged text cell, and naming them without declaring them delivered none of it.
+
+    THIS REPO PAID FOR IT ONCE ALREADY, in c4x/tabs/summary.py, where an undeclared hidden
+    column kept a row out of derived_viewport_data and every click on the findings table was a
+    silent no-op. It was reintroduced at three sites in one commit because the gate written for
+    the property asserted on the DataFrame instead of on the table. This one asks the table.
+    """
+    undeclared = []
+    for tab, table, _query in _every_table(app, pane, session_id, other_session_id):
+        declared = {c.get("id") for c in _cols_of(table)}
+        for name in (getattr(table, "hidden_columns", None) or []):
+            if name not in declared:
+                undeclared.append(f"{tab}/{getattr(table, 'id', None) or '(anonymous)'}: {name}")
+    assert not undeclared, ("hidden columns that were never declared, so they hide nothing and "
+                            "cannot be exported: " + ", ".join(sorted(set(undeclared))))
+
+
+#: Tables that read tool_calls and deliberately say nothing about how the calls turned out.
+#: Each carries its reason, and the reason is checked, not trusted.
+OUTCOME_EXEMPT = {
+    "denial_kind": "every row IS a refusal, so an outcome column would say `refused` N times",
+    "reads": ("a refused read is not a read, and it would be a real defect in this count, but "
+              "the store holds 4 refused reads against 47,117 and none of them falls in a "
+              "group this table shows. A column blank on every row is the noise the merged "
+              "cell exists to avoid. Revisit if the refused count ever reaches this table."),
+}
+
+
+def test_every_table_that_reports_tool_calls_says_how_they_turned_out(
+        app, pane, session_id, other_session_id, has_store):
+    """THE POPULATION IS EVERY TABLE THAT READS tool_calls, not the six the plan listed.
+
+    Taking that list as the population is the error this gate removes. Two tables were missed,
+    MCP Calls and Multi-Session Input, both on the tab the change edited, and on the live store
+    one MCP row hid 176 errors and 7 unknown behind a bare invocation count. A gate that knew
+    the list would have walked past both.
+
+    An exemption must be DECLARED and must still describe its table, in the manner of
+    tools/table_audit.py: a stale exemption silently grants coverage to a table that has since
+    started needing it.
+    """
+    missing, unused = [], set(OUTCOME_EXEMPT)
+    for tab, table, query in _every_table(app, pane, session_id, other_session_id):
+        if "tool_calls" not in query:
+            continue
+        ids = [c.get("id") for c in _cols_of(table)]
+        if "outcome" in ids:
+            continue
+        excuse = next((k for k in OUTCOME_EXEMPT if k in ids), None)
+        if excuse:
+            unused.discard(excuse)
+            continue
+        missing.append(f"{tab}: {ids}")
+    assert not missing, ("tables reporting tool calls that say nothing about how they turned "
+                         "out: " + " | ".join(sorted(set(missing))))
+    assert not unused, (f"exemptions describing no rendered table, so they are stale: {unused}")

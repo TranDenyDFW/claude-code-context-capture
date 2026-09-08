@@ -247,7 +247,9 @@ def column_present(table: str, column: str) -> bool:
 # RAN because something refused it. Measured on this store after the backfill: of 6,871 flagged
 # calls, 1,848 are refusals (26.9%), 3,945 are genuine failures, and 1,078 predate the field that
 # would settle it. Per tool it is far worse, because refusal is not evenly spread: of the 41 flagged
-# ExitPlanMode calls, NOT ONE is a tool that ran and failed.
+# ExitPlanMode calls, this store can PROVE none ran and failed: 13 carry a denial kind and the
+# other 28 predate the field. Reading the result text says roughly 3 were real, which is why
+# the claim here is about what is provable and not about what happened.
 #
 # harvest.mjs records the answer per call; this is the one place that reads it, so no surface can
 # invent a second definition.
@@ -310,12 +312,16 @@ def outcome_text(errors=0, refused=0, unknown=0) -> str:
 
 
 def fold_outcomes(df):
-    """Replace the three counted columns with one merged `outcome`, keeping them for sorting.
+    """Replace the three counted columns with one merged `outcome`, keeping the numbers.
 
     APPLIED IMMEDIATELY AFTER THE QUERY, so no caller can render the three raw columns by
-    forgetting to. The three survive as hidden columns because the merged cell is TEXT and sorts
-    lexicographically, which would put "3 errors" above "36 refused" above "9 refused"; a reader
-    ordering by failures needs the numbers, and so does a CSV export.
+    forgetting to. The three survive as hidden columns so the numbers still reach a row click and
+    the CSV, which `evidence_block` asks for with export_columns="all".
+
+    WHAT THEY DO NOT SURVIVE AS IS SORTABLE. A hidden column has no header, so nothing in the
+    browser can order by it, and the merged cell is text: it sorts lexicographically, putting
+    "3 errors" above "36 refused" above "9 refused". The plan promised sorting as well; it was not
+    deliverable behind a hidden column and saying so is cheaper than a reader discovering it.
 
     Inserted where `errors` sat, so column order is unchanged for every caller.
     """

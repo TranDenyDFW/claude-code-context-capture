@@ -168,7 +168,9 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   -- WHAT THE CALL TURNED OUT TO BE, because is_error meant two opposite things at once: a tool
   -- that RAN AND FAILED and a tool that NEVER RAN because something refused it. Measured across
   -- this store after the backfill, of 6,871 flagged calls 1,848 (26.9%) were refusals, and not
-  -- one of the ExitPlanMode row's 41 flagged calls was a tool that ran and failed.
+  -- one of the ExitPlanMode row's 41 flagged calls can be PROVEN to have run and failed: 13
+  -- carry a denial kind, 28 predate the field, and the text of those 28 suggests about 3 were
+  -- real. This column reports the provable answer, never the suggested one.
   --
   -- One of ok, error, refused, unclassified. NULL means no result block has ever been seen for
   -- this call, which is a real answer and not the same as any of the four.
