@@ -7,6 +7,7 @@ from dash import dcc, html
 
 from c4x.dash_compat import DataTable
 from c4x.frames import records
+from c4x.labels import stamp
 from c4x.store import COMPACTION_WINDOWS, THRESHOLDS, all_compactions, fit_window
 from c4x.theme import (
     BORDER,
@@ -60,7 +61,7 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
                       xaxis_title="Tokens at Compaction", yaxis_title="Tokens Past Threshold")
 
     show = df.copy()
-    show["ts"] = show["ts"].astype(str).str.slice(0, 19).str.replace("T", " ", regex=False)
+    show["ts"] = show["ts"].map(stamp)
     cols = ["ts", "project", "model", "version", "trigger", "pre_tokens", "post_tokens",
             "dropped", "survivors", "fitted_window", "confidence", "threshold", "overshoot"]
 

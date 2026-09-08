@@ -113,3 +113,79 @@ def test_the_population_caption_agrees_with_its_own_count():
     with mock_patch.object(store, "cohort_sessions", return_value=["a", "b"]):
         assert store.population_label(None, "project::X", "main") == (
             "2 sessions in project X, main thread only")
+
+
+# --- a chat with no folder --------------------------------------------------------------------
+
+SCRATCH = ("C:/Users/Shake/AppData/Roaming/Claude/scratch-workspaces/"
+           "54e8e2c2-6d3a-4c51-8ab7-5b84c31e6e4a/5f6eb959-46b3-4fa4-8ce4-79017924010c/"
+           "scratch-2026-09-07-433162")
+PROJECT = "P:/ClaudeExt/ccxe/c4x"
+
+
+def test_a_scratch_workspace_is_folderless_and_a_project_is_not():
+    from c4x.labels import is_folderless
+    assert is_folderless(SCRATCH)
+    assert not is_folderless(PROJECT)
+    assert not is_folderless(None) and not is_folderless("")
+
+
+def test_a_backslash_path_is_recognised_too():
+    """Every one of these arrives from the store in Windows form."""
+    from c4x.labels import is_folderless
+    assert is_folderless(SCRATCH.replace("/", BACKSLASH))
+
+
+def test_a_project_never_gets_a_title_appended():
+    """THE NEGATIVE CONTROL. A title is offered and must be ignored: a real path names itself, and
+    appending to all of them is the long-label problem short_path exists to solve."""
+    from c4x.labels import titled_path
+    assert titled_path(PROJECT, {"custom": "SHOULD NOT APPEAR"}) == ".../ccxe/c4x"
+
+
+def test_a_folderless_chat_shows_its_name():
+    from c4x.labels import titled_path
+    assert titled_path(SCRATCH, {"last-prompt": "how to create mcp server"}) == (
+        ".../scratch-2026-09-07-433162 - how to create mcp server")
+
+
+def test_it_keeps_one_segment_not_two():
+    """The parent of a scratch workspace is a uuid, identical across every one of them on this
+    store, so keeping it spends 37 characters saying nothing and pushes the name off the end."""
+    from c4x.labels import titled_path
+    assert titled_path(SCRATCH, {}) == ".../scratch-2026-09-07-433162"
+
+
+def test_a_real_title_outranks_the_prompt():
+    """A custom title was typed by a person and an ai one was written to BE a title. A last-prompt
+    is merely what was said first, so it must never win over either."""
+    from c4x.labels import titled_path
+    both = {"custom": "Chosen", "ai": "Generated", "last-prompt": "typed first"}
+    assert titled_path(SCRATCH, both).endswith(" - Chosen")
+    assert titled_path(SCRATCH, {"ai": "Generated", "last-prompt": "x"}).endswith(" - Generated")
+
+
+def test_a_long_prompt_is_cut_and_marked_as_cut():
+    """Measured on the real store: one folder-less chat's prompt is a pasted shell command 70
+    characters long. Uncut it would be the whole label."""
+    from c4x.labels import PROMPT_LABEL_MAX, titled_path
+    long = "stop the service and delete: PS C:/Users/Shake> C:/Users/Shake/WiseFs-thing"
+    out = titled_path(SCRATCH, {"last-prompt": long})
+    assert out.endswith("...")
+    assert len(out.split(" - ", 1)[1]) <= PROMPT_LABEL_MAX + 3
+
+
+def test_newlines_in_a_prompt_do_not_break_the_label():
+    """A prompt is free text and can be multi-line. A label with a newline in it wraps a table row
+    open, which is a layout fault rather than a wrong number, but it is still not a label."""
+    from c4x.labels import titled_path
+    out = titled_path(SCRATCH, {"last-prompt": "first line\n\nsecond line"})
+    assert "\n" not in out and " - first line second line" in out
+
+
+def test_an_empty_or_missing_title_leaves_the_path_alone():
+    """Whitespace is not a title. Appending " - " with nothing after it reads as a bug."""
+    from c4x.labels import titled_path
+    assert titled_path(SCRATCH, {}) == ".../scratch-2026-09-07-433162"
+    assert titled_path(SCRATCH, {"last-prompt": "   "}) == ".../scratch-2026-09-07-433162"
+    assert titled_path(SCRATCH, None) == ".../scratch-2026-09-07-433162"

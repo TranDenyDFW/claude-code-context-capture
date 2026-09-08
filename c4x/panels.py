@@ -9,7 +9,7 @@ from dash.dash_table.Format import Format, Scheme
 
 from c4x.dash_compat import DataTable
 from c4x.frames import records as frame_records
-from c4x.labels import plural
+from c4x.labels import plural, stamp
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     measured_cost,
@@ -231,8 +231,8 @@ def selection_metrics(session_id=None, cohort=None, scope="main") -> dict:
         "compactions": int(comp or 0),
         "tool_calls": int(tools["n"] or 0),
         "tool_bytes": int(tools["bytes"] or 0),
-        "first_ts": str(row["first_ts"] or "")[:19].replace("T", " "),
-        "last_ts": str(row["last_ts"] or "")[:19].replace("T", " "),
+        "first_ts": stamp(row["first_ts"]),
+        "last_ts": stamp(row["last_ts"]),
     }
 
 
@@ -269,9 +269,11 @@ COMPARE_ROWS = [
     # It scales with population, like the other totals, so it is never marked comparable across
     # arms of different sizes.
     ("cost_usd", "estimated cost, USD", f"estimate, prices of {PRICE_TABLE_DATE}", "higher", False),
-    # BESIDE the estimate, directly under it, so the two are read together. Absent for any arm
-    # whose sessions predate the cost-state record, and the compare table already drops a row where
-    # both arms are empty, so an unmeasured comparison shows no measured row rather than two zeros.
+    # BESIDE the estimate, directly under it, so the two are read together. Absent for any arm whose
+    # sessions predate the cost-state record. A comparison where NEITHER arm is measured drops this
+    # row; one where only one arm is measured keeps it, shows the measured side and leaves the other
+    # blank, and says "one arm has none". The earlier version of this comment claimed the drop
+    # covered the one-sided case too, which was wrong and crashed the tab.
     ("measured_usd", "measured cost, USD", "Claude Code's own total", "higher", False),
     ("cost_calls", "calls the price table covers", "count", None, False),
 ]
@@ -317,8 +319,21 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
                 verdict = ""
         else:
             ratio, verdict = None, "one arm has none"
+        # BLANK, NOT ZERO, for an arm that has no value at all.
+        #
+        # This crashed. `measured_usd` is None when an arm carries no cost-state record, and the
+        # guard above only drops a row when BOTH arms are empty, so one measured arm against one
+        # unmeasured reached round(None, 1) and raised TypeError. It took out the Compare tab, the
+        # CLI and contract_audit.py. My own comment on the COMPARE_ROWS entry asserted the drop
+        # covered this and it never did.
+        #
+        # `round(av or 0, 1)` would fix the crash and tell a lie: 0.0 claims the arm measured
+        # nothing, which is the claim `selection_metrics` returns None specifically to avoid. None
+        # renders as an empty cell, the same rule est_usd already follows on the Cost tab, and the
+        # verdict beside it already reads "one arm has none".
         rows.append({"metric": label, "unit": kind,
-                     "A": round(av, 1), "B": round(bv, 1),
+                     "A": None if av is None else round(av, 1),
+                     "B": None if bv is None else round(bv, 1),
                      "B / A": None if ratio is None else round(ratio, 2), "verdict": verdict,
                      "basis": ("per unit" if per_unit else
                                "total, arms are the same size" if same_size else
@@ -460,7 +475,8 @@ def turn_diff_panel(session_id, scope, turns, a, b):
     ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap"})
 
     blocks = [
-        html.Div(f"Between turn {a} ({ts_a[:19]}) and turn {b} ({ts_b[:19]})", style=SECTION_HEAD),
+        html.Div(f"Between turn {a} ({stamp(ts_a)}) and turn {b} ({stamp(ts_b)})",
+                 style=SECTION_HEAD),
         cards,
     ]
     if not tools.empty:

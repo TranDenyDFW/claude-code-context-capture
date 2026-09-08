@@ -17,12 +17,37 @@
 // Usage: node tools/run_tests.mjs [--node-only] [--strict] [--self-test]
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { winArg } from './paths.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
+// A CHILD THAT PRINTS TOO MUCH IS KILLED, and the runner called it slow.
+//
+// spawnSync's default maxBuffer is 1 MB. A child that writes past it is killed with SIGTERM and the
+// call returns error.code ENOBUFS with status null. The runner only looked at `signal`, so it
+// reported "killed after 300s", and a leg that failed in eight seconds for writing 1 MB of pytest
+// output was read as one that had run for five minutes. Measured: node -e writing 2 MB returns
+// status null, signal SIGTERM, ENOBUFS, with 1,114,112 bytes captured.
+//
+// 64 MB, and the number is a ceiling rather than an expectation: the point is that a verbose leg
+// fails on its own merits instead of being cut off, and that the failure says which happened.
+const MAX_OUTPUT = 64 * 1024 * 1024;
+
+// WHAT ACTUALLY HAPPENED TO THE CHILD, rather than a guess from `signal` alone.
+//
+// A signal meant "timed out" to this runner, and it printed a hardcoded 300s beside it. Two things
+// were wrong: the number had drifted from the timeouts it claimed to describe, and the commonest
+// signal here is not a timeout but SIGTERM from exceeding maxBuffer, which arrives with error.code
+// ENOBUFS. Reading `error` first tells the two apart, which is the difference between "this leg is
+// slow" and "this leg printed more than the runner would hold".
+function whyItFailed(run) {
+  if (run.error) return `${run.error.code || 'error'}: ${String(run.error.message).slice(0, 160)}`;
+  if (run.signal) return `killed by ${run.signal} (a timeout, or output past ${MAX_OUTPUT >> 20} MB)`;
+  return `exit ${run.status}`;
+}
+
 const ROOT = dirname(dirname(SELF));
 const NODE_ONLY = process.argv.includes('--node-only');
 // A SKIPPED CHECK IS A FAILURE WHERE IT MATTERS. The runner has always SAID so, printing
@@ -106,6 +131,52 @@ function tailOf(text, keep = 4) {
   return chosen.join(' | ').slice(0, 600);
 }
 
+
+// A CONTROL CHARACTER IN SOURCE IS ALWAYS A BUG, AND ALWAYS AN INVISIBLE ONE.
+//
+// Three files in this repo carried one, all from the same authoring mistake: an escape written into
+// a non-raw string by an editing script, so the two characters backslash-b became a single backspace
+// byte. What that produces is worse than a syntax error, because it compiles and it reads correctly
+// in every terminal, editor and diff:
+//
+//   run_tests.mjs     a decline marker that could never match, so every graceful skip in the python
+//                     leg was reported as a failure. An external reviewer chased that across two
+//                     full runs, called it non-deterministic, and could not find it. That is the cost.
+//   statusline.mjs    the Bearer alternative of the secret-redaction pattern, dead, so a value that
+//                     should never have been recorded would have been recorded verbatim.
+//   test_projects.py  a path inside prose. Harmless, and the reason a search by symptom misses these.
+//
+// A reader cannot see them and a review cannot catch them, so a machine has to. Scoped to the text
+// this repo authors: the images and the built frontend bundle are legitimately binary.
+//
+// ESC (u001b) is cut OUT of the range rather than merely described as excluded: the first version
+// of this comment claimed the exclusion while the range still covered it, and the gate fired on
+// six innocent files. Tab, CR and LF fall outside the ranges. The .md plan artifacts are skipped
+// as a directory because they are captured terminal transcripts, not source this repo authored.
+const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f]/;
+const SOURCE_EXT = /\.(mjs|js|jsx|ts|tsx|py|json|md|css|html|yml|yaml|toml|cfg|txt)$/;
+const SKIP_DIR = new Set(['node_modules', 'dist', '.git', 'tmp', '__pycache__', '.venv', 'data', '.md']);
+
+function sourceFiles(dir = ROOT, out = []) {
+  for (const name of readdirSync(dir)) {
+    if (SKIP_DIR.has(name)) continue;
+    const abs = join(dir, name);
+    if (statSync(abs).isDirectory()) sourceFiles(abs, out);
+    else if (SOURCE_EXT.test(name)) out.push(abs);
+  }
+  return out;
+}
+
+function controlCharHits() {
+  const hits = [];
+  for (const abs of sourceFiles()) {
+    const text = readFileSync(abs, 'utf8');
+    if (!CONTROL.test(text)) continue;
+    const line = text.split('\n').findIndex((l) => CONTROL.test(l)) + 1;
+    hits.push(`${abs.slice(ROOT.length + 1).replace(/\\/g, '/')}:${line}`);
+  }
+  return hits;
+}
 
 function nodeTargets() {
   const out = [];
@@ -290,6 +361,16 @@ const EXEMPT = new Map([
 // duplicate, and a duplicate that ignored the flag would fork until something killed it.
 if (process.argv.includes('--self-test')) {
   const cases = [
+    // THE DETECTOR IS PROVED FIRST, so this trio still fails on a clean tree. A scan that reports
+    // nothing proves nothing by itself: it looks identical whether it works or matches nothing at
+    // all. The known-bad input is the exact shape that shipped, built from a code point so that
+    // this file never contains the byte it is looking for.
+    ['the control-character detector catches a known-bad line',
+     CONTROL.test('const declined = /' + String.fromCharCode(8) + "SKIPPED/.test(text);")],
+    ['and does not fire on ordinary source, tab, CR and LF included',
+     !CONTROL.test('function f() {\r\n\tconst r = /\\bword\\b/;\n}')],
+    ['no source file in this repo carries a control character',
+     controlCharHits().length === 0, controlCharHits().join(' ') || 'none'],
     ['skips itself by resolved path, not by filename', nodeTargets().every((r) => join(ROOT, r) !== SELF)],
     ['every exempt entry carries a reason', [...EXEMPT.values()].every((v) => v && v.length > 10)],
     ['the check-count pattern matches a real self-test line', CHECKS.test('SELF-TEST PASS (77 checks)')],
@@ -349,7 +430,7 @@ let skipped = 0;
 if (!NODE_ONLY) {
   const at = (args) => {
     const r = spawnSync('git', ['log', '-1', '--format=%ct', '--', ...args],
-                        { encoding: 'utf8', cwd: ROOT, windowsHide: true });
+                        { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, windowsHide: true });
     return r.status === 0 ? Number((r.stdout || '').trim()) || 0 : 0;
   };
   const src = at([':(exclude)frontend/src/**/*.test.*', ':(exclude)frontend/src/**/*.spec.*',
@@ -401,6 +482,24 @@ function suiteEnv(extra = {}) {
   return e;
 }
 
+// PYTHON BUFFERS ITS STDOUT WHEN IT IS A PIPE, AND A PIPE IS ALL THE RUNNER EVER GIVES IT.
+//
+// Measured, not assumed: table_audit.py against a first-run store writes 3,275 bytes and every one
+// of them arrives in a SINGLE chunk 4,629 ms into a 4,820 ms run. Nothing streams. The whole verdict
+// sits in an 8 KB buffer that reaches the runner only at interpreter shutdown, so a path that ends
+// the process without a final flush loses the verdict entirely rather than truncating it.
+//
+// STATED PLAINLY, BECAUSE IT WOULD OTHERWISE READ AS THE FIX: this is NOT what caused the reported
+// symptom. A reviewer saw a deliberate AUDIT SKIPPED presented as a failure, could not find the
+// mechanism, and reported the behaviour rather than dressing it up. The cause was the dead regex
+// above, it was deterministic all along, and it is fixed there. This is a separate fragility found
+// while chasing that one, and it is worth fixing because the runner's whole contract with its
+// children rides on bytes whose flushing it does not control. Every python child, not just the one
+// tool whose symptom happened to be noticed.
+function pyEnv(extra = {}) {
+  return { ...process.env, ...extra, PYTHONUNBUFFERED: '1' };
+}
+
 // THE FIXTURE IS BUILT BEFORE THE NODE SELF-TESTS, not only for the Python leg.
 //
 // `mirror.mjs --self-test` and `segments.mjs --self-test` call validate()/audit(), which read a
@@ -423,7 +522,7 @@ function buildFixture(out, extra = []) {
   rmSync(out, { force: true });
   const built = spawnSync(process.execPath,
     [join(ROOT, 'tools', 'make_fixture.mjs'), '--out', out, ...extra],
-    { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true, env: suiteEnv() });
+    { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, windowsHide: true, env: suiteEnv() });
   return { ok: built.status === 0 && existsSync(out),
            tail: tailOf(`${built.stdout || ''}${built.stderr || ''}`) };
 }
@@ -449,7 +548,7 @@ for (const rel of nodeTargets()) {
   // than a hung process reports a green suite as red, which teaches people to re-run rather than
   // to read. Still bounded, because a genuinely hung self-test must not stall the suite forever.
   const run = spawnSync(process.execPath, [join(ROOT, rel), '--self-test'],
-    { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true,
+    { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, windowsHide: true,
       // Every node self-test, not a hand-picked list: nodeTargets() enumerates from disk so
       // that nothing can hide, and a per-tool opt-in would put the hand-list straight back.
       // A self-test that touches no store is unaffected by the variable.
@@ -465,15 +564,22 @@ for (const rel of nodeTargets()) {
   // facing a store too small to check could only exit non-zero, which the runner read as a
   // broken check. SKIPPED still fails under --strict, so a check that could not run is never
   // quietly a pass.
-  const declined = run.status === 3 && /SKIPPED/.test(text);
+  // EXIT 3 IS THE CONTRACT; THE MARKER ONLY CARRIES THE REASON.
+  // Requiring both meant a missing marker produced a FAILURE rather than a decline with a thin
+  // reason: the wrong verdict, not a poorer one. Not hypothetical. The marker test in the python
+  // loop was two literal backspace bytes around the word where a word boundary was meant, so it
+  // could never match and every graceful decline there was reported as a break. That was the whole
+  // of the unexplained skip-shown-as-failure. Fixed above, and no longer load-bearing here. SKIPPED
+  // still fails under --strict, so trusting the exit code alone never becomes a quiet pass.
+  const declined = run.status === 3;
   if (declined) {
     skipped++;
-    const why = (text.match(/^.*SKIPPED:\s*(.+)$/m) || [, 'no reason given'])[1];
+    const why = (text.match(/^.*SKIPPED:\s*(.+)$/m) || [, 'it exited 3 to decline but its reason never reached the runner'])[1];
     results.push({ rel, state: 'SKIPPED', note: why.trim().slice(0, 200) });
   } else if (run.status !== 0 || run.signal) {
     failed++;
     results.push({ rel, state: 'FAIL',
-                   note: run.signal ? `killed after 300s (${run.signal})` : `exit ${run.status}`,
+                   note: whyItFailed(run),
                    tail: tailOf(text) });
   } else if (!match) {
     failed++;
@@ -503,7 +609,7 @@ if (NODE_ONLY) {
     rmSync(bare, { force: true });
     const built = spawnSync(process.execPath, [join(ROOT, 'tools', 'make_fixture.mjs'),
                                                '--out', bare, '--no-optional'],
-                            { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
+                            { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, windowsHide: true });
     bareBuilt = built.status === 0 && existsSync(bare);
     if (!bareBuilt) {
       failed++;
@@ -541,12 +647,12 @@ if (NODE_ONLY) {
     // a broken test rather than a broken runner.
     const argv = rel.startsWith('-') ? [rel, ...args] : [join(ROOT, rel), ...args];
     const run = spawnSync('python', argv, {
-      encoding: 'utf8', cwd: ROOT, timeout: 900_000, windowsHide: true,
+      encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 900_000, windowsHide: true,
       // C4X_DB is the store override the app already honours, so the fixture run needs no special
       // support anywhere else in the codebase.
-      env: opts?.fixture ? { ...process.env, C4X_DB: fixture }
-        : opts?.bareFixture ? { ...process.env, C4X_DB: bare }
-        : process.env,
+      env: opts?.fixture ? pyEnv({ C4X_DB: fixture })
+        : opts?.bareFixture ? pyEnv({ C4X_DB: bare })
+        : pyEnv(),
     });
     const text = plain(run.stdout) + plain(run.stderr);
     const match = text.match(CHECKS);
@@ -558,16 +664,23 @@ if (NODE_ONLY) {
     // `compactions` table as a crash. The child names the reason and it is printed here verbatim,
     // and SKIPPED still fails under --strict, so the rule at the top of this file holds: a check
     // that could not run is never quietly a pass.
-    const declined = run.status === 3 && /SKIPPED/.test(text);
+    // EXIT 3 IS THE CONTRACT; THE MARKER ONLY CARRIES THE REASON.
+    // Requiring both meant a missing marker produced a FAILURE rather than a decline with a thin
+    // reason: the wrong verdict, not a poorer one. Not hypothetical. The marker test in the python
+    // loop was two literal backspace bytes around the word where a word boundary was meant, so it
+    // could never match and every graceful decline there was reported as a break. That was the whole
+    // of the unexplained skip-shown-as-failure. Fixed above, and no longer load-bearing here. SKIPPED
+    // still fails under --strict, so trusting the exit code alone never becomes a quiet pass.
+    const declined = run.status === 3;
     if (declined) {
       skipped++;
-      const why = (text.match(/^.*SKIPPED:\s*(.+)$/m) || [, 'no reason given'])[1];
+      const why = (text.match(/^.*SKIPPED:\s*(.+)$/m) || [, 'it exited 3 to decline but its reason never reached the runner'])[1];
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'SKIPPED',
                      note: why.trim().slice(0, 200) });
     } else if (run.status !== 0 || run.signal) {
       failed++;
       results.push({ rel: `${rel} ${args.join(' ')}`.trim(), state: 'FAIL',
-                     note: run.signal ? `killed after 300s (${run.signal})` : `exit ${run.status}`,
+                     note: whyItFailed(run),
                      tail: tailOf(text) });
     } else if (!text.includes(marker)) {
       // Exit 0 with the marker absent means it did not do what it claims to do.
@@ -616,8 +729,8 @@ if (!NODE_ONLY) {
     const argv = [...args, '--prefix', frontend];
     const run = process.platform === 'win32'
       ? spawnSync(['npm', ...argv].map(winArg).join(' '),
-                  { encoding: 'utf8', cwd: ROOT, timeout: 900_000, shell: true, windowsHide: true })
-      : spawnSync('npm', argv, { encoding: 'utf8', cwd: ROOT, timeout: 900_000, windowsHide: true });
+                  { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 900_000, shell: true, windowsHide: true })
+      : spawnSync('npm', argv, { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 900_000, windowsHide: true });
     const text = plain(run.stdout) + plain(run.stderr);
     // NOT the shared CHECKS pattern. Vitest prints "Test Files  2 passed (2)" BEFORE
     // "Tests  22 passed (22)", and CHECKS matches "N passed" anywhere, so it took the file count
@@ -684,9 +797,9 @@ if (!NODE_ONLY && !existsSync(join(ROOT, 'node_modules', 'eslint'))) {
   const WIN = process.platform === 'win32';
   const run = WIN
     ? spawnSync(['npm', 'run', 'lint'].map(winArg).join(' '),
-                { encoding: 'utf8', cwd: ROOT, timeout: 300_000, shell: true, windowsHide: true })
+                { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, shell: true, windowsHide: true })
     : spawnSync('npm', ['run', 'lint'],
-                { encoding: 'utf8', cwd: ROOT, timeout: 300_000, windowsHide: true });
+                { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, windowsHide: true });
   const text = plain(run.stdout) + plain(run.stderr);
   if (run.status !== 0 || run.signal) {
     failed++;

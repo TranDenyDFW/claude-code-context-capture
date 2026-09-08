@@ -6,7 +6,13 @@ import plotly.graph_objects as go
 from dash import dcc, html
 
 from c4x.dash_compat import DataTable
-from c4x.store import SESSION_TURN_FLOOR, cohort_sessions, session_rows
+from c4x.labels import is_folderless, titled_path
+from c4x.store import (
+    SESSION_TURN_FLOOR,
+    restrict_to_cohort,
+    session_rows,
+    titles_for,
+)
 from c4x.theme import (
     ACCENT,
     GOOD,
@@ -92,18 +98,22 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
     project and could not be scanned. Sorted by section, then project, then most recently active,
     which is the order the desktop sidebar uses.
     """
-    df = session_rows()
-    ids = cohort_sessions(cohort)
-    if ids:
-        df = df[df["session_id"].isin(ids)]
+    df = restrict_to_cohort(session_rows(), cohort)
     counts = df["section"].value_counts().to_dict() if not df.empty else {}
+    # NAMES for the chats that have no folder. Every other row's project is a directory somebody
+    # chose; a scratch workspace is a generated id and identifies the row without saying anything
+    # about it. Looked up only for the folder-less rows, so an ordinary store pays nothing.
+    _folderless = [r.session_id for r in df.itertuples() if is_folderless(r.project)]
+    _titles = titles_for(_folderless) if _folderless else {}
+
     rows = []
     for r in df.itertuples():
         rows.append({
             "session_id": r.session_id,
             "section": r.section,
             "title": r.title,
-            "project": r.project,
+            "project": (titled_path(r.project, _titles.get(r.session_id, {}))
+                        if is_folderless(r.project) else r.project),
             "last active": str(r.last_ts or "")[:16].replace("T", " "),
             "turns": int(r.turns),
             "peak": int(r.peak or 0),

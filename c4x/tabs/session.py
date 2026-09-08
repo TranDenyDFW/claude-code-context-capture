@@ -2,16 +2,18 @@
 
 One session in detail: the resident line, the danger bands, and the turn diff.
 """
+import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
 
 from c4x.dash_compat import DataTable
 from c4x.frames import records
-from c4x.labels import plural
+from c4x.labels import plural, stamp
 from c4x.panels import baseline_marks
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     THRESHOLDS,
+    cohort_named,
     cohort_sessions,
     measured_cost,
     q,
@@ -21,6 +23,7 @@ from c4x.store import (
     session_compactions,
     session_messages,
     session_survivors,
+    session_tool_calls,
     session_turns,
     session_window,
 )
@@ -201,6 +204,11 @@ def most_recent_session(cohort=None):
     coming back to the app expects the default to follow.
     """
     ids = cohort_sessions(cohort)
+    if not ids and cohort_named(cohort):
+        # A cohort was chosen and nothing answers to it, so there is no session to default to.
+        # Falling through picked the newest session in the STORE, which is how a deleted project
+        # ended up showing a session from somewhere else under its own name.
+        return None
     if ids:
         placeholders = ",".join("?" * len(ids))
         df = q(f"""SELECT session_id FROM turns WHERE session_id IN ({placeholders})
@@ -230,10 +238,15 @@ def session_layout(session_id=None, scope="main", cohort=None):
         # THE WARNING SAYS WHICH SESSION THE CHART IS OF, so it belongs to the chart. It used to
         # open the tab as the first of five loose paragraphs, which is where a reader stops reading
         # them.
+        # LEVEL, not only a colour. Dash renders the amber; the browser app gets extract.texts(),
+        # where a colour does not survive, so this arrived as an ordinary caption and was shown on
+        # hover. It is the sentence that answers "why does All sessions show one session", asked
+        # of a header that was still reading "All sessions (22 listed)". A reader with that
+        # question does not hover the chart heading to find the answer.
         defaulted = chart_note(
             "Nothing is selected in the header, so this is the most recently active session in "
             "the population. Pick one in the header, or click a row on All sessions, to change it.",
-            style={"color": WARN})
+            style={"color": WARN}, level="warn")
     turns = session_turns(session_id, include_sidechain=(scope != "main"))
     n = max(len(turns), 1)
     default_budget = 80
@@ -565,7 +578,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
 
     if not comps.empty:
         show = comps.copy()
-        show["ts"] = show["ts"].astype(str).str.slice(0, 19).str.replace("T", " ", regex=False)
+        show["ts"] = show["ts"].map(stamp)
         cols = ["ts", "trigger", "pre_tokens", "post_tokens", "cumulative_dropped_tokens",
                 "duration_ms", "version"]
         cards = html.Div([cards, html.Div(style={"height": "14px"}),
@@ -582,15 +595,33 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
 
     # What was actually said. The chart shows the window filling; this shows what filled it.
     msgs = session_messages(session_id)
+    # WHAT WAS PROPOSED, beside what was said about it. `messages` holds no tool_use type at all,
+    # store-wide, so a rejected call read as "plan written" then "the user does not want to proceed
+    # with this tool use" with nothing in between naming what was refused. The call was in
+    # tool_calls the whole time, a different table on a different tab, recording a hash and a byte
+    # count and none of the content.
+    #
+    # Concatenated and re-sorted rather than joined, because the two are separate records of the
+    # same moment and the reader wants them in the order they happened. Empty on a store harvest
+    # has not migrated yet, which is the state that existed before this and not a failure.
+    calls = session_tool_calls(session_id)
+    if not calls.empty:
+        msgs = pd.concat([msgs, calls], ignore_index=True).sort_values("ts", kind="stable")
     if not msgs.empty:
         m = msgs.copy()
-        m["ts"] = m["ts"].astype(str).str.slice(11, 19)
+        m["ts"] = m["ts"].map(stamp)
         # The query is capped, so len(m) is how many are shown, not how many exist. Saying
         # "400 messages" when 400 is the LIMIT reports the cap as if it were a measurement.
         total_msgs = int(q("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
                            (session_id,)).iloc[0]["n"])
-        note = (f"{total_msgs:,} messages in this session, showing the first {len(m):,}"
-                if total_msgs > len(m) else f"{total_msgs:,} messages in this session")
+        # BOTH KINDS, because the table now holds both and reporting only the messages would call
+        # a mixed count a message count. Stated separately rather than summed into one number,
+        # since "1,204 rows" would hide which half the reader is short of.
+        total_calls = len(calls)
+        shown = f", showing the first {len(m):,}" if total_msgs + total_calls > len(m) else ""
+        note = (f"{total_msgs:,} messages and {total_calls:,} tool calls in this session{shown}"
+                if total_calls else
+                (f"{total_msgs:,} messages in this session{shown}"))
         cards = html.Div([
             cards,
             html.Div(f"{note}, oldest first. Click a row to read it in full.",

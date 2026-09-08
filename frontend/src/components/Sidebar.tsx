@@ -30,6 +30,18 @@ const ICONS: Record<string, typeof Activity> = {
   'tab-diagnostics': Stethoscope,
 }
 
+/**
+ * The two kinds of tab, and the fact that separates them.
+ *
+ * `scoped` comes from the server, where a tab declares it on the same line as its name. The
+ * grouping is drawn from that single source rather than from a second list here, because a list
+ * of tab ids in the frontend is exactly what the payload exists to replace.
+ */
+const GROUPS: { key: string; heading: string; holds: (scoped?: boolean) => boolean }[] = [
+  { key: 'store', heading: 'Whole store', holds: (scoped) => scoped === false },
+  { key: 'selection', heading: 'Current selection', holds: (scoped) => scoped !== false },
+]
+
 const REMEMBERED = 'c4x.sidebar.collapsed'
 
 export function useCollapsed(): [boolean, (next: boolean) => void] {
@@ -87,46 +99,78 @@ export function Sidebar({
         </span>
       </div>
 
-      {tabs.map((tab) => {
-        const Icon = ICONS[tab.id] ?? Activity
-        const current = tab.id === active
+      {/*
+        GROUPED BY WHAT THE HEADER SELECTION REACHES, with the groups named on the page.
+        
+        The list interleaved them: Summary, All sessions, Session, Compactions, Window, Cost,
+        Compare, Diagnostics, so the three tabs whose numbers NEVER move sat at positions 1, 2
+        and 8. Picking a session changed five of the eight and left three identical, and nothing
+        on screen said which was which. `scoped` was already in the payload and was spent on a
+        line of hover text, which is the one place a reader looking for that answer will not find
+        it. The server decides the membership; this only draws it.
+
+        A tab the server does not classify falls in with the selection group rather than being
+        dropped, on the same rule as the icon map above: a presentation gap must not hide a tab.
+      */}
+      {GROUPS.map(({ key, heading, holds }) => {
+        const mine = tabs.filter((tab) => holds(tab.scoped))
+        if (!mine.length) return null
         return (
-          <button
-            key={tab.id}
-            // The same id the Dash page used, which `tools/screenshots.py` selects on.
-            id={`btn-${tab.id}`}
-            onClick={() => onPick(tab.id)}
-            aria-current={current ? 'page' : undefined}
-            // NAMED BY THE LABEL. With the description in `title` and the label hidden when
-            // collapsed, the accessible name was the whole sentence, so a screen reader read a
-            // paragraph per tab and the name did not contain the visible text. The label is the
-            // name; the sentence is the description.
-            aria-label={tab.label}
-            aria-description={[tab.help, ...(current ? about ?? [] : [])]
-              .filter(Boolean).join(' ')}
-            // WHAT THIS TAB IS, on the tab. The sentence used to be printed across the top of
-            // every pane; it belongs on the thing it describes. When collapsed the label leads,
-            // because the rail shows only an icon.
-            title={[
-              collapsed ? tab.label : '',
-              tab.help,
-              tab.scoped === false ? 'Store-wide: the header selection does not change it.' : '',
-              ...(current ? about ?? [] : []),
-            ].filter(Boolean).join('\n\n')}
-            className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm
-                        transition-colors duration-150 ${collapsed ? 'justify-center' : ''} ${
-                          current
-                            ? 'bg-accent/12 text-ink'
-                            : 'text-ink-dim hover:bg-panel-raised hover:text-ink'
-                        }`}
-          >
-            <Icon
-              size={15}
-              aria-hidden="true"
-              className={current ? 'text-accent' : 'text-ink-faint'}
-            />
-            {!collapsed && <span className="truncate">{tab.label}</span>}
-          </button>
+          <div key={key} className="contents">
+            {collapsed ? (
+              // A HEADING IS NOT READABLE IN A 3.5rem RAIL, and a truncated one is worse than
+              // none. The rule stays visible so the split survives the collapse, and the group
+              // keeps its name for a screen reader either way.
+              <hr className="my-1 border-edge/60" aria-hidden="true" />
+            ) : (
+              <h2 className="mt-2 px-2.5 pb-0.5 text-2xs font-semibold uppercase tracking-wide
+                             text-ink-faint">
+                {heading}
+              </h2>
+            )}
+            {mine.map((tab) => {
+            const Icon = ICONS[tab.id] ?? Activity
+            const current = tab.id === active
+            return (
+              <button
+                key={tab.id}
+                // The same id the Dash page used, which `tools/screenshots.py` selects on.
+                id={`btn-${tab.id}`}
+                onClick={() => onPick(tab.id)}
+                aria-current={current ? 'page' : undefined}
+                // NAMED BY THE LABEL. With the description in `title` and the label hidden when
+                // collapsed, the accessible name was the whole sentence, so a screen reader read a
+                // paragraph per tab and the name did not contain the visible text. The label is the
+                // name; the sentence is the description.
+                aria-label={tab.label}
+                aria-description={[tab.help, ...(current ? about ?? [] : [])]
+                  .filter(Boolean).join(' ')}
+                // WHAT THIS TAB IS, on the tab. The sentence used to be printed across the top of
+                // every pane; it belongs on the thing it describes. When collapsed the label leads,
+                // because the rail shows only an icon.
+                title={[
+                  collapsed ? tab.label : '',
+                  tab.help,
+                  tab.scoped === false ? 'Store-wide: the header selection does not change it.' : '',
+                  ...(current ? about ?? [] : []),
+                ].filter(Boolean).join('\n\n')}
+                className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm
+                            transition-colors duration-150 ${collapsed ? 'justify-center' : ''} ${
+                              current
+                                ? 'bg-accent/12 text-ink'
+                                : 'text-ink-dim hover:bg-panel-raised hover:text-ink'
+                            }`}
+              >
+                <Icon
+                  size={15}
+                  aria-hidden="true"
+                  className={current ? 'text-accent' : 'text-ink-faint'}
+                />
+                {!collapsed && <span className="truncate">{tab.label}</span>}
+              </button>
+            )
+            })}
+          </div>
         )
       })}
 

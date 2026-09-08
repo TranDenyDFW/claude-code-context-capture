@@ -310,7 +310,7 @@ class TestWhichSessionsAProjectOwns:
         """A partition, checked over every project at once.
 
         Not "does project X have all its sessions", which is the check that got this wrong: an
-        archived chat keeps its cwd and moves to `<cwd>rchived`, so counting by cwd reported 13
+        archived chat keeps its cwd and moves to `<cwd>\archived`, so counting by cwd reported 13
         false misses. What has to hold is that no session is lost and none is claimed twice.
         """
         from c4x import store

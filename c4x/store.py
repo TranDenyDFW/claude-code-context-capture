@@ -23,7 +23,7 @@ from typing import Any, TypedDict
 
 import pandas as pd
 
-from c4x.labels import distinct_short_paths, plural
+from c4x.labels import distinct_short_paths, is_folderless, plural, titled_path
 
 ROOT = Path(__file__).resolve().parent.parent
 # C4X_DB, the same override every node tool honours through paths.mjs. That module exists because
@@ -749,6 +749,22 @@ def cohort_options() -> list:
     # The VALUE keeps the full path. The label is ambiguous by construction and nothing matches
     # on it; `cohort_parts` below splits the value, and a delete resolves through that.
     labels = distinct_short_paths(list(work.index))
+    # A CHAT WITH NO FOLDER GETS ITS NAME. distinct_short_paths keeps the tail that tells two
+    # projects apart, which is right when the tail is a directory somebody chose and useless when
+    # it is "scratch-2026-09-05-d67fea" under two generated uuids. For those, the chat's own name is
+    # the only thing that identifies it to a reader.
+    #
+    # The VALUE is untouched: cohort_parts splits it, and a delete resolves through that.
+    folderless = [p for p in work.index if is_folderless(p)]
+    if folderless:
+        by_project: dict = {}
+        for p in folderless:
+            for sid in cohort_sessions(f"project::{p}"):
+                by_project.setdefault(p, []).append(sid)
+        every = titles_for([s for ids in by_project.values() for s in ids])
+        for p in folderless:
+            ids = by_project.get(p) or []
+            labels[p] = titled_path(p, every.get(ids[0], {}) if ids else {})
     for proj, row in work.iterrows():
         # "listed", the same qualifier the All sessions option above carries. Without it the
         # number reads as "this project has N sessions", when it is the count the picker will
@@ -773,6 +789,42 @@ def cohort_parts(cohort) -> tuple:
     if not sep or kind not in ("section", "project") or not value:
         return "", ""
     return kind, value
+
+
+def restrict_to_cohort(df, cohort, column: str = "session_id"):
+    """Narrow a frame to a cohort, with an ASKED-FOR-BUT-EMPTY cohort meaning nothing, not all.
+
+    ONE HOME FOR THE RULE, because the shape it replaces was copied to five places and every copy
+    had the same hole: `ids = cohort_sessions(...)` then `if ids: df = df[isin]`, so a cohort that
+    resolves to no sessions fell through and left the frame whole. A reader who deleted a project
+    and stayed on the page then saw the entire store under a header naming the project they deleted.
+
+    Five sites, found by sweeping rather than by reading the report, which named two.
+    """
+    ids = cohort_sessions(cohort)
+    if ids:
+        return df[df[column].isin(ids)]
+    if cohort_named(cohort):
+        return df.iloc[0:0]
+    return df
+
+
+def cohort_named(cohort) -> bool:
+    """Whether a COHORT WAS ASKED FOR, regardless of whether anything answers to it.
+
+    THE DISTINCTION `cohort_sessions` CANNOT MAKE. It returns an empty list for two situations that
+    are opposites: nothing was selected, and a project was selected that no longer has any sessions.
+    Every filtering site then reads empty as "no restriction", so deleting a project turns its
+    filter into the whole store, silently, and the page shows more than was asked for rather than
+    less. Proven by executing the functions: a live project emits `AND session_id IN (?,?)` and a
+    deleted one emits byte-identical SQL to no filter at all.
+
+    This repo has met the same conflation twice and both times guarded the INPUT SHAPE. cohort_parts
+    above records one: "the frontend sent a bare path with no `project::` prefix, which resolves
+    here to no restriction ... A delete cannot afford the same mistake." Guarding the shape does
+    nothing for a well-formed cohort whose rows are gone, which is what a delete leaves behind.
+    """
+    return bool(cohort) and cohort != COHORT_ALL and bool(cohort_parts(cohort)[0])
 
 
 def cohort_sessions(cohort, ttl: float = 45.0) -> list:
@@ -817,6 +869,46 @@ def session_name(session_id) -> str:
     return f"{r.get('project')}  ·  {str(r.get('title'))[:60]}  ·  {when}"
 
 
+def titles_for(session_ids) -> dict:
+    """Best-known title per session, as a mapping of session_id to {kind: text}.
+
+    Guarded, because `session_titles` is written by harvest and this package never writes: a store
+    from before that table existed has no such table and a bare query raises rather than returning
+    nothing.
+    """
+    ids = [s for s in (session_ids or []) if s]
+    if not ids or not tables_present("session_titles"):
+        return {}
+    marks = ",".join("?" * len(ids))
+    df = q(f"SELECT session_id, kind, title FROM session_titles WHERE session_id IN ({marks})",
+           tuple(ids))
+    out: dict = {}
+    for _, row in df.iterrows():
+        out.setdefault(row["session_id"], {})[row["kind"]] = row["title"]
+    return out
+
+
+def cohort_label(cohort, ids=None) -> str:
+    """The display form of a cohort's value: shortened, and named when the path names nothing.
+
+    ONE HOME, because this sentence is built in two places that must not drift: the population line
+    on every scoped tab and the two arm labels on Compare. The VALUE is untouched; only what the
+    reader sees changes.
+    """
+    kind, _, value = str(cohort or "").partition("::")
+    if kind != "project" or not value:
+        return value
+    if not is_folderless(value):
+        # UNCHANGED for a real project. Its path is its own name, and shortening it here would be a
+        # different change from the one asked for: this sentence has always printed the full path
+        # and nobody reported it as wrong.
+        return value
+    ids = list(ids if ids is not None else cohort_sessions(cohort))
+    titles = titles_for(ids)
+    best = titles.get(ids[0], {}) if ids else {}
+    return titled_path(value, best)
+
+
 def population_label(session_id, cohort, scope) -> str:
     """One sentence naming exactly what is being described, for the page to print.
 
@@ -829,8 +921,11 @@ def population_label(session_id, cohort, scope) -> str:
         return f"1 session, {side}"
     ids = cohort_sessions(cohort)
     if ids:
-        kind, _, value = str(cohort).partition("::")
-        return f"{plural(len(ids), 'session')} in {kind} {value}, {side}"
+        kind, _, _value = str(cohort).partition("::")
+        # SHORTENED AND NAMED. This printed the raw working directory, and for a chat started
+        # without a project that is a 152-character scratch path in the one sentence telling the
+        # reader what they just selected. It reaches both frontends.
+        return f"{plural(len(ids), 'session')} in {kind} {cohort_label(cohort, ids)}, {side}"
     return f"the whole store, every session, {side}"
 
 
@@ -855,6 +950,16 @@ def scoped(session_id, scope="main", alias="", cohort=None):
         if ids:
             bits.append(f"AND {a}session_id IN ({','.join('?' * len(ids))})")
             args.extend(ids)
+        elif cohort_named(cohort):
+            # A COHORT WAS ASKED FOR AND NOTHING ANSWERS TO IT. Falling through here appended no
+            # clause at all, so the query became the store-wide query and the page answered a
+            # question nobody asked. Deleting a project is the ordinary way to reach this state,
+            # and the app keeps the deleted cohort selected afterwards.
+            #
+            # An empty population is the truthful answer, so the filter matches no row rather than
+            # every row. `1 = 0` rather than `IN ()`: SQLite accepts the latter, but this reads as
+            # what it is to anyone opening the SQL accordion under the table.
+            bits.append("AND 1 = 0")
     if scope != "all":
         bits.append(f"AND COALESCE({a}is_sidechain,0) = 0")
     return " ".join(bits), tuple(args)
@@ -1024,7 +1129,23 @@ def compaction_dropped_count(compaction_uuid: str) -> int:
     return int(df.iloc[0]["n"]) if not df.empty else 0
 
 
-def session_messages(session_id: str, limit: int = 400) -> pd.DataFrame:
+def session_messages(session_id: str, limit: int = 2000) -> pd.DataFrame:
+    """The messages of one session, capped, with each one cut to a preview.
+
+    THE CAP IS 2,000, RAISED FROM 400. Measured on this store: 62 of 1,352 sessions hold more than
+    400 messages and 27 hold more than 2,000, so the raise halves the number of sessions whose
+    table, and whose search box, cannot see the whole session. It costs nothing on a typical one:
+    the mean session holds 244.7 messages and never reached the old cap either. At 180 bytes of
+    preview per row the worst case is about 360 KB, and only for the sessions that need it.
+
+    It is still a cap, and the table says so in its own note rather than presenting the first
+    2,000 as the whole. The largest session here holds 53,124 messages.
+
+    THE PREVIEW IS 220 CHARACTERS and that is a display cut, never a search one. 205,775 of the
+    330,857 messages in this store are longer than that, so a browser searching the preview was
+    searching about a tenth of the average message; the page fetches the whole of the column when
+    somebody actually searches.
+    """
     return q(
         """
         SELECT uuid, ts, role, type, chars,
@@ -1034,6 +1155,47 @@ def session_messages(session_id: str, limit: int = 400) -> pd.DataFrame:
         (session_id, limit),
     )
 
+
+def session_tool_calls(session_id: str, limit: int = 2000) -> pd.DataFrame:
+    """The tool calls of one session, shaped like messages so they can share a timeline.
+
+    WHAT WAS PROPOSED HAS NO MESSAGE. `messages` holds no tool_use type at all, store-wide, so a
+    rejected call read as "plan written" then "the user does not want to proceed with this tool
+    use" with nothing between them naming what was refused. The call itself lived in `tool_calls`,
+    a different table on a different tab, and until harvest kept a preview it recorded only a hash
+    and a byte count.
+
+    Columns are named for the message ones deliberately: the two frames are concatenated and sorted
+    by ts, so the reader meets the proposal and its refusal in the order they happened.
+
+    EMPTY WHEN THE STORE HAS NOT MIGRATED, rather than raising. This package never writes, so it
+    cannot add the column itself; harvest adds it on its next run, which may be days after this
+    code ships. A timeline missing its proposals is the state that existed before this function,
+    and it is a great deal better than a tab that raises.
+    """
+    if not column_present("tool_calls", "input_preview"):
+        return pd.DataFrame(columns=["uuid", "ts", "role", "type", "chars", "preview"])
+    # THE SAME VOCABULARY THE MESSAGES TABLE USES, which theme.COLUMN_HELP defines: `role` is the
+    # transport record's own type, which is why it reads `user` on a tool result, and `type` is
+    # what actually produced the record. A tool_use block sits on an assistant record, so those are
+    # 'assistant' and 'tool_use', the exact mirror of the 'tool_result' row that answers it.
+    #
+    # The tool NAME leads the preview. Without it the row says a call was proposed and not which,
+    # and the name is the first thing a reader needs to make sense of the input that follows.
+    return q(
+        """
+        SELECT tool_use_id AS uuid, ts,
+               'assistant' AS role,
+               'tool_use' AS type,
+               input_bytes AS chars,
+               substr(COALESCE(tool_name, 'tool') || ': ' ||
+                      replace(replace(COALESCE(input_preview, ''), char(10), ' '), char(13), ' '),
+                      1, 220) AS preview
+        FROM tool_calls WHERE session_id = ? AND input_preview IS NOT NULL
+        ORDER BY ts LIMIT ?
+        """,
+        (session_id, limit),
+    )
 
 def messages_text(uuids: list[str]) -> dict[str, str]:
     """{uuid: full text} for the uuids given, in one query. Absent uuids are absent, not empty."""

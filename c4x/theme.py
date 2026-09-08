@@ -631,7 +631,8 @@ def numeric_columns(cols, numeric, formats=None):
     return out
 
 
-def chart_note(text, for_id: str | None = None, style: dict | None = None):
+def chart_note(text, for_id: str | None = None, style: dict | None = None,
+               level: str | None = None):
     """The sentence that explains a chart, marked so it reaches the chart over the API.
 
     A table's heading and note are paired by position, which works because they are always written
@@ -649,10 +650,11 @@ def chart_note(text, for_id: str | None = None, style: dict | None = None):
     Dash renders it exactly as `SECTION_NOTE` always did, so the page it was written for is
     unchanged; `style` overrides that for the few that are warnings.
     """
-    return _marked_note("chart-note", text, for_id, style)
+    return _marked_note("chart-note", text, for_id, style, level)
 
 
-def table_note(text, for_id: str | None = None, style: dict | None = None):
+def table_note(text, for_id: str | None = None, style: dict | None = None,
+               level: str | None = None):
     """The sentence that explains a table when it is written BELOW the rows.
 
     A heading and a note written above a table are paired by position and need no mark. Six
@@ -663,7 +665,7 @@ def table_note(text, for_id: str | None = None, style: dict | None = None):
     Use this only for the ones written below. Above the table, keep writing a plain `SECTION_NOTE`:
     the pairing already handles it and a mark there would be noise.
     """
-    return _marked_note("table-note", text, for_id, style)
+    return _marked_note("table-note", text, for_id, style, level)
 
 
 def empty_panel(title: str, note: str):
@@ -699,10 +701,18 @@ def about_note(children, style: dict | None = None):
     return html.Div(children, className="about-note", style={**SECTION_NOTE, **(style or {})})
 
 
-def _marked_note(mark: str, text, for_id: str | None, style: dict | None):
+def _marked_note(mark: str, text, for_id: str | None, style: dict | None, level: str | None = None):
     # THE TARGET RIDES IN THE CLASS, NOT IN THE ID. An id must be unique in a Dash page, so binding
     # by id allowed exactly one caption per chart and the Window tab needs three on one of them.
+    #
+    # SO DOES THE LEVEL, for the same reason the population note carries its kind as data: Dash
+    # says "this is a warning" with a colour, and a colour does not survive extract.texts(). The
+    # Session tab's warning, the sentence explaining that nothing was selected and one session was
+    # substituted, reached the browser as an ordinary caption and was shown on hover. It was the
+    # answer to a question a reader was asking of that page, and it was behind a mouse.
     classes = f"{mark} {mark}-for-{for_id}" if for_id else mark
+    if level:
+        classes = f"{classes} {mark}-level-{level}"
     return html.Div(text, className=classes, style={**SECTION_NOTE, **(style or {})})
 
 

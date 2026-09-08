@@ -755,7 +755,10 @@ def main():
         cases = [("no selection", None, None),
                  ("one session", session_id, None),
                  ("a cohort", None, cohort)]
-        for index, (tab_id, _label, _fn) in enumerate(m.TABS):
+        # STAR, NOT A FIXED ARITY. The registry gained a fourth field (which population a tab
+        # answers to) and this line broke, along with one in tests/test_tabs_render.py. Both
+        # only ever wanted the id, so neither should have been counting.
+        for index, (tab_id, *_rest) in enumerate(m.TABS):
             for case, sid, coh in cases:
                 pane = exercise("_render_tab", errors, exercised,
                                 lambda i=index, s=sid, c=coh: m._render_tab(i, s, "main", c))

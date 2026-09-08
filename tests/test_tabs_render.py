@@ -102,7 +102,9 @@ def test_every_banner_exemption_names_a_tab_that_exists(app):
     quoted = {node.value for statement in body for node in _ast.walk(statement)
               if isinstance(node, _ast.Constant) and isinstance(node.value, str)
               and node.value.startswith("tab-")}
-    known = {tab_id for tab_id, _label, _fn in app.TABS}
+    # Star, not a fixed arity: this wants the id and nothing else, so it must not break when the
+    # registry gains a field. It did, when tabs began declaring which population they answer to.
+    known = {tab_id for tab_id, *_rest in app.TABS}
     unknown = quoted - known
     assert not unknown, f"_render_tab names tabs that do not exist: {sorted(unknown)}"
 

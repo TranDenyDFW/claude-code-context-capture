@@ -1,4 +1,4 @@
-import type { TableMeta } from '@/api'
+import type { NoteLevel, TableMeta } from '@/api'
 
 /**
  * The one heading anything on a page gets: its name, its row count when it has rows, and its note
@@ -29,34 +29,61 @@ export function joinNotes(...notes: (string | null | undefined)[]): string | nul
   return kept.length ? kept.join('\n') : null
 }
 
+/**
+ * A NOTE WITH A LEVEL IS SHOWN, NOT HOVERED.
+ *
+ * Every note went into `title`, which is a mouse-only affordance, and one of them was the answer
+ * to a question a reader was actively asking: the Session tab substitutes the most recent session
+ * when nothing is selected, says so in a warning, and showed that warning on hover while the
+ * header control kept reading "All sessions (22 listed)". The page contradicted its own control
+ * and the reconciliation was behind a mouse.
+ *
+ * Levelled notes only. Making every caption visible would put a paragraph under each of eight
+ * headings and bury the one that matters, which is the same failure in the other direction: this
+ * warning already spent a life as the first of five loose paragraphs at the top of the tab, which
+ * is where a reader stops reading them. The server decides which notes have a level.
+ */
 export function Heading({
   name,
   note,
+  level,
   as: Tag = 'h3',
 }: {
   name: string
   note: string | null
+  level?: NoteLevel
   as?: 'h1' | 'h2' | 'h3'
 }) {
+  const loud = Boolean(level && note)
   return (
-    <Tag
-      className="text-md font-semibold text-ink-dim"
-      title={note ?? undefined}
-      aria-description={note ?? undefined}
-    >
-      {name}
-    </Tag>
+    <div className="min-w-0">
+      <Tag
+        className="text-md font-semibold text-ink-dim"
+        // A NOTE SHOWN ON THE PAGE IS NOT ALSO THE HOVER. The same sentence in both places reads
+        // as two, and a screen reader announces it twice.
+        title={loud ? undefined : note ?? undefined}
+      >
+        {name}
+      </Tag>
+      {loud && (
+        <p role="note" data-note-level={level} className="mt-1 text-sm leading-relaxed text-warn">
+          {note}
+        </p>
+      )}
+    </div>
   )
 }
 
 export function TableHeading({
   name,
   note,
+  level,
   as,
 }: {
   name: string
   note: string | null
+  level?: NoteLevel
   as?: 'h1' | 'h2' | 'h3'
 }) {
-  return <Heading name={name} note={note} as={as} />
+  return <Heading name={name} note={note} level={level} as={as} />
 }

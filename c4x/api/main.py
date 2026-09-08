@@ -223,7 +223,8 @@ def _figure_meta(node, count):
     for first, second in zip(above, marked, strict=True):
         lines = [t for t in (first["note"], second["note"]) if t]
         out.append({"note": "\n".join(lines) or None,
-                    "absorbed": list(first["absorbed"]) + list(second["absorbed"])})
+                    "absorbed": list(first["absorbed"]) + list(second["absorbed"]),
+                    "note_level": second.get("note_level")})
     return out
 
 
@@ -342,10 +343,15 @@ def _marked_notes(node, count, mark, kind):
         classes = str(getattr(node, "className", "") or "").split()
         if mark in classes:
             target = next((c[len(prefix):] for c in classes if c.startswith(prefix)), None)
-            events.append(("note", extract.texts(node), target, owner))
+            # THE LEVEL, marked where the note was written. Dash draws a warning in amber and a
+            # colour does not survive extract.texts(), so a warning and an ordinary caption
+            # arrived here indistinguishable and the page put both of them on hover.
+            level = next((c[len(mark) + 7:] for c in classes
+                          if c.startswith(mark + "-level-")), None)
+            events.append(("note", extract.texts(node), target, owner, level))
             return
         if seen == kind:
-            events.append(("graph", getattr(node, "id", None), None, owner))
+            events.append(("graph", getattr(node, "id", None), None, owner, None))
             return
         for name in node._prop_names:
             value = getattr(node, name, None)
@@ -362,11 +368,12 @@ def _marked_notes(node, count, mark, kind):
             seen += 1
 
     notes: dict[int, list[str]] = {i: [] for i in range(count)}
+    levels: dict[int, str | None] = dict.fromkeys(range(count))
     absorbed: dict[int, list[str]] = {i: [] for i in range(count)}
     for at, event in enumerate(events):
         if event[0] != "note":
             continue
-        _, lines, target, owner = event
+        _, lines, target, owner, level = event
         chosen = None
         if target is not None:
             chosen = next((index_at[j] for j, other in enumerate(events)
@@ -386,10 +393,16 @@ def _marked_notes(node, count, mark, kind):
             continue
         notes[chosen].extend(line for line in lines if line and line.strip())
         absorbed[chosen].extend(lines)
+        # THE FIRST LEVEL WINS, and today that is the only one there is. A chart carrying both a
+        # warning and an ordinary caption must not have the warning demoted by whichever of the
+        # two happened to be written second.
+        if level and levels[chosen] is None:
+            levels[chosen] = level
 
     # Joined with a newline, not a space: the Window tab's composition chart carries three separate
     # statements and running them together makes one unreadable sentence in a tooltip.
-    return [{"note": "\n".join(notes[i]) or None, "absorbed": absorbed[i]}
+    return [{"note": "\n".join(notes[i]) or None, "absorbed": absorbed[i],
+             "note_level": levels[i]}
             for i in range(count)]
 
 
@@ -431,6 +444,11 @@ def _render_payload(pane):
                 t for t in (entry.get("note"), extra["note"]) if t)
             entry["note"] = joined or None
             entry["absorbed"] = list(entry.get("absorbed") or []) + list(extra["absorbed"])
+            # A TABLE CAPTION CAN BE A WARNING TOO, and leaving this to the figures alone would
+            # make the fix true of one half of the page. Only a caption written BELOW a table can
+            # carry a level, because only those come through the marked path; a note written above
+            # is paired by position and has nowhere to declare one.
+            entry["note_level"] = extra.get("note_level")
     # TEXT THAT BELONGS TO A DASH-ONLY CONTROL. The window calculator's labels and constants
     # sentence are marked in the tree; the page drops these lines rather than printing the
     # labels of inputs it does not draw. The parity surface keeps them: they are real text.
@@ -1117,11 +1135,7 @@ def sessions(limit: int = Query(50, ge=1, le=2000), cohort: str | None = Query(N
     and both would look correct.
     """
     from c4x import store
-    frame = store.session_rows()
-    if cohort:
-        ids = store.cohort_sessions(cohort)
-        if ids:
-            frame = frame[frame["session_id"].isin(ids)]
+    frame = store.restrict_to_cohort(store.session_rows(), cohort)
     total = int(len(frame))
     if "last_ts" in frame.columns:
         frame = frame.sort_values("last_ts", ascending=False)

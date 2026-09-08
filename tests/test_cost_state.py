@@ -131,3 +131,52 @@ def test_the_note_survives_an_estimate_of_zero():
     measured half must still report."""
     note = measured_note({"sessions": 1, "total_usd": 4.0, "incomplete": 0}, 0.0)
     assert "MEASURED" in note and "4.00" in note
+
+
+# --- the compare table, where a one-sided measurement crashed the tab ---------------------------
+
+def _arm(**over):
+    return {"calls": 10, "cost_usd": 3.0, "cost_calls": 10, "sessions": 1, **over}
+
+
+def test_one_measured_arm_against_one_unmeasured_does_not_raise():
+    """THE CRASH. `measured_usd` is None for an arm carrying no cost-state record, and the row is
+    dropped only when BOTH arms are empty, so one measured against one unmeasured reached
+    round(None, 1) and raised TypeError. It took out the Compare tab, the CLI and contract_audit.
+
+    Every new session gets a record and no old session ever will, so the crash surface was any
+    comparison spanning the upgrade boundary, which is the most natural comparison there is.
+    """
+    from c4x.panels import compare_table
+    compare_table("A", _arm(measured_usd=4.2), "B", _arm(measured_usd=None))
+    compare_table("A", _arm(measured_usd=None), "B", _arm(measured_usd=4.2))
+
+
+def _measured_row(a, b):
+    from c4x.cli import extract
+    from c4x.panels import compare_table
+    table = extract.tables(compare_table("A", a, "B", b))[0]
+    rows = [r for r in table["rows"] if "measured" in str(r.get("metric", "")).lower()]
+    return rows[0] if rows else None
+
+
+def test_the_unmeasured_arm_is_blank_and_never_zero():
+    """`round(av or 0, 1)` would also fix the crash, and would claim the arm measured nothing.
+    selection_metrics returns None precisely to avoid that, and the Cost tab's est_usd already
+    renders a missing value as an empty cell rather than 0."""
+    row = _measured_row(_arm(measured_usd=4.2), _arm(measured_usd=None))
+    assert row is not None, "the row must be kept: one arm DOES have a measurement"
+    assert row["B"] is None, f"an unmeasured arm must be blank, not {row['B']!r}"
+    assert row["verdict"] == "one arm has none"
+
+
+def test_a_real_zero_is_still_shown_as_zero():
+    """The negative control. 0.0 is a measurement that the work cost nothing, which is a different
+    statement from having no measurement, and blanking it would lose that."""
+    row = _measured_row(_arm(measured_usd=4.2), _arm(measured_usd=0))
+    assert row["B"] == 0
+
+
+def test_two_unmeasured_arms_drop_the_row_entirely():
+    """Neither arm has anything to say, so the page says nothing rather than showing two blanks."""
+    assert _measured_row(_arm(measured_usd=None), _arm(measured_usd=None)) is None

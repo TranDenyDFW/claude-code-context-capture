@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Band, ColumnMeta, Table, TableMeta } from '@/api'
+import { useFullText } from './useFullText'
 import { TableToolbar } from './TableToolbar'
 import type { Sheet } from './exporters'
 
@@ -127,6 +128,14 @@ export function DataTable({
   // FILTERED FIRST, then sorted, then paged. Filtering the visible page instead of the whole table
   // would search the rows that happen to be on screen and report nothing for a value three hundred
   // rows down, which looks exactly like an empty result.
+  // THE WHOLE OF A CUT COLUMN, fetched the moment somebody actually searches. The Messages table
+  // ships the first 220 characters of each message; measured on this store, 205,775 of 330,857
+  // messages are longer than that and the mean is 2,313 characters, so the box searched about a
+  // tenth of the average message and reported "no match" for the other nine. Nothing is fetched
+  // for a reader who never types.
+  const searching = Boolean(query.trim())
+  const full = useFullText(table.rows, meta, searching)
+
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
     const perColumn = Object.entries(columnQuery)
@@ -142,9 +151,20 @@ export function DataTable({
       // Matched against the TEXT ON SCREEN, so typing what you can see finds the row. Searching the
       // raw value would fail on "1,024" and on a date the reader is looking at. Only VISIBLE
       // columns, so hiding a column also removes it from the search, which is what hiding means.
-      return visible.some((c) => show(row[c.id], c).toLowerCase().includes(needle))
+      //
+      // EXCEPT WHERE THE SERVER HAD TO CUT ONE. There the text on screen is a fifth of a sentence
+      // and matching only that is what made the box report nothing for words that are plainly in
+      // the message. The full value is searched and the preview stays on screen, so the rule above
+      // still holds for every column that was never cut.
+      return visible.some((c) => {
+        if (c.id === full.column) {
+          const whole = full.text.get(String(row[meta?.full_text?.key ?? ""] ?? ""))
+          if (typeof whole === "string") return whole.toLowerCase().includes(needle)
+        }
+        return show(row[c.id], c).toLowerCase().includes(needle)
+      })
     })
-  }, [table.rows, columns, visible, query, columnQuery])
+  }, [table.rows, columns, visible, query, columnQuery, full, meta])
 
   const sorted = useMemo(() => {
     if (!sort) return filtered
@@ -258,6 +278,21 @@ export function DataTable({
             <span className="text-2xs text-ink-faint">
               {`${sorted.length.toLocaleString()} of ${table.rows.length.toLocaleString()} match`}
             </span>
+            {/* WHAT THE SEARCH CAN SEE RIGHT NOW, said out loud while it is not the whole thing.
+                An under-reporting search is indistinguishable from an absent word, so the two
+                states where it under-reports are the two states that have to be legible: the
+                fetch is still in flight, or it failed and the previews are all there is. Nothing
+                is said in the ordinary case, because a label on every search would be noise. */}
+            {full.loading && (
+              <span role="status" className="text-2xs text-ink-faint">
+                searching previews while the full text loads
+              </span>
+            )}
+            {full.failed && (
+              <span role="status" className="text-2xs text-warn">
+                the full text could not be loaded, so this searches the previews only
+              </span>
+            )}
           </>
         )}
       </TableToolbar>

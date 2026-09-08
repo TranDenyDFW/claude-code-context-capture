@@ -142,7 +142,17 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   -- Which KIND of subagent an Agent call asked for, e.g. "general-purpose". Carried in the tool
   -- input and discarded until now, so this store held 827 Agent rows that could not say what any
   -- of them ran. NULL on every other tool, which is the honest value: they have no agent type.
-  subagent_type TEXT
+  subagent_type TEXT,
+  -- THE HEAD OF WHAT WAS ASKED FOR. The hash and the byte count were derived from the input and
+  -- the input itself was thrown away, so a row could say a call was 2,655 bytes and rejected and
+  -- not one word of WHAT was proposed. The timeline read "plan written" then "the user does not
+  -- want to proceed with this tool use" with nothing in between, and the plan was sitting in the
+  -- transcript on disk the whole time.
+  --
+  -- 500 characters, measured on this store: it adds 64 MB to a 1.37 GB store, 4.6%, and 174,538
+  -- of 238,632 calls fit inside it whole. A preview, not the input: the transcript remains the
+  -- record, and input_bytes still says how much of it this is.
+  input_preview TEXT
 );
 CREATE INDEX IF NOT EXISTS tool_calls_session ON tool_calls (session_id);
 CREATE INDEX IF NOT EXISTS tool_calls_target ON tool_calls (target);
@@ -280,10 +290,13 @@ export const HOOK_EVENT_COLUMNS = [
 // Columns added to tables that already existed in the wild, by table. Every one is TEXT and
 // nullable, so adding it cannot invalidate a row: an old row simply has nothing in it, which is
 // exactly true. Anything needing a type or a default is a rebuild, not an entry here.
+// How much of a tool input is kept. See the column comment in the schema for the measurement.
+export const TOOL_INPUT_PREVIEW = 500;
+
 export const ADDED_COLUMNS = {
   hook_events: HOOK_EVENT_COLUMNS,
   turns: ['parent_uuid'],
-  tool_calls: ['subagent_type'],
+  tool_calls: ['subagent_type', 'input_preview'],
 };
 const BOOLEAN_EVENT_COLUMNS = new Set(['probe', 'known', 'truncated']);
 
@@ -946,10 +959,10 @@ class Harvest {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`),
       putToolCall: db.prepare(`INSERT OR REPLACE INTO tool_calls
         (tool_use_id,session_id,turn_uuid,ts,tool_name,server_name,target,input_sha1,input_bytes,
-         result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type)
+         result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type,input_preview)
         VALUES (?,?,?,?,?,?,?,?,?,
          COALESCE((SELECT result_bytes FROM tool_calls WHERE tool_use_id = ?), NULL),
-         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?)`),
+         COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?,?)`),
       // The result arrives on a LATER line than the use, so this fills the row in place. If the
       // two land in different harvest runs the update finds nothing and result_bytes stays NULL,
       // which reads as "not yet seen" rather than as zero bytes.
@@ -991,6 +1004,14 @@ class Harvest {
     this.typeCounts = new Map();
     this.typeKnown = new Map();
     this.unknownSeen = new Set();
+    // WHAT THIS RUN COULD NOT PARSE, kept apart from what the LOG has ever held.
+    //
+    // `unknownSeen` is loaded from data/raw/unknown-records.ndjson so a type already sampled is not
+    // appended twice. Reporting from it made unknown_record_types mean "every type ever logged",
+    // so a type recognised later kept being announced as unrecognised for the life of the store:
+    // cost-state is parsed and stored now, and every harvest still named it. One Set cannot answer
+    // both questions.
+    this.unknownThisRun = new Set();
     this.stats = { filesSeen: 0, filesRead: 0, rewrites: 0, lines: 0, bytes: 0, turns: 0, compactions: 0, paired: 0, toolCalls: 0, toolResults: 0, messages: 0, messageChars: 0, excludedFiles: 0 };
     this.loadExclusions();
   }
@@ -1079,6 +1100,7 @@ class Harvest {
   }
 
   noteUnknown(type, line) {
+    this.unknownThisRun.add(type);
     if (this.unknownSeen.has(type)) return;
     this.seenOnDisk();
     if (this.unknownSeen.has(type)) return;
@@ -1244,7 +1266,10 @@ class Harvest {
           // Only where the tool actually asked for one. Storing the empty string or "none" on
           // every other tool would make `subagent_type IS NOT NULL` stop meaning "this spawned an
           // agent", which is the one question the column exists to answer.
-          typeof input.subagent_type === 'string' ? input.subagent_type : null);
+          typeof input.subagent_type === 'string' ? input.subagent_type : null,
+          // THE INPUT, KEPT. `raw` was already built here to be hashed and measured, and then
+          // dropped, which is why a rejected call could report its size and not its content.
+          raw.slice(0, TOOL_INPUT_PREVIEW));
         this.stats.toolCalls++;
       } else if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
         const c = b.content;
@@ -1292,6 +1317,17 @@ async function run({ full }) {
       process.stderr.write(`  ${i + 1}/${files.length} files, ${h.stats.turns} turns, ${h.stats.compactions} compactions, ${(h.stats.bytes / 1048576).toFixed(0)} MB\n`);
     }
   }
+  // A FULL PASS REPLACES THE CENSUS RATHER THAN ADDING TO IT. record_types is a cumulative upsert,
+  // which is right for an incremental run that sees only new bytes and wrong for a full one that
+  // has just re-read every line of every transcript: its tally IS the census, and adding it to the
+  // previous one doubles every count. Inside the open transaction, so the delete and the reflush
+  // commit together and a crash between them cannot leave the census empty.
+  //
+  // SCOPE, stated rather than implied: this fixes the --full path. A single transcript that SHRANK
+  // is re-read from zero by the incremental path too, and its types are counted twice for that
+  // file. Fixing that needs per-file counts, which is a schema change and a bigger piece of work
+  // than this; it is not fixed here and should not be read as fixed.
+  if (full) db.exec('DELETE FROM record_types');
   flushTypesFast(db, h.typeCounts, h.typeKnown);
   db.exec('COMMIT');
 
@@ -1324,7 +1360,7 @@ async function run({ full }) {
     message_rows_stored: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
     message_text_mb: +((db.prepare('SELECT COALESCE(SUM(chars),0) c FROM messages').get().c) / 1048576).toFixed(1),
     unpaired_boundaries: unpaired,
-    unknown_record_types: [...h.unknownSeen],
+    unknown_record_types: [...h.unknownThisRun],
     seconds: +(ms / 1000).toFixed(1),
   };
   console.log(JSON.stringify(out, null, 2));
@@ -1504,6 +1540,12 @@ async function selfTest() {
   flushTypesFast(db, h.typeCounts, h.typeKnown);
 
   const checks = [];
+  // THIS MODULE'S OWN SOURCE. Two fixes below live in run(), which the self-test cannot call: it
+  // needs a real store, real transcripts and a real --full pass. Both were verified by mutation to
+  // be invisible to every behavioural check here, so they are asserted against the text instead,
+  // the way install.mjs asserts its call graph. A source gate is weaker than a behavioural one and
+  // is used only where the behaviour is genuinely out of reach.
+  const src = readFileSync(new URL(import.meta.url), 'utf8');
   const turn = db.prepare('SELECT * FROM turns WHERE uuid = ?').get('u1');
   checks.push(['turn captured', !!turn]);
   checks.push(['total_resident = input + cache_write + cache_read', turn?.total_resident === 1003]);
@@ -2071,6 +2113,111 @@ async function selfTest() {
     again.noteUnknown('zzz-second-new-type', '{}');
     const third = readFileSync(scratchLog, 'utf8').split(String.fromCharCode(10)).filter(Boolean).length;
     checks.push(['but a genuinely new type still is', third === before + 1]);
+  }
+
+  // WHAT THIS RUN COULD NOT PARSE, not what the log has ever held. A type recognised later kept
+  // being announced as unrecognised for the life of the store, because the report read the
+  // append-dedup memory, which is loaded from disk and never forgets.
+  {
+    const scratchDb = new DatabaseSync(':memory:');
+    scratchDb.exec(SCHEMA);
+    const seeded = join(tmp, 'seeded-unknowns.ndjson');
+    writeFileSync(seeded, JSON.stringify({ type: 'cost-state', first_seen: 'x' }) + String.fromCharCode(10));
+    const h4 = new Harvest(scratchDb, { unknownLog: seeded });
+    // PRE-LOADED ON PURPOSE. seenOnDisk() reads the log lazily, so on a first call the dedup return
+    // does not fire and this check passed whether the per-run add sat before or after it: a check
+    // that cannot fail. Seeding the set reproduces the state the guard actually guards.
+    h4.unknownSeen.add('cost-state');
+    h4.noteUnknown('cost-state', '{}');
+    h4.noteUnknown('zzz-really-new', '{}');
+    checks.push(['a type already in the log is still reported by the run that met it (gate can fail)',
+      h4.unknownThisRun.has('cost-state') && h4.unknownThisRun.has('zzz-really-new'),
+      [...h4.unknownThisRun].join(',')]);
+    // WHICH SET THE REPORT READS is the actual defect, and no assertion over the sets can see it.
+    checks.push(['the run report reads the PER-RUN set, not the on-disk memory (gate can fail)',
+      /unknown_record_types:\s*\[\.\.\.h\.unknownThisRun\]/.test(src),
+      (src.match(/unknown_record_types:.*/) || ['not found'])[0].slice(0, 80)]);
+    const fresh = new Harvest(scratchDb, { unknownLog: seeded });
+    fresh.noteUnknown('zzz-really-new', '{}');
+    checks.push(['but a run that did NOT meet it does not report it (gate can fail)',
+      !fresh.unknownThisRun.has('cost-state'), [...fresh.unknownThisRun].join(',')]);
+    scratchDb.close();
+  }
+
+  // A FULL PASS REPLACES THE CENSUS. The upsert is cumulative, so re-reading every transcript and
+  // adding the tally to the previous one doubles every count.
+  {
+    const scratchDb = new DatabaseSync(':memory:');
+    scratchDb.exec(SCHEMA);
+    const h5 = new Harvest(scratchDb, { unknownLog: scratchLog });
+    h5.countType('assistant', true);
+    flushTypesFast(scratchDb, h5.typeCounts, h5.typeKnown);
+    const n1 = scratchDb.prepare("SELECT n FROM record_types WHERE type='assistant'").get().n;
+    // What an incremental run does: add to what is there.
+    flushTypesFast(scratchDb, h5.typeCounts, h5.typeKnown);
+    const n2 = scratchDb.prepare("SELECT n FROM record_types WHERE type='assistant'").get().n;
+    checks.push(['an incremental flush ADDS, which is what it is for', n1 === 1 && n2 === 2]);
+    // What a full run must do: replace.
+    scratchDb.exec('DELETE FROM record_types');
+    flushTypesFast(scratchDb, h5.typeCounts, h5.typeKnown);
+    const n3 = scratchDb.prepare("SELECT n FROM record_types WHERE type='assistant'").get().n;
+    checks.push(['clearing first makes a full pass replace rather than double (gate can fail)',
+      n3 === 1, String(n3)]);
+    // AND THAT run() ACTUALLY CLEARS. The two checks above pass with the clear deleted from run()
+    // entirely, which was verified by mutation: they prove the primitive, never the caller, and
+    // run() cannot be called from here without a real store and real transcripts. The clear must
+    // also sit immediately before the reflush, inside the open transaction, so the two are matched
+    // as an ordered pair rather than each being found somewhere in the file.
+    const clearAt = src.indexOf("if (full) db.exec('DELETE FROM record_types')");
+    const flushAt = src.indexOf('flushTypesFast(db, h.typeCounts');
+    checks.push(['the FULL path clears the census before reflushing it (gate can fail)',
+      clearAt > 0 && flushAt > clearAt && flushAt - clearAt < 120,
+      `clear at ${clearAt}, reflush at ${flushAt}`]);
+    scratchDb.close();
+  }
+
+  // WHAT WAS PROPOSED, not just how big it was. A rejected call could report 2,655 bytes and an
+  // error flag and not one word of its content, so the timeline read "plan written" then "the user
+  // does not want to proceed" with nothing in between.
+  {
+    const scratchDb = new DatabaseSync(":memory:");
+    scratchDb.exec(SCHEMA);
+    const h6 = new Harvest(scratchDb, { unknownLog: scratchLog });
+    const proposal = "# Delete results/t16-keep.txt" + "x".repeat(TOOL_INPUT_PREVIEW * 3);
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u1", timestamp: "2026-09-07T05:01:44Z",
+      message: { content: [{ type: "tool_use", id: "toolu_1", name: "ExitPlanMode",
+                             input: { plan: proposal } }] },
+    }, "f", 1);
+    const row = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_1");
+    checks.push(["the head of a tool input is stored, not only its hash (gate can fail)",
+      typeof row?.input_preview === "string" && row.input_preview.includes("t16-keep.txt"),
+      String(row?.input_preview).slice(0, 40)]);
+    checks.push(["and it is CUT, so one call cannot carry a megabyte of input",
+      row?.input_preview?.length === TOOL_INPUT_PREVIEW, String(row?.input_preview?.length)]);
+    checks.push(["the byte count still measures the WHOLE input, not the preview (gate can fail)",
+      row?.input_bytes > TOOL_INPUT_PREVIEW * 3, String(row?.input_bytes)]);
+    // A short input is stored whole, which is 73% of the calls on this store.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u2", timestamp: "2026-09-07T05:01:45Z",
+      message: { content: [{ type: "tool_use", id: "toolu_2", name: "Read",
+                             input: { file_path: "C:/x/a.md" } }] },
+    }, "f", 2);
+    const small = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_2");
+    checks.push(["a short input is kept whole",
+      small?.input_preview === JSON.stringify({ file_path: "C:/x/a.md" }), String(small?.input_preview)]);
+    // THE REJECTION PATH, which is the one the finding was about: the result arrives on a later
+    // line and must fill in the error flag WITHOUT clearing what was asked for.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u3", timestamp: "2026-09-07T05:01:51Z",
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", is_error: true,
+                             content: "The user doesn't want to proceed with this tool use." }] },
+    }, "f", 3);
+    const after = scratchDb.prepare("SELECT * FROM tool_calls WHERE tool_use_id = ?").get("toolu_1");
+    checks.push(["a rejected call still says what it proposed (gate can fail)",
+      after?.is_error === 1 && String(after?.input_preview).includes("t16-keep.txt"),
+      `is_error=${after?.is_error} preview=${String(after?.input_preview).slice(0, 30)}`]);
+    scratchDb.close();
   }
 
   // THE MEASURED COST. Every branch that can silently produce a wrong number is exercised, because
