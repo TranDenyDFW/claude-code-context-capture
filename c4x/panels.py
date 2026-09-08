@@ -286,7 +286,7 @@ COMPARE_ROWS = [
     # arithmetic over a price table that lives in c4x/pricing.py and is dated on the Cost tab.
     # It scales with population, like the other totals, so it is never marked comparable across
     # arms of different sizes.
-    ("cost_usd", "estimated cost, USD", f"estimate, prices of {PRICE_TABLE_DATE}", "higher", False),
+    ("cost_usd", "estimated cost, USD", f"USD ({PRICE_TABLE_DATE})", "higher", False),
     # BESIDE the estimate, directly under it, so the two are read together. Absent for any arm whose
     # sessions predate the cost-state record. A comparison where NEITHER arm is measured drops this
     # row; one where only one arm is measured keeps it, shows the measured side and leaves the other
@@ -354,7 +354,7 @@ def compare_table(a_label, a, b_label, b) -> html.Div:
                      "B": None if bv is None else round(bv, 1),
                      "B / A": None if ratio is None else round(ratio, 2), "verdict": verdict,
                      "basis": ("per unit" if per_unit else
-                               "total, arms are the same size" if same_size else
+                               "total" if same_size else
                                "total, arms are different sizes")})
     # The arm labels live in the table's note, not in two Divs above it. Over the API those Divs
     # arrived as four loose lines ("A", the label, "B", the label) with nothing tying them to the

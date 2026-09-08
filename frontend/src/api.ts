@@ -79,6 +79,15 @@ export interface ColumnMeta {
   specifier: string | null
   align: 'left' | 'right'
   hidden: boolean
+  /**
+   * The one column in this table long enough to widen it, chosen by the server from the data.
+   *
+   * Cells do not wrap, so a 200-character title pushes the table into a horizontal scroll. Only
+   * this column is capped; every other keeps its natural width, because a cap wide enough for a
+   * title means nothing on a date and narrowing all of them is the blunt fix that costs the
+   * wrong columns. A table whose columns are all short marks none.
+   */
+  wide?: boolean
   bands: Band[]
 }
 
@@ -99,6 +108,14 @@ export interface TableMeta {
    * from a caption, and was therefore hidden behind a hover.
    */
   note_level?: NoteLevel
+  /**
+   * The levelled half of the note, which is the half that renders on the page.
+   *
+   * Kept apart from `note` because joining them made one drag the other into view: the Session
+   * chart carries a warning AND a legend caption, and under one level the caption was drawn in
+   * warning amber too, which is a paragraph of alarm over an explanation of some shaded bands.
+   */
+  alert?: string | null
   /** The `text` lines the server folded into `title` and `note`, so the page does not print them. */
   absorbed?: string[]
   columns: ColumnMeta[]
@@ -168,7 +185,11 @@ export interface TabPayload {
    */
   empty?: { title: string; note: string | null }[]
   /** Only on /render. The caption each chart answers to, in the same order as `figures`. */
-  figure_meta?: { note: string | null; absorbed: string[]; note_level?: NoteLevel }[]
+  figure_meta?: {
+    note: string | null; absorbed: string[]
+    /** The levelled half, shown ON the page. `note` stays the hover. */
+    alert?: string | null; note_level?: NoteLevel
+  }[]
   /** Whether the header selection changes this tab at all. From the app's SELECTION_SCOPED. */
   scoped?: boolean
   /** The one sentence saying which population this tab describes. */

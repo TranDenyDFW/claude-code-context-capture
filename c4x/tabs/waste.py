@@ -288,8 +288,8 @@ def _rebill_card(session_id=None, cohort=None):
                   FROM api_calls WHERE 1=1 {where}""", args).iloc[0]
     churn, peak = int(row["churn"] or 0), int(row["peak"] or 0)
     if not peak:
-        return stat_card("Re-billed", "-", sub="no resident reading in this population")
-    return stat_card("Re-billed", f"{churn / peak:,.0f}x", color=DANGER,
+        return stat_card("Rebilled", "-", sub="no resident reading in this population")
+    return stat_card("Rebilled", f"{churn / peak:,.0f}x", color=DANGER,
                      sub=f"{fmt_tokens(churn)} of cache reads against a "
                          f"{fmt_tokens(peak)} peak window")
 
@@ -378,12 +378,12 @@ def waste_layout(session_id=None, scope="main", cohort=None):
     return html.Div([
         scope_note,
         html.Div([
-            stat_card("Re-read groups", f"{groups:,}",
+            stat_card("Reread groups", f"{groups:,}",
                       sub=(f"same file, one session, {dup_min}+ reads" if read_tools
                            else "UNAVAILABLE: read-tool spec unreadable")),
-            stat_card("Re-reads beyond the first", f"{repeats:,}",
+            stat_card("Reread count", f"{repeats:,}",
                       color=DANGER if repeats else TEXT),
-            stat_card("KB in the repeats", f"{repeat_bytes/1024:,.1f}", sub="tool result bytes"),
+            stat_card("Repeats (KB)", f"{repeat_bytes/1024:,.1f}", sub="tool result bytes"),
             _rebill_card(session_id, cohort),
             stat_card("Tool calls recorded",
                       f"{int(tools['calls'].sum()):,}" if not tools.empty else "0"),

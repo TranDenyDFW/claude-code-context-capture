@@ -103,7 +103,15 @@ export function DataTable({
   // already showing this table kept the old filter, and the address described a screen nobody had.
   useEffect(() => { setQuery(initialQuery ?? '') }, [initialQuery])
   const [columnQuery, setColumnQuery] = useState<Record<string, string>>({})
-  const [hidden, setHidden] = useState<Set<string>>(new Set())
+  // SEEDED FROM THE SERVER, which declares `hidden` per column and was being ignored. The payload
+  // marks the Findings table's `session_id` and `goes to` hidden:true, this started empty, and so
+  // both rendered: the declaration meant nothing and every future table would meet the same bug.
+  //
+  // A READER CAN STILL UNHIDE THEM from the Columns menu. This is a default, not a lock, which is
+  // the difference between a hidden column and a dropped one: `session_id` is how a row click
+  // knows which session it points at, so it has to travel even when it is not shown.
+  const [hidden, setHidden] = useState<Set<string>>(
+    () => new Set((meta?.columns ?? []).filter((c) => c.hidden).map((c) => c.id)))
   const [order, setOrder] = useState<string[] | null>(null)
   const [dragging, setDragging] = useState<string | null>(null)
   const [pageSize, setPageSize] = useState(meta?.page_size ?? 25)
@@ -407,7 +415,15 @@ export function DataTable({
                       // The full value as a tooltip, so a truncated cell is still readable. The
                       // reference does the same and calls it cheap and reliable.
                       title={text || undefined}
-                      className={`px-3 py-1.5 whitespace-nowrap ${
+                      // ONE COLUMN PER TABLE IS CAPPED, and the server picks it from the data.
+                      // Measured across every tab: Messages.preview reaches 220 characters,
+                      // Sessions.title 200, Cost.target 161 and Findings."do this" 153, while
+                      // Last Active is 19 and Compactions 11. Capping every column would cut the
+                      // wrong ones; capping the widest two still left the table scrolling.
+                      //
+                      // The value is not lost: `title` above carries the whole of it, and an
+                      // export reads the rows rather than the cells.
+                      className={`${column.wide ? 'max-w-96 truncate' : ''} px-3 py-1.5 whitespace-nowrap ${
                         column.align === 'right' ? 'text-right font-mono tabular-nums' : ''
                       } ${value === null || value === undefined ? 'text-ink-faint' : ''}`}
                     >

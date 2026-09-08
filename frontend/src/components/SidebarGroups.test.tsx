@@ -51,14 +51,14 @@ function labelsUnder(heading: string): string[] {
 describe('the sidebar', () => {
   it('names both groups on the page, not in a tooltip', () => {
     draw()
-    expect(screen.getByText('Whole store')).toBeTruthy()
-    expect(screen.getByText('Current selection')).toBeTruthy()
+    expect(screen.getByText('All')).toBeTruthy()
+    expect(screen.getByText('Selection')).toBeTruthy()
   })
 
   it('puts each tab under the group the server put it in', () => {
     draw()
-    expect(labelsUnder('Whole store')).toEqual(['Summary', 'All sessions', 'Diagnostics'])
-    expect(labelsUnder('Current selection')).toEqual(['Session', 'Cost'])
+    expect(labelsUnder('All')).toEqual(['Summary', 'All sessions', 'Diagnostics'])
+    expect(labelsUnder('Selection')).toEqual(['Session', 'Cost'])
   })
 
   it('still renders every tab it was given (gate can fail)', () => {
@@ -72,19 +72,19 @@ describe('the sidebar', () => {
     // Same rule as the icon map: a presentation gap must not hide a tab.
     draw([...TABS, { id: 'tab-new', label: 'Something New' }])
     expect(screen.getByText('Something New')).toBeTruthy()
-    expect(labelsUnder('Current selection')).toContain('Something New')
+    expect(labelsUnder('Selection')).toContain('Something New')
   })
 
   it('drops the headings when collapsed but keeps the split', () => {
     // A heading is not readable in a 3.5rem rail, and a truncated one is worse than none.
     const { container } = draw(TABS, true)
-    expect(screen.queryByText('Whole store')).toBeNull()
+    expect(screen.queryByText('All')).toBeNull()
     expect(container.querySelectorAll('hr').length).toBe(2)
   })
 
   it('shows one group when every tab is in it', () => {
     draw(TABS.filter((t) => t.scoped === false))
-    expect(screen.getByText('Whole store')).toBeTruthy()
-    expect(screen.queryByText('Current selection')).toBeNull()
+    expect(screen.getByText('All')).toBeTruthy()
+    expect(screen.queryByText('Selection')).toBeNull()
   })
 })

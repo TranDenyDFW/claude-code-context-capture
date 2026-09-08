@@ -160,7 +160,7 @@ STORE, SELECTION = "store", "selection"
 
 TABS = [
     ("tab-summary", "Summary", summary_layout, STORE),
-    ("tab-sessions", "All sessions", sessions_table_layout, STORE),
+    ("tab-sessions", "All Sessions", sessions_table_layout, STORE),
     ("tab-diagnostics", "Diagnostics", diagnostics_layout, STORE),
     ("tab-session", "Session", session_layout, SELECTION),
     ("tab-compactions", "Compactions", compactions_layout, SELECTION),
@@ -194,7 +194,7 @@ GROUP_LABEL = {"display": "flex", "flexDirection": "column", "gap": "2px",
 def _tab_groups():
     """The tab row, split into what the header selection reaches and what it does not."""
     out: list = []
-    for kind, heading in ((STORE, "WHOLE STORE"), (SELECTION, "CURRENT SELECTION")):
+    for kind, heading in ((STORE, "All"), (SELECTION, "Selection")):
         mine = [t for t in TABS if t[3] == kind]
         if not mine:
             continue
@@ -202,8 +202,8 @@ def _tab_groups():
             out.append(html.Div(style={"width": "1px", "alignSelf": "stretch",
                                        "background": BORDER, "margin": "0 10px"}))
         out.append(html.Div([
-            html.Div(heading, style={"color": MUTED, "fontSize": "9px", "fontWeight": 700,
-                                     "letterSpacing": "0.08em", "padding": "4px 18px 0"}),
+            html.Div(heading, style={"color": MUTED, "fontSize": "11px", "fontWeight": 700,
+                                     "letterSpacing": "0.06em", "padding": "4px 18px 0"}),
             html.Div([tab_button(tid, lbl, TAB_IDS.index(tid) == 0)
                       for tid, lbl, _, _ in mine], style={"display": "flex", "gap": "2px"}),
         ]))

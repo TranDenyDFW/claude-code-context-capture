@@ -512,7 +512,11 @@ _MINOR = {"at", "of", "to", "vs", "in", "for", "and", "on", "per", "by", "a", "a
 
 # Words that are acronyms, not words. Without this the rule produces "Api Calls" and "Est. Usd",
 # which reads as a machine having capitalised something it did not understand.
-_ACRONYMS = {"api", "id", "ok", "usd", "sql", "cli", "csv", "pdf", "url", "uuid", "mcp", "ms"}
+# KB IS HERE BECAUSE THE TITLE-CASER LOWERCASES WHAT IT DOES NOT KNOW. A stat card written
+# "Repeats (KB)" came back "Repeats (Kb)", which is not a unit anyone writes, and the card is a
+# unit label. The rule is the same one that already keeps API and USD upright.
+_ACRONYMS = {"api", "id", "ok", "usd", "sql", "cli", "csv", "pdf", "url", "uuid", "mcp", "ms",
+             "kb", "mb", "gb"}
 
 # One heading per table, for the ones that HAVE an id. `tbl-reread` is a DOM id; "Files Read More
 # Than Once" is what the table is. Anonymous tables get no heading rather than an invented one.
@@ -556,7 +560,10 @@ def column_label(column_id) -> str:
     if not words:
         return str(column_id)
     def cased(word, first):
-        bare = word.lower().strip(".")
+        # STRIPPED OF WRAPPING PUNCTUATION FOR THE LOOKUP ONLY. "Repeats (KB)" arrives as the
+        # token "(KB)", which is not in the set, so it fell through to Title() and became "(Kb)".
+        # The original word is what gets returned, so the brackets survive: upper() keeps them.
+        bare = word.lower().strip("().,;:[]")
         if bare in _ACRONYMS:
             return word.upper()
         # A SINGLE LETTER IS A NAME, NOT A MINOR WORD. The Compare table's ratio column is

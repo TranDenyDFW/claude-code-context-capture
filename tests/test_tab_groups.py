@@ -54,7 +54,7 @@ def test_no_id_is_listed_twice():
     assert len(TAB_IDS) == len(set(TAB_IDS))
 
 
-@pytest.mark.parametrize("heading", ["WHOLE STORE", "CURRENT SELECTION"])
+@pytest.mark.parametrize("heading", ["All", "Selection"])
 def test_the_dash_page_names_both_groups(heading):
     """A gap alone is a difference somebody has to notice and then interpret, and the
     interpretation is the whole content."""
