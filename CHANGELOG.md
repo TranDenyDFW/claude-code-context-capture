@@ -29,6 +29,18 @@ removed and nothing here said so.
 - **Project import and export**, with the manifest verified before a row is written.
 - **Pre-compaction transcript snapshots are documented**, including where they live, the size cap,
   `C4X_SNAPSHOT=0`, and that `--purge` deletes them.
+- **What a tool call turned out to be**, on `tool_calls` as `outcome` and `denial_kind`, from
+  the `toolDenialKind` field Claude Code writes at the top level of the record. Both nullable
+  TEXT through the existing migration path, so an older store gains them the next time harvest
+  runs. `is_error` stays: it is the raw transcript fact, and it simply stops being read by
+  anything that reports a number. `tools/outcomes.mjs` holds the one definition the writer and
+  the readers share; `c4x/store.py` mirrors it in SQL.
+- **A Refusals table on the Cost tab, and `waste.mjs --refusals`**, carrying Claude Code's own
+  vocabulary unchanged. A table rather than a note, because a note cannot be sorted, filtered
+  or exported, and this is the one place the values are quoted verbatim rather than summarised.
+- **`harvest --backfill-tool-outcomes`**, which classifies every existing row from the
+  transcripts still on disk. UPDATE only, idempotent, and guarded on a high-water rowid rather
+  than a row count, because three writers share this store.
 
 ### Changed
 
@@ -42,6 +54,25 @@ removed and nothing here said so.
 - **Hook events are ingested from the last offset** rather than by re-reading the whole log, which
   on one install meant 29,049 runs each re-reading a 36 MB file to learn what the previous run
   already knew.
+- **`errors` no longer counts calls that never ran.** Claude Code sets `is_error` on a tool
+  that RAN AND FAILED and on a tool that was REFUSED before it ran, and every "errors" number
+  this app printed was the two added together. Measured over 7,941 transcripts joined to this
+  store: of 6,688 flagged calls, 1,828 were refusals, 27.3%. Per tool it is far worse, because
+  refusal is not spread evenly: the `ExitPlanMode` row read 39 errors of which 36 were a person
+  rejecting a plan, so that number was 92.3% wrong. Six surfaces now read one merged `outcome`
+  column that is BLANK when there is nothing to say, with the three counts kept as hidden
+  columns so sorting and CSV export still work on the numbers.
+- **A store harvested before those columns existed reports "N unknown", not zero.** A blank
+  column there would be indistinguishable from "everything succeeded", which is the defect
+  being fixed. The page names the command that resolves it.
+- **Calls flagged by a build older than 2.1.202 are Unknown and stay Unknown.** That build
+  recorded no reason, and its refusal records are identical to its failure records down to the
+  key set, so roughly 818 real failures move out of `errors`. Reporting them as errors would be
+  the same defect, twenty times smaller. The era is stored, so this is a one-line policy change
+  later.
+- **Hook and user are NOT separated**, because Claude Code does not separate them: a settings
+  deny rule and a hook block both record `permission-rule`, and the leak runs both ways. The
+  vocabulary is reported as recorded and the column help says why.
 
 ### Fixed
 
@@ -55,6 +86,16 @@ removed and nothing here said so.
 - **Optional tables no longer raise.** A store with no probe or calibration rows renders an empty
   state instead of an exception panel, and the suite now runs against a first-run fixture that
   actually has those tables missing.
+- **Every table on the turn-diff panel shows the query that actually ran.** Three of them were
+  handed a retyping of their own query. One said `SUM(is_error)` where the real one said a
+  `CASE`, and all three dropped the scope clause AND its bound arguments, so a reader who copied
+  what was shown got the whole store back instead of the session in front of them.
+- **`errors` left the Tool Calls heat map.** `heat_cells` filters to numbers, so a text column
+  in that list is a silent no-op: a shading feature quietly doing nothing. It had also been
+  shading a count that was 27% refusals, so the darkest cells pointed at tools that had not
+  failed.
+- **`make_fixture.mjs` can exercise any of this.** It hard-coded `is_error` to 0 for every
+  synthetic row, so CI could not reach a single one of these paths.
 
 ### Known limits
 
@@ -62,6 +103,12 @@ removed and nothing here said so.
   counted as a genuine sample. The cross-check is a session-id heuristic and `statusline.mjs`
   says so.
 - `data/raw/events.ndjson` is ingested incrementally but never rotated, so it grows.
+- A refused call cannot be attributed to a hook rather than to a person, or the reverse. Claude
+  Code records `permission-rule` for both a settings deny rule and a hook block, and 15 user
+  rejections landed in `permission-rule` against 28 permission prompts in `user-rejected`. This
+  is a limit of the source, not of the reader, and nothing here guesses at the split.
+- A call flagged by a build older than 2.1.202 can never be classified: that build recorded no
+  reason at all, and its refusal records are identical to its failure records.
 
 ## 0.1.0 - 2026-08-29
 
