@@ -275,6 +275,20 @@ def test_hook_events_are_reported_when_present(injected, q):
 
 
 def test_every_table_carries_the_query_that_produced_it(injected):
-    """This panel is evidence-first: a number a reader cannot reproduce is not evidence."""
+    """This panel is evidence-first: a number a reader cannot reproduce is not evidence.
+
+    The query is no longer PRINTED beside the table. It rides on the block that owns the table and
+    the page puts it behind a button, so the thing to check is that it still travels, attributed,
+    rather than that it appears in the prose. Both halves are asserted: the panel would fail this
+    the same way if the query were dropped, and it would also fail if it came back as body text.
+    """
+    from c4x.api.main import _table_meta
+
     assert extract.tables(injected), "the Injected panel rendered no tables at all"
-    assert "SELECT" in extract.all_words(injected).upper(), "no SQL is shown beside any table"
+    words = extract.all_words(injected).upper()
+    assert "SELECT" not in words, "the query is being printed in the body again"
+    meta = _table_meta(injected)
+    assert meta, "the Injected panel reported no table metadata"
+    carried = [m for m in meta if m.get("query")]
+    assert carried, "no table on the Injected panel carries the query that produced it"
+    assert any("SELECT" in m["query"].upper() for m in carried)
