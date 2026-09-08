@@ -478,6 +478,10 @@ COLUMN_LABEL = {
     # of API calls. The tooltip always said "every transcript row"; the header said "Turns", and
     # the header is what a reader takes the number's meaning from.
     "turns": "Transcript Rows",
+    # The column id stays "do this": it is the key in every finding row and in the conditional
+    # styling, so renaming it would touch the data. Only the HEADING changes, which is the whole
+    # reason this map exists.
+    "do this": "Recommendation",
     # NOT "Role" and "Type". Both were the transcript record's own `type` field, so a directory
     # listing and a question both read "user" and nothing on the page distinguished them.
     # Measured: 86.5% of the records typed 'user' were tool results.
