@@ -323,11 +323,31 @@ export function ProjectMoves({
                       trust setting, the desktop record and the rows all follow this path, so the
                       app and this page agree on one location.
                     </p>
-                    <p className="mt-1 text-xs text-ink-faint">
-                      {staged.plan.app_state?.written.length ?? 0} file(s) would be written,{' '}
-                      {staged.plan.app_state?.written.filter((w) => w.exists).length ?? 0} of them
-                      over something already there.
-                    </p>
+                    {/*
+                      THE PLAN BELONGS TO THE DESTINATION IT WAS COMPUTED FOR.
+
+                      The dry run runs once, when the file is chosen, against the destination the
+                      export came from. Editing the field is the only thing the field is FOR, and
+                      the counts and the "over something already there" both stop applying the
+                      moment it is edited: they describe paths under the old slug. Re-running the
+                      dry run per keystroke would re-upload the file, so the honest move is to say
+                      the plan is stale rather than to keep showing it as though it were not.
+
+                      The slug line above stays live, because it is derived from the field itself.
+                    */}
+                    {into.trim() === (staged.plan.into[0] ?? '') ? (
+                      <p className="mt-1 text-xs text-ink-faint">
+                        {staged.plan.app_state?.written.length ?? 0} file(s) would be written,{' '}
+                        {staged.plan.app_state?.written.filter((w) => w.exists).length ?? 0} of them
+                        over something already there.
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-xs text-warn">
+                        {staged.plan.app_state?.written.length ?? 0} file(s) will be written. The
+                        earlier count of what they would overwrite was worked out for{' '}
+                        <code>{staged.plan.into[0]}</code> and does not apply to the path you typed.
+                      </p>
+                    )}
                     {(staged.plan.app_state?.refused.length ?? 0) > 0 && (
                       <p className="mt-1 text-xs text-warn">
                         Refused:{' '}

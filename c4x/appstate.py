@@ -15,7 +15,7 @@ restoring. Carrying an absolute path would make an import reproduce the EXPORTER
 profile,
 which is a broken import rather than a faithful one. The measurements behind the desktop layer,
 including why its two directory levels cannot be copied across machines, are in
-`.md/20260909-desktop-record-addressing.md`.
+`docs/desktop-records.md`.
 
 A PROJECT IS A WORKING DIRECTORY AND NEVER A LABEL. `store.session_rows()` appends `\\archived` to
 a project's label when the desktop app has archived the chat, and passing that label where a

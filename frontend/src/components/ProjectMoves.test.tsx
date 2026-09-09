@@ -251,6 +251,27 @@ describe('import', () => {
     expect(call.mock.calls[1][1]).toBe('D:\\Work\\Alpha')
   })
 
+  it('stops presenting the plan as current once the destination is edited', async () => {
+    // The dry run is computed ONCE, for the destination the export came from. Editing the field
+    // is the only thing the field is for, and the overwrite count then describes paths under the
+    // old slug. Found by an independent sweep of the branch.
+    vi.spyOn(api.project, 'import').mockResolvedValue(report({
+      dry_run: true,
+      app_state: {
+        written: [{ relpath: 'a.jsonl', kind: 'transcript', path: 'x', exists: true }],
+        replaced: [], replaced_shorter: [], refused: [], desktop: [], bytes: 0, dry_run: true,
+      },
+    }))
+    show()
+    await choose()
+    expect(screen.getByText(/over something already there/)).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText(/working directory on this machine/i),
+                     { target: { value: 'D:\\Somewhere\\Else' } })
+    expect(screen.queryByText(/over something already there/)).toBeNull()
+    expect(screen.getByText(/does not apply to the path you typed/)).toBeTruthy()
+  })
+
   it('reports what landed, what was already here, and what was dropped', async () => {
     vi.spyOn(api.project, 'import').mockResolvedValue(report({
       inserted: { turns: 25964, messages: 22416, files: 0 },
