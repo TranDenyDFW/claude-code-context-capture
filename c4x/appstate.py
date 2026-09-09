@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -132,6 +133,39 @@ def sessions_root():
     """
     from c4x import store
     return store.sessions_root()
+
+
+def read_config():
+    """`~/.claude.json`, parsed. Raises rather than pretending an unreadable file is an empty one.
+
+    THIS DESTROYED A REAL CONFIG. `_merge_config` read the file inside a
+    `try/except (OSError, ValueError): config = {}`, then wrote its result back, so any file it
+    could not parse was REPLACED by one containing just the project being imported. Measured on the
+    test laptop: 26 project entries became 1, and the only reason all but two came back is that
+    Claude Code keeps its own `.claude.json.backup`.
+
+    The trigger was not exotic. A file written by Windows PowerShell's `Set-Content -Encoding UTF8`
+    carries a byte order mark, `json.loads` raises `ValueError` on it, and the fallback did the
+    rest. So this reads `utf-8-sig`, which accepts a BOM instead of dying on one, and a file that
+    still will not parse stops the import instead of overwriting a file full of other projects'
+    settings and this machine's credentials.
+
+    A MISSING file is different and is not an error: that is a fresh machine, and `{}` is the
+    truthful answer.
+    """
+    if not CONFIG_PATH.exists():
+        return {}
+    raw = CONFIG_PATH.read_text(encoding="utf-8-sig")
+    try:
+        config = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{CONFIG_PATH} exists and does not parse as JSON ({exc}). Refusing to touch it: it "
+            "holds every other project's settings and this machine's credentials, and writing a "
+            "fresh one here would destroy them.") from exc
+    if not isinstance(config, dict):
+        raise ValueError(f"{CONFIG_PATH} is not a JSON object, so it is not a Claude Code config")
+    return config
 
 
 def destination_cwd(row_cwd, mapping):
@@ -424,8 +458,8 @@ def capture(cwds, session_ids, sessions_root=None, sink=None):
 def _capture_config(cwds, skipped):
     """Every `~/.claude.json` projects entry whose key names one of these directories."""
     try:
-        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        mtime = CONFIG_PATH.stat().st_mtime
+        config = read_config()
+        mtime = CONFIG_PATH.stat().st_mtime if CONFIG_PATH.exists() else 0.0
     except (OSError, ValueError) as exc:
         skipped.append({"path": str(CONFIG_PATH), "why": f"unreadable: {exc}"})
         return []
@@ -699,14 +733,13 @@ def _merge_config(config_rows, mapping):
 
     Read, set one key, write to a temporary file beside the real one and replace. The file holds
     this machine's credentials and every other project's settings, so it is never rewritten from
-    anything but its own current contents.
+    anything but its own current contents, and `read_config()` RAISES rather than handing back an
+    empty dict for a file it could not parse. That fallback existed here and destroyed 26 project
+    entries on the test laptop.
+
+    A copy is kept beside it before the replace, so even a correct write is undoable.
     """
-    try:
-        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        config = {}
-    if not isinstance(config, dict):
-        config = {}
+    config = read_config()
     projects = config.setdefault("projects", {})
     winners, displaced = config_winners(config_rows, mapping)
     keys = []
@@ -717,6 +750,8 @@ def _merge_config(config_rows, mapping):
             continue
         projects[dest_cwd] = entry
         keys.append(dest_cwd)
+    if CONFIG_PATH.exists():
+        shutil.copy2(CONFIG_PATH, CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-before"))
     temporary = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-import")
     temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
     os.replace(temporary, CONFIG_PATH)
@@ -813,7 +848,7 @@ def _desktop_cwd_fields(blob):
 
 def _config_matches(row, dest_cwd):
     try:
-        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        config = read_config()
     except (OSError, ValueError):
         return False
     entry = (config.get("projects") or {}).get(dest_cwd)

@@ -229,3 +229,49 @@ class TestTheDestinationIsChecked:
         manifest = {"cwds": [SOURCE], "primary_cwd": SOURCE}
         with pytest.raises(ValueError):
             projects.destination_mapping(manifest, "relative\\path")
+
+
+class TestTheConfigIsNeverClobbered:
+    """The worst defect in this feature, and it was found by running it on a real second machine
+    rather than by any test or any review.
+
+    `_merge_config` read `~/.claude.json` inside `except (OSError, ValueError): config = {}` and
+    then wrote its result back, so a file it could not PARSE was replaced by one holding just the
+    project being imported. Measured on the test laptop: 26 project entries became 1. All but two
+    came back only because Claude Code keeps its own `.claude.json.backup`.
+
+    The trigger was ordinary. Windows PowerShell's `Set-Content -Encoding UTF8` writes a byte order
+    mark, `json.loads` raises ValueError on one, and the fallback did the rest.
+    """
+
+    def test_a_config_with_a_byte_order_mark_is_read_not_replaced(self, destination, source_rows):
+        raw = destination.config.read_text(encoding="utf-8")
+        destination.config.write_bytes(b"\xef\xbb\xbf" + raw.encode("utf-8"))
+        appstate.restore(source_rows, {SOURCE: DEST})
+        config = json.loads(destination.config.read_text(encoding="utf-8-sig"))
+        assert r"D:\Something\Else" in config["projects"], \
+            "a byte order mark cost this machine every other project's settings"
+        assert config["oauthAccount"] == {"destination machine": True}
+        assert DEST in config["projects"]
+
+    def test_a_config_that_cannot_be_parsed_stops_the_import(self, destination, source_rows):
+        """Refusing is the only safe answer: the alternative is what destroyed the laptop's."""
+        destination.config.write_text("{ this is not json", encoding="utf-8")
+        with pytest.raises(ValueError, match="Refusing to touch it"):
+            appstate.restore(source_rows, {SOURCE: DEST})
+        assert destination.config.read_text(encoding="utf-8") == "{ this is not json", \
+            "the unparseable file was overwritten anyway"
+
+    def test_a_copy_is_kept_before_the_config_is_replaced(self, destination, source_rows):
+        before = destination.config.read_text(encoding="utf-8")
+        appstate.restore(source_rows, {SOURCE: DEST})
+        kept = destination.config.with_suffix(destination.config.suffix + ".c4x-before")
+        assert kept.exists(), "no copy was kept, so a correct write is still not undoable"
+        assert kept.read_text(encoding="utf-8") == before
+
+    def test_a_machine_with_no_config_at_all_is_not_an_error(self, destination, source_rows):
+        """A missing file is a fresh machine, which is different from an unreadable one."""
+        destination.config.unlink()
+        appstate.restore(source_rows, {SOURCE: DEST})
+        config = json.loads(destination.config.read_text(encoding="utf-8-sig"))
+        assert DEST in config["projects"]
