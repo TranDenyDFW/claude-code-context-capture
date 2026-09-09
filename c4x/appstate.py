@@ -176,25 +176,6 @@ def _capture_one(project: str):
     return items
 
 
-def mtime_of(project: str, kind: str, rel: str):
-    """The source file's modification time, carried so the far side can compare rather than guess.
-
-    Recorded at EXPORT time because the import has nothing else to compare with: a blob in a
-    SQLite table has no mtime of its own, and without this the "take the newer one" policy would
-    have to fall back to always or never, both of which are wrong in one direction.
-    """
-    from c4x import store
-
-    roots = {TRANSCRIPT: project_dir(project), DESKTOP: Path(store.sessions_root())}
-    root = roots.get(kind)
-    if root is None:
-        return None
-    try:
-        return (root / rel).stat().st_mtime
-    except OSError:
-        return None
-
-
 def summarise(items):
     """What a captured bundle holds, for a report or a manifest."""
     readable = [i for i in items if i[3] is not None]
@@ -230,13 +211,22 @@ def restore(project: str, items, when_exists="newer"):
     from c4x import store
 
     report = {"written": 0, "bytes": 0, "kept_existing": [], "replaced": [],
-              "newer_but_shorter": [], "desktop_written": 0, "config": "not present"}
+              "newer_but_shorter": [], "rejected_paths": [], "desktop_written": 0,
+              "config": "not present"}
     roots = {TRANSCRIPT: project_dir(project), DESKTOP: Path(store.sessions_root())}
 
     for kind, rel, incoming, blob in items:
         if blob is None or kind not in roots:
             continue
-        target = roots[kind] / rel
+        target = _contained(roots[kind], rel)
+        if target is None:
+            # AN EXPORT IS UNTRUSTED INPUT. It is a file that arrives from another machine, and
+            # this function writes whatever paths it names. `../../../../evil.txt` under the
+            # transcript root resolved to C:\Users\evil.txt on the machine this was written on,
+            # which is arbitrary file write out of a data file. Adding the restore capability is
+            # what made a harmless stored string dangerous.
+            report["rejected_paths"].append(f"{kind}:{rel}")
+            continue
         if target.exists():
             existing = target.stat().st_mtime
             take = (when_exists == "always"
@@ -263,6 +253,22 @@ def restore(project: str, items, when_exists="newer"):
         report["config"] = _merge_config_entry(
             project, json.loads(entry.decode("utf-8")), overwrite=(when_exists == "always"))
     return report
+
+
+def _contained(root: Path, rel: str):
+    """`root / rel` when it genuinely stays under root, else None.
+
+    Compared after RESOLVING both, because the check has to answer where the write actually
+    lands, not what the string looks like: a prefix test on the raw text passes `..` and
+    fails a legitimate path through a symlinked home. An absolute path in the export is
+    rejected by the same test, since it resolves outside root on its own.
+    """
+    try:
+        target = (root / rel).resolve()
+        base = root.resolve()
+    except OSError:
+        return None
+    return target if target == base or base in target.parents else None
 
 
 def _merge_config_entry(project: str, entry: dict, overwrite=False) -> str:
