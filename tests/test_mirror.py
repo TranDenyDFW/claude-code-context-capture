@@ -152,6 +152,19 @@ class TestTheExportCarriesEverything:
         ok, problems = projects.verify(tmp_path / "rows.db")
         assert ok, problems
 
+    def test_a_rows_only_export_is_not_called_a_mirror(self, store_at, machine, tmp_path):
+        """The emptiest kind of pass, found by an independent reviewer.
+
+        `verify` and `verify_mirror` answer different questions. A rows-only export is INTERNALLY
+        sound, which is what `verify` asks, and it carries no files at all, so "is this machine
+        byte for byte what it carries" is not a question with a yes: pointed at one of `delete`'s
+        backups it returned ok while 1,458 files in that project's directory were carried by
+        nothing."""
+        projects.export(SOURCE, tmp_path / "rows.db", app_state=False)
+        result = projects.verify_mirror(tmp_path / "rows.db")
+        assert result["carries_no_files"] is True
+        assert not result["ok"], "an export carrying no files was called a mirror"
+
 
 class TestTheRoundTrip:
     def test_onto_a_wiped_machine_it_is_a_mirror(self, store_at, machine, tmp_path):

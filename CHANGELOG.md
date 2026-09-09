@@ -108,6 +108,32 @@ removed and nothing here said so.
 
 ### Fixed
 
+- **An import no longer writes the EXPORTER's path into your `~/.claude.json`.** The destination
+  was resolved with `mapping.get(row["cwd"], row["cwd"])`, exact string equality on a value that
+  arrives from three places: `sessions.cwd` for a transcript, the raw config KEY for a config
+  entry, and the string inside the record for a desktop row. Those need not be spelled the same,
+  which is why `normalised()` exists at all: 4 of the 91 projects on this machine carry both slash
+  spellings. So a project whose config key used forward slashes had the exporter's absolute path
+  written into the importing user's config, kept the imported chat pointing at a directory that
+  does not exist on that machine, and still passed the mirror check. Found by independent review.
+- **The mirror check now sees the two fields an import rewrites.** A desktop record is hashed with
+  `cwd` and `originCwd` neutralised, so a rebased record can be compared at all, which left exactly
+  those two fields outside every check: a record pointed at a directory that does not exist
+  returned ok. The hash still covers everything the import must not change; the rewritten values
+  are now checked against the destination.
+- **`--into` is validated before anything is derived from it.** A relative path, an existing file,
+  and a page label ending in the archived suffix were all accepted. Nothing failed loudly; the
+  project was filed under a name nothing would look for, since `..\x` slugs to `---x`.
+- **A rows-only export is no longer called a mirror.** `delete` takes its backup that way, so
+  pointing `verify-mirror` at one returned ok while every file in that project's directory was
+  carried by nothing.
+- **"byte for byte" was an overclaim** and the wording now says what holds: transcripts, memory and
+  tasks land byte-identical, while a config entry and a desktop record are content-identical with
+  the working directory rebased. A real record grew from 181,366 to 190,303 bytes on being
+  re-serialised.
+- **An export no longer holds itself in memory.** The whole capture was built as a list of blobs
+  before a byte reached the disk, 694.5 MB for this repo's own project, all of it already on the
+  disk it was read from. Capture now streams into the export row by row.
 - **A delete no longer orphans the two cost tables.** `cost_state` and `cost_state_models` were
   appended to `BY_SESSION` after `sessions`, which put deletion back in the window that ordering
   exists to close: `sessions` gone while rows still pointed at it. The self-test had been

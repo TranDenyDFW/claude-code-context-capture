@@ -32,6 +32,7 @@ import argparse
 import hashlib
 import json
 import platform
+import re
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -404,10 +405,13 @@ def _write_app_state(out_path, cwds, ids):
     the two are indistinguishable from a count alone.
     """
     from c4x import appstate
-    rows, report = appstate.capture(cwds, ids)
-    oversized = [r for r in rows if len(r["blob"]) > MAX_CARRIED_BYTES]
-    rows = [r for r in rows if len(r["blob"]) <= MAX_CARRIED_BYTES]
 
+    # STRAIGHT INTO THE FILE, ONE ROW AT A TIME. This built the whole capture as a list of blobs
+    # first: 694.5 MB resident for this repo's own project before a single byte reached the disk,
+    # and every one of those bytes was already on the disk it was read from.
+    counts = dict.fromkeys(appstate.KINDS, 0)
+    written = {"files": 0, "bytes": 0}
+    oversized = []
     con = sqlite3.connect(str(out_path))
     try:
         con.execute(f"""CREATE TABLE IF NOT EXISTS {APP_STATE_TABLE} (
@@ -415,24 +419,34 @@ def _write_app_state(out_path, cwds, ids):
                           mtime REAL NOT NULL, sha256 TEXT NOT NULL,
                           rebased_sha256 TEXT NOT NULL, blob BLOB NOT NULL,
                           PRIMARY KEY (kind, path, cwd))""")
-        con.executemany(
-            f"INSERT OR REPLACE INTO {APP_STATE_TABLE} "
-            "(kind, path, cwd, mtime, sha256, rebased_sha256, blob) VALUES (?,?,?,?,?,?,?)",
-            [(r["kind"], r["relpath"], r["cwd"], r["mtime"], r["sha256"],
-              r["rebased_sha256"], sqlite3.Binary(r["blob"])) for r in rows])
+
+        def keep(row):
+            if len(row["blob"]) > MAX_CARRIED_BYTES:
+                oversized.append({"path": row["relpath"], "bytes": len(row["blob"])})
+                return
+            con.execute(
+                f"INSERT OR REPLACE INTO {APP_STATE_TABLE} "
+                "(kind, path, cwd, mtime, sha256, rebased_sha256, blob) VALUES (?,?,?,?,?,?,?)",
+                (row["kind"], row["relpath"], row["cwd"], row["mtime"], row["sha256"],
+                 row["rebased_sha256"], sqlite3.Binary(row["blob"])))
+            counts[row["kind"]] += 1
+            written["files"] += 1
+            written["bytes"] += len(row["blob"])
+
+        _rows, report = appstate.capture(cwds, ids, sink=keep)
         con.commit()
     finally:
         con.close()
 
     return {
-        "files": len(rows),
-        "bytes": sum(len(r["blob"]) for r in rows),
-        "by_kind": {k: sum(1 for r in rows if r["kind"] == k) for k in appstate.KINDS},
+        "files": written["files"],
+        "bytes": written["bytes"],
+        "by_kind": counts,
         "cwds": cwds,
         "not_carried": report["not_carried"],
         "not_carried_files": report["not_carried_files"],
         "skipped": report["skipped"],
-        "too_large": [{"path": r["relpath"], "bytes": len(r["blob"])} for r in oversized],
+        "too_large": oversized,
         "source_desktop_pair": report["desktop_pair"],
     }
 
@@ -573,6 +587,38 @@ def export(project, out_path, app_state=True):
 # ---------------------------------------------------------------------------
 # Import
 # ---------------------------------------------------------------------------
+def check_destination(into):
+    """The destination a user typed, checked before anything is derived from it.
+
+    Everything an import writes is derived from this one string: the slug directory, the config
+    key, the `cwd` inside the desktop record, and the rows. So a value that is not a working
+    directory does not fail loudly, it produces a project filed under a name nothing will ever look
+    for. `..\\x` becomes the slug `---x`; a project LABEL ending in the archived suffix becomes a
+    directory that does not exist; and an existing FILE becomes a slug directory beside it while
+    the config claims the file is a project.
+
+    Absolute, including UNC, because a relative path means nothing once it leaves the shell that
+    typed it: the import runs in the API server's working directory, not the user's.
+    """
+    from c4x import store
+    text = str(into).strip()
+    if not text:
+        raise ValueError("the destination working directory cannot be empty")
+    if text.rstrip("\\/").casefold().endswith("\\" + store.ARCHIVED_SUFFIX.casefold()):
+        raise ValueError(
+            f"{text!r} is a project LABEL, not a directory: the desktop app's archive flag adds "
+            f"\\{store.ARCHIVED_SUFFIX} to what the page shows. Import into the real directory.")
+    windows_absolute = re.match(r"^[A-Za-z]:[\\/]", text) is not None
+    unc = text.startswith("\\\\") or text.startswith("//")
+    if not (windows_absolute or unc or text.startswith("/")):
+        raise ValueError(
+            f"{text!r} is a relative path. An import runs wherever the server runs, not where you "
+            "typed it, so the destination has to be absolute.")
+    if Path(text).is_file():
+        raise ValueError(f"{text!r} is an existing FILE, so it cannot be a working directory")
+    return text.rstrip("\\/") or text
+
+
 def destination_mapping(manifest, into=None):
     """{source working directory: destination working directory} for this import.
 
@@ -588,6 +634,8 @@ def destination_mapping(manifest, into=None):
     from c4x import appstate
     cwds = list(manifest.get("cwds") or [])
     primary = manifest.get("primary_cwd") or (cwds[0] if cwds else None)
+    if into is not None:
+        into = check_destination(into)
     if not into or not primary:
         return {c: c for c in cwds}, []
     mapping, unmoved = {}, []
@@ -643,7 +691,7 @@ def _rebase_store_rows(con, ids, mapping, app_rows):
         if not row["relpath"].endswith(".jsonl"):
             continue
         sid = row["relpath"][: -len(".jsonl")]
-        dest_cwd = mapping.get(row["cwd"], row["cwd"])
+        dest_cwd = appstate.destination_cwd(row["cwd"], mapping)
         landed[sid] = str(appstate.project_dir(dest_cwd) / row["relpath"])
     for sid, new_path in landed.items():
         old = con.execute("SELECT transcript_path FROM sessions WHERE session_id = ?",
@@ -807,9 +855,20 @@ def verify_mirror(path, into=None, mapping=None):
     if mapping is None:
         mapping, _unmoved = destination_mapping(manifest, into)
     from c4x import appstate
-    result = appstate.compare(app_state_rows(path), mapping)
+    rows = app_state_rows(path)
+    result = appstate.compare(rows, mapping)
     result["into"] = sorted(set(mapping.values()))
     result["not_carried"] = (manifest.get("app_state") or {}).get("not_carried") or []
+    # AN EXPORT THAT CARRIES NO FILES CANNOT BE MIRRORED, and saying "ok" about it is the emptiest
+    # kind of pass: `delete` takes its backup that way, so pointing this at one returned a clean
+    # verdict while 1,458 files in that project's directory were carried by nothing. The question
+    # is not answered, so the answer is not yes.
+    result["carries_no_files"] = not rows
+    if not rows:
+        result["ok"] = False
+        result["unresolved"] = list(result.get("unresolved") or []) + [{
+            "relpath": str(path),
+            "why": "this export carries no files, so there is nothing to be a mirror OF"}]
     return result
 
 
@@ -1046,7 +1105,16 @@ def _print_mirror(result):
     if not_carried:
         print(f"  {sum(n['files'] for n in not_carried)} file(s) the EXPORT did not carry, "
               "belonging to sessions it has no rows for")
-    print("  mirror  " + ("OK, byte for byte" if result.get("ok") else "NOT A MIRROR"))
+    if result.get("carries_no_files"):
+        print("  mirror  NOT CHECKED: this export carries rows only, no files")
+        return 1
+    # NOT "byte for byte", WHICH WAS NOT TRUE OF ALL FIVE KINDS. Transcripts, memory and tasks land
+    # byte-identical. A config entry and a desktop record are the two things an import deliberately
+    # rewrites, so they are identical in content with the working directory replaced, and a real
+    # record grew from 181,366 to 190,303 bytes on being re-serialised. Claiming the stronger
+    # property of all of them was an overclaim an independent reviewer measured.
+    print("  mirror  " + ("OK: files identical, config and desktop record rebased"
+                          if result.get("ok") else "NOT A MIRROR"))
     return 0 if result.get("ok") else 1
 
 

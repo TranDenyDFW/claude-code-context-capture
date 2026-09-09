@@ -134,6 +134,39 @@ def sessions_root():
     return store.sessions_root()
 
 
+def destination_cwd(row_cwd, mapping):
+    """Where a row belongs, resolved the way two spellings of one directory are the same directory.
+
+    NOT `mapping.get(row_cwd, row_cwd)`, which is what this was and which quietly defeated the
+    whole feature. The mapping is keyed on `sessions.cwd`, and a row's `cwd` comes from three
+    different places: a transcript's is that same value, a CONFIG row's is the raw
+    `~/.claude.json` key, and a DESKTOP row's is the string inside the record. Those do not have to
+    agree character for character, and `normalised()` exists in this module precisely because they
+    do not: 4 of the 91 projects on this machine carry both slash spellings.
+
+    Measured on a fixture where the config key and the record both said `P:/FakeSrc/Proj` while
+    `sessions.cwd` said `P:\\FakeSrc\\Proj`: the transcript moved to the destination, the config
+    gained the EXPORTER's key, the chat kept pointing at the exporter's directory, and
+    `verify_mirror` returned ok. An import that writes another machine's absolute path into this
+    user's config is the exact outcome this feature exists to prevent.
+
+    A row under a mapped directory moves with it, so `P:\\Proj\\sub` follows `P:\\Proj`.
+    Anything that matches nothing is returned unchanged, and callers report it.
+    """
+    if row_cwd in mapping:
+        return mapping[row_cwd]
+    target = normalised(row_cwd)
+    for source, dest in mapping.items():
+        if normalised(source) == target:
+            return dest
+    for source, dest in sorted(mapping.items(), key=lambda kv: -len(kv[0])):
+        prefix = normalised(source) + "\\"
+        if target.startswith(prefix):
+            tail = str(row_cwd).replace("/", "\\")[len(str(source)):].lstrip("\\")
+            return str(dest).rstrip("\\") + "\\" + tail
+    return row_cwd
+
+
 def normalised(cwd):
     """A working directory reduced to what makes two spellings the same directory.
 
@@ -301,7 +334,7 @@ def _count_files(entry):
     return total
 
 
-def capture(cwds, session_ids, sessions_root=None):
+def capture(cwds, session_ids, sessions_root=None, sink=None):
     """Everything the four layers hold for these working directories and sessions.
 
     Returns (rows, report). A row is a dict with kind, cwd, relpath, mtime, sha256, rebased_sha256
@@ -317,12 +350,37 @@ def capture(cwds, session_ids, sessions_root=None):
     WHAT IS NOT CARRIED IS REPORTED. The slug directory is shared by every session with that
     working directory, so a file belonging to a session this store has no row for is real, is not
     ours to move, and is named in `not_carried` rather than dropped in silence.
+
+    PASS A `sink` AND NOTHING IS ACCUMULATED. Every row is handed to it and dropped, and the
+    returned list is empty. `_write_app_state` uses that to insert straight into the export, which
+    matters at the size this reaches: an export of this repo's own project is 694.5 MB, and holding
+    all of it as blobs in a list before writing any of it is a way to run a machine out of memory
+    while doing nothing useful with the bytes.
     """
     from c4x import store
     cwds = _cwds(cwds)
     ids = [str(s) for s in session_ids]
     id_set = set(ids)
-    rows, skipped, not_carried = [], [], []
+    skipped, not_carried = [], []
+    kept, tally = [], {"files": 0, "bytes": 0, "by_kind": dict.fromkeys(KINDS, 0)}
+
+    class _Rows(list):
+        """Looks like the list this used to build, and keeps nothing when a sink is given."""
+
+        def append(self, row):
+            tally["files"] += 1
+            tally["bytes"] += len(row["blob"])
+            tally["by_kind"][row["kind"]] += 1
+            if sink is None:
+                kept.append(row)
+            else:
+                sink(row)
+
+        def extend(self, more):
+            for row in more:
+                self.append(row)
+
+    rows = _Rows()
 
     for cwd in cwds:
         base = project_dir(cwd)
@@ -351,16 +409,16 @@ def capture(cwds, session_ids, sessions_root=None):
     rows.extend(_capture_desktop(id_set, sessions_root, skipped))
 
     report = {
-        "files": len(rows),
-        "bytes": sum(len(r["blob"]) for r in rows),
-        "by_kind": {k: sum(1 for r in rows if r["kind"] == k) for k in KINDS},
+        "files": tally["files"],
+        "bytes": tally["bytes"],
+        "by_kind": dict(tally["by_kind"]),
         "skipped": skipped,
         "not_carried": not_carried,
         "not_carried_files": sum(n["files"] for n in not_carried),
         "desktop_pair": desktop_pair(sessions_root),
         "source_store": str(store.DB_PATH),
     }
-    return rows, report
+    return kept, report
 
 
 def _capture_config(cwds, skipped):
@@ -503,7 +561,8 @@ def restore(rows, mapping, sessions_root=None, dry_run=False):
     """
     mapping = _mapping(mapping)
     report = {"written": [], "replaced": [], "replaced_shorter": [], "refused": [],
-              "config_keys": [], "desktop": [], "bytes": 0, "dry_run": bool(dry_run)}
+              "config_keys": [], "config_spellings_merged": [], "desktop": [], "bytes": 0,
+              "dry_run": bool(dry_run)}
 
     # 1. TYPES, before anything is opened.
     for row in rows:
@@ -519,7 +578,7 @@ def restore(rows, mapping, sessions_root=None, dry_run=False):
     # 2. CONTAINMENT, and 3. COLLISION, both decided before a single byte is written.
     planned, seen = [], {}
     for row in rows:
-        dest_cwd = mapping.get(row["cwd"], row["cwd"])
+        dest_cwd = destination_cwd(row["cwd"], mapping)
         path, refusal = destination(row, dest_cwd, sessions_root)
         if refusal:
             report["refused"].append({"relpath": row["relpath"], "kind": row["kind"],
@@ -579,7 +638,8 @@ def restore(rows, mapping, sessions_root=None, dry_run=False):
             report["desktop"].append({"path": str(path), "cwd": dest_cwd})
 
     if config_rows:
-        report["config_keys"] = _merge_config(config_rows)
+        report["config_keys"], report["config_spellings_merged"] = _merge_config(
+            config_rows, mapping)
     return report
 
 
@@ -597,7 +657,44 @@ def _rebased_desktop(blob, dest_cwd):
     return json.dumps(record, ensure_ascii=False).encode("utf-8"), None
 
 
-def _merge_config(config_rows):
+def config_winners(config_rows, mapping):
+    """One entry per destination key, chosen the same way everywhere, and the ones it displaced.
+
+    TWO SPELLINGS OF ONE DIRECTORY ARE ONE DIRECTORY, so once the destination is resolved properly
+    both of a project's `~/.claude.json` keys land on the same key, and their entries need not be
+    equal. That is a genuine conflict, not a detail: last-one-wins would let the answer depend on
+    dict order, and the mirror check would then report the loser as a difference forever.
+
+    The winner is the spelling the STORE uses, which is the one a mapping is keyed on, because that
+    is the spelling every other layer of this project already agrees on. Failing that, the first by
+    sorted key, so the answer is at least the same in both places that ask.
+
+    Returns ({destination key: row}, [{"key", "displaced", "kept"}]).
+    """
+    # EXACT, not normalised. Normalising is what makes both spellings collide in the first place,
+    # so normalising the preference too makes both of them "preferred" and the tie falls to
+    # whichever sorts first, which on these two is the forward-slash one because `/` is 0x2F and
+    # `\` is 0x5C. The point of the preference is to pick the spelling the STORE uses.
+    canonical = set(mapping)
+    by_key = {}
+    for row, dest_cwd in config_rows:
+        by_key.setdefault(dest_cwd, []).append(row)
+    winners, displaced = {}, []
+    for dest_cwd, rows in by_key.items():
+        if len(rows) == 1:
+            winners[dest_cwd] = rows[0]
+            continue
+        preferred = [r for r in rows if r["cwd"] in canonical]
+        chosen = min(preferred or rows, key=lambda r: str(r["cwd"]))
+        winners[dest_cwd] = chosen
+        for row in rows:
+            if row is not chosen:
+                displaced.append({"key": dest_cwd, "displaced": row["cwd"],
+                                  "kept": chosen["cwd"]})
+    return winners, displaced
+
+
+def _merge_config(config_rows, mapping):
     """Put each carried entry under its DESTINATION key in `~/.claude.json`, touching nothing else.
 
     Read, set one key, write to a temporary file beside the real one and replace. The file holds
@@ -611,8 +708,9 @@ def _merge_config(config_rows):
     if not isinstance(config, dict):
         config = {}
     projects = config.setdefault("projects", {})
+    winners, displaced = config_winners(config_rows, mapping)
     keys = []
-    for row, dest_cwd in config_rows:
+    for dest_cwd, row in winners.items():
         try:
             entry = json.loads(bytes(row["blob"]).decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -622,7 +720,7 @@ def _merge_config(config_rows):
     temporary = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-import")
     temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
     os.replace(temporary, CONFIG_PATH)
-    return keys
+    return sorted(keys), displaced
 
 
 # ---------------------------------------------------------------------------
@@ -638,13 +736,21 @@ def compare(rows, mapping, sessions_root=None):
     """
     mapping = _mapping(mapping)
     missing, differs, unresolved, expected_paths = [], [], [], set()
+    # THE SAME WINNER RULE THE RESTORE USED. Two spellings of one directory land on one key, so
+    # only one of their entries can be there; asking about the other would report a difference no
+    # import could ever clear.
+    config_rows = [(row, destination_cwd(row["cwd"], mapping))
+                   for row in rows if row["kind"] == CONFIG]
+    winners, merged_spellings = config_winners(config_rows, mapping)
     for row in rows:
-        dest_cwd = mapping.get(row["cwd"], row["cwd"])
+        dest_cwd = destination_cwd(row["cwd"], mapping)
         path, refusal = destination(row, dest_cwd, sessions_root)
         if refusal:
             unresolved.append({"relpath": row["relpath"], "why": refusal})
             continue
         if row["kind"] == CONFIG:
+            if winners.get(dest_cwd) is not row:
+                continue
             if not _config_matches(row, dest_cwd):
                 differs.append({"relpath": dest_cwd, "kind": CONFIG,
                                 "why": "the entry under this key is not the one exported"})
@@ -657,6 +763,16 @@ def compare(rows, mapping, sessions_root=None):
         if row["kind"] == DESKTOP:
             actual = sha256_bytes(rebase_marked(landed, DESKTOP_CWD_FIELDS) or landed)
             wanted = row["rebased_sha256"]
+            # AND THE TWO FIELDS THE HASH DELIBERATELY IGNORES. Neutralising them is what lets a
+            # rebased record be compared at all, and it left the one field an import REWRITES as
+            # the one field the acceptance test could not see: a record pointed at
+            # `Q:\\nowhere` passed. The hash covers everything the import must not change; this
+            # covers the little it must.
+            for field, value in _desktop_cwd_fields(landed).items():
+                if value != dest_cwd:
+                    differs.append({
+                        "relpath": row["relpath"], "kind": DESKTOP, "path": str(path),
+                        "why": f"{field} is {value!r}, not the destination {dest_cwd!r}"})
         else:
             actual = sha256_bytes(landed)
             wanted = row["sha256"]
@@ -676,7 +792,23 @@ def compare(rows, mapping, sessions_root=None):
                     extra.append(full)
     return {"ok": not missing and not differs and not unresolved,
             "missing": missing, "differs": differs, "extra": sorted(extra),
-            "unresolved": unresolved}
+            "unresolved": unresolved, "config_spellings_merged": merged_spellings}
+
+
+def _desktop_cwd_fields(blob):
+    """{field: value} for the working-directory fields a landed record carries.
+
+    Only the fields that are actually present: a record without `originCwd` is not a record with a
+    wrong `originCwd`, and reporting one would make the check fail on a shape the app itself
+    writes.
+    """
+    try:
+        record = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    return {field: record[field] for field in DESKTOP_CWD_FIELDS if field in record}
 
 
 def _config_matches(row, dest_cwd):
