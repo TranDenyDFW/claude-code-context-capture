@@ -32,6 +32,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -294,7 +295,7 @@ def desktop_pair(root=None):
     except (OSError, ValueError):
         pass
 
-    newest = {}
+    newest: dict[tuple[str, str], float] = {}
     if root.is_dir():
         for path in root.glob("*/*/local_*.json"):
             pair = (path.parent.parent.name, path.parent.name)
@@ -395,8 +396,11 @@ def capture(cwds, session_ids, sessions_root=None, sink=None):
     cwds = _cwds(cwds)
     ids = [str(s) for s in session_ids]
     id_set = set(ids)
-    skipped, not_carried = [], []
-    kept, tally = [], {"files": 0, "bytes": 0, "by_kind": dict.fromkeys(KINDS, 0)}
+    skipped: list[dict] = []
+    not_carried: list[dict] = []
+    kept: list[dict] = []
+    counted: dict[str, int] = dict.fromkeys(KINDS, 0)
+    tally: dict[str, int] = {"files": 0, "bytes": 0}
 
     class _Rows(list):
         """Looks like the list this used to build, and keeps nothing when a sink is given."""
@@ -404,7 +408,7 @@ def capture(cwds, session_ids, sessions_root=None, sink=None):
         def append(self, row):
             tally["files"] += 1
             tally["bytes"] += len(row["blob"])
-            tally["by_kind"][row["kind"]] += 1
+            counted[row["kind"]] += 1
             if sink is None:
                 kept.append(row)
             else:
@@ -445,7 +449,7 @@ def capture(cwds, session_ids, sessions_root=None, sink=None):
     report = {
         "files": tally["files"],
         "bytes": tally["bytes"],
-        "by_kind": dict(tally["by_kind"]),
+        "by_kind": dict(counted),
         "skipped": skipped,
         "not_carried": not_carried,
         "not_carried_files": sum(n["files"] for n in not_carried),
@@ -537,10 +541,10 @@ def _safe_parts(relpath):
 def destination(row, dest_cwd, sessions_root=None):
     """(path, refusal). The path this row is written to on this machine, or why it is refused."""
     kind = row["kind"]
-    parts, why = (None, None)
+    parts: list[str] | None = None
     if kind in (TRANSCRIPT, MEMORY, TASKS, DESKTOP):
         parts, why = _safe_parts(row["relpath"])
-        if why:
+        if why or parts is None:
             return None, f"{row['relpath']!r}: {why}"
     if kind in (TRANSCRIPT, MEMORY):
         base = project_dir(dest_cwd)
@@ -551,13 +555,15 @@ def destination(row, dest_cwd, sessions_root=None):
         if base is None:
             return None, ("this machine has no desktop account and organisation to file a record "
                           "under, so the session would not appear in the app")
-        if len(parts) != 1:
+        if parts is None or len(parts) != 1:
             return None, f"{row['relpath']!r}: a desktop record is carried as a filename alone"
     elif kind == CONFIG:
         return CONFIG_PATH, None
     else:
         return None, f"unknown kind {kind!r}"
 
+    if parts is None:              # unreachable: CONFIG is the only kind that leaves it unset,
+        return None, f"{kind!r} carries no relative path"    # and CONFIG returned above
     path = base.joinpath(*parts)
     try:
         resolved = path.resolve()
@@ -594,9 +600,10 @@ def restore(rows, mapping, sessions_root=None, dry_run=False):
     "kept existing" and never names it.
     """
     mapping = _mapping(mapping)
-    report = {"written": [], "replaced": [], "replaced_shorter": [], "refused": [],
-              "config_keys": [], "config_spellings_merged": [], "desktop": [], "bytes": 0,
-              "dry_run": bool(dry_run)}
+    report: dict[str, Any] = {
+        "written": [], "replaced": [], "replaced_shorter": [], "refused": [],
+        "config_keys": [], "config_spellings_merged": [], "desktop": [], "bytes": 0,
+        "dry_run": bool(dry_run)}
 
     # 1. TYPES, before anything is opened.
     for row in rows:
@@ -610,7 +617,8 @@ def restore(rows, mapping, sessions_root=None, dry_run=False):
             raise ValueError(f"{row.get('relpath')!r}: unknown kind {row.get('kind')!r}")
 
     # 2. CONTAINMENT, and 3. COLLISION, both decided before a single byte is written.
-    planned, seen = [], {}
+    planned: list = []
+    seen: dict[str, str] = {}
     for row in rows:
         dest_cwd = destination_cwd(row["cwd"], mapping)
         path, refusal = destination(row, dest_cwd, sessions_root)
@@ -710,7 +718,7 @@ def config_winners(config_rows, mapping):
     # whichever sorts first, which on these two is the forward-slash one because `/` is 0x2F and
     # `\` is 0x5C. The point of the preference is to pick the spelling the STORE uses.
     canonical = set(mapping)
-    by_key = {}
+    by_key: dict[str, list[dict]] = {}
     for row, dest_cwd in config_rows:
         by_key.setdefault(dest_cwd, []).append(row)
     winners, displaced = {}, []
@@ -861,7 +869,7 @@ def _config_matches(row, dest_cwd):
 # Checks that need no store and no fixture
 # ---------------------------------------------------------------------------
 def self_test():
-    cases = []
+    cases: list[tuple[str, bool]] = []
 
     def check(what, ok):
         cases.append((what, bool(ok)))
@@ -877,12 +885,15 @@ def self_test():
     check("both slash spellings normalise to one directory",
           normalised("P:/Skills") == normalised("P:\\Skills\\"))
 
-    for bad, why in (("../evil.txt", "parent reference"),
-                     ("C:\\evil.txt", "absolute"),
-                     ("nul", "device name"),
-                     ("a.jsonl.", "trailing dot"),
-                     ("", "empty")):
-        check(f"a relative path that is {why} is refused", _safe_parts(bad)[0] is None)
+    # `candidate`, not `bad`: `bad` is the failure COUNTER below, and shadowing it here made the
+    # counter start life as a string. mypy caught it; nothing else would have, because the loop
+    # ends before the counter is used.
+    for candidate, why in (("../evil.txt", "parent reference"),
+                           ("C:\\evil.txt", "absolute"),
+                           ("nul", "device name"),
+                           ("a.jsonl.", "trailing dot"),
+                           ("", "empty")):
+        check(f"a relative path that is {why} is refused", _safe_parts(candidate)[0] is None)
     check("an ordinary relative path is accepted",
           _safe_parts("abc-def/subagents/x.json")[0] == ["abc-def", "subagents", "x.json"])
 

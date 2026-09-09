@@ -31,8 +31,7 @@ if str(ROOT) not in sys.path:
 
 import re  # noqa: E402
 
-from fastapi import (FastAPI, File, Form, HTTPException, Query, Request,  # noqa: E402
-                     UploadFile)
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
