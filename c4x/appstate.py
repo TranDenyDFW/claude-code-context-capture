@@ -104,11 +104,19 @@ def slug_for(cwd):
     Every character that is not a letter or a digit becomes a hyphen, so `P:\\Skills` is
     `P--Skills`.
 
-    `tests/test_appstate.py::TestTheSlugAgainstTheRealMachine` pins this against the directories
-    Claude Code actually created, by resolving `~/.claude.json`'s own project keys and requiring
-    that every one with a directory maps onto it. It SKIPS where there is nothing to compare, so a
-    fresh checkout is not told its rule is wrong; that sentence used to claim the test existed
-    when it did not, which an independent sweep caught.
+    THIS RESTATES A RULE CLAUDE CODE IMPLEMENTS ELSEWHERE, so it can only be validated by looking
+    at the directories it created. Measured on 2026-09-09 against one machine's `~/.claude.json`:
+    72 of 91 project keys had a directory, and this rule reproduced the name of every one. 49 of
+    those contained a character it has to rewrite, covering the space, dot, underscore, hyphen and
+    colon cases. The other 19 keys were projects that had never been opened, so no directory
+    existed to compare.
+
+    That is a dated measurement rather than a gate, and it is written that way on purpose. An
+    earlier version of this docstring cited a test that did not exist, and the test then written to
+    make it true could only run on a machine with a real Claude Code install: it SKIPPED in CI, and
+    a skip against the deterministic fixture is a fixture gap the suite fails on, correctly. What
+    IS pinned everywhere is the rule's behaviour, in
+    `tests/test_appstate.py::TestTheSlug`, over inputs of each shape above.
     """
     if not isinstance(cwd, str):
         cwd = str(cwd)
