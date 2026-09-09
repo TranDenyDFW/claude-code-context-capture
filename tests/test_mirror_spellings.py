@@ -275,3 +275,4 @@ class TestTheConfigIsNeverClobbered:
         appstate.restore(source_rows, {SOURCE: DEST})
         config = json.loads(destination.config.read_text(encoding="utf-8-sig"))
         assert DEST in config["projects"]
+

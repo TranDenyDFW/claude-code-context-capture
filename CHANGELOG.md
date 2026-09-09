@@ -43,7 +43,7 @@ removed and nothing here said so.
     evidence for it, in `.md/20260909-desktop-record-addressing.md`.
   - **Source always wins**, and every file is re-read and re-hashed after writing. A replacement
     that SHRINKS a file is named, because a compacted transcript is newer and shorter.
-  - `verify-mirror <export> [--into ...]` answers "is this machine byte for byte what the export
+  - `verify-mirror <export> [--into ...]` answers "does this machine hold what the export
     carries?" standalone, exits non-zero on a difference, and runs automatically at the end of
     every import. Files the export does not carry are reported and never deleted: a slug directory
     is shared by every session with the same working directory.
@@ -81,12 +81,15 @@ removed and nothing here said so.
   calls: 1,848 refusals, 3,945 genuine failures, and 1,078 that predate the field and cannot be
   told apart. So 26.9% of what was called an error never ran, and of the calls that can be
   classified at all it is 31.9%. Per tool it is far worse, because refusal is not spread
-  evenly: the `ExitPlanMode` row read 39 errors and NONE of them can be proven to have run and
+  evenly: the `ExitPlanMode` row read 41 errors and NONE of them can be proven to have run and
   failed. That row now reads "13 refused, 30 unknown", because the shipped classifier will
-  not claim a refusal it cannot prove and 28 of those calls predate the field that would have
-  proved it. Reading the result text of the 39 that could be matched: 23 say the user did not
-  want to proceed, 2 are permission failures, and exactly ONE is a genuine tool error. The plan
-  said 3 and two rounds of commit messages repeated it unmeasured. Only the exact signal ships,
+  not claim a refusal it cannot prove and 28 of the flagged calls predate the field that would have
+  proved it. (41 is the flagged count, `is_error = 1`; 30 is the unknown count across all 285 calls
+  of that tool, which is what the row shows. This entry said 39 for the first figure while three
+  code comments said 41, and 41 is what the store contains: an independent sweep found the
+  disagreement.) Reading the result text of the calls that could be matched to a transcript:
+  23 say the user did not want to proceed, 2 are permission failures, and exactly ONE is a genuine
+  tool error. The plan said 3 and two rounds of commit messages repeated it unmeasured. Only the exact signal ships,
   so the app says unknown where an inference would have said refused.
   Six surfaces now read one merged `outcome`
   column that is BLANK when there is nothing to say, with the three counts kept as hidden
@@ -139,10 +142,18 @@ removed and nothing here said so.
   exists to close: `sessions` gone while rows still pointed at it. The self-test had been
   reporting it as a FAIL. Nothing but the deletion order reads that sequence, so exports and
   footprints are unaffected.
-- **No test can reach the real `~/.claude`, `~/.claude.json` or `%APPDATA%\Claude`.** An autouse
-  fixture points all three at a temporary directory. The risk was not in the tests that mean to
-  touch those paths; it was in the export tests that now capture app state and did not know they
-  would read the developer's own machine.
+- **No test WRITES to the real `~/.claude`, `~/.claude.json` or `%APPDATA%\Claude`,** and none of
+  them reaches those paths through `c4x/appstate.py`. An autouse fixture points that module's three
+  roots at a temporary directory. The risk was not in the tests that mean to touch those paths; it
+  was in the export tests that now capture app state and did not know they would read the
+  developer's own machine.
+  The claim stops there on purpose, because a wider one would be false: `c4x/store.py` still READS
+  the real machine, by design, and the suite depends on it. `archived_sessions()` is what puts the
+  `\archived` marker on a session row and `transcript_ids()` is what tells an imported session from
+  a local one, so pointing those at an empty directory silently changed what every pane test saw.
+  One test asserts the marker against the real records and is right to. Two of these reads are
+  named in `tests/test_appstate.py::TestTheSlugAgainstTheRealMachine`, which skips where there is
+  nothing to compare.
 - **Mutation routes refuse a cross-origin request.** A multipart POST is a CORS simple request, so
   it reached the import handler and staged the upload to disk before anything validated it. The
   guard is middleware rather than a route dependency, because FastAPI reads the body first.

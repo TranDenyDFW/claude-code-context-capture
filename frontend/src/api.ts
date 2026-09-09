@@ -280,7 +280,7 @@ export interface MirrorFile {
 }
 
 /**
- * Whether this machine now holds byte for byte what the export carries.
+ * Whether this machine now holds what the export carries.
  *
  * `missing` is carried and absent, `differs` is carried and hashes differently, `extra` is here
  * and not in the export: reported and never deleted, because a slug directory is shared by every
@@ -297,6 +297,14 @@ export interface MirrorResult {
   unresolved: MirrorFile[]
   into: string[]
   not_carried: { path: string; files: number; why: string }[]
+  /**
+   * The export carried rows only, so there was nothing to compare and `ok` answers no question.
+   *
+   * `delete` writes its backup this way, which makes every undo of a delete a rows-only import.
+   * Reading `ok` alone painted that correct restore red and named nothing, because `missing` and
+   * `differs` are both empty when nothing was carried.
+   */
+  carries_no_files?: boolean
 }
 
 /** The files an import wrote, and what it refused. */

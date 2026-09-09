@@ -168,7 +168,7 @@ def test_no_table_calls_a_refused_tool_an_error(pane, q, has_store):
     tool = refusers.iloc[0]["tool_name"]
     truth = int(refusers.iloc[0]["refused"])
 
-    checked = 0
+    checked = reported = 0
     for table in extract.tables(pane("tab-cost")):
         if "outcome" not in (table["columns"] or []):
             continue
@@ -179,7 +179,13 @@ def test_no_table_calls_a_refused_tool_an_error(pane, q, has_store):
             assert "error" not in row["outcome"], (
                 f"{tool} never failed: every flagged call was stopped before it ran, but a "
                 f"table reports {row['outcome']!r}")
-            assert "refused" in row["outcome"], row["outcome"]
+            # NOT "every drawn row must say refused". A table that PARTITIONS this tool's calls,
+            # the repeated-inputs table groups by input hash, can honestly draw a group holding
+            # none of the refusals, and demanding the word of every row failed correct code. Found
+            # by an independent sweep, and it is the same mistake the note below describes one
+            # version earlier: a bound that assumes the whole population is in every row.
+            if "refused" not in row["outcome"]:
+                continue
             # BOUNDED BY SQL, NOT COMPARED TO THE FOLDER. The first version asserted
             # row["outcome"] == outcome_text(row["errors"], ...), which is outcome_text
             # checked against outcome_text: any wrong number passed as long as the same
@@ -188,13 +194,18 @@ def test_no_table_calls_a_refused_tool_an_error(pane, q, has_store):
             # The second version compared the cell to the STORE-WIDE total, which coupled it
             # to one table again: a table grouping by input hash honestly reports a smaller
             # number and was failed for being right. The bound holds for every population:
-            # a partition of this tool's refusals cannot exceed the tool's refusals, and a
-            # drawn row cannot report none.
+            # a partition of this tool's refusals cannot exceed the tool's refusals.
             n = int(row["outcome"].split()[0].replace(",", ""))
             assert 1 <= n <= truth, (
                 f"{tool} shows {n} refused in a table whose whole population holds at "
                 f"most {truth}")
+            reported += 1
     assert checked, f"no table on the Cost tab drew an outcome cell for {tool}"
+    # AND SOMEWHERE THE WORD DOES APPEAR. Skipping a row with no refusals is right per row and
+    # would make the whole check vacuous if every row were skipped, which is how a gate stops
+    # asking its question while still reporting success.
+    assert reported, (
+        f"{tool} has {truth} refusals in the store and not one drawn row reports any")
 
 def test_the_denial_vocabulary_reaches_a_table_not_only_a_note(pane, q, has_store):
     """Decision 8. A note carries the same words and cannot be sorted, filtered or exported."""
@@ -378,16 +389,20 @@ def _every_table(app, pane, session_id, other_session_id):
                 walk(getattr(node, name, None), query, found)
         return found
 
-    # THE APP'S OWN TAB LIST, never a copy of it here. A copy is a second place to forget, and
-    # a tab this file did not know about is exactly where an unchecked table would sit. Naming the
-    # population's SOURCE rather than its members is the whole point of both gates below.
+    # THE POPULATION `tests/test_tables.py` ALREADY BUILDS, not a second narrower walk here.
+    #
+    # This walked `app.TABS` and used `other_session_id` as a BOOLEAN, rendering `pane(tab, None)`
+    # rather than a second session, so no table on this branch was ever drawn for two different
+    # sessions and the whole callback-delivered half of the app sat outside the population: the
+    # Session tab's turn-diff panel, the Compare body, and every Window sub-panel after the first.
+    # An independent sweep found the gate reporting a coverage it did not have. `every_body` walks
+    # exactly those, and reusing it means one place to forget instead of two.
+    from tests.test_tables import every_body
+
     out = []
-    for tab in [t[0] for t in app.TABS]:
-        for table, query in walk(pane(tab, session_id), None, []):
-            out.append((tab, table, query or ""))
-        if other_session_id:
-            for table, query in walk(pane(tab, None), None, []):
-                out.append((tab, table, query or ""))
+    for label, body in every_body(pane, session_id, other_session_id):
+        for table, query in walk(body, None, []):
+            out.append((label, table, query or ""))
     assert out, "no tables rendered, so neither gate below could have failed"
     return out
 

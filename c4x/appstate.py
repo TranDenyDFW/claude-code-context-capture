@@ -1,6 +1,6 @@
-"""The three layers of Claude Code state that live OUTSIDE the store, captured and restored.
+"""The five kinds of Claude Code state that live OUTSIDE the store, captured and restored.
 
-c4x's export carries what c4x parsed. Claude Code itself holds four more things, and without them
+c4x's export carries what c4x parsed. Claude Code itself holds the rest, and without them
 an imported project is a set of rows: visible in c4x, invisible in the desktop app, unopenable by
 `/resume`.
 
@@ -102,8 +102,13 @@ def slug_for(cwd):
     """The directory name Claude Code gives a working directory under ~/.claude/projects.
 
     Every character that is not a letter or a digit becomes a hyphen, so `P:\\Skills` is
-    `P--Skills`. Checked against the 513 slug directories on this machine by
-    `tests/test_appstate.py`, which resolves real config keys rather than restating the rule.
+    `P--Skills`.
+
+    `tests/test_appstate.py::TestTheSlugAgainstTheRealMachine` pins this against the directories
+    Claude Code actually created, by resolving `~/.claude.json`'s own project keys and requiring
+    that every one with a directory maps onto it. It SKIPS where there is nothing to compare, so a
+    fresh checkout is not told its rule is wrong; that sentence used to claim the test existed
+    when it did not, which an independent sweep caught.
     """
     if not isinstance(cwd, str):
         cwd = str(cwd)

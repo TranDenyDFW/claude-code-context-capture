@@ -216,7 +216,7 @@ def _subagent_types(where, args):
              "harvest and backfilled over every transcript already on disk. "
              + (f"{unknown:,} calls named no type and are reported as such rather than assumed to "
                 f"be the default. " if unknown else "")
-             + "bytes is tool RESULT bytes, not tokens: an agent's own turns are counted "
+             + "kb is tool RESULT kilobytes, not tokens: an agent's own turns are counted "
                "elsewhere, under the session that spawned it.")
 
 

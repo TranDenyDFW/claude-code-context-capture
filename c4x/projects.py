@@ -671,15 +671,26 @@ def _rebase_store_rows(con, ids, mapping, app_rows):
         return {}
     marks = ",".join("?" * len(ids))
     moved = {"sessions": 0, "hook_events": 0, "transcripts": 0, "files": 0}
-    for source_cwd, dest_cwd in mapping.items():
-        if source_cwd == dest_cwd:
+    # WHICH SESSION CAME FROM WHICH DIRECTORY, read from the EXPORT rather than from this store.
+    #
+    # These matched on `AND cwd = <source>`, which is true only the first time. Import an export
+    # into D:\First and the rows read D:\First; import the SAME export again into D:\Second and
+    # that clause matches nothing, so the rows stayed at D:\First while the transcript and its
+    # offset moved to D:\Second, and the page called it a success. The export knows what each
+    # session's directory was, so the mapping is applied per session and the second import is as
+    # correct as the first.
+    origin = {}
+    for sid, cwd in con.execute(
+            f"SELECT session_id, cwd FROM src.sessions WHERE session_id IN ({marks})", ids):
+        origin[sid] = cwd
+    for sid, source_cwd in origin.items():
+        dest_cwd = appstate.destination_cwd(source_cwd, mapping) if source_cwd else None
+        if not dest_cwd or dest_cwd == source_cwd:
             continue
         moved["sessions"] += con.execute(
-            f"UPDATE sessions SET cwd = ? WHERE session_id IN ({marks}) AND cwd = ?",
-            [dest_cwd, *ids, source_cwd]).rowcount
+            "UPDATE sessions SET cwd = ? WHERE session_id = ?", (dest_cwd, sid)).rowcount
         moved["hook_events"] += con.execute(
-            f"UPDATE hook_events SET cwd = ? WHERE session_id IN ({marks}) AND cwd = ?",
-            [dest_cwd, *ids, source_cwd]).rowcount
+            "UPDATE hook_events SET cwd = ? WHERE session_id = ?", (dest_cwd, sid)).rowcount
 
     # The transcript moves to whatever slug directory its bytes actually landed in, and only for
     # sessions this export carried a transcript FOR. A session with no carried transcript keeps the
@@ -698,8 +709,16 @@ def _rebase_store_rows(con, ids, mapping, app_rows):
                           (sid,)).fetchone()
         if not old or old[0] == new_path:
             continue
+        # COPIED, NOT MOVED, and that is the whole of it. `tools/harvest.mjs` resumes each
+        # transcript from `files.bytes_read` and treats a path with NO row as unread, so moving the
+        # row left the ORIGINAL transcript, which an import never deletes, looking brand new. The
+        # next harvest re-read it from zero and recreated every session row at the OLD working
+        # directory, silently undoing the move the user asked for. Keeping both rows means neither
+        # copy is re-read: the old path keeps its offset, the new path gets the same one.
         moved["files"] += con.execute(
-            "UPDATE OR IGNORE files SET path = ? WHERE path = ?", (new_path, old[0])).rowcount
+            "INSERT OR IGNORE INTO files (path, size, mtime_ms, bytes_read, lines_read, rewrites, "
+            "last_harvest_ts) SELECT ?, size, mtime_ms, bytes_read, lines_read, rewrites, "
+            "last_harvest_ts FROM files WHERE path = ?", (new_path, old[0])).rowcount
         moved["transcripts"] += con.execute(
             "UPDATE sessions SET transcript_path = ? WHERE session_id = ?",
             (new_path, sid)).rowcount
@@ -835,7 +854,7 @@ def restore_app_state(path, mapping):
 
 
 def verify_mirror(path, into=None, mapping=None):
-    """Is what is on this machine byte for byte what the export carries?
+    """Does this machine hold what the export carries?
 
     THE ACCEPTANCE TEST FOR "COMPLETE MIRROR IMAGE", and it runs standalone against an export file
     so it can be run after the fact, by someone else, on the machine that received the import.
@@ -859,16 +878,15 @@ def verify_mirror(path, into=None, mapping=None):
     result = appstate.compare(rows, mapping)
     result["into"] = sorted(set(mapping.values()))
     result["not_carried"] = (manifest.get("app_state") or {}).get("not_carried") or []
-    # AN EXPORT THAT CARRIES NO FILES CANNOT BE MIRRORED, and saying "ok" about it is the emptiest
-    # kind of pass: `delete` takes its backup that way, so pointing this at one returned a clean
-    # verdict while 1,458 files in that project's directory were carried by nothing. The question
-    # is not answered, so the answer is not yes.
+    # AN EXPORT THAT CARRIES NO FILES IS NOT A FAILED MIRROR, it is a mirror question that does not
+    # apply, and the difference is not academic. `delete` takes its backup with `app_state=False`,
+    # so EVERY undo of a delete imports a rows-only export. Answering that with ok=False made the
+    # documented recovery path report itself as a failure, exit non-zero, and paint red on the page.
+    #
+    # The original complaint was still right: returning a bare ok=True over a file that carries
+    # nothing reads as "this machine matches the export" when nothing was compared. So the answer
+    # is neither yes nor no, it is "not asked", and `carries_no_files` says so to every caller.
     result["carries_no_files"] = not rows
-    if not rows:
-        result["ok"] = False
-        result["unresolved"] = list(result.get("unresolved") or []) + [{
-            "relpath": str(path),
-            "why": "this export carries no files, so there is nothing to be a mirror OF"}]
     return result
 
 
@@ -966,9 +984,14 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
     manifest = export(project, backup, app_state=False)    # raises if it cannot be verified
 
     with store.write() as con:
-        ids = session_ids(con, project)
+        # THE SET THE BACKUP HOLDS, not a fresh resolution. This called `session_ids` again here,
+        # so a harvest landing between the export and this transaction added a session that was
+        # then deleted while absent from the only copy of it. For a large project the export runs
+        # for minutes, which is plenty of window.
+        ids = list(manifest.get("session_ids") or [])
         if not ids:
             raise ValueError(f"no sessions with cwd {project!r}")
+        appeared = [s for s in session_ids(con, project) if s not in set(ids)]
         marks = ",".join("?" * len(ids))
         removed = {}
         # Survivors before compactions, and everything before sessions: no foreign keys means
@@ -987,14 +1010,29 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
         for table in BY_SESSION:
             removed[table] = con.execute(
                 f"DELETE FROM {table} WHERE session_id IN ({marks})", ids).rowcount
+        excluded_cwds: list[str] = []
         if not keep_capturing:
+            # THE WORKING DIRECTORIES, NOT THE LABEL. This wrote `project`, and a project's label
+            # is `<cwd>\archived` whenever the desktop app archived its chats, which 764bc0b
+            # deliberately made selectable. `tools/harvest.mjs` excludes by cwd and NO cwd ends in
+            # that suffix, so deleting an archived project never stuck: the next harvest put every
+            # row back while this function reported `excluded: True`. Measured on this store, 16 of
+            # the labels the menu offers are of that shape.
             ensure_exclusions(con)
-            con.execute("INSERT OR REPLACE INTO excluded_projects (cwd, excluded_at, note) "
-                        "VALUES (?,?,?)",
-                        (project, datetime.now(UTC).isoformat(timespec="seconds"),
-                         f"deleted, exported to {backup.name}"))
+            excluded_cwds = manifest.get("cwds") or []
+            if not excluded_cwds:                # an export written before cwds were recorded
+                excluded_cwds = [project]
+            for cwd in excluded_cwds:
+                con.execute("INSERT OR REPLACE INTO excluded_projects (cwd, excluded_at, note) "
+                            "VALUES (?,?,?)",
+                            (cwd, datetime.now(UTC).isoformat(timespec="seconds"),
+                             f"deleted, exported to {backup.name}"))
     return {"project": project, "backup": str(backup), "removed": removed,
-            "excluded": not keep_capturing, "exported_sessions": manifest["sessions"]}
+            "excluded": not keep_capturing, "excluded_cwds": excluded_cwds,
+            "exported_sessions": manifest["sessions"],
+            # Sessions that arrived between the backup and the delete. They are NOT deleted, and
+            # naming them is the difference between a race and a silent loss.
+            "appeared_since_backup": appeared}
 
 
 # ---------------------------------------------------------------------------
@@ -1106,8 +1144,12 @@ def _print_mirror(result):
         print(f"  {sum(n['files'] for n in not_carried)} file(s) the EXPORT did not carry, "
               "belonging to sessions it has no rows for")
     if result.get("carries_no_files"):
-        print("  mirror  NOT CHECKED: this export carries rows only, no files")
-        return 1
+        # EXIT 0, like the other NOT CHECKED branch six lines above. A rows-only export is what
+        # `delete` writes, so this is the undo path, and a non-zero exit told every script that
+        # recovering a deleted project had failed.
+        print("  mirror  NOT CHECKED: this export carries rows only, so there are no files to "
+              "compare. The rows imported; the transcripts were never in this file.")
+        return 0
     # NOT "byte for byte", WHICH WAS NOT TRUE OF ALL FIVE KINDS. Transcripts, memory and tasks land
     # byte-identical. A config entry and a desktop record are the two things an import deliberately
     # rewrites, so they are identical in content with the working directory replaced, and a real
@@ -1141,7 +1183,7 @@ def main(argv=None):
                           help="name every destination and write nothing")
 
     p_mirror = sub.add_parser("verify-mirror",
-                              help="is this machine byte for byte what an export carries?")
+                              help="does this machine hold what an export carries?")
     p_mirror.add_argument("path")
     p_mirror.add_argument("--into", default=None)
 
@@ -1246,7 +1288,13 @@ def main(argv=None):
         print(f"  exported to {result['backup']} before deleting")
         for table, n in result["removed"].items():
             print(f"    {table:22} {n:>8,} removed")
-        print(f"  excluded from future harvests: {result['excluded']}")
+        if result["excluded"]:
+            for cwd in result.get("excluded_cwds") or []:
+                print(f"  excluded from future harvests: {cwd}")
+        else:
+            print("  still being captured, so the next harvest brings it back")
+        for sid in result.get("appeared_since_backup") or []:
+            print(f"  KEPT, arrived after the backup was written and is not in it: {sid}")
         return 0
     if args.command == "include":
         print(f"  removed {include(args.project)} exclusion(s) for {args.project}")

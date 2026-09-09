@@ -275,6 +275,35 @@ describe('import', () => {
        expect(screen.getByText(/desktop app record/)).toBeTruthy()
      })
 
+  it('does not paint an undone delete red', async () => {
+    // `delete` writes its backup with app_state off, so every undo of a delete imports a rows-only
+    // export. `missing` and `differs` are both empty when nothing was carried, so reading `ok`
+    // alone rendered "NOT a mirror. 0 missing, 0 different:" over a correct restore, naming
+    // nothing. Found by an independent reviewer against the page, not the CLI.
+    vi.spyOn(api.project, 'import').mockResolvedValue(report({
+      mirror: {
+        ok: false, missing: [], differs: [], extra: [], unresolved: [],
+        into: [PROJECT], not_carried: [], carries_no_files: true,
+      },
+    }))
+    show()
+    fireEvent.click(await choose())
+    await screen.findByText(/^Imported/)
+    expect(screen.queryByText(/NOT a mirror/)).toBeNull()
+    expect(screen.getByText(/carries rows only/)).toBeTruthy()
+  })
+
+  it('does not claim byte for byte, which is not true of all five kinds', async () => {
+    // The CLI was corrected off that wording because a config entry and a desktop record are
+    // rewritten by design; the page kept it.
+    vi.spyOn(api.project, 'import').mockResolvedValue(report())
+    show()
+    fireEvent.click(await choose())
+    await screen.findByText(/^Imported/)
+    expect(screen.queryByText(/[Bb]yte for byte/)).toBeNull()
+    expect(screen.getByText(/Every carried file is identical/)).toBeTruthy()
+  })
+
   it('does NOT call a failed mirror an import', async () => {
     // A 200 with a non-empty `differs` means files landed and are not what the export carries.
     // Reporting that as a success is the exact claim this whole change exists to stop.
@@ -340,6 +369,14 @@ describe('slugFor', () => {
     expect(slugFor('S:\\www.sec.gov\\Archives')).toBe('S--www-sec-gov-Archives')
     expect(slugFor('P:\\cSrc\\dual_skill_package')).toBe('P--cSrc-dual-skill-package')
     expect(slugFor('P:\\VSA Agent GP')).toBe('P--VSA-Agent-GP')
+  })
+
+  it('trims a trailing separator the way check_destination does', () => {
+    // The preview showed `D--Work-Alpha-` for a path the server would file under `D--Work-Alpha`,
+    // on the one input a reader is most likely to paste. Found by an independent sweep.
+    expect(slugFor('D:\\Work\\Alpha\\')).toBe('D--Work-Alpha')
+    expect(slugFor('D:/Work/Alpha/')).toBe('D--Work-Alpha')
+    expect(slugFor('  D:\\Work\\Alpha  ')).toBe('D--Work-Alpha')
   })
 })
 

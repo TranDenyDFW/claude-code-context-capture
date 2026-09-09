@@ -152,18 +152,34 @@ class TestTheExportCarriesEverything:
         ok, problems = projects.verify(tmp_path / "rows.db")
         assert ok, problems
 
-    def test_a_rows_only_export_is_not_called_a_mirror(self, store_at, machine, tmp_path):
-        """The emptiest kind of pass, found by an independent reviewer.
+    def test_a_rows_only_export_says_it_carried_no_files(self, store_at, machine, tmp_path):
+        """Neither a yes nor a no: a question that does not apply, and it has to SAY so.
 
-        `verify` and `verify_mirror` answer different questions. A rows-only export is INTERNALLY
-        sound, which is what `verify` asks, and it carries no files at all, so "is this machine
-        byte for byte what it carries" is not a question with a yes: pointed at one of `delete`'s
-        backups it returned ok while 1,458 files in that project's directory were carried by
-        nothing."""
+        Two independent reviews landed on opposite halves of this and both were right. Returning a
+        bare ok=True reads as "this machine matches the export" when nothing was compared. Returning
+        ok=False is worse: `delete` writes its backup with `app_state=False`, so every undo of a
+        delete is a rows-only import, and answering it with a failure made the documented recovery
+        path exit non-zero and paint red on the page while naming nothing, because `missing` and
+        `differs` are both empty when nothing was carried.
+
+        So the flag is the answer, and `_print_mirror` and the page both read it."""
         projects.export(SOURCE, tmp_path / "rows.db", app_state=False)
         result = projects.verify_mirror(tmp_path / "rows.db")
         assert result["carries_no_files"] is True
-        assert not result["ok"], "an export carrying no files was called a mirror"
+        assert result["missing"] == [] and result["differs"] == []
+
+    def test_undoing_a_delete_is_not_reported_as_a_failure(self, store_at, machine, tmp_path,
+                                                           capsys):
+        """The path the Delete panel advertises: import the file it leaves behind.
+
+        Checked on the EXIT CODE and the printed line, because those are what a script and a reader
+        actually act on, and both said failure."""
+        projects.export(SOURCE, tmp_path / "rows.db", app_state=False)
+        code = projects._print_mirror(projects.verify_mirror(tmp_path / "rows.db"))
+        printed = capsys.readouterr().out
+        assert code == 0, "undoing a delete exited non-zero"
+        assert "NOT CHECKED" in printed
+        assert "NOT A MIRROR" not in printed
 
 
 class TestTheRoundTrip:
@@ -324,9 +340,19 @@ class TestTheRebase:
         assert read_store(
             store_at,
             "SELECT transcript_path FROM sessions WHERE session_id = 's0-0'") == [expected]
-        offset_sql = "SELECT path FROM files WHERE path LIKE '%s0-0%'"
-        assert read_store(store_at, offset_sql) == [expected], \
-            "the harvest offset stayed on the old path, so the next harvest re-reads from zero"
+        # BOTH OFFSETS, and the second one is the fix rather than a leak.
+        #
+        # This asserted the offset had MOVED, which is what the code did and what an independent
+        # sweep found wrong: an import never deletes the original transcript, and `harvest.mjs`
+        # treats a path with no `files` row as unread, so moving the row left the original looking
+        # brand new. The next harvest re-read it from zero and recreated every session row at the
+        # OLD working directory, undoing the move on the same machine it was made on.
+        offset_sql = "SELECT path FROM files WHERE path LIKE '%s0-0%' ORDER BY path"
+        offsets = read_store(store_at, offset_sql)
+        assert expected in offsets, \
+            "the destination transcript has no offset, so harvest would re-read it from zero"
+        assert r"C:\t\s0-0.jsonl" in offsets, \
+            "the ORIGINAL transcript lost its offset, so the next harvest undoes the move"
 
     def test_another_project_in_the_store_is_left_alone(self, store_at, machine, tmp_path):
         """The rebase is scoped to the sessions the export carries, and nothing else."""

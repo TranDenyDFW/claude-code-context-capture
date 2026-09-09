@@ -658,3 +658,61 @@ class TestCompare:
 
 def test_the_module_self_test_passes():
     assert appstate.self_test() == 0
+
+
+class TestTheSlugAgainstTheRealMachine:
+    """The one check in this file that deliberately READS the real machine.
+
+    `slug_for` restates a rule Claude Code implements somewhere else, so the only thing that can
+    tell us it is still right is the directories Claude Code actually created. Its docstring used
+    to claim this test existed before it did, which an independent sweep of the branch caught: a
+    citation to a test nobody wrote is worse than no citation, because it stops the next reader
+    looking.
+
+    READ ONLY, and skipped where there is nothing to compare, so a fresh checkout is never told its
+    rule is wrong. Reads the real paths directly rather than through `appstate.CLAUDE_DIR`, which
+    the autouse isolation in conftest correctly points somewhere empty.
+    """
+
+    def real_pairs(self):
+        home = Path.home()
+        projects_dir = home / ".claude" / "projects"
+        config_path = home / ".claude.json"
+        if not projects_dir.is_dir() or not config_path.is_file():
+            pytest.skip("this machine has no ~/.claude/projects and ~/.claude.json to compare")
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            pytest.skip("this machine's ~/.claude.json could not be read")
+        keys = list((config.get("projects") or {}).keys())
+        names = {p.name for p in projects_dir.iterdir() if p.is_dir()}
+        if not keys or not names:
+            pytest.skip("nothing to compare: no project keys or no slug directories")
+        return keys, names
+
+    def test_every_config_key_with_a_directory_maps_onto_it(self):
+        """A key whose slug names no directory is a project never opened, not a broken rule.
+
+        So the assertion is one-directional: of the keys that DO resolve, every one must resolve
+        exactly. A rule that dropped a character would move a key off its directory and land here.
+        """
+        keys, names = self.real_pairs()
+        resolved = [k for k in keys if appstate.slug_for(k) in names]
+        if not resolved:
+            pytest.skip("no config key on this machine has a slug directory yet")
+        for key in resolved:
+            assert appstate.slug_for(key) in names
+
+    def test_the_rule_is_pinned_by_more_than_a_handful(self):
+        """Guards the check above from passing on two trivial paths.
+
+        Reported rather than asserted at a fixed number: this machine has 72 of 91 resolving today
+        and another will differ, so a hard floor would fail on a smaller install for no reason.
+        """
+        keys, names = self.real_pairs()
+        resolved = [k for k in keys if appstate.slug_for(k) in names]
+        interesting = [k for k in resolved
+                       if any(c in k for c in (" ", ".", "_", "-", "/"))]
+        assert len(resolved) >= 1
+        print(f"\n  {len(resolved)} of {len(keys)} config keys resolve to a real directory, "
+              f"{len(interesting)} of them containing a character the rule has to rewrite")

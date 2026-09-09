@@ -36,7 +36,11 @@ export function pathOf(cohort: string | null | undefined): string | null {
  * cases the Python side pins, so the two cannot drift silently.
  */
 export function slugFor(cwd: string): string {
-  return cwd.replace(/[^A-Za-z0-9]/g, '-')
+  // TRIMMED THE WAY THE SERVER TRIMS. `check_destination` strips a trailing separator before
+  // anything is derived from the path, so `D:\Work\Alpha\` becomes `D--Work-Alpha` there and
+  // showed as `D--Work-Alpha-` here: a preview of a directory the import would not create, on the
+  // one input a reader is most likely to paste.
+  return cwd.trim().replace(/[\\/]+$/, '').replace(/[^A-Za-z0-9]/g, '-')
 }
 
 function Problem({ error }: { error: unknown }) {
@@ -274,7 +278,8 @@ export function ProjectMoves({
                 <p className="mt-0.5 text-xs text-ink-faint">
                   Carries the conversations too, not only the rows: the transcripts, the project
                   memory, the trust setting, and the desktop app's own record, so the project opens
-                  in the app afterwards. Verified byte for byte, and safe to run twice.
+                  in the app afterwards. Every carried file is re-hashed after writing, and the
+                  import is safe to run twice.
                 </p>
                 <input
                   ref={upload}
@@ -360,23 +365,40 @@ export function ProjectMoves({
                   // THE BORDER FOLLOWS THE MIRROR, NOT THE HTTP STATUS. A 200 with a non-empty
                   // `differs` means files landed and are not what the export carries, and showing
                   // that in green is the exact claim this change exists to stop.
+                  // A rows-only export carried no files, so `ok` answers no question and the two
+                  // lists are empty. `delete` writes its backup that way, so reading `ok` alone
+                  // painted the documented undo-a-delete path red while naming nothing.
                   <div
                     className={`mt-2 rounded-md border px-3 py-2 text-sm ${
-                      imported.mirror && !imported.mirror.ok
+                      imported.mirror && !imported.mirror.ok && !imported.mirror.carries_no_files
                         ? 'border-bad/40 bg-bad/5'
                         : 'border-good/40 bg-good/5'
                     }`}
                   >
-                    <p className={imported.mirror && !imported.mirror.ok ? 'text-bad' : 'text-good'}>
+                    <p
+                      className={
+                        imported.mirror && !imported.mirror.ok && !imported.mirror.carries_no_files
+                          ? 'text-bad'
+                          : 'text-good'
+                      }
+                    >
                       Imported {imported.project ?? 'the export'} into{' '}
                       <code>{imported.into.join(', ')}</code>
                     </p>
                     {imported.mirror && (
                       <p className="mt-1 text-xs">
-                        {imported.mirror.ok ? (
+                        {imported.mirror.carries_no_files ? (
+                          <span className="text-ink-dim">
+                            This export carries rows only, so there were no files to compare. The
+                            rows are back; the transcripts were never in the file.
+                          </span>
+                        ) : imported.mirror.ok ? (
+                          // NOT "byte for byte", which was corrected in the CLI and left here:
+                          // a config entry and a desktop record are rewritten by design.
                           <span className="text-good">
-                            Byte for byte identical to the export, re-read and re-hashed after
-                            writing.
+                            Every carried file is identical, re-read and re-hashed after writing.
+                            The config entry and the desktop record are the same but for the
+                            working directory, which this import rebased.
                           </span>
                         ) : (
                           <span className="text-bad">

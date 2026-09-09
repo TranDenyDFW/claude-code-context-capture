@@ -495,12 +495,18 @@ def turn_diff(session_id, scope, ts_a, ts_b):
                      GROUP BY tool ORDER BY result_bytes DESC LIMIT 40"""
     tools = fold_outcomes(q(sql_tools, params))
 
+    # THE OUTCOME HERE TOO. Its sibling above has carried it since the outcome work; this table
+    # reports the same tool calls grouped by what they touched and said nothing about how they
+    # turned out, so a refused read and a successful one were one row. It went unnoticed because
+    # the gate that asks the question walked only the tab bodies, and this panel is delivered by
+    # its own callback: widening that population is what surfaced it.
     sql_targets = f"""SELECT target, tool_name AS tool, COUNT(*) AS reads,
-                             COALESCE(SUM(result_bytes), 0) AS result_bytes
+                             COALESCE(SUM(result_bytes), 0) AS result_bytes,
+                             {outcome_sums()}
                         FROM tool_calls
                        WHERE ts > ? AND ts <= ? AND target IS NOT NULL AND target != '' {w}
                        GROUP BY target, tool ORDER BY result_bytes DESC LIMIT 40"""
-    targets = q(sql_targets, params)
+    targets = fold_outcomes(q(sql_targets, params))
 
     sql_said = f"""SELECT role, type, COUNT(*) AS messages,
                           COALESCE(SUM(chars), 0) AS chars
@@ -567,7 +573,11 @@ def turn_diff_panel(session_id, scope, turns, a, b):
     if not targets.df.empty:
         blocks.append(evidence_block(
             "what was read, largest first", targets.df, targets.sql, targets.params,
-            columns=numeric_columns(list(targets.df.columns), {"reads", "result_bytes"})))
+            # Same shape as the table above it: `outcome` is text, the three counts behind it are
+            # hidden so they reach the CSV and a row click without being drawn.
+            columns=numeric_columns([c for c in targets.df.columns if c not in OUTCOME_HIDDEN],
+                                    {"reads", "result_bytes"}),
+            hidden_columns=list(OUTCOME_HIDDEN)))
     if not said.df.empty:
         blocks.append(evidence_block(
             "what was said", said.df, said.sql, said.params,
