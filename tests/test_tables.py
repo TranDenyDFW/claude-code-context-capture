@@ -44,6 +44,12 @@ def every_body(pane, session_id, other_session_id=None):
         if index == 0:
             continue                               # already covered by the tab body above
         yield f"tab-window/{key}", window_panel(index, session_id, "main", None)
+        # AND WITH NOTHING SELECTED, for the same reason the tab bodies above are walked twice.
+        # The Sources panel's hook tables are per-session, so against a real store they render
+        # empty for a session that fired no hooks, and their columns then look like columns
+        # nothing renders. Measured: `event` and `response_bytes` were reported as dead registry
+        # entries on the real store while rendering perfectly with no session selected.
+        yield f"tab-window/{key}/nothing selected", window_panel(index, None, "main", None)
     import app as module
     # The Session tab's A/B diff, which renders the tool and message tables for a turn range and
     # is the only place `result_bytes` appears.
