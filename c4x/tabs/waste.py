@@ -17,7 +17,15 @@ from c4x.pricing import (
     coverage_note,
     measured_note,
 )
-from c4x.store import measured_cost, q, scoped
+from c4x.store import (
+    OUTCOME_HIDDEN,
+    fold_outcomes,
+    measured_cost,
+    outcome_available,
+    outcome_sums,
+    q,
+    scoped,
+)
 from c4x.theme import (
     DANGER,
     MUTED,
@@ -178,26 +186,28 @@ def _subagent_types(where, args):
     sql = """SELECT COALESCE(subagent_type, '(not recorded)') AS agent,
                     COUNT(*)                                 AS calls,
                     COUNT(DISTINCT session_id)               AS sessions,
-                    SUM(COALESCE(result_bytes, 0))           AS bytes,
-                    SUM(COALESCE(is_error, 0))               AS errors,
+                    ROUND(SUM(COALESCE(result_bytes, 0)) / 1024.0, 1) AS kb,
+                    """ + outcome_sums() + """,
                     MIN(ts) AS first_seen, MAX(ts) AS last_seen
                FROM tool_calls
               WHERE tool_name IN ('Agent', 'Task') """ + where + """
               GROUP BY agent ORDER BY calls DESC"""
-    df = q(sql, args)
+    # FOLDED AT THE QUERY, not at the table. The three counts never reach a caller that
+    # could render them raw by forgetting not to.
+    df = fold_outcomes(q(sql, args))
     if df.empty:
         return html.Div()
-    df["bytes"] = (df["bytes"] / 1024).round(1)
     for column in ("first_seen", "last_seen"):
         df[column] = df[column].astype(str).str.slice(0, 16).str.replace("T", " ")
     unknown = int(df.loc[df["agent"] == "(not recorded)", "calls"].sum())
     return evidence_block(
         "Subagent Calls", df, sql, args,
         columns=numeric_columns(
-            ["agent", "calls", "sessions", "bytes", "errors", "first_seen", "last_seen"],
-            {"calls", "sessions", "bytes", "errors"},
-            {"bytes": Format(precision=1, scheme=Scheme.fixed)}),
-        heat=["calls", "bytes"], page_size=10,
+            ["agent", "calls", "sessions", "kb", "outcome", "first_seen", "last_seen"],
+            {"calls", "sessions", "kb"},
+            {"kb": Format(precision=1, scheme=Scheme.fixed)}),
+        heat=["calls", "kb"], page_size=10,
+        hidden_columns=list(OUTCOME_HIDDEN),
         help_for={
             "calls": "Agent calls that asked for this subagent type.",
             "sessions": "How many different sessions used this subagent type.",
@@ -206,7 +216,7 @@ def _subagent_types(where, args):
              "harvest and backfilled over every transcript already on disk. "
              + (f"{unknown:,} calls named no type and are reported as such rather than assumed to "
                 f"be the default. " if unknown else "")
-             + "bytes is tool RESULT bytes, not tokens: an agent's own turns are counted "
+             + "kb is tool RESULT kilobytes, not tokens: an agent's own turns are counted "
                "elsewhere, under the session that spawned it.")
 
 
@@ -231,7 +241,8 @@ def _repeated_inputs(where, args, session_id=None):
                     COUNT(DISTINCT session_id) AS sessions,
                     COUNT(*)                   AS calls,
                     COUNT(*) - COUNT(DISTINCT session_id) AS beyond_one_each,
-                    SUM(COALESCE(result_bytes, 0)) AS bytes,
+                    ROUND(SUM(COALESCE(result_bytes, 0)) / 1024.0, 1) AS kb,
+                    """ + outcome_sums() + """,
                     MIN(ts) AS first_seen, MAX(ts) AS last_seen
                FROM tool_calls
               WHERE input_sha1 IS NOT NULL """ + where + """
@@ -248,10 +259,9 @@ def _repeated_inputs(where, args, session_id=None):
             "Not answerable with a single session selected: this table compares sessions to each "
             "other. Clear the session in the header, or pick a project, to see which inputs repeat "
             "across a whole population.")
-    df = q(sql, args)
+    df = fold_outcomes(q(sql, args))
     if df.empty:
         return html.Div()
-    df["bytes"] = (df["bytes"] / 1024).round(1)
     for column in ("first_seen", "last_seen"):
         df[column] = df[column].astype(str).str.slice(0, 16).str.replace("T", " ")
     totals = q("""SELECT COUNT(*) AS groups, COALESCE(SUM(calls), 0) AS calls,
@@ -262,10 +272,11 @@ def _repeated_inputs(where, args, session_id=None):
     return evidence_block(
         "Multi-Session Input", df, sql, args,
         columns=numeric_columns(
-            ["tool", "target", "sessions", "calls", "beyond_one_each", "bytes",
+            ["tool", "target", "sessions", "calls", "beyond_one_each", "kb", "outcome",
              "first_seen", "last_seen"],
-            {"sessions", "calls", "beyond_one_each", "bytes"},
-            {"bytes": Format(precision=1, scheme=Scheme.fixed)}),
+            {"sessions", "calls", "beyond_one_each", "kb"},
+            {"kb": Format(precision=1, scheme=Scheme.fixed)}),
+        hidden_columns=list(OUTCOME_HIDDEN),
         heat=["sessions", "calls"], page_size=12,
         note=f"{int(totals['groups']):,} inputs repeat across sessions, "
              f"{int(totals['calls']):,} calls in total. NOT the same cost as the table above: "
@@ -288,11 +299,47 @@ def _rebill_card(session_id=None, cohort=None):
                   FROM api_calls WHERE 1=1 {where}""", args).iloc[0]
     churn, peak = int(row["churn"] or 0), int(row["peak"] or 0)
     if not peak:
-        return stat_card("Re-billed", "-", sub="no resident reading in this population")
-    return stat_card("Re-billed", f"{churn / peak:,.0f}x", color=DANGER,
+        return stat_card("Rebilled", "-", sub="no resident reading in this population")
+    return stat_card("Rebilled", f"{churn / peak:,.0f}x", color=DANGER,
                      sub=f"{fmt_tokens(churn)} of cache reads against a "
                          f"{fmt_tokens(peak)} peak window")
 
+
+def _refusals(where, args):
+    """Claude Code's own vocabulary for why a call never ran, as a TABLE.
+
+    The merged `outcome` column says a call was refused. It cannot say by what, and the
+    difference decides what a reader does next: a settings rule is theirs to change, a
+    hook is theirs to read, and a rejection at the prompt is not a defect at all.
+
+    A note would have carried the same words. It could not be sorted, filtered or exported,
+    and this is the one place the vocabulary is quoted verbatim rather than summarised, so it
+    is the one place a reader is most likely to want the rows themselves.
+    """
+    if not outcome_available():
+        # Not an empty table: an unmigrated store has no denial_kind column at all, and
+        # querying it raises. The Tool Calls table above already says "N unknown" and names
+        # the command, so this panel would only repeat it.
+        return html.Div()
+    sql = """SELECT denial_kind, COUNT(*) calls,
+                    COUNT(DISTINCT tool_name) tools,
+                    COUNT(DISTINCT session_id) sessions, MAX(ts) last_call
+               FROM tool_calls WHERE denial_kind IS NOT NULL """ + where + """
+              GROUP BY denial_kind ORDER BY calls DESC"""
+    return evidence_block(
+        "Refusals", q(sql, args), sql, args,
+        columns=numeric_columns(["denial_kind", "calls", "tools", "sessions", "last_call"],
+                                {"calls", "tools", "sessions"}),
+        heat=["calls"], page_size=10,
+        help_for={
+            "calls": "Calls Claude Code recorded under this denial kind.",
+            "sessions": "How many different sessions hit this denial kind.",
+        },
+        note="REPORTED UNCHANGED, not grouped. These are Claude Code's values, and one of "
+             "them is ambiguous at the source: `permission-rule` covers a settings deny rule "
+             "AND a hook that blocked the call, because the transcript records the same value "
+             "for both. Splitting them here would be this app guessing rather than that "
+             "record speaking, and the guess leaks both ways, so it is not made.")
 
 def waste_layout(session_id=None, scope="main", cohort=None):
     """Context paid for twice, or paid for and never used.
@@ -317,25 +364,33 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         read_tools, dup_min = [], 3
     placeholders = ",".join("?" for _ in read_tools)
     sql_dup = f"""SELECT session_id, target, COUNT(*) reads,
-                   SUM(COALESCE(result_bytes,0)) bytes,
-                   COUNT(DISTINCT input_sha1) variants
+                   ROUND(SUM(COALESCE(result_bytes,0)) / 1024.0, 1) kb,
+                   COUNT(DISTINCT input_sha1) variants,
+                   {outcome_sums()}
             FROM tool_calls
             WHERE tool_name IN ({placeholders}) AND target IS NOT NULL {wsid}
             GROUP BY session_id, target HAVING reads >= ?
             ORDER BY reads DESC LIMIT 200"""
     dup_args = tuple(read_tools) + wargs + (dup_min,)
-    dup = q(sql_dup, dup_args) if read_tools else pd.DataFrame()
+    # A REFUSED READ IS NOT A READ, and neither is one that errored. This table was exempted
+    # from carrying an outcome on the argument that the store holds 4 refused reads against
+    # 47,117, which was true and was the wrong question: the column also covers failures and
+    # the unclassifiable, and the worst-200 groups drawn here carry 13 errored and 18
+    # unclassified reads across 12 rows. An exemption argued from one bucket and applied to
+    # the whole column is a claim wider than its evidence.
+    dup = fold_outcomes(q(sql_dup, dup_args)) if read_tools else pd.DataFrame()
     sql_srv = """SELECT server_name AS server, COUNT(*) calls,
-                  SUM(COALESCE(result_bytes,0)) bytes, MAX(ts) last_call
+                  ROUND(SUM(COALESCE(result_bytes,0)) / 1024.0, 1) kb,
+                  """ + outcome_sums() + """, MAX(ts) last_call
            FROM tool_calls WHERE server_name IS NOT NULL """ + wsid + """
            GROUP BY server_name ORDER BY calls ASC"""
-    srv = q(sql_srv, wargs)
+    srv = fold_outcomes(q(sql_srv, wargs))
     sql_tools = """SELECT tool_name AS tool, COUNT(*) calls,
-                  SUM(COALESCE(result_bytes,0)) bytes,
-                  SUM(COALESCE(is_error,0)) errors
+                  ROUND(SUM(COALESCE(result_bytes,0)) / 1024.0, 1) kb,
+                  """ + outcome_sums() + """
            FROM tool_calls WHERE 1=1 """ + wsid + """
            GROUP BY tool_name ORDER BY calls DESC LIMIT 40"""
-    tools = q(sql_tools, wargs)
+    tools = fold_outcomes(q(sql_tools, wargs))
 
     # The three cards below count EVERY group, not the 200 the table shows.
     #
@@ -362,10 +417,6 @@ def waste_layout(session_id=None, scope="main", cohort=None):
         repeats = int(totals["repeats"])
         repeat_bytes = int(totals["bytes"])
 
-    for frame in (dup, srv, tools):
-        if not frame.empty and "bytes" in frame:
-            frame["bytes"] = (frame["bytes"] / 1024).round(1)
-
     # Why subagents are counted is on the `reads` column tooltip. What stays here is the one thing
     # a tooltip cannot say: which population this page is describing right now.
     scope_note = population_note(
@@ -378,12 +429,12 @@ def waste_layout(session_id=None, scope="main", cohort=None):
     return html.Div([
         scope_note,
         html.Div([
-            stat_card("Re-read groups", f"{groups:,}",
+            stat_card("Reread groups", f"{groups:,}",
                       sub=(f"same file, one session, {dup_min}+ reads" if read_tools
                            else "UNAVAILABLE: read-tool spec unreadable")),
-            stat_card("Re-reads beyond the first", f"{repeats:,}",
+            stat_card("Reread count", f"{repeats:,}",
                       color=DANGER if repeats else TEXT),
-            stat_card("KB in the repeats", f"{repeat_bytes/1024:,.1f}", sub="tool result bytes"),
+            stat_card("Repeats (KB)", f"{repeat_bytes/1024:,.1f}", sub="tool result bytes"),
             _rebill_card(session_id, cohort),
             stat_card("Tool calls recorded",
                       f"{int(tools['calls'].sum()):,}" if not tools.empty else "0"),
@@ -391,8 +442,15 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
         evidence_block(
             "Session Rereads", dup, sql_dup, dup_args,
-            columns=["reads", "bytes", "variants", "session_id", "target"],
-            heat=["reads", "bytes"], table_id="tbl-reread",
+            columns=["reads", "kb", "variants", "outcome", "session_id", "target"],
+            hidden_columns=list(OUTCOME_HIDDEN),
+            heat=["reads", "kb"], table_id="tbl-reread",
+            # The shared entry has to be true of every table drawing `session_id`, and
+            # the Findings table draws it for something else. The reason THIS table
+            # groups within a session belongs here.
+            help_for={"session_id": ("Re-reads are counted WITHIN this session and never pooled "
+                                     "across sessions, because a re-read costs what it costs by "
+                                     "being re-billed on every later request in the same one.")},
             note=f"Every re-read is re-billed on every later request in that session, so the cost "
                  f"is the read multiplied by the turns that follow it. THE WORST 200 GROUPS of "
                  f"{groups:,}: the cards above and the curve below count all of them."),
@@ -414,7 +472,12 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
         evidence_block(
             "MCP Calls", srv, sql_srv, wargs,
-            columns=["server", "calls", "bytes", "last_call"],
+            # NOT ON THE PLAN'S LIST OF SIX, and it reads tool_calls like the rest of them. On the
+            # live store this row hid 176 errors and 7 unknown behind a bare invocation count for
+            # one server. The list was an enumeration; the population is every table that reports
+            # tool calls, and a gate now asks that of the rendered app.
+            columns=["server", "calls", "kb", "outcome", "last_call"],
+            hidden_columns=list(OUTCOME_HIDDEN),
             # The shared help for "calls" was written for the repeated-inputs table and says these
             # count calls "with this exact input". Here they count every call to the server.
             help_for={"calls": "Every call to this server, whatever the input."},
@@ -424,6 +487,13 @@ def waste_layout(session_id=None, scope="main", cohort=None):
 
         evidence_block(
             "Tool Calls", tools, sql_tools, wargs,
-            columns=["tool", "calls", "bytes", "errors"], heat=["calls", "bytes", "errors"],
+            # `errors` LEAVES heat, and that is not cosmetic. heat_cells filters to numbers,
+            # so a text column in this list would be a SILENT no-op, a shading feature
+            # quietly doing nothing. It was also shading a count that was 27% refusals,
+            # so the darkest cells were pointing at tools that had not failed at all.
+            columns=["tool", "calls", "kb", "outcome"], heat=["calls", "kb"],
+            hidden_columns=list(OUTCOME_HIDDEN),
             help_for={"calls": "Every call to this tool, whatever the input."}),
+
+        _refusals(wsid, wargs),
     ])

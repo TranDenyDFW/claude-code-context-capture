@@ -154,6 +154,12 @@ def build_store(path, project=r"P:\Alpha", rows=3, extra_project=r"P:\Beta"):
     return path
 
 
+def projects_store():
+    """The `store` module `projects` actually calls, so a patch lands on it."""
+    from c4x import store
+    return store
+
+
 def forget_cached_rows():
     """Empty every module-level cache in `c4x.store` that outlives a monkeypatched DB_PATH.
 
@@ -305,6 +311,45 @@ class TestWhichSessionsAProjectOwns:
         assert "faint" in projects.session_ids(con, r"P:\Alpha"), \
             "a session the page cannot see was left out of its own project"
         con.close()
+
+    def test_every_project_listed_is_one_that_can_be_exported(self, store_at, monkeypatch):
+        """THE LIST IS A MENU, so nothing on it may be refused by export and delete.
+
+        `projects()` grouped by raw cwd while `session_ids()` resolves a project the way the
+        PAGE does, and `session_rows()` appends `\\archived` to the label when the desktop app
+        has archived the chat. An archived-only project was therefore listed under its bare
+        cwd and then refused by both commands with "no sessions with cwd", which reads as a
+        broken store rather than a wrong name. Measured on the real store when this was
+        written: 3 of 25 small projects sampled were listed and unusable.
+
+        Asserted as the PROPERTY over every listed project, not against the three that
+        happened to fail: the defect is that two functions answer "what is a project"
+        differently, and any future divergence is the same bug wearing a different name.
+        """
+        con = sqlite3.connect(str(store_at))
+        # An archived session is the case that broke it. `store.classify()` decides the
+        # section, so the label is produced by the app rather than typed here.
+        con.execute("INSERT INTO sessions (session_id, cwd) VALUES ('arch', ?)", (r'P:\\Gamma',))
+        for i in range(8):
+            con.execute("""INSERT INTO turns (uuid, session_id, ts, total_resident)
+                           VALUES (?, 'arch', '2026-08-01T00:00:00Z', 1)""", (f'arch-t{i}',))
+        con.commit()
+        con.close()
+        monkeypatch.setattr(projects_store(), 'archived_sessions', lambda: {'arch': True})
+        forget_cached_rows()
+
+        con = sqlite3.connect(f'file:{store_at}?mode=ro', uri=True)
+        try:
+            listed = projects.projects()
+            assert listed, 'no projects listed, so this gate proved nothing'
+            unusable = [r['project'] for r in listed
+                        if not projects.session_ids(con, r['project'])]
+            assert not unusable, (
+                'projects() lists names that export and delete both refuse: '
+                + ', '.join(repr(u) for u in unusable))
+        finally:
+            con.close()
+            forget_cached_rows()
 
     def test_every_session_belongs_to_exactly_one_project(self, store_at, monkeypatch):
         """A partition, checked over every project at once.

@@ -79,6 +79,15 @@ export interface ColumnMeta {
   specifier: string | null
   align: 'left' | 'right'
   hidden: boolean
+  /**
+   * The one column in this table long enough to widen it, chosen by the server from the data.
+   *
+   * Cells do not wrap, so a 200-character title pushes the table into a horizontal scroll. Only
+   * this column is capped; every other keeps its natural width, because a cap wide enough for a
+   * title means nothing on a date and narrowing all of them is the blunt fix that costs the
+   * wrong columns. A table whose columns are all short marks none.
+   */
+  wide?: boolean
   bands: Band[]
 }
 
@@ -99,6 +108,14 @@ export interface TableMeta {
    * from a caption, and was therefore hidden behind a hover.
    */
   note_level?: NoteLevel
+  /**
+   * The levelled half of the note, which is the half that renders on the page.
+   *
+   * Kept apart from `note` because joining them made one drag the other into view: the Session
+   * chart carries a warning AND a legend caption, and under one level the caption was drawn in
+   * warning amber too, which is a paragraph of alarm over an explanation of some shaded bands.
+   */
+  alert?: string | null
   /** The `text` lines the server folded into `title` and `note`, so the page does not print them. */
   absorbed?: string[]
   columns: ColumnMeta[]
@@ -168,7 +185,11 @@ export interface TabPayload {
    */
   empty?: { title: string; note: string | null }[]
   /** Only on /render. The caption each chart answers to, in the same order as `figures`. */
-  figure_meta?: { note: string | null; absorbed: string[]; note_level?: NoteLevel }[]
+  figure_meta?: {
+    note: string | null; absorbed: string[]
+    /** The levelled half, shown ON the page. `note` stays the hover. */
+    alert?: string | null; note_level?: NoteLevel
+  }[]
   /** Whether the header selection changes this tab at all. From the app's SELECTION_SCOPED. */
   scoped?: boolean
   /** The one sentence saying which population this tab describes. */
@@ -245,10 +266,73 @@ export interface Exclusion {
   note: string | null
 }
 
+/** One file the import wrote, or would write. */
+export interface MirrorFile {
+  relpath: string
+  kind: string
+  path?: string
+  /** Dry run only: whether something is already at that path and would be replaced. */
+  exists?: boolean
+  into?: string
+  why?: string
+  was?: number
+  now?: number
+}
+
+/**
+ * Whether this machine now holds what the export carries.
+ *
+ * `missing` is carried and absent, `differs` is carried and hashes differently, `extra` is here
+ * and not in the export: reported and never deleted, because a slug directory is shared by every
+ * session with the same working directory.
+ *
+ * THE PAGE MUST RENDER THIS AND NOT ONLY THE ROW COUNTS. "Imported" printed above a non-empty
+ * `differs` is the exact claim the whole change exists to stop.
+ */
+export interface MirrorResult {
+  ok: boolean
+  missing: MirrorFile[]
+  differs: MirrorFile[]
+  extra: string[]
+  unresolved: MirrorFile[]
+  into: string[]
+  not_carried: { path: string; files: number; why: string }[]
+  /**
+   * The export carried rows only, so there was nothing to compare and `ok` answers no question.
+   *
+   * `delete` writes its backup this way, which makes every undo of a delete a rows-only import.
+   * Reading `ok` alone painted that correct restore red and named nothing, because `missing` and
+   * `differs` are both empty when nothing was carried.
+   */
+  carries_no_files?: boolean
+}
+
+/** The files an import wrote, and what it refused. */
+export interface AppStateReport {
+  written: MirrorFile[]
+  replaced: MirrorFile[]
+  replaced_shorter: MirrorFile[]
+  refused: MirrorFile[]
+  desktop: { path: string; cwd: string }[]
+  bytes: number
+  dry_run: boolean
+}
+
 /** What `/api/project/import` reports back, per table. */
 export interface ImportReport {
   project: string | null
   from: string | null
+  /** The working directories on THIS machine the import landed in. */
+  into: string[]
+  /** {source working directory: destination}. What the page shows before it commits. */
+  mapping: Record<string, string>
+  /** Carried directories that are neither the project's own nor under it, so they did not move. */
+  not_moved: string[]
+  /** True when nothing was written and this is only a plan. */
+  dry_run?: boolean
+  app_state?: AppStateReport
+  mirror?: MirrorResult
+  rebased_rows?: Record<string, number>
   /**
    * The rows are back but harvest is still skipping the directory.
    *
@@ -372,9 +456,19 @@ export const api = {
     exportUrl: (cohort: string) =>
       `/api/project/export?cohort=${encodeURIComponent(cohort)}`,
 
-    import: (file: File) => {
+    /**
+     * `into` is the working directory ON THE SERVER to import into, and everything is rebuilt from
+     * it: the slug directory, the config key, the desktop app's record, and the cwd in the rows.
+     * Leave it out to land where the export came from.
+     *
+     * `dryRun` names every destination and writes nothing. The page runs that first, so a wrong
+     * destination is visible before it lands rather than after.
+     */
+    import: (file: File, into?: string, dryRun = false) => {
       const body = new FormData()
       body.append('file', file)
+      if (into) body.append('into', into)
+      if (dryRun) body.append('dry_run', 'true')
       return post<ImportReport>('/api/project/import', body)
     },
 

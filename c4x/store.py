@@ -241,6 +241,117 @@ def column_present(table: str, column: str) -> bool:
         con.close()
 
 
+# ---- What a tool call turned out to be -------------------------------------------------------
+#
+# `is_error` meant two opposite things at once: a tool that RAN AND FAILED, and a tool that NEVER
+# RAN because something refused it. Measured on this store after the backfill: of 6,871 flagged
+# calls, 1,848 are refusals (26.9%), 3,945 are genuine failures, and 1,078 predate the field that
+# would settle it. Per tool it is far worse, because refusal is not evenly spread: of the 41 flagged
+# ExitPlanMode calls, this store can PROVE none ran and failed: 13 carry a denial kind and the
+# other 28 predate the field. Reading the result text of all 39 that could be matched: 23 say
+# the user did not want to proceed and 2 are permission failures, both of which are calls that
+# NEVER RAN, and exactly ONE is a genuine tool error. The plan said 3 and two rounds of commit
+# messages repeated it without measuring. The claim here is about what is provable.
+#
+# harvest.mjs records the answer per call; this is the one place that reads it, so no surface can
+# invent a second definition.
+
+#: The vocabulary harvest.mjs writes. Mirrored here rather than imported, because that is a JS
+#: module, and pinned by a test that reads the distinct values out of a real store.
+OUTCOME_OK = "ok"
+OUTCOME_ERROR = "error"
+OUTCOME_REFUSED = "refused"
+OUTCOME_UNCLASSIFIED = "unclassified"
+
+
+def outcome_available() -> bool:
+    """Whether this store has been harvested since the outcome columns arrived."""
+    return (column_present("tool_calls", "outcome")
+            and column_present("tool_calls", "denial_kind"))
+
+
+def outcome_sums(alias: str = "") -> str:
+    """The three SELECT-list expressions every surface counts outcomes with.
+
+    ONE FRAGMENT, SO SIX SITES CANNOT DISAGREE. They already had: one wrote
+    `SUM(CASE WHEN is_error THEN 1 ELSE 0 END)` and the others `SUM(COALESCE(is_error, 0))`, and a
+    seventh place retyped a paraphrase of the query for the reader that matched none of them.
+
+    ON AN UNMIGRATED STORE THIS COUNTS EVERYTHING AS UNKNOWN, and that is deliberate rather than
+    defensive. Returning zeros would render a blank column, which is exactly what a table where
+    everything succeeded looks like, so the page would state the strongest possible claim on the
+    weakest possible evidence. Saying "N unknown" is true, is visible, and names the command that
+    fixes it. Same reasoning as the empty-frame guard on session_tool_calls, one level up.
+    """
+    where = f"{alias}." if alias else ""
+    if not outcome_available():
+        return "0 AS errors, 0 AS refused, COUNT(*) AS unknown"
+    return (f"SUM(CASE WHEN {where}outcome = 'error' THEN 1 ELSE 0 END) AS errors, "
+            f"SUM(CASE WHEN {where}outcome = 'refused' THEN 1 ELSE 0 END) AS refused, "
+            f"SUM(CASE WHEN {where}outcome IS NULL OR {where}outcome = 'unclassified' "
+            f"THEN 1 ELSE 0 END) AS unknown")
+
+
+def outcome_text(errors=0, refused=0, unknown=0) -> str:
+    """The merged cell, and an EMPTY STRING when there is nothing to say.
+
+    A zero is noise. On a table of forty tools most rows have no failures at all, and forty cells
+    reading "0 errors" is forty cells of nothing dressed as a measurement.
+
+    THE WORDS ARE LONG ON PURPOSE, and this is not style. tools/table_audit.py fails any cell
+    matching a number followed by up to four letters, so "3 err" would be reported as a number
+    stored as text while "3 errors" is not; and the bare word "unknown" is one of that audit's
+    placeholder strings, so the count always leads. Mirrors outcomeText in tools/outcomes.mjs.
+    """
+    parts = []
+    for n, one, many in ((errors, "error", "errors"),
+                         (refused, "refused", "refused"),
+                         (unknown, "unknown", "unknown")):
+        n = int(n or 0)
+        if n > 0:
+            parts.append(f"{n:,} {one if n == 1 else many}")
+    return ", ".join(parts)
+
+
+def fold_outcomes(df):
+    """Replace the three counted columns with one merged `outcome`, keeping the numbers.
+
+    APPLIED IMMEDIATELY AFTER THE QUERY, so no caller can render the three raw columns by
+    forgetting to. The three survive as hidden columns so the numbers still reach a row click and
+    the CSV, which `evidence_block` asks for with export_columns="all".
+
+    WHAT THEY DO NOT SURVIVE AS IS SORTABLE. A hidden column has no header, so nothing in the
+    browser can order by it, and the merged cell is text: it sorts lexicographically, putting
+    "3 errors" above "36 refused" above "9 refused". The plan promised sorting as well; it was not
+    deliverable behind a hidden column and saying so is cheaper than a reader discovering it.
+
+    Inserted where `errors` sat, so column order is unchanged for every caller.
+    """
+    # NO getattr HERE. It was written defensively, and tools/table_audit.py reports any call whose
+    # callee it cannot name from the source, because a dynamic call is exactly how a table-building
+    # path evades that scan. The defensiveness bought nothing either: every caller passes a frame
+    # straight from q(), which always returns one, so this asks the question directly.
+    if df is None or df.empty or "errors" not in df.columns:
+        return df
+    out = df.copy()
+    at = list(out.columns).index("errors")
+    merged = [outcome_text(e, r, u) for e, r, u
+              in zip(out["errors"], out["refused"], out["unknown"], strict=True)]
+    for name in ("errors", "refused", "unknown"):
+        if name in out.columns:
+            out = out.drop(columns=[name])
+    out.insert(at, "outcome", merged)
+    # The numbers, kept and hidden. The table builder declares them in `hidden_columns`.
+    out["errors"] = list(df["errors"])
+    out["refused"] = list(df["refused"])
+    out["unknown"] = list(df["unknown"])
+    return out
+
+
+#: What fold_outcomes leaves behind for a DataTable to hide.
+OUTCOME_HIDDEN = ("errors", "refused", "unknown")
+
+
 def tables_present(*names) -> bool:
     """Whether EVERY named table exists. One round trip, no query against the tables themselves.
 
@@ -405,10 +516,81 @@ class _ArchivedCache(TypedDict):
 _archived_cache: _ArchivedCache = {"map": None, "at": 0.0, "root": None}
 
 
+def _claude_appdata_candidates():
+    """Every directory the desktop app might keep its state in on this machine.
+
+    A Microsoft Store (MSIX) install redirects `%APPDATA%` into its own package container, so there
+    are two names for what may or may not be one directory:
+
+        %APPDATA%\\Claude
+        %LOCALAPPDATA%\\Packages\\Claude_<publisher>\\LocalCache\\Roaming\\Claude
+
+    MEASURED ON TWO MACHINES, AND THEY DISAGREE. On this one the two are the SAME directory: a
+    record under each path returns identical device and inode numbers, and both list 184 records.
+    On the test laptop they are two different stores, 19 records and a `config.json` under the
+    package container against 1 record and no config under `%APPDATA%`, so reading `%APPDATA%`
+    there saw one twentieth of the sessions and would have filed an imported record where the app
+    never looks.
+    """
+    roaming = os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming")
+    local = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
+    found = [os.path.join(roaming, "Claude")]
+    found.extend(sorted(glob.glob(os.path.join(
+        local, "Packages", "Claude*", "LocalCache", "Roaming", "Claude"))))
+    return found
+
+
+def _identity(path):
+    """(device, inode) for a directory, or None. Two names for one directory share these."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def claude_appdata():
+    """The directory the desktop app is ACTUALLY using, chosen from evidence rather than assumed.
+
+    `C4X_SESSIONS_ROOT` overrides it outright, for a layout neither candidate covers.
+
+    Otherwise the candidates are collapsed by identity, so a redirected install counts once, and
+    then ranked: a `config.json` beside the records is the strongest signal that the app writes
+    there, then how many records it holds, then how recent the newest one is. With no evidence at
+    all the `%APPDATA%` name is returned, which is where a fresh install puts things.
+    """
+    override = os.environ.get("C4X_SESSIONS_ROOT")
+    if override:
+        return os.path.dirname(override.rstrip("\\/")) or override
+    seen, candidates = set(), []
+    for path in _claude_appdata_candidates():
+        key = _identity(path)
+        if key is not None and key in seen:
+            continue                    # the same directory under its other name
+        if key is not None:
+            seen.add(key)
+        candidates.append(path)
+    best, best_score = candidates[0], None
+    for path in candidates:
+        records = glob.glob(os.path.join(path, "claude-code-sessions", "*", "*", "local_*.json"))
+        newest = 0.0
+        for record in records:
+            try:
+                newest = max(newest, os.path.getmtime(record))
+            except OSError:
+                continue
+        score = (os.path.isfile(os.path.join(path, "config.json")), len(records), newest)
+        if best_score is None or score > best_score:
+            best, best_score = path, score
+    return best
+
+
 def sessions_root():
     """Where the desktop app keeps its per-chat records."""
-    return os.path.join(os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming"),
-                        "Claude", "claude-code-sessions")
+    override = os.environ.get("C4X_SESSIONS_ROOT")
+    if override:
+        return override
+    return os.path.join(claude_appdata(), "claude-code-sessions")
 
 
 def read_archived_record(path):

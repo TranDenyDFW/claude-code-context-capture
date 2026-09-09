@@ -2,235 +2,85 @@
 
 Claude Code shows you one number: a percentage in the context bar. Everything behind it is
 discarded at render time, so when a compaction fires you cannot see what it dropped, and you cannot
-see it coming. **c4x** records that state into a local SQLite store as you work, and mirrors Claude
-Code's own window arithmetic closely enough to say when the next compaction will fire. Install is
-three commands and pulls nothing from npm.
+see it coming.
 
-> Everything stays under `data/` on your disk - the store, the raw capture logs, and a copy of each
-> transcript taken just before it is compacted. While it is installed it captures, and there is no
-> off switch short of `node tools/install.mjs uninstall`. [Why.](#does-this-send-anything-anywhere)
+**c4x** records that state into a local SQLite store as you work, and mirrors Claude Code's own
+window arithmetic closely enough to say when the next compaction will fire. Install is three
+commands and pulls nothing from npm.
 
 ![One session's context growth, with compaction markers, the predicted trigger line, the model's warn and blocked zones, and a rolling band marking calls unlike the rest of the session](docs/images/session.png)
 
-<sub>Every screenshot here is a real store of 1,324 sessions, with working directories, file names
-and message text replaced by `tools/redact.py`. Every number, chart and finding is untouched.</sub>
+> **Everything stays on your disk** under `data/`: the store, the raw capture logs, and a copy of
+> each transcript taken just before it is compacted. The store keeps the TEXT of your
+> conversations, not just their sizes. While it is installed it captures, and there is no off
+> switch short of uninstalling. [What that means.](#privacy)
 
----
+<sub>Every screenshot is a real store of 1,409 sessions with working directories, file names and
+message text replaced by <code>tools/redact.py</code>. Every number, chart and finding is
+untouched.</sub>
 
 ## Install
 
-**Requirements**
-
-- **Node 24 or newer.** Every tool opens the store through the built-in `node:sqlite`, which
-  earlier majors shipped behind a flag.
-- **Python 3.12 or newer**, for the dashboard and the CLI only. Capture itself needs neither.
-- **Nothing from npm at capture time.** The tools that read your transcripts import nothing but
-  Node's own modules. The two committed lockfiles pin the development toolchain, the linter and the
-  frontend build, which is what CI installs and what you need only if you are changing this repo.
+Needs **Node 24+** (the tools open the store through the built-in `node:sqlite`) and, for the
+dashboard and CLI only, **Python 3.12+**. Capture itself needs no Python and nothing from npm.
 
 ```bash
 git clone https://github.com/TranDenyDFW/claude-code-context-capture
 cd claude-code-context-capture
 node tools/install.mjs install
+pip install -r requirements.txt        # dashboard and CLI only
 ```
 
-That writes this checkout's hooks and status line into `~/.claude/settings.json` and records exactly
-what it changed in `data/install-receipt.json`. It converges rather than overwrites, so running it
-twice changes nothing and running it over a broken config repairs it. The hooks take effect in
-sessions already running, and if there is no store yet the install runs one harvest before it
-finishes, so your existing transcripts are already in it and the check below has something to
-report on day one.
+That writes this checkout's hooks and status line into `~/.claude/settings.json` and records what
+it changed in `data/install-receipt.json`. It converges rather than overwrites, so running it twice
+changes nothing and running it over a broken config repairs it. If there is no store yet it runs
+one harvest, so your existing transcripts are already in it.
+
+**Check it worked.** Worth not skipping: this hooks into another program's lifecycle, and a silent
+failure there looks exactly like a quiet week.
 
 ```bash
-node tools/install.mjs install --dry-run   # print the exact diff, write nothing
-pip install -r requirements.txt            # dashboard and CLI only
+node tools/install.mjs status          # exit 0 healthy, 1 drifted, 2 misuse
 ```
 
-**Check it worked.** This is the step worth not skipping, because the tool hooks into another
-program's lifecycle and a silent failure there looks exactly like a quiet week:
+`node tools/install.mjs install --dry-run` prints the exact diff and writes nothing.
+`uninstall` removes only this tool's entries and keeps the store; `--purge` deletes the store too.
+[What capture costs, and how to read `status`.](docs/performance.md)
+
+## Usage
+
+Everything below runs against transcripts you already have.
 
 ```bash
-node tools/install.mjs status
+node tools/harvest.mjs --stats               # confirm it captured something
+python -m c4x.cli sessions --limit 5         # your sessions, largest first
+python -m c4x.api                            # the dashboard, on 127.0.0.1:8059
 ```
 
 ```
-install root : /path/to/claude-code-context-capture
-settings     : /home/you/.claude/settings.json
-store        : /path/to/claude-code-context-capture/data/context.db
-receipt      : written 2026-08-28T19:26:22.167Z
-hook capture : 1,204 events, last 3 min ago
-status line  : 11 genuine samples, last 3 min ago
-self-heal    : never rewrote your settings  (set C4X_NO_SELF_HEAL=1 to stop it)
-HEALTHY
-```
-
-Exit code 0 is healthy, 1 is drifted, 2 is misuse, so it can gate a script.
-
-The last three lines are liveness rather than wiring: whether anything has actually been captured,
-and when. `hook capture` counts what a harvest has stored and also reports when a hook last appended
-to the raw log, so a fresh install says events are captured and waiting for a harvest rather than
-printing a zero that reads exactly like a dead capture. `status line` will say it never fired if you
-use the Claude Desktop chat view, which does not invoke a status line at all; capture continues
-through the hooks either way.
-
-**What it costs.** The `PostToolUse` hook is wired with matcher `*`, so Claude Code spawns it once
-per tool call and waits for it. Almost all of that is Node process startup rather than anything this
-repo does, and startup varies by roughly five times across machines, so measure yours rather than
-trusting a number here:
-
-```bash
-node -e "
-const {spawnSync}=require('node:child_process');
-const payload=JSON.stringify({hook_event_name:'PostToolUse',session_id:'m',cwd:process.cwd(),
-                              tool_name:'Read',tool_input:{},tool_response:'x'});
-const env={...process.env, C4X_EVENTS_OUT: process.cwd()+'/tmp/cost.ndjson'};
-const t=(f,n)=>{const a=[];for(let i=0;i<n;i++){const s=Date.now();f();a.push(Date.now()-s);}
-                a.sort((x,y)=>x-y);return a[Math.floor(a.length/2)];};
-console.log('bare node startup:', t(()=>spawnSync(process.execPath,['-e','']),10), 'ms');
-console.log('this hook        :', t(()=>spawnSync(process.execPath,['hooks/event-hook.mjs'],
-                                                  {input:payload,env}),20), 'ms');"
-```
-
-`C4X_EVENTS_OUT` sends the measurement rows to a scratch file, so nothing real is written. Two
-machines, same method, medians:
-
-| | bare node startup | the hook | this repo's own share |
-|---|---|---|---|
-| a fast desktop | 32 ms | 44 ms | 12 ms |
-| a slower one | 170 ms | 248 ms | 78 ms |
-
-If that is too much, remove the `PostToolUse` entry from `~/.claude/settings.json`. You lose
-per-tool byte accounting on the Sources tab; everything else keeps working, because the transcript
-harvest does not depend on it.
-
-**Updating.** `git pull` then `node tools/install.mjs install` to re-converge. Your store is left
-alone: upgrades add columns in place and never rewrite existing rows.
-
-**Turning it off.** `node tools/install.mjs uninstall` removes only this tool's entries and keeps
-the store. Add `--purge` to delete the store as well.
-
----
-
-## Examples
-
-Each of these runs against data you already have, your own transcripts under `~/.claude/projects`,
-with no setup beyond the install above.
-
-### Confirm it captured something
-
-```bash
-node tools/harvest.mjs --stats
-```
-
-```json
-{
-  "db": "/path/to/data/context.db",
-  "files": { "n": 7246, "bytes": 11026710459 },
-  "sessions": 1324,
-  "turns": { "n": 342522, "max_resident": 999798 },
-  "api_calls": { "n": 156579, "rows_behind_them": 342391 }
-}
-```
-
-`api_calls` is the number that matters. A streamed assistant message is written as several
-transcript rows sharing one request id, so 342,522 rows are 156,579 real API calls. Summing the
-rows would count the same call two to eight times, which is the easiest mistake to make against
-this store and the reason the deduped view exists.
-
-### List your sessions
-
-```bash
-python -m c4x.cli sessions --limit 5
-```
-
-```
-session_id  title                                         project                turns  current   peak    compactions
-928cf7e5    Status line documentation accuracy            /work/c4x               7425   670569   997078            4
-ed1902c7    Economic policy impact on prices and markets  /work/secdb             5986   744642   997778            2
-4fa08075    Claude extensions and GitHub issues folder    /work/extindex         31982   429257   966014            2
+session_id  title                                         project        turns  current   peak   compactions
+928cf7e5    Status line documentation accuracy            /work/c4x       7425   670569   997078           4
+ed1902c7    Economic policy impact on prices and markets  /work/secdb     5986   744642   997778           2
 ```
 
 `current` is the last reading, `peak` is the high-water mark. A session can sit at 670k having
 touched 997k earlier, which is the difference the context bar alone cannot show you.
 
-### Open the dashboard
-
-```bash
-python -m c4x.api
-```
-
-Visit `http://127.0.0.1:8059/`. Use `--port` or `C4X_API_PORT` to move it. Closing the dashboard
-does not stop capture: the hooks keep recording whether or not it is running.
-
-Still nothing from npm. The page is committed built, so this serves it as-is; npm is needed only to
-change the frontend.
-
-![The Summary tab: five findings that each name a session and an action, store totals, and cumulative resident tokens by working directory](docs/images/summary.png)
-
-Every finding is clickable. Clicking one selects the session it names and jumps to the tab that
-proves it, so a claim on the front page is one click from its evidence.
-
-The same server serves the data as JSON, so anything you can see you can also fetch:
-`curl 127.0.0.1:8059/api/tab/tab-cost` returns exactly what `python -m c4x.cli dump --tab tab-cost
---json` prints. It holds each answer until the store is written to, and for five seconds
-after that, so the second view of a tab costs about 3 ms rather than 1.6 seconds.
-
-The page is React; the numbers are still built by the Python that always built them, and
-`python tools/parity.py` renders all eight tabs both ways and compares them cell by cell to keep it
-that way.
-
-### See where the window went
-
-The Session tab is the chart at the top of this README: growth per turn, every compaction marked in
-red, the model's warn and blocked zones shaded, and the predicted trigger drawn as a line. Pick a
-session in the header, or click a row on All sessions.
-
-The same view without a browser:
-
-```bash
-python -m c4x.cli dump --tab tab-session --session 928cf7e5-287f-4300-a03f-347d17719ae8
-```
-
-### Find out when the next compaction fires
+**When does the next compaction fire?**
 
 ```bash
 node tools/mirror.mjs --predict 850000 --window 1000000
 ```
 
 ```json
-{
-  "reported_threshold": 967000,
-  "trigger_threshold": 967000,
-  "warn_at": 947000,
-  "blocked_at": 997000,
-  "level": "ok",
-  "pctLeft": 12,
-  "tokens_until_compact": 117000
-}
+{ "trigger_threshold": 967000, "warn_at": 947000, "blocked_at": 997000,
+  "level": "ok", "pctLeft": 12, "tokens_until_compact": 117000 }
 ```
 
 The arithmetic comes from `tools/mirror-core.mjs`, the same module the dashboard draws its
 threshold lines from, so the number here and the line on the chart cannot drift apart.
 
-### Read what a compaction threw away
-
-```bash
-python -m c4x.cli dump --tab tab-compactions
-```
-
-```
-ts                   trigger  pre_tokens  post_tokens  dropped    survivors  threshold  overshoot
-2026-08-05 04:47:04  auto        1028902        88094   2888675          27     967000      61902
-2026-08-08 02:22:18  auto        1012890        36778   4831550           8     967000      45890
-```
-
-`overshoot` is how far past the predicted trigger the session actually got. Clicking a row opens
-the summary the compaction wrote, in full, plus the messages that are absent from its survivor
-list, recovered from the store rather than reconstructed.
-
-![The Compactions tab: every compaction with its predicted trigger, its overshoot, and the survivors it kept](docs/images/compactions.png)
-
-### See what you paid for twice
+**What did you pay for twice?**
 
 ```bash
 node tools/waste.mjs --duplicates
@@ -241,140 +91,123 @@ duplicate reads (>= 3 reads of one file in one session)
   groups: 1129   re-reads beyond the first: 7323   bytes in the repeats: 72778.4 KB
 
     614x     297.1 KB  identical     582a3e1c  /work/categories.json
-    344x    4074.0 KB  identical     3d6ee47a  /work/staging/_BATCH_BRIEF.md
     340x    8819.3 KB  42 variants   7fe4cdc8  /books/_standards_catalog.md
 ```
 
-`variants` is how a re-read hides: the same file reached by 42 different spellings of its path. The
-Cost tab adds the shape of it, a cumulative curve answering whether ten fixes would end most of the
-re-reading or none of it, and a second table for identical tool inputs repeated **across** sessions,
-which no per-session view can see.
+`variants` is how a re-read hides: the same file reached by 42 different spellings of its path.
 
-![The Cost tab: re-read groups, the concentration curve, and an estimated cost per model from a dated price table](docs/images/cost.png)
-
-Cost is an estimate and says so, from a price table committed at `c4x/prices.json` and refreshed by
-CI against two published sources that have to agree. A model with no entry renders blank, never
-zero.
-
-### Compare two populations
-
-```bash
-python -m c4x.cli dump --tab tab-compare --compare-with ed1902c7-ce5c-4495-87b3-f416086dba64
-```
-
-Both arms are measured by the same function, so a difference cannot be an artefact of asking two
-different questions. Each row declares whether it scales with population size, because comparing 3
-sessions against 303 makes every total larger for a reason that says nothing.
-
-### Query the store yourself
-
-Every table on the page prints the query that produced it, and so does the dump:
+**Query it yourself.** Every table on the page prints the query that produced it, and so does the
+dump. Add `--json` for the same content machine-readably.
 
 ```bash
 python -m c4x.cli dump --tab tab-cost | grep -A 12 "Query"
 sqlite3 data/context.db
 ```
 
-Add `--json` for the same content machine-readably. The dashboard is a convenience over an ordinary
-SQLite file, not a gatekeeper on it.
+## The dashboard
 
----
+`python -m c4x.api`, then `http://127.0.0.1:8059/`. Closing it does not stop capture. The page is
+committed built, so npm is needed only to change the frontend. The same server serves every tab as
+JSON: `curl 127.0.0.1:8059/api/tab/tab-cost`.
 
-## The eight tabs
+The CLI renders the same callbacks the browser does, so a dump is what the page shows rather than a
+parallel implementation of it.
 
-`python -m c4x.cli tabs` lists these. The CLI renders the same callbacks the browser renders, so a
-dump is what the page shows rather than a parallel implementation of it.
+| Tab | What it answers | Dump it |
+|---|---|---|
+| Summary | what is worth doing about this store | `python -m c4x.cli dump --tab tab-summary` |
+| All sessions | every session as a point and a row | `--tab tab-sessions` |
+| Session | where one session's window went | `--tab tab-session --session <id>` |
+| Compactions | what each compaction discarded | `--tab tab-compactions` |
+| Window | what is in the window right now | `--tab tab-window --session <id>` |
+| Cost | what was read twice, and what it cost | `--tab tab-cost` |
+| Compare | two populations, measured the same way | `--tab tab-compare --compare-with <id>` |
+| Diagnostics | is the capture healthy | `--tab tab-diagnostics` |
 
-| Tab | Dump it |
-|---|---|
-| Summary | `python -m c4x.cli dump --tab tab-summary` |
-| All sessions | `python -m c4x.cli dump --tab tab-sessions` |
-| Session | `python -m c4x.cli dump --tab tab-session --session <id>` |
-| Compactions | `python -m c4x.cli dump --tab tab-compactions --session <id>` |
-| Window | `python -m c4x.cli dump --tab tab-window --session <id>` |
-| Cost | `python -m c4x.cli dump --tab tab-cost --session <id>` |
-| Compare | `python -m c4x.cli dump --tab tab-compare --compare-with <id>` |
-| Diagnostics | `python -m c4x.cli dump --tab tab-diagnostics` |
+![The Summary tab: findings that each name a session and an action, store totals, and tool bytes by working directory](docs/images/summary.png)
+
+Every finding is clickable: it selects the session it names and jumps to the tab that proves it, so
+a claim on the front page is one click from its evidence.
+
+![The Cost tab: re-read groups, the concentration curve, and how each tool call turned out](docs/images/cost.png)
+
+Cost is an estimate and says so, from a price table at `c4x/prices.json` refreshed by CI against
+two published sources that have to agree. A model with no entry renders blank, never zero.
+
+**`errors` counts what failed, not what was refused.** Claude Code sets one flag on a tool that ran
+and failed and on a tool that was stopped before it ran. Measured on this store, 26.9% of what was
+called an error never ran. The `outcome` column reports the two apart, and says `unknown` where the
+transcript cannot prove which it was.
+
+![The Compactions tab: every compaction with its predicted trigger, its overshoot, and the survivors it kept](docs/images/compactions.png)
+
+`overshoot` is how far past the predicted trigger the session actually got. Clicking a row opens the
+summary the compaction wrote, in full, plus the messages absent from its survivor list, recovered
+from the store rather than reconstructed.
 
 **Two tabs need a reading the install does not take.** Window and Diagnostics stay empty until you
-record one, and they say so on the page rather than looking broken:
+record one, and say so on the page rather than looking broken. Nothing else depends on either,
+which is why the install does not run something that costs money on your behalf.
 
 ```bash
-node tools/probe.mjs                  # asks a spawned Claude Code session for its own context
-                                      # breakdown. One billable session, about 12 seconds.
-node tools/breakdown.mjs --calibrate  # records your configuration's fixed overhead, read from the
-                                      # context tooltip. Print the flag list with no arguments.
+node tools/probe.mjs                  # one billable session, about 12 seconds
+node tools/breakdown.mjs --calibrate  # your configuration's fixed overhead
 ```
-
-Nothing else depends on either. Capture, the Summary, Session, Cost and Compare tabs all work
-without them, which is why the install does not run something that costs money on your behalf.
-
-`python -m c4x.cli all` sweeps every tab at once, which is the fastest way to ask "did anything
-break". Three things worth finding that the examples above did not reach: the Window tab's treemap
-of what is in the context right now, item by item; subagent identity, which records what kind of
-agent ran and which turns it spawned; and dragging a box on a chart to filter the table beside it.
 
 ![The Window tab: what is in the context window right now, as area, grouped into configuration, messages and free space](docs/images/window.png)
 
----
+## Moving a project between machines
 
-## Does this send anything anywhere?
+```bash
+python -m c4x.projects export "P:\Work\Thing" --out thing.db
+python -m c4x.projects import thing.db --into "D:\Elsewhere\Thing"
+```
 
-No. Nothing leaves the machine, there is no network call in the capture path, and `data/` is
+The export carries the conversations, not only the rows: the transcripts, project memory, tasks,
+the trust setting, and the desktop app's own record, so the project opens in Claude Code on the
+other machine. Everything is rebuilt from the destination you choose, on the importing user's own
+paths. `--dry-run` names every destination and writes nothing; `verify-mirror` re-hashes what
+landed and exits non-zero on a difference.
+
+## Privacy
+
+**Nothing leaves the machine.** There is no network call in the capture path, and `data/` is
 gitignored.
 
-**The store keeps the text of your conversations, not just their sizes.** That is what makes a
-compaction summary readable instead of a character count, and what makes a dropped message
-recoverable at all. It is also the thing to know before you install rather than after.
+**The store keeps the text of your conversations**, not just their sizes. That is what makes a
+compaction summary readable instead of a character count, and a dropped message recoverable at all.
+It is the thing to know before you install rather than after.
 
-**And there is a second copy.** On every compaction, `hooks/compact-hook.mjs` copies the WHOLE
-transcript into `data/snapshots/` before Claude Code drops the messages, because a compaction is
-the one event after which the original cannot be recovered from anywhere else. These are verbatim
-files, one per boundary, so a long-lived session accumulates several: on the machine this was
-written on, thirteen files and 603 MB. Two things follow.
+**There is a second copy.** On every compaction, `hooks/compact-hook.mjs` copies the whole
+transcript into `data/snapshots/` before Claude Code drops the messages, because a compaction is the
+one event after which the original cannot be recovered from anywhere else. A long-lived session
+accumulates several. A transcript over 250 MB is skipped rather than copied, and the skip is
+recorded with its reason. `C4X_SNAPSHOT=0` turns the copies off; capture continues.
 
-- A transcript larger than 250 MB is skipped rather than copied, and the skip is recorded in
-  `data/raw/compaction-events.ndjson` with its reason, so a gap in the set always says why.
-- `C4X_SNAPSHOT=0` in the environment Claude Code launches with turns the copies off. Capture
-  continues; only the pre-compaction copy stops.
+**There is no off switch on purpose.** A capture tool you can quietly disable still produces a store
+that looks complete, with nothing in it saying which sessions were recorded and which were not.
+`node tools/install.mjs uninstall` is the way to stop it, and it prints what it is keeping.
 
-There is no off switch on purpose. A capture tool you can quietly disable still produces a store
-that *looks* complete, and nothing in it tells you which sessions were recorded and which were not.
-`node tools/install.mjs uninstall` is the way to stop it. It prints what it is keeping, including
-the snapshot count and size; `--purge` deletes all of it - the store, `data/raw/` and
-`data/snapshots/`.
-
-**Who else on the machine can read it.** The installer restricts `data/` to your account and
-SYSTEM when it creates it. A checkout on a data volume rather than under your home directory would
-otherwise inherit that volume's permissions, which on a stock Windows data drive lets every local
-account read the conversation text. `node tools/install.mjs status` warns if it finds that state on
-a directory created before this, and prints the command that fixes it.
-
----
+**Who else can read it.** The installer restricts `data/` to your account and SYSTEM. A checkout on
+a data volume would otherwise inherit that volume's permissions, which on a stock Windows data drive
+lets every local account read the conversation text. `install status` warns if it finds that state
+and prints the command that fixes it.
 
 ## Docs
 
 The dashboard explains itself as you use it: every column carries a tooltip saying what it means,
-every table carries the SQL behind it, and every derived figure says on the page that it is
-derived rather than measured.
+every table carries the SQL behind it, and every derived figure says on the page that it is derived
+rather than measured.
 
-Beyond that there are two things worth reading. Every tool prints its own usage, and
-`node tools/install.mjs --help` in particular explains why the installer converges instead of
-scripting. And [docs/architecture.md](docs/architecture.md) covers the three stages, where the
-data lives, the one invariant that catches everyone, and why the category breakdown is derived
-rather than read.
-
-The API documents itself too: with the server running, `/api/docs` is the generated reference and
-`/api/openapi.json` is the schema. Two routes answer without touching the store, for scripting a
-readiness check:
-
-| Route | Answers |
-|---|---|
-| `GET /api/health` | `ok`, the store path, whether this process is read-only, whether the write routes are enabled, and the cache's current state |
-| `GET /__health__` | `ok`, the store path and the port. The older shape, kept so anything already watching for it still works |
-
-Neither is authenticated, and neither needs to be: the server binds to `127.0.0.1` only, and the
-routes that can change anything refuse a cross-origin request.
+- [docs/architecture.md](docs/architecture.md): the three stages, where the data lives, the one
+  invariant that catches everyone, and why the category breakdown is derived rather than read.
+- [docs/performance.md](docs/performance.md): what the hook costs and how to measure it here.
+- Every tool prints its own usage. `node tools/install.mjs --help` explains why the installer
+  converges instead of scripting.
+- With the server running, `/api/docs` is the generated API reference and `/api/openapi.json` is the
+  schema. `GET /api/health` answers without touching the store, for a readiness check. Neither is
+  authenticated and neither needs to be: the server binds to `127.0.0.1` only, and the routes that
+  can change anything refuse a cross-origin request.
 
 ## License
 

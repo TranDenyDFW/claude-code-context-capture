@@ -934,6 +934,46 @@ def main():
     fixture_ok = fixture_kinds == {("stringified", "n"), ("placeholder", "n"),
                                    ("placeholder", "u")}
 
+    # NO TABLE DRAWS A RAW OUTCOME COUNT.
+    #
+    # `errors`, `refused` and `unknown` are the three counts the merged `outcome` cell replaces.
+    # They ride on every row so a click and the CSV can read them, and they are hidden. A table
+    # that DECLARES one of them visibly has reverted a site, and its reader is back to a single
+    # number that adds a tool which ran and failed to a tool that was never allowed to run.
+    #
+    # CHECKED HERE BECAUSE THIS FILE HOLDS THE WHOLE POPULATION. The suite's version of this gate
+    # walks the tabs, and the turn-diff panel is built by a CALLBACK rather than by a tab, so an
+    # independent reviewer reverted that one table and watched 113 targeted tests and this audit
+    # stay green. `constructed` holds every table built during the run, callback output included.
+    #
+    # ABOVE THE PRINTER, NOT BELOW IT. Appended after the loop that prints `errors`, this gate
+    # failed the run and named nothing, which is a verdict with no evidence: the first version of
+    # it did exactly that and the mutation it caught looked like an unexplained AUDIT FAIL.
+    # THE PROPERTY IS THAT `outcome` IS DRAWN, not that the raw three are hidden. The first
+    # version of this gate asked only the second question and an independent reviewer walked
+    # straight through it: leaving `hidden_columns=list(OUTCOME_HIDDEN)` in place while restoring
+    # the raw columns satisfies "none of the three is drawn" and shows the reader nothing at all.
+    # Adding "outcome" to a hide list does the same. Both halves are asked here.
+    #
+    # The author's own attempt to reproduce that reviewer's mutation retyped it from their prose
+    # instead of applying their published diff, tested a different defect, and reported the gate
+    # as verified. The mutation that matters is the one someone actually published.
+    RAW_OUTCOME = {"errors", "refused", "unknown"}
+    for table in constructed.values():
+        hidden = set(getattr(table, "hidden_columns", None) or [])
+        ids = [c.get("id") for c in (getattr(table, "columns", None) or []) if isinstance(c, dict)]
+        if not (set(ids) & (RAW_OUTCOME | {"outcome"})):
+            continue                      # not an outcome-bearing table; other gates cover it
+        drawn = (set(ids) & RAW_OUTCOME) - hidden
+        if drawn:
+            errors.append(f"a table draws the raw outcome count(s) {sorted(drawn)} instead of the "
+                          f"merged `outcome` cell, so its reader sees calls that failed added to "
+                          f"calls that never ran; columns={ids}")
+        if "outcome" not in set(ids) - hidden:
+            errors.append(f"a table carries outcome counts but DRAWS no `outcome` cell, so the "
+                          f"reader is told nothing about how those calls turned out; "
+                          f"columns={ids}, hidden={sorted(hidden)}")
+
     seen = set()
     for kind, label, tid, col, val in hits:
         key = (tid, col, kind)

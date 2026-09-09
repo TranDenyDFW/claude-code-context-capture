@@ -8,7 +8,8 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { api } from '@/api'
-import { ProjectMoves, pathOf } from './ProjectMoves'
+import type { ImportReport } from '@/api'
+import { ProjectMoves, pathOf, slugFor } from './ProjectMoves'
 // Vite's ?raw import, not node:fs. The app tsconfig types `vite/client` and NOT `node`, so
 // readFileSync/process do not type-check here at all: `npm run typecheck` reported three
 // TS2591s that a bare `tsc --noEmit` never ran.
@@ -181,37 +182,190 @@ describe('how App wires it up', () => {
   })
 })
 
+/**
+ * A whole import report, so a test states only the field it is about.
+ *
+ * Written out in full rather than partially, because the fields that were missing from the old
+ * mocks are exactly the ones the page now renders, and a mock that omits them tests a response
+ * shape the server never sends.
+ */
+function report(over: Partial<ImportReport> = {}): ImportReport {
+  return {
+    project: PROJECT,
+    from: 'PONPON',
+    into: [PROJECT],
+    mapping: { [PROJECT]: PROJECT },
+    not_moved: [],
+    still_excluded: false,
+    inserted: { turns: 10 },
+    already_present: {},
+    dropped_columns: {},
+    app_state: {
+      written: [{ relpath: 'a.jsonl', kind: 'transcript', path: 'x', exists: false }],
+      replaced: [], replaced_shorter: [], refused: [],
+      desktop: [{ path: 'r.json', cwd: PROJECT }],
+      bytes: 1024, dry_run: false,
+    },
+    mirror: {
+      ok: true, missing: [], differs: [], extra: [], unresolved: [],
+      into: [PROJECT], not_carried: [],
+    },
+    ...over,
+  }
+}
+
+/**
+ * Pick a file, then commit. Two steps on purpose: the first is a DRY RUN that writes nothing and
+ * reports where every file would land, so a wrong destination is visible before it lands.
+ */
+async function choose(file = new File([new Uint8Array([1, 2, 3])], 'secdb.db')) {
+  fireEvent.change(fileField(), { target: { files: [file] } })
+  return screen.findByRole('button', { name: /^Import$/ })
+}
+
 describe('import', () => {
+  it('shows where the export would land, and writes nothing, before it is confirmed', async () => {
+    const call = vi.spyOn(api.project, 'import').mockResolvedValue(report({ dry_run: true }))
+    show()
+    await choose()
+    // The first call is the plan. Its third argument is what makes it a plan.
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(call.mock.calls[0][2]).toBe(true)
+    expect(screen.queryByText(/^Imported/)).toBeNull()
+    expect((screen.getByLabelText(/working directory on this machine/i) as HTMLInputElement).value)
+      .toBe(PROJECT)
+  })
+
+  it('lets the destination be changed and shows the directory it produces', async () => {
+    // The requirement: the destination is the user's choice, and it is the CURRENT machine's
+    // paths that get rebuilt from it. The slug is shown because a typo in a path is invisible and
+    // the directory name it produces is not.
+    const call = vi.spyOn(api.project, 'import').mockResolvedValue(report())
+    show()
+    const button = await choose()
+    fireEvent.change(screen.getByLabelText(/working directory on this machine/i),
+                     { target: { value: 'D:\\Work\\Alpha' } })
+    expect(screen.getByText(/D--Work-Alpha/)).toBeTruthy()
+    fireEvent.click(button)
+    await screen.findByText(/^Imported/)
+    expect(call.mock.calls[1][1]).toBe('D:\\Work\\Alpha')
+  })
+
+  it('stops presenting the plan as current once the destination is edited', async () => {
+    // The dry run is computed ONCE, for the destination the export came from. Editing the field
+    // is the only thing the field is for, and the overwrite count then describes paths under the
+    // old slug. Found by an independent sweep of the branch.
+    vi.spyOn(api.project, 'import').mockResolvedValue(report({
+      dry_run: true,
+      app_state: {
+        written: [{ relpath: 'a.jsonl', kind: 'transcript', path: 'x', exists: true }],
+        replaced: [], replaced_shorter: [], refused: [], desktop: [], bytes: 0, dry_run: true,
+      },
+    }))
+    show()
+    await choose()
+    expect(screen.getByText(/over something already there/)).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText(/working directory on this machine/i),
+                     { target: { value: 'D:\\Somewhere\\Else' } })
+    expect(screen.queryByText(/over something already there/)).toBeNull()
+    expect(screen.getByText(/does not apply to the path you typed/)).toBeTruthy()
+  })
+
   it('reports what landed, what was already here, and what was dropped', async () => {
-    vi.spyOn(api.project, 'import').mockResolvedValue({
-      project: PROJECT,
-      from: 'PONPON',
-      still_excluded: false,
+    vi.spyOn(api.project, 'import').mockResolvedValue(report({
       inserted: { turns: 25964, messages: 22416, files: 0 },
       already_present: { turns: 0, sessions: 17 },
       dropped_columns: { sessions: ['from_the_future'] },
-    })
+    }))
     show()
-    const file = new File([new Uint8Array([1, 2, 3])], 'secdb.db')
-    fireEvent.change(fileField(), { target: { files: [file] } })
-    expect(await screen.findByText(/Imported/)).toBeTruthy()
+    fireEvent.click(await choose())
+    expect(await screen.findByText(/^Imported/)).toBeTruthy()
     // Counts of zero are left out: a table that gained nothing is noise in a success report.
     expect(screen.getByText(/turns 25,964 · messages 22,416/)).toBeTruthy()
     expect(screen.getByText(/sessions 17/)).toBeTruthy()
     expect(screen.getByText(/from_the_future/)).toBeTruthy()
   })
 
+  it('says the desktop app record was restored, because that is what makes it open there',
+     async () => {
+       vi.spyOn(api.project, 'import').mockResolvedValue(report())
+       show()
+       fireEvent.click(await choose())
+       await screen.findByText(/^Imported/)
+       expect(screen.getByText(/desktop app record/)).toBeTruthy()
+     })
+
+  it('does not paint an undone delete red', async () => {
+    // `delete` writes its backup with app_state off, so every undo of a delete imports a rows-only
+    // export. `missing` and `differs` are both empty when nothing was carried, so reading `ok`
+    // alone rendered "NOT a mirror. 0 missing, 0 different:" over a correct restore, naming
+    // nothing. Found by an independent reviewer against the page, not the CLI.
+    vi.spyOn(api.project, 'import').mockResolvedValue(report({
+      mirror: {
+        ok: false, missing: [], differs: [], extra: [], unresolved: [],
+        into: [PROJECT], not_carried: [], carries_no_files: true,
+      },
+    }))
+    show()
+    fireEvent.click(await choose())
+    await screen.findByText(/^Imported/)
+    expect(screen.queryByText(/NOT a mirror/)).toBeNull()
+    expect(screen.getByText(/carries rows only/)).toBeTruthy()
+  })
+
+  it('does not claim byte for byte, which is not true of all five kinds', async () => {
+    // The CLI was corrected off that wording because a config entry and a desktop record are
+    // rewritten by design; the page kept it.
+    vi.spyOn(api.project, 'import').mockResolvedValue(report())
+    show()
+    fireEvent.click(await choose())
+    await screen.findByText(/^Imported/)
+    expect(screen.queryByText(/[Bb]yte for byte/)).toBeNull()
+    expect(screen.getByText(/Every carried file is identical/)).toBeTruthy()
+  })
+
+  it('does NOT call a failed mirror an import', async () => {
+    // A 200 with a non-empty `differs` means files landed and are not what the export carries.
+    // Reporting that as a success is the exact claim this whole change exists to stop.
+    vi.spyOn(api.project, 'import').mockResolvedValue(report({
+      mirror: {
+        ok: false,
+        missing: [{ relpath: 'memory/notes.md', kind: 'memory' }],
+        differs: [{ relpath: 's0-0.jsonl', kind: 'transcript' }],
+        extra: [], unresolved: [], into: [PROJECT], not_carried: [],
+      },
+    }))
+    show()
+    fireEvent.click(await choose())
+    await screen.findByText(/^Imported/)
+    expect(screen.getByText(/NOT a mirror/)).toBeTruthy()
+    expect(screen.getByText(/s0-0\.jsonl/)).toBeTruthy()
+  })
+
+  it('names a file that was replaced with a shorter one', async () => {
+    // A compacted transcript is NEWER and SHORTER, so source-always-wins can replace a longer
+    // local record with less conversation. That was the choice; doing it quietly was not.
+    vi.spyOn(api.project, 'import').mockResolvedValue(report({
+      app_state: {
+        written: [], replaced: [], refused: [], desktop: [], bytes: 0, dry_run: false,
+        replaced_shorter: [{ relpath: 's0-0.jsonl', kind: 'transcript', was: 900, now: 40 }],
+      },
+    }))
+    show()
+    fireEvent.click(await choose())
+    await screen.findByText(/^Imported/)
+    expect(screen.getByText(/SHORTER/)).toBeTruthy()
+  })
+
   it('offers to resume capturing when the rows are back but the exclusion is not', async () => {
     // Restoring a project and leaving harvest skipping the directory means every session run
     // there since is dropped, with nothing on the page connecting the two facts.
-    vi.spyOn(api.project, 'import').mockResolvedValue({
-      project: PROJECT, from: 'PONPON', still_excluded: true,
-      inserted: { turns: 10 }, already_present: {}, dropped_columns: {},
-    })
+    vi.spyOn(api.project, 'import').mockResolvedValue(report({ still_excluded: true }))
     const lift = vi.spyOn(api.project, 'include').mockResolvedValue({ project: PROJECT, removed: 1 })
     vi.spyOn(api.project, 'excluded').mockResolvedValue({ excluded: [], writes_enabled: true })
     show()
-    fireEvent.change(fileField(), { target: { files: [new File(['x'], 'x.db')] } })
+    fireEvent.click(await choose())
     fireEvent.click(await screen.findByRole('button', { name: /resume capturing/i }))
     await vi.waitFor(() =>
       expect(screen.queryByRole('button', { name: /resume capturing/i })).toBeNull())
@@ -219,14 +373,31 @@ describe('import', () => {
   })
 
   it('offers nothing to resume when the project is not excluded', async () => {
-    vi.spyOn(api.project, 'import').mockResolvedValue({
-      project: PROJECT, from: 'PONPON', still_excluded: false,
-      inserted: { turns: 10 }, already_present: {}, dropped_columns: {},
-    })
+    vi.spyOn(api.project, 'import').mockResolvedValue(report())
     show()
-    fireEvent.change(fileField(), { target: { files: [new File(['x'], 'x.db')] } })
-    await screen.findByText(/Imported/)
+    fireEvent.click(await choose())
+    await screen.findByText(/^Imported/)
     expect(screen.queryByRole('button', { name: /resume capturing/i })).toBeNull()
+  })
+})
+
+describe('slugFor', () => {
+  // A SECOND COPY of `c4x/appstate.py::slug_for`, pinned on the same cases the Python self-test
+  // pins, so the two cannot drift silently.
+  it('turns every character that is not a letter or a digit into a hyphen', () => {
+    expect(slugFor('P:\\Skills')).toBe('P--Skills')
+    expect(slugFor('D:\\Work\\Alpha')).toBe('D--Work-Alpha')
+    expect(slugFor('S:\\www.sec.gov\\Archives')).toBe('S--www-sec-gov-Archives')
+    expect(slugFor('P:\\cSrc\\dual_skill_package')).toBe('P--cSrc-dual-skill-package')
+    expect(slugFor('P:\\VSA Agent GP')).toBe('P--VSA-Agent-GP')
+  })
+
+  it('trims a trailing separator the way check_destination does', () => {
+    // The preview showed `D--Work-Alpha-` for a path the server would file under `D--Work-Alpha`,
+    // on the one input a reader is most likely to paste. Found by an independent sweep.
+    expect(slugFor('D:\\Work\\Alpha\\')).toBe('D--Work-Alpha')
+    expect(slugFor('D:/Work/Alpha/')).toBe('D--Work-Alpha')
+    expect(slugFor('  D:\\Work\\Alpha  ')).toBe('D--Work-Alpha')
   })
 })
 

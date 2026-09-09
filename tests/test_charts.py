@@ -236,8 +236,8 @@ def test_the_headline_cards_count_every_group_not_the_first_page(cost_pane, q):
     # caption below, so a substring search over the whole tab passes while the card beside it
     # still says 200. That is exactly the defect, and the first version of this test did not
     # catch it when the defect was replanted.
-    assert card_value(cost_pane, "Re-read groups") == f"{int(truth['groups']):,}"
-    assert card_value(cost_pane, "Re-reads beyond the first") == f"{int(truth['repeats']):,}"
+    assert card_value(cost_pane, "Reread groups") == f"{int(truth['groups']):,}"
+    assert card_value(cost_pane, "Reread count") == f"{int(truth['repeats']):,}"
 
 
 def test_the_table_says_it_is_capped(cost_pane):

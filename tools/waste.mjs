@@ -23,6 +23,7 @@
 //   node waste.mjs --duplicates [--min N] [--session ID]
 //   node waste.mjs --servers [--days N]
 //   node waste.mjs --tools
+//   node waste.mjs --refusals
 //   node waste.mjs --self-test
 //
 // Every report accepts --db (or C4X_DB) so it can run against a copy.
@@ -33,6 +34,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { rootFrom, resolveDb } from './paths.mjs';
+// ONE definition of the vocabulary, shared with harvest.mjs, and mirrored in SQL by
+// c4x/store.py. Three places had to agree about what a flagged call means; now they agree WITH
+// something rather than each holding a second answer to reconcile.
+import { outcomeText } from './outcomes.mjs';
 
 // Three writers share this store by design: a manual harvest, the SessionEnd and UserPromptSubmit
 // hooks, and the dashboard's refresh loop. SQLite's default busy timeout is ZERO, so a reader that
@@ -193,15 +198,35 @@ export function schemaCost(db) {
     GROUP BY ts.tool_name`).all();
 }
 
+/**
+ * The three counts, chosen by whether this store has been harvested since `outcome` arrived.
+ *
+ * MIRRORS outcome_sums() in c4x/store.py, ANSWER FOR ANSWER, including what it says about a
+ * store that predates the column: everything is unknown, and it says so. Returning zeros would
+ * render a blank column, which is exactly what a store where nothing failed looks like, so the
+ * CLI would make the strongest possible claim on the weakest possible evidence AND disagree
+ * with the dashboard reading the same rows.
+ */
+function outcomeSums(db) {
+  const have = new Set(db.prepare('PRAGMA table_info(tool_calls)').all().map((r) => r.name));
+  if (!have.has('outcome')) return '0 errors, 0 refused, COUNT(*) unknown';
+  return `SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) errors,
+          SUM(CASE WHEN outcome = 'refused' THEN 1 ELSE 0 END) refused,
+          SUM(CASE WHEN outcome IS NULL OR outcome = 'unclassified' THEN 1 ELSE 0 END) unknown`;
+}
+
 export function toolUsage(db) {
   const calls = db.prepare(`
     SELECT tool_name, COUNT(*) calls, SUM(COALESCE(result_bytes,0)) bytes,
-           SUM(COALESCE(is_error,0)) errors
+           ${outcomeSums(db)}
     FROM tool_calls GROUP BY 1`).all();
+  // MERGED AT THE SOURCE, so neither report below can render the three raw counts by
+  // forgetting to. The numbers stay on the row for anything that wants to sort by them.
+  const merged = (r) => ({ ...r, outcome: outcomeText(r) });
   const cost = schemaCost(db);
   const blank = { schema_bytes: null, schema_versions: null, schema_probe_only: null };
   if (cost === null) {
-    return calls.map((r) => ({ ...r, ...blank })).sort((a, b) => b.calls - a.calls);
+    return calls.map((r) => merged({ ...r, ...blank })).sort((a, b) => b.calls - a.calls);
   }
 
   const byName = new Map(cost.map((r) => [r.tool_name, r]));
@@ -214,12 +239,15 @@ export function toolUsage(db) {
   const out = calls.map((r) => {
     const s = byName.get(r.tool_name);
     byName.delete(r.tool_name);
-    return { ...r, ...(s ? shape(s) : blank) };
+    return merged({ ...r, ...(s ? shape(s) : blank) });
   });
   // Tools carrying a schema that were NEVER invoked. This is the number the header of this file
   // said was unrecoverable from the store: schema rent paid on every request, for nothing.
   for (const s of byName.values()) {
-    out.push({ tool_name: s.tool_name, calls: 0, bytes: 0, errors: 0, ...shape(s) });
+    // Every count present and zero, not absent. An absent one renders as "undefined" the moment
+    // anything reads it, and reads as a measurement rather than as the nothing it is.
+    out.push(merged({ tool_name: s.tool_name, calls: 0, bytes: 0,
+                      errors: 0, refused: 0, unknown: 0, ...shape(s) }));
   }
   return out.sort((a, b) => b.calls - a.calls || (b.schema_bytes || 0) - (a.schema_bytes || 0));
 }
@@ -285,17 +313,37 @@ function reportTools(db) {
   const measured = rows.filter((r) => r.schema_bytes !== null);
   const idle = measured.filter((r) => r.calls === 0);
 
+  // THE COLUMN COLLAPSES WHEN THERE IS NOTHING TO SAY. On a store where every call succeeded
+  // this is not a column of zeros, it is not a column. Same rule as the dashboard's blank cell,
+  // one level up: a zero on every row is thirty cells of nothing dressed as a measurement.
+  const shown = rows.slice(0, 30);
+  const widest = shown.reduce((w, r) => Math.max(w, r.outcome.length), 0);
+  const width = widest ? Math.max(widest, 'outcome'.length) : 0;
+  const cell = (text) => (width ? `  ${text.padEnd(width)}` : '');
+
   console.log('tool invocations across the store');
   console.log('');
-  console.log(`  ${'calls'.padStart(7)}  ${'result'.padStart(12)}  ${'err'.padStart(5)}  ${'schema'.padStart(9)}  tool`);
-  for (const r of rows.slice(0, 30)) {
+  console.log(`  ${'calls'.padStart(7)}  ${'result'.padStart(12)}${cell('outcome')}  ${'schema'.padStart(9)}  tool`);
+  for (const r of shown) {
     // UNKNOWN, never 0: no captured body means no measurement, which is not the same as free.
     const schema = r.schema_bytes === null ? '  UNKNOWN'
       : `${String(r.schema_bytes).padStart(7)} B${r.schema_versions > 1 ? '*' : ''}`;
-    console.log(`  ${String(r.calls).padStart(7)}  ${kb(r.bytes).padStart(12)}  ${String(r.errors).padStart(5)}  ${schema.padStart(9)}  ${r.tool_name}`);
+    console.log(`  ${String(r.calls).padStart(7)}  ${kb(r.bytes).padStart(12)}${cell(r.outcome)}  ${schema.padStart(9)}  ${r.tool_name}`);
   }
 
   console.log('');
+  // THE LEGEND IS PRINTED ONLY WHERE IT APPLIES. `errors` used to be one number covering two
+  // opposite facts, and on this store 26.9% of it was calls that never ran at all.
+  if (shown.some((r) => r.refused)) {
+    console.log('  refused = the call NEVER RAN: a permission rule, a hook, or a person stopped it');
+    console.log('  first. It was counted as an error until this column existed. Run tools/waste.mjs');
+    console.log('  --refusals for the denial kind Claude Code recorded for each one.');
+  }
+  if (shown.some((r) => r.unknown)) {
+    console.log('  unknown = flagged by a build older than 2.1.202, which recorded no reason, so');
+    console.log('  this store cannot tell a failure from a refusal. Not folded into either.');
+  }
+  if (shown.some((r) => r.refused || r.unknown)) console.log('');
   if (!measured.length) {
     console.log('  schema column is UNKNOWN for every tool: no raw bodies have been ingested.');
     console.log('  Capture some with tools/otel-ingest.mjs --enable, then --ingest.');
@@ -320,6 +368,43 @@ function reportTools(db) {
   } else {
     console.log(`  Every tool with a captured schema was invoked at least once (${measured.length} measured).`);
   }
+}
+
+/** Claude Code's own word for why a call never ran, counted and reported unchanged. */
+export function refusals(db) {
+  const have = new Set(db.prepare('PRAGMA table_info(tool_calls)').all().map((r) => r.name));
+  if (!have.has('denial_kind')) return null;
+  return db.prepare(`
+    SELECT denial_kind, COUNT(*) calls, COUNT(DISTINCT tool_name) tools,
+           COUNT(DISTINCT session_id) sessions, MAX(ts) last_call
+      FROM tool_calls WHERE denial_kind IS NOT NULL
+     GROUP BY 1 ORDER BY calls DESC`).all();
+}
+
+function reportRefusals(db) {
+  const rows = refusals(db);
+  // NULL AND EMPTY ARE DIFFERENT ANSWERS, and printing the same line for both would be the
+  // defect this whole change exists to remove: one output covering two opposite facts.
+  if (rows === null) {
+    console.log('this store predates the denial_kind column, so it cannot say why any call was');
+    console.log('refused. Run: node tools/harvest.mjs --backfill-tool-outcomes');
+    return;
+  }
+  if (!rows.length) {
+    console.log('no refused calls recorded in this store.');
+    return;
+  }
+  console.log('calls that never ran, by the reason Claude Code recorded');
+  console.log('');
+  const width = rows.reduce((w, r) => Math.max(w, r.denial_kind.length), 'kind'.length);
+  console.log(`  ${'kind'.padEnd(width)}  ${'calls'.padStart(7)}  ${'tools'.padStart(5)}  ${'sessions'.padStart(8)}  last`);
+  for (const r of rows) {
+    console.log(`  ${r.denial_kind.padEnd(width)}  ${String(r.calls).padStart(7)}  ${String(r.tools).padStart(5)}  ${String(r.sessions).padStart(8)}  ${String(r.last_call).slice(0, 16)}`);
+  }
+  console.log('');
+  console.log('  REPORTED UNCHANGED, not grouped. permission-rule covers a settings deny rule AND');
+  console.log('  a hook that blocked the call: the transcript records the same value for both, so');
+  console.log('  splitting them would be this tool guessing rather than that record speaking.');
 }
 
 function selfTest() {
@@ -367,7 +452,51 @@ function selfTest() {
 
   const tu = toolUsage(db);
   add('tool usage counts Bash', tu.find((r) => r.tool_name === 'Bash')?.calls === 1);
-  add('tool usage carries error counts', tu.find((r) => r.tool_name === 'Bash')?.errors === 1);
+  // --- the outcome buckets ---------------------------------------------------------------
+  // SPLIT, NOT DELETED. This used to assert `errors === 1` for the one flagged row, which was
+  // true only while `errors` meant "flagged", the very conflation this column removes. The
+  // store above has no `outcome` column, so what it can honestly say about that row is that
+  // something happened to it and this store cannot say what.
+  const bash = tu.find((r) => r.tool_name === 'Bash');
+  add('C1 an unmigrated store reports the flagged call as UNKNOWN, never as zero errors',
+    bash?.errors === 0 && bash?.unknown === 1 && bash?.outcome === '1 unknown',
+    JSON.stringify(bash));
+  add('C1b and it does NOT report a store-wide silence: every row is accounted for'
+    + ' (gate can fail)',
+    tu.every((r) => r.errors + r.refused + r.unknown === r.calls),
+    JSON.stringify(tu.map((r) => [r.tool_name, r.calls, r.unknown])));
+
+  // The same rows, in a store that HAS been harvested since the column arrived.
+  const mdb = new DatabaseSync(':memory:');
+  mdb.exec(`CREATE TABLE tool_calls (tool_use_id TEXT PRIMARY KEY, session_id TEXT, ts TEXT,
+    tool_name TEXT, server_name TEXT, target TEXT, input_sha1 TEXT, result_bytes INTEGER,
+    is_error INTEGER, outcome TEXT, denial_kind TEXT)`);
+  const mins = mdb.prepare('INSERT INTO tool_calls (tool_use_id,session_id,ts,tool_name,result_bytes,is_error,outcome,denial_kind) VALUES (?,?,?,?,?,?,?,?)');
+  // One tool, three fates, which is the case the single number could not tell apart.
+  mins.run('m1', 's1', '2026-08-01T00:00:00Z', 'Edit', 10, 1, 'refused', 'permission-rule');
+  mins.run('m2', 's1', '2026-08-02T00:00:00Z', 'Edit', 10, 1, 'refused', 'user-rejected');
+  mins.run('m3', 's1', '2026-08-03T00:00:00Z', 'Edit', 10, 1, 'error', null);
+  mins.run('m4', 's1', '2026-08-04T00:00:00Z', 'Edit', 10, 0, 'ok', null);
+  mins.run('m5', 's1', '2026-08-05T00:00:00Z', 'Read', 10, 0, 'ok', null);
+  const mtu = toolUsage(mdb);
+  const edit = mtu.find((r) => r.tool_name === 'Edit');
+  // THE DEFECT ITSELF. Before this column that row read "3 errors", and two of the three
+  // never ran.
+  add('C2 a refused call is NOT counted as an error (gate can fail)',
+    edit?.errors === 1 && edit?.refused === 2 && edit?.outcome === '1 error, 2 refused',
+    JSON.stringify(edit));
+  add('C3 a tool with nothing to report renders NOTHING, not a zero (gate can fail)',
+    mtu.find((r) => r.tool_name === 'Read')?.outcome === '',
+    JSON.stringify(mtu.find((r) => r.tool_name === 'Read')));
+
+  // The vocabulary, reported unchanged.
+  const ref = refusals(mdb);
+  add('C2b the denial kinds are reported as Claude Code wrote them, not grouped',
+    ref.length === 2 && ref.every((r) => r.calls === 1)
+      && ref.map((r) => r.denial_kind).sort().join(',') === 'permission-rule,user-rejected',
+    JSON.stringify(ref));
+  add('C2c a store with no denial_kind column says so rather than saying none (gate can fail)',
+    refusals(db) === null, JSON.stringify(refusals(db)));
   // Five Read rows: a,b,c at 100 each in s1, d at 50 in s1, e at 100 in s2.
   add('tool usage sums result bytes across sessions', tu.find((r) => r.tool_name === 'Read')?.bytes === 450,
     String(tu.find((r) => r.tool_name === 'Read')?.bytes));
@@ -399,6 +528,14 @@ function selfTest() {
   const idleTool = joined.find((r) => r.tool_name === 'NeverUsed');
   add('an invoked tool carries its measured schema bytes', read?.schema_bytes === 500, JSON.stringify(read));
   add('a tool with a schema but ZERO invocations is surfaced', idleTool && idleTool.calls === 0 && idleTool.schema_bytes === 900, JSON.stringify(idleTool));
+
+  // A row built by this file rather than by the query, so its counts are only there if
+  // someone put them there. Absent, they render as "undefined" the moment anything reads
+  // them, which looks like a measurement of something.
+  add('C4 a tool that was never invoked carries zeros and renders blank (gate can fail)',
+    idleTool?.errors === 0 && idleTool?.refused === 0 && idleTool?.unknown === 0
+      && idleTool?.outcome === '',
+    JSON.stringify(idleTool));
   add('a tool in tool_calls with no captured schema stays UNKNOWN, not 0',
     (() => { sdb.prepare('INSERT INTO tool_calls (tool_use_id,session_id,ts,tool_name,result_bytes,is_error) VALUES (?,?,?,?,?,?)')
       .run('y', 's1', '2026-08-02T00:00:00Z', 'Unmeasured', 5, 0);
@@ -487,6 +624,7 @@ if (IS_ENTRY) {
   if (argv.includes('--duplicates')) reportDuplicates(db, argv);
   else if (argv.includes('--servers')) reportServers(db, argv);
   else if (argv.includes('--tools')) reportTools(db);
+  else if (argv.includes('--refusals')) reportRefusals(db);
   else {
     console.log('specify --duplicates, --servers, --tools, or --self-test');
     process.exit(2);

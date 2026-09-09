@@ -38,8 +38,8 @@ const ICONS: Record<string, typeof Activity> = {
  * of tab ids in the frontend is exactly what the payload exists to replace.
  */
 const GROUPS: { key: string; heading: string; holds: (scoped?: boolean) => boolean }[] = [
-  { key: 'store', heading: 'Whole store', holds: (scoped) => scoped === false },
-  { key: 'selection', heading: 'Current selection', holds: (scoped) => scoped !== false },
+  { key: 'store', heading: 'All', holds: (scoped) => scoped === false },
+  { key: 'selection', heading: 'Selection', holds: (scoped) => scoped !== false },
 ]
 
 const REMEMBERED = 'c4x.sidebar.collapsed'
@@ -123,7 +123,12 @@ export function Sidebar({
               // keeps its name for a screen reader either way.
               <hr className="my-1 border-edge/60" aria-hidden="true" />
             ) : (
-              <h2 className="mt-2 px-2.5 pb-0.5 text-2xs font-semibold uppercase tracking-wide
+              // BIGGER THAN A TAB IS NOT THE GOAL; DIFFERENT FROM ONE IS. A tab is text-sm and
+              // normal weight, so the group label reads as a peer at that size. It sits one step
+              // down at text-xs, semibold, wide-tracked and faint, which is a heading rather than
+              // a thing you click. No uppercase: the words are "All" and "Selection", and
+              // shouting them made a two-word label look like a section of its own.
+              <h2 className="mt-2.5 px-2.5 pb-1 text-xs font-semibold tracking-wider
                              text-ink-faint">
                 {heading}
               </h2>

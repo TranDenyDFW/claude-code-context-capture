@@ -95,7 +95,9 @@ def test_diff_tool_totals_match_independent_sql(session_id, turns, q):
     import c4x.panels as panels
     a, b = 2, min(len(turns), 40)
     ts_a, ts_b = str(turns["ts"].iloc[a - 1]), str(turns["ts"].iloc[b - 1])
-    _spend, tools, _targets, _said = panels.turn_diff(session_id, "main", ts_a, ts_b)
+    # `.df` because turn_diff now hands each frame out WITH the query and the bound arguments
+    # that produced it, so no caller can show a reader a retyping of its own query.
+    tools = panels.turn_diff(session_id, "main", ts_a, ts_b)[1].df
     mine = q("""SELECT COUNT(*) AS n, COALESCE(SUM(result_bytes),0) AS b FROM tool_calls
                  WHERE session_id = ? AND ts > ? AND ts <= ? AND is_sidechain = 0""",
              (session_id, ts_a, ts_b)).iloc[0]

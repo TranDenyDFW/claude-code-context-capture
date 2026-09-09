@@ -444,16 +444,185 @@ COLUMN_HELP = {
     "agent": ("Which KIND of subagent the Agent call asked for, read from the call's own input. "
               "\"(not recorded)\" means the call named none and took the default: the transcript "
               "recorded the omission, so this reports the omission rather than the default."),
-    "errors": "Calls whose result block was flagged as an error.",
+    # "errors" IS GONE, not reworded. No table DRAWS a column by that name any more, and a stale
+    # entry fails test_the_registry_has_no_dead_entries, which is why the label and the site edits
+    # are one commit.
+    #
+    # "draws", not "renders", and the difference is not pedantry. Five tables now DECLARE `errors`
+    # as a hidden column so the number reaches a row click and the CSV. While that gate counted
+    # declared columns it counted those five, this entry could be restored with everything green,
+    # and the gate cited here as the reason for the atomic commit had quietly stopped protecting
+    # it. The gate now asks about drawn columns; the wording here matches what it asks.
+    "outcome": ("What went wrong with these calls, and BLANK when nothing did. \"errors\" ran "
+                "and failed; \"refused\" never ran at all, because a permission rule, a "
+                "hook, or a person stopped it first; \"unknown\" is neither, and says so "
+                "rather than guessing: the build that flagged it was older than 2.1.202 and "
+                "recorded no reason at all. "
+                "Refusals were counted as errors until this column existed, and they were "
+                "27% of them."),
+    "denial_kind": ("Claude Code's OWN word for why a call never ran, reported unchanged "
+                    "rather than grouped. \"permission-rule\" covers a settings deny "
+                    "rule AND a hook that blocked the call: the transcript records the "
+                    "same value for both, so splitting them would be this app guessing "
+                    "rather than that record speaking. \"user-rejected\" is a person "
+                    "saying no at the prompt."),
     "last_seen": "Latest call with this input. Still recent means the repetition is not history.",
     "target": ("The file or resource the call named. BLANK where the tool has no target, such as "
                "Bash or ToolSearch: the store keeps a hash of the input, never the input itself, "
                "so those rows are identified by their tool and their shape alone."),
 
     # Compactions
-    "dropped": "Tokens the compaction discarded, as the transcript recorded it.",
+    #
+    # `dropped` WAS WRONG, and wrong in the direction that reads as informative. It is
+    # `cumulative_dropped_tokens` aliased, a RUNNING TOTAL, and the entry called it "tokens the
+    # compaction discarded". Measured on this store, one session reads 975,726 then 1,954,727 then
+    # 2,934,510, each the sum of everything before it, so a reader ordering by that column was
+    # ordering by how late in a session a compaction fired.
+    "dropped": ("A RUNNING TOTAL for the session, NOT this compaction's own loss, which the "
+                "column name hides: it is `cumulative_dropped_tokens` aliased. What this one "
+                "dropped is pre_tokens minus post_tokens. Blank on most rows, because only 51 of "
+                "155 compactions in this store recorded the field at all."),
     "pre_tokens": "Resident tokens immediately before the compaction.",
     "post_tokens": "Resident tokens immediately after it.",
+    "cumulative_dropped_tokens": ("Every token this session's compactions have discarded up to "
+                                  "and including this one, as Claude Code counts it. It only ever "
+                                  "rises, so the step between two rows is what the later one "
+                                  "dropped."),
+    "duration_ms": "How long the compaction itself took, in milliseconds.",
+    "trigger": ("What started the compaction. `auto` is the window reaching its own threshold; "
+                "anything else was asked for. The transcript records this, so it is not inferred "
+                "from the timing."),
+    "version": ("The Claude Code build that wrote this record, which decides what the record "
+                "could contain at all: builds before 2.1.202 wrote no reason for a refused tool "
+                "call, which is why some outcomes read unknown."),
+    "survivors": ("How many messages the compaction kept, counted from the rows it wrote rather "
+                  "than from the summary text. A compaction with no surviving-message records "
+                  "reads 0, which means this store has none, not that it kept nothing."),
+    "fitted_window": ("The context window size resolved for this compaction, from the model "
+                      "segment it sits in. Where segmentation cannot resolve one it is fitted "
+                      "from the token count alone, and `confidence` says which happened."),
+    "confidence": ("How `fitted_window` was arrived at, stated rather than hidden behind an "
+                   "identical-looking number. `token-fit` means no model segment could be "
+                   "resolved and the window was inferred from the token count alone."),
+    "threshold": "The compact line for the fitted window: where auto-compaction should have fired.",
+    "overshoot": ("How far past its own trigger the compaction actually fired, computed as "
+                  "pre_tokens minus threshold. "
+                  "It CANNOT be negative, so a negative row is evidence the "
+                  "window was fitted wrongly, not evidence of an early compaction."),
+
+    # Per-model spend
+    "input_tokens": ("Fresh input tokens: neither read from nor written to the cache. On a long "
+                     "session this is the smallest of the four token columns by a wide margin."),
+    "output_tokens": "Tokens the model generated, which is the part it was actually asked for.",
+    "cache_read_input_tokens": ("Tokens billed for RE-READING the cached prompt, and where a long "
+                                "session's money goes: every request re-bills the whole resident "
+                                "context, so a file read early is paid for on every request after "
+                                "it."),
+    "cache_creation_input_tokens": "Tokens billed for WRITING the cache, paid once per entry.",
+    "est_usd": ("Estimated from this app's own price table, and not a bill. BLANK where no price "
+                "is recorded for that model, never 0: an unpriced model costs an unknown amount, "
+                "not nothing."),
+    "priced": ("Whether a price existed for this model when the estimate was computed. Empty "
+               "means it did not, so that row adds nothing to the total above, and the total "
+               "states how many calls it leaves out."),
+
+    # Tool calls
+    "tool": "The tool as the transcript named it, including the full mcp__server__name form.",
+    # WAS `bytes`, AND HELD KILOBYTES. Five tables drew a column headed `bytes` whose values were
+    # already divided by 1024, so 3790.1 read as four kilobytes when it meant 3.7 megabytes: a
+    # factor of 1024 in a size figure, on the tab about what things cost. Help explaining a wrong
+    # header was the cheap fix and it only works on a reader who hovers.
+    "kb": ("Kilobytes of tool RESULT. The division happens in the query, so the SQL shown under "
+           "the table returns exactly this column and this magnitude. Never tokens: this store "
+           "records exact token counts per request and none per tool call, so converting would "
+           "dress an estimate as a measurement."),
+    "tools": "How many DIFFERENT tools were recorded against this denial kind.",
+    "last_call": "The most recent call in this group, which says whether it is still happening.",
+    # KEYED ON A BARE COLUMN ID, so this has to be true of every table that draws it. The re-read
+    # table's own reason for grouping within a session lives in that table's `help_for`, because
+    # the Findings table declares this same name for something else entirely.
+    "session_id": ("Which session the row belongs to. Sessions are never pooled here: this store "
+                   "keeps them apart because the costs it reports, re-reads above all, are paid "
+                   "inside one session rather than across several."),
+
+    # Messages
+    "ts": "When this row's event happened, as the transcript recorded it.",
+    "messages": ("How many messages of this role and type the range holds. Counts records, "
+                 "not turns: one turn is several records."),
+    "chars": ("Length in CHARACTERS, not tokens. The store keeps no per-message token count, and "
+              "multiplying by a ratio would turn a measurement into an estimate."),
+    "preview": ("The opening of the message, truncated for display. The store keeps the whole "
+                "text, so this is a display cut and not all that was captured."),
+
+    # Window composition
+    "category": ("Which part of the context window this row accounts for. DERIVED from a "
+                 "calibrated baseline rather than read: the split exists only in Claude Code's "
+                 "own tooltip, so these rows are an attribution, not a measurement."),
+    "tokens": ("Tokens attributed to this row, from the same derivation as the category "
+               "beside it rather than a separate measurement."),
+
+    # Probe runs
+    "id": "Which probe run this row is, in the order they were recorded.",
+    "probe_id": "Which probe run this row came from, matching the id in the runs table above.",
+    "ok": ("Whether the probe session answered the control protocol. A failed run keeps its row "
+           "with empty numbers rather than disappearing, so a gap in the series stays visible."),
+    "model": "The model this row's numbers belong to.",
+    "total_tokens": "Resident tokens the probe session reported for itself when asked.",
+    "auto_compact_threshold": ("The token count that probe session said it would auto-compact at. "
+                               "It describes the SPAWNED CLI session, which is not configured "
+                               "like the desktop app, so it is evidence about the probe rather "
+                               "than about your own window."),
+    "kind": "Which category of item the probe priced in this row.",
+    "name": "The individual item the probe named and priced.",
+
+    # Window math
+    "window": "The context window size, in tokens, that this row's three lines apply to.",
+    "warn": "Where the window math starts warning, for this window size.",
+    "compact": "Where auto-compaction fires, for this window size.",
+    "blocked": "Where the window refuses more input, for this window size.",
+
+    # Excluded projects
+    "cwd": ("The WORKING DIRECTORY an exclusion is keyed on, not the transcript folder. One "
+            "folder can hold several projects, so excluding by folder would stop capturing "
+            "unrelated work."),
+    "excluded_at": "When this project was excluded and every harvest since began skipping it.",
+    "note": "Why it was excluded, as whoever excluded it wrote it down.",
+
+    # Injected context and the record census
+    #
+    # FOUND BY THE GATE, NOT BY THE INVENTORY THAT PRECEDED IT. The sweep that produced the entries
+    # above walked tab bodies and reported 43 undocumented columns; the gate walks what a reader
+    # can actually reach, which includes the Window sub-panels, the Session diff and Compare's own
+    # callback, and found 13 more. The population was never the 43.
+    "occurrences": ("How many times this kind of attachment was injected, summed over every "
+                    "session in scope, not how many sessions saw one."),
+    "event": "Which hook fired, as Claude Code names it in the event it wrote.",
+    "n": "How many the store holds of the thing this row names.",
+    "record_type": ("The record shape as the transcript labels it. This is a census of what the "
+                    "transcripts CONTAIN, so an unfamiliar type here is a real thing this store "
+                    "met and not a parsing artefact."),
+    "harvest": ("What this store did with that record type. `parsed` means it was understood, "
+                "`counted only` means it was tallied and its content dropped, and `not yet "
+                "recounted` means this store has not been harvested since the distinction "
+                "existed, which is not the same as either."),
+    "response_bytes": ("Bytes the tool returned, as the HOOK recorded them rather than as the "
+                       "transcript did. The two are captured by different machinery."),
+    "input_bytes": "Bytes of input the call carried, which is what the model paid to send it.",
+    "path": "The file the probe priced, as the probe named it.",
+    "loaded_tools": ("How many of that server's tools were actually LOADED into the window, which "
+                     "is what is paid for, as against how many it defines."),
+
+    # Compare
+    "metric": "What this row measures. The two arms are always measured the same way.",
+    "A": "The first arm, which is whatever is selected in the header.",
+    "B": "The second arm, chosen in the picker on this tab.",
+
+    # Findings
+    "finding": "What this app noticed, in one line, with the tab that proves it one click away.",
+    "evidence": "The measurement behind the finding, so it can be checked rather than believed.",
+    "do this": ("The action the finding recommends. It is named `do this` in the data and drawn "
+                "under a friendlier heading; the id is what the click callback and the CSV "
+                "carry."),
 }
 
 
@@ -512,7 +681,11 @@ _MINOR = {"at", "of", "to", "vs", "in", "for", "and", "on", "per", "by", "a", "a
 
 # Words that are acronyms, not words. Without this the rule produces "Api Calls" and "Est. Usd",
 # which reads as a machine having capitalised something it did not understand.
-_ACRONYMS = {"api", "id", "ok", "usd", "sql", "cli", "csv", "pdf", "url", "uuid", "mcp", "ms"}
+# KB IS HERE BECAUSE THE TITLE-CASER LOWERCASES WHAT IT DOES NOT KNOW. A stat card written
+# "Repeats (KB)" came back "Repeats (Kb)", which is not a unit anyone writes, and the card is a
+# unit label. The rule is the same one that already keeps API and USD upright.
+_ACRONYMS = {"api", "id", "ok", "usd", "sql", "cli", "csv", "pdf", "url", "uuid", "mcp", "ms",
+             "kb", "mb", "gb"}
 
 # One heading per table, for the ones that HAVE an id. `tbl-reread` is a DOM id; "Files Read More
 # Than Once" is what the table is. Anonymous tables get no heading rather than an invented one.
@@ -556,7 +729,10 @@ def column_label(column_id) -> str:
     if not words:
         return str(column_id)
     def cased(word, first):
-        bare = word.lower().strip(".")
+        # STRIPPED OF WRAPPING PUNCTUATION FOR THE LOOKUP ONLY. "Repeats (KB)" arrives as the
+        # token "(KB)", which is not in the set, so it fell through to Title() and became "(Kb)".
+        # The original word is what gets returned, so the brackets survive: upper() keeps them.
+        bare = word.lower().strip("().,;:[]")
         if bare in _ACRONYMS:
             return word.upper()
         # A SINGLE LETTER IS A NAME, NOT A MINOR WORD. The Compare table's ratio column is
