@@ -37,6 +37,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from c4x import appstate
 from c4x.frames import records
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +69,11 @@ STORE_WIDE = ("probes", "probe_categories", "probe_details", "probe_message_brea
               "sqlite_sequence")
 
 MANIFEST_TABLE = "c4x_export"
+
+#: Claude Code's OWN state for the project, carried inside the export rather than beside it.
+#: A row per file, so the existing digest and verify machinery covers it for free and the
+#: export stays ONE artifact that either verifies or does not.
+APP_STATE_TABLE = "c4x_app_state"
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +350,19 @@ def export(project, out_path):
                         WHERE session_id IN ({marks}) AND transcript_path IS NOT NULL)""", ids)
             source.commit()
             source.execute("DETACH DATABASE dest")
+
+            # LAYERS 2 AND 3, the ones a disk clone moves and this export did not. Measured
+            # on a second machine: an import used to touch exactly one file, context.db, and
+            # left ~/.claude and ~/.claude.json byte-identical, so an imported project was
+            # visible in c4x and invisible to the desktop app.
+            out.execute(
+                f"CREATE TABLE IF NOT EXISTS {APP_STATE_TABLE} (kind TEXT, path TEXT, "
+                "mtime REAL, blob BLOB, PRIMARY KEY (kind, path))")
+            for kind, rel, stamp, payload in appstate.capture(project, ids):
+                out.execute(
+                    f"INSERT OR REPLACE INTO {APP_STATE_TABLE} VALUES (?,?,?,?)",
+                    (kind, rel, stamp, payload))
+            out.commit()
         finally:
             out.close()
 
@@ -367,6 +386,9 @@ def export(project, out_path):
                 # rather than failing or, worse, shifting values into the wrong columns.
                 "tables": list(carried),
                 "unhandled_tables_at_export": unhandled_tables(out),
+                # What of Claude Code's own state came with it, so a reader of the file can
+                # tell a complete export from a store-only one without opening the table.
+                "app_state": app_state_summary(out),
             }
             out.execute(f"CREATE TABLE IF NOT EXISTS {MANIFEST_TABLE} "
                         "(key TEXT PRIMARY KEY, value TEXT)")
@@ -388,6 +410,18 @@ def export(project, out_path):
 # ---------------------------------------------------------------------------
 # Import
 # ---------------------------------------------------------------------------
+def app_state_summary(con):
+    """What layers 2 and 3 the export actually carries, read from the FILE."""
+    try:
+        rows = con.execute(
+            f"SELECT kind, COUNT(*), COALESCE(SUM(LENGTH(blob)),0) FROM {APP_STATE_TABLE}"
+            " GROUP BY kind").fetchall()
+    except sqlite3.Error:
+        return {"present": False}
+    return {"present": bool(rows),
+            "by_kind": {k: {"files": n, "bytes": b} for k, n, b in rows}}
+
+
 def import_(path):
     """Load an export into this store, verifying it first and inserting only what is missing.
 
@@ -450,7 +484,50 @@ def import_(path):
             # answers DETACH with "database src is locked" rather than anything naming the cause.
             con.commit()
             con.execute("DETACH DATABASE src")
+
+    # LAYERS 2 AND 3, after the rows and outside the store transaction. These write to
+    # ~/.claude and ~/.claude.json, which have nothing to do with the SQLite lock, and holding a
+    # write transaction open across a filesystem walk is how an import blocks the harvest.
+    #
+    # An export written before this feature has no such table and restores nothing, which is the
+    # correct answer for it rather than an error: it genuinely carried no app state.
+    report["app_state"] = restore_app_state(path)
     return report
+
+
+def restore_app_state(export_path, project=None, when_exists="newer"):
+    """Put Claude Code's own state back, from an export that carries it.
+
+    THE WORKING DIRECTORY COMES FROM THE EXPORT'S OWN `sessions` ROWS, never from the manifest's
+    project name and never from a caller. That name can be a PAGE LABEL: `session_rows()` appends
+    `\\archived` once the desktop app has archived a chat, and threading it in here put a restored
+    transcript into `P--Skills-archived/`, a directory Claude Code will never read, and merged the
+    config entry under a project path that does not exist. Caught by diffing the target machine's
+    filesystem, not by reading the code.
+
+    That was the FOURTH place the same label-for-path substitution went wrong in this change, which
+    is why the cwd is now taken from the data rather than passed along: the export knows what
+    directory its sessions ran in, so nothing upstream has to be trusted to say.
+
+    Separate and callable on its own, so a store imported before this existed can be completed
+    later from the same file without re-importing the rows.
+    """
+    con = sqlite3.connect(f"file:{Path(export_path)}?mode=ro", uri=True)
+    try:
+        rows = con.execute(f"SELECT kind, path, mtime, blob FROM {APP_STATE_TABLE}").fetchall()
+        cwds = [r[0] for r in con.execute(
+            "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL AND cwd <> ''").fetchall()]
+    except sqlite3.Error:
+        return {"present": False, "note": "this export predates app-state capture"}
+    finally:
+        con.close()
+    if not rows:
+        return {"present": False, "note": "the export carries no Claude Code state"}
+    if not cwds:
+        return {"present": False, "note": "the export names no working directory to restore into"}
+    out = appstate.restore(cwds[0], rows, when_exists=when_exists)
+    out.update({"present": True, "restored_into": cwds[0]})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +645,24 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
                         "VALUES (?,?,?)",
                         (project, datetime.now(UTC).isoformat(timespec="seconds"),
                          f"deleted, exported to {backup.name}"))
-    return {"project": project, "backup": str(backup), "removed": removed,
+    # LAYERS 2 AND 3, and only now: the export above is verified before anything is removed, and
+    # it is the ONLY copy of the transcripts once this runs. Deleting the app's state before the
+    # backup was proven readable would make the one irreversible step depend on an unchecked file.
+    #
+    # Layer 2 goes through `claude project purge` rather than a sweep written here, because the
+    # footprint is not stable: this build deletes two items where the documentation describes five,
+    # so a hand-rolled sweep is correct until the next release and silently wrong after it.
+    app = {"cli": [], "desktop_removed": []}
+    desktop_root = Path(store.sessions_root())
+    for real in appstate.cwds_for(ids) or [project]:
+        app["cli"].append({"project": real, **appstate.purge(real)})
+    for rel, _mtime, _blob in appstate.desktop_records(ids, with_mtime=True):
+        try:
+            (desktop_root / rel).unlink()
+            app["desktop_removed"].append(rel)
+        except OSError as exc:
+            app["desktop_removed"].append(f"{rel}: FAILED {type(exc).__name__}")
+    return {"project": project, "backup": str(backup), "removed": removed, "app_state": app,
             "excluded": not keep_capturing, "exported_sessions": manifest["sessions"]}
 
 
