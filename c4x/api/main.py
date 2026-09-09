@@ -31,7 +31,8 @@ if str(ROOT) not in sys.path:
 
 import re  # noqa: E402
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile  # noqa: E402
+from fastapi import (FastAPI, File, Form, HTTPException, Query, Request,  # noqa: E402
+                     UploadFile)
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -1363,8 +1364,22 @@ _IMPORT_MAX_BYTES = 1 << 30
 
 
 @api.post("/api/project/import")
-async def project_import(file: UploadFile = File(...)):
-    """Load an exported project. Verified before a single row is written."""
+async def project_import(file: UploadFile = File(...), into: str = Form(default=""),
+                         dry_run: bool = Form(default=False)):
+    """Load an exported project. Verified before a single row is written.
+
+    `into` is the working directory on THIS machine to import into, and everything is rebuilt from
+    it: the slug directory under `~/.claude/projects`, the `~/.claude.json` key, the desktop app's
+    record, and the `cwd` in the rows. Empty means the directory the export came from, which is the
+    same-machine case.
+
+    IT IS A FORM FIELD RATHER THAN A PICKER because a browser cannot open a native folder dialog
+    for a path on the server. The page fills it in from the export and lets it be edited; the API
+    and the page normally run on the same machine, so the path the user types is one they can see.
+
+    `dry_run` names every destination and writes nothing, which is the only cheap way to catch a
+    wrong `into` before it lands.
+    """
     from c4x import projects
     _require_writes()
     staged = ROOT / "tmp" / "imports"
@@ -1389,7 +1404,7 @@ async def project_import(file: UploadFile = File(...)):
                         "error": f"an import is capped at {_IMPORT_MAX_BYTES // (1 << 20)} MB",
                         "file": given})
                 fh.write(chunk)
-        return projects.import_(path)
+        return projects.import_(path, into=(into or None), dry_run=dry_run)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400,
                             detail={"error": str(exc), "file": given}) from exc

@@ -266,10 +266,65 @@ export interface Exclusion {
   note: string | null
 }
 
+/** One file the import wrote, or would write. */
+export interface MirrorFile {
+  relpath: string
+  kind: string
+  path?: string
+  /** Dry run only: whether something is already at that path and would be replaced. */
+  exists?: boolean
+  into?: string
+  why?: string
+  was?: number
+  now?: number
+}
+
+/**
+ * Whether this machine now holds byte for byte what the export carries.
+ *
+ * `missing` is carried and absent, `differs` is carried and hashes differently, `extra` is here
+ * and not in the export: reported and never deleted, because a slug directory is shared by every
+ * session with the same working directory.
+ *
+ * THE PAGE MUST RENDER THIS AND NOT ONLY THE ROW COUNTS. "Imported" printed above a non-empty
+ * `differs` is the exact claim the whole change exists to stop.
+ */
+export interface MirrorResult {
+  ok: boolean
+  missing: MirrorFile[]
+  differs: MirrorFile[]
+  extra: string[]
+  unresolved: MirrorFile[]
+  into: string[]
+  not_carried: { path: string; files: number; why: string }[]
+}
+
+/** The files an import wrote, and what it refused. */
+export interface AppStateReport {
+  written: MirrorFile[]
+  replaced: MirrorFile[]
+  replaced_shorter: MirrorFile[]
+  refused: MirrorFile[]
+  desktop: { path: string; cwd: string }[]
+  bytes: number
+  dry_run: boolean
+}
+
 /** What `/api/project/import` reports back, per table. */
 export interface ImportReport {
   project: string | null
   from: string | null
+  /** The working directories on THIS machine the import landed in. */
+  into: string[]
+  /** {source working directory: destination}. What the page shows before it commits. */
+  mapping: Record<string, string>
+  /** Carried directories that are neither the project's own nor under it, so they did not move. */
+  not_moved: string[]
+  /** True when nothing was written and this is only a plan. */
+  dry_run?: boolean
+  app_state?: AppStateReport
+  mirror?: MirrorResult
+  rebased_rows?: Record<string, number>
   /**
    * The rows are back but harvest is still skipping the directory.
    *
@@ -393,9 +448,19 @@ export const api = {
     exportUrl: (cohort: string) =>
       `/api/project/export?cohort=${encodeURIComponent(cohort)}`,
 
-    import: (file: File) => {
+    /**
+     * `into` is the working directory ON THE SERVER to import into, and everything is rebuilt from
+     * it: the slug directory, the config key, the desktop app's record, and the cwd in the rows.
+     * Leave it out to land where the export came from.
+     *
+     * `dryRun` names every destination and writes nothing. The page runs that first, so a wrong
+     * destination is visible before it lands rather than after.
+     */
+    import: (file: File, into?: string, dryRun = false) => {
       const body = new FormData()
       body.append('file', file)
+      if (into) body.append('into', into)
+      if (dryRun) body.append('dry_run', 'true')
       return post<ImportReport>('/api/project/import', body)
     },
 

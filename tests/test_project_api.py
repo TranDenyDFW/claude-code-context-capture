@@ -150,6 +150,36 @@ class TestDelete:
         assert count(ALPHA) == 3
         assert sum(r.json()["inserted"].values()) > 0
 
+    def test_the_destination_reaches_the_import_and_the_rows_follow_it(self, client, tmp_path):
+        """THE CLI IS NOT THE PRODUCT. A destination that exists only as a flag is unreachable
+        from the page, which is where this is actually used.
+
+        Checked on the STORE rather than on the response, so a route that accepted the field and
+        dropped it would still fail."""
+        from c4x import store
+        exported = client.get("/api/project/export",
+                              params={"cohort": f"project::{ALPHA}"}).content
+        client.post("/api/project/delete", json={"cohort": f"project::{ALPHA}", "confirm": ALPHA})
+        client.post("/api/project/include", json={"project": ALPHA})
+        r = client.post("/api/project/import",
+                        files={"file": ("alpha.db", exported, "application/vnd.sqlite3")},
+                        data={"into": r"D:\Work\Alpha"})
+        assert r.status_code == 200, r.text
+        assert r.json()["into"] == [r"D:\Work\Alpha"]
+        landed = store.q("SELECT DISTINCT cwd FROM sessions WHERE cwd LIKE 'D:%'")
+        assert list(landed["cwd"]) == [r"D:\Work\Alpha"]
+
+    def test_a_dry_run_over_http_writes_nothing(self, client):
+        exported = client.get("/api/project/export",
+                              params={"cohort": f"project::{ALPHA}"}).content
+        client.post("/api/project/delete", json={"cohort": f"project::{ALPHA}", "confirm": ALPHA})
+        r = client.post("/api/project/import",
+                        files={"file": ("alpha.db", exported, "application/vnd.sqlite3")},
+                        data={"into": r"D:\Work\Alpha", "dry_run": "true"})
+        assert r.status_code == 200, r.text
+        assert r.json()["dry_run"] is True
+        assert count(ALPHA) == 0, "a dry run put the rows back"
+
     def test_importing_something_that_is_not_an_export_is_a_400(self, client):
         r = client.post("/api/project/import",
                         files={"file": ("junk.db", b"this is not a database", "application/x")})

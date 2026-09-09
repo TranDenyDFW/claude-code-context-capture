@@ -62,6 +62,39 @@ def _snapshot_the_store():
 _snapshot_the_store()
 
 
+@pytest.fixture(autouse=True)
+def never_the_real_claude_directory(tmp_path_factory, monkeypatch):
+    """NO TEST EVER READS OR WRITES THE REAL `~/.claude`, `~/.claude.json` or `%APPDATA%\\Claude`.
+
+    Autouse, because the risk is not in the tests that mean to touch those paths: it is in the ones
+    that do not know they do. `projects.export` now captures Claude Code's own state, so every
+    export test in this suite, and every API test that drives one over HTTP, would otherwise read
+    this machine's real config and its real desktop records, and could write them into a test
+    export under `tmp/`.
+
+    Read-only would still be wrong. A test that passes because the developer's own machine happens
+    to have an entry for `P:\\Alpha` is a test that says nothing, and one that fails on a fresh
+    checkout for the same reason is worse.
+
+    A test that wants a populated fake machine builds one over the top of this, which works because
+    monkeypatch unwinds in reverse order.
+    """
+    from c4x import appstate
+    empty = tmp_path_factory.mktemp("no-real-claude")
+    (empty / ".claude" / "projects").mkdir(parents=True)
+    (empty / ".claude" / "tasks").mkdir(parents=True)
+    (empty / ".claude.json").write_text('{"projects": {}}', encoding="utf-8")
+    (empty / "appdata" / "Claude" / "claude-code-sessions").mkdir(parents=True)
+    monkeypatch.setattr(appstate, "CLAUDE_DIR", empty / ".claude")
+    monkeypatch.setattr(appstate, "CONFIG_PATH", empty / ".claude.json")
+    # `appstate.sessions_root`, NOT `store.sessions_root`. The store's is what feeds the
+    # `\archived` marker on every session row through `archived_sessions()`, and pointing THAT at
+    # an empty directory silently removed the marker from the whole suite: the one test that checks
+    # it against the real records failed with an empty dict, and it was right to.
+    monkeypatch.setattr(appstate, "sessions_root",
+                        lambda: str(empty / "appdata" / "Claude" / "claude-code-sessions"))
+
+
 @pytest.fixture(scope="session")
 def app():
     """The Dash app module, imported once.

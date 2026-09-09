@@ -53,9 +53,15 @@ if str(ROOT) not in sys.path:
 # describe one session's work, and leaving them out would hand someone an export whose Cost tab
 # shows the ESTIMATE and silently drops the measurement beside it: two figures on the source page,
 # one on the copy, with nothing saying which went missing.
+#
+# `sessions` IS LAST, and the two cost tables were appended AFTER it when they were added, which
+# put a delete back in the exact window this ordering exists to close: `sessions` gone while
+# `cost_state` still points at it. The self-test has been reporting that as a FAIL; this is the
+# reorder. Nothing but the deletion order reads this sequence, so the export and the footprint are
+# unaffected.
 BY_SESSION = ("hook_events", "attachments", "tool_calls", "messages", "turns",
-              "session_titles", "compactions", "sessions",
-              "cost_state", "cost_state_models")
+              "session_titles", "compactions", "cost_state", "cost_state_models",
+              "sessions")
 
 # Reached another way, and named so nothing depends on remembering it.
 BY_COMPACTION = ("compaction_survivors",)
@@ -68,6 +74,17 @@ STORE_WIDE = ("probes", "probe_categories", "probe_details", "probe_message_brea
               "sqlite_sequence")
 
 MANIFEST_TABLE = "c4x_export"
+
+# Claude Code's own state, carried as rows so the existing digest and verify machinery covers it.
+# It is NOT a project table: `import_` applies it to the filesystem and must skip it in the
+# row-copy loop, and `verify()` allows it by name rather than by membership in the three lists
+# above. All three of those facts have to hold together, which is why they are asserted by
+# `self_test()` rather than left to be remembered.
+APP_STATE_TABLE = "c4x_app_state"
+
+# A single value SQLite will not carry, and a file this big in a transcript directory is a sign
+# something else is wrong. Reported by name rather than silently dropped.
+MAX_CARRIED_BYTES = 500 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +161,34 @@ def session_ids(con, project):
     return ids
 
 
+def cwds_for(con, ids):
+    """The WORKING DIRECTORIES these sessions actually have, resolved from the store.
+
+    Never the project label. A label can be `P:\\Books\\archived`, which is a page label the
+    desktop app's archive flag produced and not a directory anything can be written to. Callers run
+    this BEFORE touching the filesystem, because the last attempt called it after the delete and
+    got `[]` back, which left the fallback-to-the-label branch as the only one that ever ran.
+    """
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    found = con.execute(
+        f"SELECT DISTINCT cwd FROM sessions WHERE session_id IN ({marks}) "
+        "AND cwd IS NOT NULL AND cwd <> ''", list(ids)).fetchall()
+    return [r[0] for r in found]
+
+
+def primary_cwd(con, ids):
+    """The working directory most of these sessions have, which is what `--into` replaces."""
+    if not ids:
+        return None
+    marks = ",".join("?" * len(ids))
+    found = con.execute(
+        f"SELECT cwd, COUNT(*) n FROM sessions WHERE session_id IN ({marks}) "
+        "AND cwd IS NOT NULL AND cwd <> '' GROUP BY cwd ORDER BY n DESC, cwd", list(ids)).fetchone()
+    return found[0] if found else None
+
+
 def footprint(con, project):
     """Row counts per table for one project, so a delete can be previewed before it happens."""
     ids = session_ids(con, project)
@@ -174,6 +219,7 @@ def unhandled_tables(con):
     """
     known = set(BY_SESSION) | set(BY_COMPACTION) | set(BY_TRANSCRIPT) | set(STORE_WIDE)
     known.add(MANIFEST_TABLE)
+    known.add(APP_STATE_TABLE)
     live = {r[0] for r in con.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     return sorted(live - known)
@@ -202,6 +248,47 @@ def digest(con, table):
     for row in sorted(repr(tuple(r)) for r in rows):
         running.update(row.encode("utf-8"))
     return f"sha256:{running.hexdigest()}"
+
+
+def app_state_digest(con):
+    """The same idea as `digest`, streamed, because these rows carry whole files.
+
+    `digest` builds a list of every row's `repr` and sorts it. That is right for a table of numbers
+    and would try to hold 694 MB of transcript in memory as text for this one, which is how a
+    verification step turns into the thing that kills the machine it was protecting.
+
+    The blob is not in this hash and does not need to be: every row carries its OWN sha256, this
+    hash covers those, and `verify()` re-reads each blob and compares it to its row. So a
+    truncated file is caught by the second check while the first stays cheap.
+    """
+    if not _has_table(con, APP_STATE_TABLE):
+        return None
+    running = hashlib.sha256()
+    rows = con.execute(
+        f"SELECT kind, path, cwd, mtime, sha256, rebased_sha256 FROM {APP_STATE_TABLE}")
+    for row in sorted(repr(tuple(r)) for r in rows):
+        running.update(row.encode("utf-8"))
+    return f"sha256:{running.hexdigest()}"
+
+
+def _has_table(con, name):
+    return bool(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                            (name,)).fetchone())
+
+
+def app_state_rows(path):
+    """Every carried file, as `appstate` wants them. Read one row at a time, never all at once."""
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        if not _has_table(con, APP_STATE_TABLE):
+            return []
+        return [{"kind": k, "relpath": p, "cwd": c, "mtime": m,
+                 "sha256": s, "rebased_sha256": r, "blob": bytes(b)}
+                for k, p, c, m, s, r, b in con.execute(
+                    f"SELECT kind, path, cwd, mtime, sha256, rebased_sha256, blob "
+                    f"FROM {APP_STATE_TABLE}")]
+    finally:
+        con.close()
 
 
 def read_manifest(path):
@@ -265,7 +352,11 @@ def verify(path):
 
     # And every one of them must be a table this module carries. The name reaches SQL as a bare
     # identifier, so an allow-list is the guard, not the quoting.
-    known = set(BY_SESSION) | set(BY_COMPACTION) | set(BY_TRANSCRIPT)
+    #
+    # APP_STATE_TABLE IS IN THE ALLOW-LIST AND IN NONE OF THE THREE LISTS. Getting that wrong is
+    # not subtle: leave it out and every fresh export fails its own verification, put it in
+    # BY_SESSION and `import_` inserts whole transcripts into a table that has no such columns.
+    known = set(BY_SESSION) | set(BY_COMPACTION) | set(BY_TRANSCRIPT) | {APP_STATE_TABLE}
     unknown = sorted(digested - known)
     if unknown:
         problems.append(f"manifest names tables this store does not export: {unknown}")
@@ -275,13 +366,26 @@ def verify(path):
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         for table, claimed in (manifest.get("digests") or {}).items():
-            actual = digest(con, table)
+            actual = app_state_digest(con) if table == APP_STATE_TABLE else digest(con, table)
             if actual != claimed:
                 problems.append(f"{table}: manifest says {claimed}, file contains {actual}")
         for table, claimed in (manifest.get("counts") or {}).items():
             actual = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             if actual != claimed:
                 problems.append(f"{table}: manifest says {claimed} rows, file has {actual}")
+        # EVERY CARRIED FILE, RE-HASHED AGAINST ITS OWN ROW. The digest above covers the hashes;
+        # this covers the bytes those hashes describe, which is the half a truncated export loses.
+        # Streamed one row at a time: an export of this repo's own project is 694 MB.
+        if _has_table(con, APP_STATE_TABLE):
+            from c4x import appstate
+            for kind, rel, claimed, blob in con.execute(
+                    f"SELECT kind, path, sha256, blob FROM {APP_STATE_TABLE}"):
+                if not isinstance(blob, (bytes, bytearray)):
+                    problems.append(f"{kind} {rel}: blob is {type(blob).__name__}, not bytes")
+                    continue
+                actual = appstate.sha256_bytes(bytes(blob))
+                if actual != claimed:
+                    problems.append(f"{kind} {rel}: row says {claimed}, bytes hash to {actual}")
     except sqlite3.Error as exc:
         problems.append(f"{path} could not be read as a c4x export: {exc}")
     finally:
@@ -292,7 +396,72 @@ def verify(path):
 # ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
-def export(project, out_path):
+def _write_app_state(out_path, cwds, ids):
+    """Capture the four outside-the-store layers into the export, and report what was left.
+
+    Returns the part of the manifest that describes them, INCLUDING what was not carried. An
+    export that silently omits is the defect; an export that names what it omitted is honest, and
+    the two are indistinguishable from a count alone.
+    """
+    from c4x import appstate
+    rows, report = appstate.capture(cwds, ids)
+    oversized = [r for r in rows if len(r["blob"]) > MAX_CARRIED_BYTES]
+    rows = [r for r in rows if len(r["blob"]) <= MAX_CARRIED_BYTES]
+
+    con = sqlite3.connect(str(out_path))
+    try:
+        con.execute(f"""CREATE TABLE IF NOT EXISTS {APP_STATE_TABLE} (
+                          kind TEXT NOT NULL, path TEXT NOT NULL, cwd TEXT NOT NULL,
+                          mtime REAL NOT NULL, sha256 TEXT NOT NULL,
+                          rebased_sha256 TEXT NOT NULL, blob BLOB NOT NULL,
+                          PRIMARY KEY (kind, path, cwd))""")
+        con.executemany(
+            f"INSERT OR REPLACE INTO {APP_STATE_TABLE} "
+            "(kind, path, cwd, mtime, sha256, rebased_sha256, blob) VALUES (?,?,?,?,?,?,?)",
+            [(r["kind"], r["relpath"], r["cwd"], r["mtime"], r["sha256"],
+              r["rebased_sha256"], sqlite3.Binary(r["blob"])) for r in rows])
+        con.commit()
+    finally:
+        con.close()
+
+    return {
+        "files": len(rows),
+        "bytes": sum(len(r["blob"]) for r in rows),
+        "by_kind": {k: sum(1 for r in rows if r["kind"] == k) for k in appstate.KINDS},
+        "cwds": cwds,
+        "not_carried": report["not_carried"],
+        "not_carried_files": report["not_carried_files"],
+        "skipped": report["skipped"],
+        "too_large": [{"path": r["relpath"], "bytes": len(r["blob"])} for r in oversized],
+        "source_desktop_pair": report["desktop_pair"],
+    }
+
+
+def _empty_app_state(out_path, cwds):
+    """The table, with no rows, for a rows-only export.
+
+    THE TABLE STILL HAS TO EXIST. `verify()` walks the manifest's digests, the manifest is built
+    from the same `carried` list either way, and a digest of a table that is not there is None,
+    which does not match. An export that cannot verify itself is refused by its own writer, so
+    the empty case is created rather than special-cased in three places.
+    """
+    con = sqlite3.connect(str(out_path))
+    try:
+        con.execute(f"""CREATE TABLE IF NOT EXISTS {APP_STATE_TABLE} (
+                          kind TEXT NOT NULL, path TEXT NOT NULL, cwd TEXT NOT NULL,
+                          mtime REAL NOT NULL, sha256 TEXT NOT NULL,
+                          rebased_sha256 TEXT NOT NULL, blob BLOB NOT NULL,
+                          PRIMARY KEY (kind, path, cwd))""")
+        con.commit()
+    finally:
+        con.close()
+    return {"files": 0, "bytes": 0, "by_kind": {}, "cwds": cwds, "not_carried": [],
+            "not_carried_files": 0, "skipped": [], "too_large": [],
+            "source_desktop_pair": None,
+            "why_empty": "this export carries rows only; see delete() for why"}
+
+
+def export(project, out_path, app_state=True):
     """Write one project to a standalone SQLite store, manifest inside it.
 
     A real database rather than a bundle of JSON: it round-trips exactly, opens in any SQLite tool,
@@ -344,23 +513,39 @@ def export(project, out_path):
                         WHERE session_id IN ({marks}) AND transcript_path IS NOT NULL)""", ids)
             source.commit()
             source.execute("DETACH DATABASE dest")
+            cwds = cwds_for(source, ids)
+            primary = primary_cwd(source, ids)
         finally:
             out.close()
+
+        # THE OTHER THREE LAYERS. Without them an imported project is a set of rows: present in
+        # c4x, invisible in the desktop app, unopenable by `/resume`. Measured on a second machine,
+        # an import used to touch exactly one file.
+        carried_state = _write_app_state(out_path, cwds, ids) if app_state else \
+            _empty_app_state(out_path, cwds)
 
         # Counted and digested from the FILE, not from what was intended to be written. The point
         # of the manifest is to describe what is actually in there.
         out = sqlite3.connect(str(out_path))
         try:
-            carried = BY_SESSION + BY_COMPACTION + BY_TRANSCRIPT
+            carried = BY_SESSION + BY_COMPACTION + BY_TRANSCRIPT + (APP_STATE_TABLE,)
             counts = {t: out.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in carried}
-            digests = {t: digest(out, t) for t in carried}
+            digests = {t: (app_state_digest(out) if t == APP_STATE_TABLE else digest(out, t))
+                       for t in carried}
             manifest = {
-                "format": "c4x-project-export/1",
+                "format": "c4x-project-export/2",
                 "project": project,
                 "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 "source_machine": platform.node(),
                 "source_store": str(store.DB_PATH),
                 "sessions": len(ids),
+                "session_ids": sorted(ids),
+                # THE WORKING DIRECTORIES, WHICH ARE NOT THE PROJECT LABEL. `project` above can be
+                # `P:\\Books\\archived`, a label the desktop app's archive flag produced. These are
+                # what an import writes to, and what `--into` replaces.
+                "cwds": cwds,
+                "primary_cwd": primary,
+                "app_state": carried_state,
                 "counts": counts,
                 "digests": digests,
                 # Named so an import against a schema that has since grown can say what it dropped
@@ -388,7 +573,92 @@ def export(project, out_path):
 # ---------------------------------------------------------------------------
 # Import
 # ---------------------------------------------------------------------------
-def import_(path):
+def destination_mapping(manifest, into=None):
+    """{source working directory: destination working directory} for this import.
+
+    With no `--into`, every directory keeps its own name and the import lands where the export came
+    from. With one, the PRIMARY directory becomes it and anything nested under the primary is moved
+    by the same prefix, so `P:\\Skills` and `P:\\Skills\\sub` land as `D:\\Work\\Skills` and
+    `D:\\Work\\Skills\\sub` rather than one of them being silently merged into the other.
+
+    A directory that is neither the primary nor under it is left alone and REPORTED. Folding it
+    into the destination would merge two projects, which is a decision this function is not
+    entitled to make on the strength of one flag.
+    """
+    from c4x import appstate
+    cwds = list(manifest.get("cwds") or [])
+    primary = manifest.get("primary_cwd") or (cwds[0] if cwds else None)
+    if not into or not primary:
+        return {c: c for c in cwds}, []
+    mapping, unmoved = {}, []
+    root = appstate.normalised(primary)
+    for cwd in cwds:
+        here = appstate.normalised(cwd)
+        if here == root:
+            mapping[cwd] = into
+        elif here.startswith(root + "\\"):
+            mapping[cwd] = str(into).rstrip("\\") + cwd[len(primary):]
+        else:
+            mapping[cwd] = cwd
+            unmoved.append(cwd)
+    return mapping, unmoved
+
+
+def _rebase_store_rows(con, ids, mapping, app_rows):
+    """Point the imported ROWS at this machine, so c4x and the desktop app agree on one path.
+
+    Four things carry a working directory into the store, and leaving any of them holding the
+    source machine's path shows the user a directory that does not exist here:
+
+        sessions.cwd            what the project selector and every cohort resolve on
+        hook_events.cwd         the same, for the hook tables
+        sessions.transcript_path  where `store.classify()` looks for the conversation
+        files.path              the harvest offset, keyed BY transcript_path
+
+    The last two move together on purpose. Rewrite the session and leave the offset behind and the
+    next harvest re-reads the whole transcript from zero against a path it has never seen.
+    """
+    from c4x import appstate
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    moved = {"sessions": 0, "hook_events": 0, "transcripts": 0, "files": 0}
+    for source_cwd, dest_cwd in mapping.items():
+        if source_cwd == dest_cwd:
+            continue
+        moved["sessions"] += con.execute(
+            f"UPDATE sessions SET cwd = ? WHERE session_id IN ({marks}) AND cwd = ?",
+            [dest_cwd, *ids, source_cwd]).rowcount
+        moved["hook_events"] += con.execute(
+            f"UPDATE hook_events SET cwd = ? WHERE session_id IN ({marks}) AND cwd = ?",
+            [dest_cwd, *ids, source_cwd]).rowcount
+
+    # The transcript moves to whatever slug directory its bytes actually landed in, and only for
+    # sessions this export carried a transcript FOR. A session with no carried transcript keeps the
+    # source path, which is what makes `store.classify()` still call it imported.
+    landed = {}
+    for row in app_rows:
+        if row["kind"] != appstate.TRANSCRIPT or "/" in row["relpath"]:
+            continue
+        if not row["relpath"].endswith(".jsonl"):
+            continue
+        sid = row["relpath"][: -len(".jsonl")]
+        dest_cwd = mapping.get(row["cwd"], row["cwd"])
+        landed[sid] = str(appstate.project_dir(dest_cwd) / row["relpath"])
+    for sid, new_path in landed.items():
+        old = con.execute("SELECT transcript_path FROM sessions WHERE session_id = ?",
+                          (sid,)).fetchone()
+        if not old or old[0] == new_path:
+            continue
+        moved["files"] += con.execute(
+            "UPDATE OR IGNORE files SET path = ? WHERE path = ?", (new_path, old[0])).rowcount
+        moved["transcripts"] += con.execute(
+            "UPDATE sessions SET transcript_path = ? WHERE session_id = ?",
+            (new_path, sid)).rowcount
+    return moved
+
+
+def import_(path, into=None, dry_run=False):
     """Load an export into this store, verifying it first and inserting only what is missing.
 
     `INSERT OR IGNORE` on the primary key, so importing the same file twice is a no-op rather than a
@@ -396,9 +666,16 @@ def import_(path):
     with an extra column loads what it can and reports what it left behind, instead of failing
     outright or, far worse, shifting every value one column to the left.
 
-    Imported sessions need no special handling to be labelled as imported. `store.classify()`
-    already calls a session whose transcript is missing and outside this machine's home
-    "Imported from another machine", which is exactly what these are.
+    THE DESTINATION IS THE CALLER'S CHOICE. `into` is a working directory on THIS machine, and
+    everything is rebuilt from it: the slug directory, the `~/.claude.json` key, the desktop
+    record, and the `cwd` in the rows. Nothing absolute from the source machine is used as a
+    destination, so an import never reproduces the exporter's `C:\\Users\\them`. With no `into`,
+    the export's own working directory is used, which is the same-machine case.
+
+    What is NOT rewritten is the transcript's own bytes. A `.jsonl` records the working directory
+    it ran in on every line, and editing that is surgery on the conversation which would also break
+    the byte-identical guarantee the mirror rests on. The container is remapped around it instead,
+    and `verify_mirror` compares those bytes unchanged.
     """
     from c4x import store
     path = Path(path)
@@ -409,6 +686,9 @@ def import_(path):
         raise ValueError("refusing to import an export that does not verify: "
                          + "; ".join(problems))
     manifest = read_manifest(path)
+    mapping, unmoved = destination_mapping(manifest, into)
+    ids = list(manifest.get("session_ids") or [])
+    app_rows = app_state_rows(path)
 
     # STILL EXCLUDED? Say so rather than fixing it silently. Importing a project the store is
     # excluding puts every row back and leaves harvest skipping the directory, so the sessions the
@@ -417,14 +697,33 @@ def import_(path):
     # Reported, not lifted. An export from another machine can name a working directory that this
     # machine has deliberately excluded, and quietly resuming capture of a local directory because
     # a file mentioned it is a decision this function is not entitled to make. The caller offers it.
+    destinations = sorted(set(mapping.values()))
+    excluded_now = {e["cwd"] for e in excluded()}
     report = {"project": manifest.get("project"), "from": manifest.get("source_machine"),
-              "still_excluded": any(e["cwd"] == manifest.get("project") for e in excluded()),
+              "into": destinations, "mapping": mapping, "not_moved": unmoved,
+              "still_excluded": bool(excluded_now & (set(destinations)
+                                                     | {manifest.get("project")})),
               "inserted": {}, "already_present": {}, "dropped_columns": {}}
+
+    if dry_run:
+        from c4x import appstate
+        report["dry_run"] = True
+        report["app_state"] = appstate.restore(app_rows, mapping, dry_run=True)
+        return report
+
     with store.write() as con:
         con.execute("ATTACH DATABASE ? AS src", (str(path),))
         try:
             # The verified set, never manifest["tables"]. See carried_tables().
+            #
+            # APP_STATE_TABLE IS SKIPPED HERE ON PURPOSE. It is verified and digested with the
+            # rest, and it is applied to the FILESYSTEM below rather than inserted: this store has
+            # no such table, and copying it in would put whole transcripts in the database while
+            # leaving `~/.claude/projects` empty, which is the failure the whole change exists to
+            # end.
             for table in carried_tables(manifest):
+                if table == APP_STATE_TABLE:
+                    continue
                 # `PRAGMA main.table_info(t)`, not `PRAGMA table_info(main.t)`. The schema is a
                 # prefix on the pragma itself; put it inside the parentheses and SQLite reports a
                 # syntax error at the dot.
@@ -445,6 +744,9 @@ def import_(path):
                 offered = con.execute(f"SELECT COUNT(*) FROM src.{table}").fetchone()[0]
                 report["inserted"][table] = after - before
                 report["already_present"][table] = offered - (after - before)
+            # INSIDE THE TRANSACTION, so a project half-moved between two working directories is
+            # not a state this store can be left in.
+            report["rebased_rows"] = _rebase_store_rows(con, ids, mapping, app_rows)
         except Exception:
             # ROLLBACK, NOT COMMIT. This was a bare `finally: con.commit()`, which ends the
             # transaction so DETACH can run and, in doing so, COMMITS a half-finished import.
@@ -463,7 +765,52 @@ def import_(path):
             # attached database and SQLite answers DETACH with "database src is locked" rather
             # than anything naming the cause.
             con.execute("DETACH DATABASE src")
+
+    # THE FILESYSTEM, AFTER THE ROWS ARE COMMITTED. The two cannot be one transaction, so the
+    # order is chosen for what a failure leaves behind: rows without files is a project c4x can
+    # show and the desktop app cannot open, and re-running the import fixes it, because inserts
+    # ignore what is already there and files are overwritten from the export either way.
+    report["app_state"] = restore_app_state(path, mapping)
+    report["mirror"] = verify_mirror(path, mapping=mapping)
     return report
+
+
+def restore_app_state(path, mapping):
+    """Write the four outside-the-store layers onto this machine.
+
+    `mapping` is {source working directory: destination working directory}. A dict, never a name:
+    `appstate._mapping` raises TypeError on anything else, which is the sixth and last guard added
+    after a project LABEL reached a filesystem call for the sixth time.
+    """
+    from c4x import appstate
+    return appstate.restore(app_state_rows(path), mapping)
+
+
+def verify_mirror(path, into=None, mapping=None):
+    """Is what is on this machine byte for byte what the export carries?
+
+    THE ACCEPTANCE TEST FOR "COMPLETE MIRROR IMAGE", and it runs standalone against an export file
+    so it can be run after the fact, by someone else, on the machine that received the import.
+
+    `missing` is carried and absent. `differs` is carried and hashes differently. `extra` is in a
+    slug directory this import wrote to and not in the export: REPORTED, never deleted, because
+    that directory is shared with every other session that has the same working directory.
+
+    A desktop record and a config entry are compared with their working-directory fields
+    neutralised, because those two are what the import deliberately rewrites. Everything else in
+    them is under the hash, so a renamed chat still fails.
+    """
+    manifest = read_manifest(path)
+    if not manifest:
+        return {"ok": False, "missing": [], "differs": [], "extra": [],
+                "unresolved": [{"relpath": str(path), "why": "not a c4x export"}]}
+    if mapping is None:
+        mapping, _unmoved = destination_mapping(manifest, into)
+    from c4x import appstate
+    result = appstate.compare(app_state_rows(path), mapping)
+    result["into"] = sorted(set(mapping.values()))
+    result["not_carried"] = (manifest.get("app_state") or {}).get("not_carried") or []
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +898,13 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
     out_dir = Path(out_dir or (_store.DB_PATH.parent / "deleted-projects"))
     out_dir.mkdir(parents=True, exist_ok=True)
     backup = out_dir / file_name(project, stamped=True)
-    manifest = export(project, backup)             # raises if it cannot be verified
+    # ROWS ONLY, deliberately. This delete is store-only: it does not touch `~/.claude/projects`,
+    # so those files are not going anywhere and copying them here would turn a 2 MB backup into a
+    # 694 MB one to protect against a removal that never happens. Redesigning delete to reach the
+    # other layers is separate work, blocked on `claude project purge` matching by slug PREFIX:
+    # measured across all 91 project entries here, 11 of them would destroy a neighbouring
+    # project's transcripts.
+    manifest = export(project, backup, app_state=False)    # raises if it cannot be verified
 
     with store.write() as con:
         ids = session_ids(con, project)
@@ -588,6 +941,17 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
 # ---------------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------------
+def _refuses(call, argument):
+    """True when `call(argument)` raises TypeError, which is what a guard is FOR."""
+    try:
+        call(argument)
+    except TypeError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def self_test():
     """Checks that need no store: the parts that decide whether data is lost."""
     import tempfile
@@ -628,6 +992,29 @@ def self_test():
     cases.append(("the store-wide tables are not treated as project data",
                   not (set(STORE_WIDE) & (set(BY_SESSION) | set(BY_COMPACTION)))))
 
+    # THE APP-STATE TABLE HAS TO SATISFY THREE THINGS AT ONCE, and each of the three has already
+    # broken a build on its own: absent from `verify`'s allow-list, every fresh export fails its
+    # own verification; present in one of the three project lists, `import_` inserts whole
+    # transcripts into a table that has no such columns; missing from `unhandled_tables`' known
+    # set, every export reports its own table as unhandled.
+    cases.append(("the app-state table is not treated as a project table",
+                  APP_STATE_TABLE not in
+                  (set(BY_SESSION) | set(BY_COMPACTION) | set(BY_TRANSCRIPT) | set(STORE_WIDE))))
+    with tempfile.TemporaryDirectory() as folder:
+        probe = Path(folder) / "known.db"
+        con = sqlite3.connect(str(probe))
+        con.execute(f"CREATE TABLE {APP_STATE_TABLE} (kind TEXT)")
+        con.commit()
+        cases.append(("an export does not report its own app-state table as unhandled",
+                      unhandled_tables(con) == []))
+        con.close()
+
+    from c4x import appstate as _appstate
+    cases.append(("a project label cannot reach a filesystem call",
+                  _refuses(_appstate._cwds, r"P:\Books\archived")))
+    cases.append(("a mapping cannot be a project label either",
+                  _refuses(_appstate._mapping, r"P:\Books\archived")))
+
     bad = 0
     for what, ok in cases:
         if not ok:
@@ -635,6 +1022,32 @@ def self_test():
             print(f"  FAIL  {what}")
     print(f"SELF-TEST {'PASS' if not bad else 'FAIL'} ({len(cases)} checks)")
     return 1 if bad else 0
+
+
+def _print_mirror(result):
+    """The mirror verdict, and the exit code that goes with it.
+
+    NON-ZERO ON A DIFFERENCE. "imported" printed above a non-empty `differs` is exactly the claim
+    this whole change exists to stop, and an exit code is the half a script can act on.
+    """
+    if not result:
+        print("  mirror  NOT CHECKED")
+        return 0
+    for entry in result.get("missing") or []:
+        print(f"  MISSING  {entry['kind']}  {entry['relpath']}")
+    for entry in result.get("differs") or []:
+        print(f"  DIFFERS  {entry['kind']}  {entry['relpath']}")
+    for entry in result.get("unresolved") or []:
+        print(f"  UNRESOLVED  {entry['relpath']}: {entry['why']}")
+    extra = result.get("extra") or []
+    if extra:
+        print(f"  {len(extra)} file(s) here that the export does not carry, left untouched")
+    not_carried = result.get("not_carried") or []
+    if not_carried:
+        print(f"  {sum(n['files'] for n in not_carried)} file(s) the EXPORT did not carry, "
+              "belonging to sessions it has no rows for")
+    print("  mirror  " + ("OK, byte for byte" if result.get("ok") else "NOT A MIRROR"))
+    return 0 if result.get("ok") else 1
 
 
 def main(argv=None):
@@ -652,6 +1065,17 @@ def main(argv=None):
 
     p_import = sub.add_parser("import", help="load an exported project into this store")
     p_import.add_argument("path")
+    p_import.add_argument("--into", default=None,
+                          help="the working directory to import INTO on this machine; defaults to "
+                               "the one the export came from. Everything is rebuilt from it: the "
+                               "slug directory, the config key, the desktop record, the rows.")
+    p_import.add_argument("--dry-run", action="store_true",
+                          help="name every destination and write nothing")
+
+    p_mirror = sub.add_parser("verify-mirror",
+                              help="is this machine byte for byte what an export carries?")
+    p_mirror.add_argument("path")
+    p_mirror.add_argument("--into", default=None)
 
     p_delete = sub.add_parser("delete", help="export, then remove, then stop capturing")
     p_delete.add_argument("project")
@@ -686,18 +1110,69 @@ def main(argv=None):
         manifest = export(args.project, args.out)
         print(f"  wrote {args.out}")
         print(f"  {manifest['sessions']} session(s), verified")
+        for cwd in manifest["cwds"]:
+            print(f"    working directory  {cwd}")
         for table, n in manifest["counts"].items():
             print(f"    {table:22} {n:>8,}")
+        state = manifest["app_state"]
+        print(f"    {'files carried':22} {state['files']:>8,}  "
+              f"({state['bytes'] / 1048576:.1f} MB)  " + ", ".join(
+                  f"{k} {n}" for k, n in sorted(state["by_kind"].items()) if n))
+        if state["not_carried_files"]:
+            print(f"    NOT CARRIED  {state['not_carried_files']:,} file(s) belonging to sessions "
+                  "this export has no rows for")
+        for skip in state["skipped"]:
+            print(f"    SKIPPED  {skip['path']}: {skip['why']}")
+        for big in state["too_large"]:
+            print(f"    TOO LARGE  {big['path']}: {big['bytes']:,} bytes")
         return 0
     if args.command == "import":
-        report = import_(args.path)
+        report = import_(args.path, into=args.into, dry_run=args.dry_run)
         print(f"  {report['project']}  from {report['from']}")
+        for source_cwd, dest_cwd in sorted(report["mapping"].items()):
+            arrow = "  stays at  " if source_cwd == dest_cwd else "  INTO  "
+            print(f"    {source_cwd}{arrow}{dest_cwd}")
+        for cwd in report.get("not_moved") or []:
+            print(f"    LEFT WHERE IT WAS  {cwd}  (not under the project's own directory)")
+        if report.get("dry_run"):
+            for entry in report["app_state"]["written"]:
+                # A CONFIG ROW MERGES ONE KEY AND NEVER REWRITES THE FILE. Printing "overwrites"
+                # beside `~/.claude.json`, which is what this said, describes losing every other
+                # project's settings and the machine's credentials. It does neither.
+                if entry["kind"] == "config":
+                    mark = "adds a key to"
+                elif entry["exists"]:
+                    mark = "overwrites   "
+                else:
+                    mark = "creates      "
+                print(f"    {mark}  {entry['path']}")
+            for refused in report["app_state"]["refused"]:
+                print(f"    REFUSED  {refused['relpath']}: {refused['why']}")
+            print(f"  {len(report['app_state']['written'])} file(s) would be written, "
+                  "and nothing was")
+            return 0
         for table, n in report["inserted"].items():
             already = report["already_present"].get(table, 0)
             print(f"    {table:22} {n:>8,} inserted, {already:,} already present")
         for table, columns in report.get("dropped_columns", {}).items():
             print(f"    NOT LOADED  {table}: {', '.join(columns)}")
-        return 0
+        state = report.get("app_state") or {}
+        print(f"    {'files restored':22} {len(state.get('written') or []):>8,}  "
+              f"({(state.get('bytes') or 0) / 1048576:.1f} MB)")
+        # NAMED SEPARATELY BECAUSE IT IS NOT A FILE. The config entry is a key merged into a shared
+        # file, so it is not in `written`, and leaving it unprinted meant the one thing a user
+        # actually notices, being asked to trust the directory again, had nothing reporting it.
+        for key in state.get("config_keys") or []:
+            print(f"    trust and settings carried for  {key}")
+        for entry in state.get("replaced_shorter") or []:
+            print(f"    SHORTER NOW  {entry['path']}  {entry['was']:,} -> {entry['now']:,} bytes")
+        for refused in state.get("refused") or []:
+            print(f"    REFUSED  {refused['relpath']}: {refused['why']}")
+        for record in state.get("desktop") or []:
+            print(f"    desktop record  {record['path']}")
+        return _print_mirror(report.get("mirror") or {})
+    if args.command == "verify-mirror":
+        return _print_mirror(verify_mirror(args.path, into=args.into))
     if args.command == "delete":
         result = delete(args.project, args.confirm, args.out_dir, args.keep_capturing)
         print(f"  exported to {result['backup']} before deleting")

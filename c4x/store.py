@@ -516,10 +516,81 @@ class _ArchivedCache(TypedDict):
 _archived_cache: _ArchivedCache = {"map": None, "at": 0.0, "root": None}
 
 
+def _claude_appdata_candidates():
+    """Every directory the desktop app might keep its state in on this machine.
+
+    A Microsoft Store (MSIX) install redirects `%APPDATA%` into its own package container, so there
+    are two names for what may or may not be one directory:
+
+        %APPDATA%\\Claude
+        %LOCALAPPDATA%\\Packages\\Claude_<publisher>\\LocalCache\\Roaming\\Claude
+
+    MEASURED ON TWO MACHINES, AND THEY DISAGREE. On this one the two are the SAME directory: a
+    record under each path returns identical device and inode numbers, and both list 184 records.
+    On the test laptop they are two different stores, 19 records and a `config.json` under the
+    package container against 1 record and no config under `%APPDATA%`, so reading `%APPDATA%`
+    there saw one twentieth of the sessions and would have filed an imported record where the app
+    never looks.
+    """
+    roaming = os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming")
+    local = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
+    found = [os.path.join(roaming, "Claude")]
+    found.extend(sorted(glob.glob(os.path.join(
+        local, "Packages", "Claude*", "LocalCache", "Roaming", "Claude"))))
+    return found
+
+
+def _identity(path):
+    """(device, inode) for a directory, or None. Two names for one directory share these."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def claude_appdata():
+    """The directory the desktop app is ACTUALLY using, chosen from evidence rather than assumed.
+
+    `C4X_SESSIONS_ROOT` overrides it outright, for a layout neither candidate covers.
+
+    Otherwise the candidates are collapsed by identity, so a redirected install counts once, and
+    then ranked: a `config.json` beside the records is the strongest signal that the app writes
+    there, then how many records it holds, then how recent the newest one is. With no evidence at
+    all the `%APPDATA%` name is returned, which is where a fresh install puts things.
+    """
+    override = os.environ.get("C4X_SESSIONS_ROOT")
+    if override:
+        return os.path.dirname(override.rstrip("\\/")) or override
+    seen, candidates = set(), []
+    for path in _claude_appdata_candidates():
+        key = _identity(path)
+        if key is not None and key in seen:
+            continue                    # the same directory under its other name
+        if key is not None:
+            seen.add(key)
+        candidates.append(path)
+    best, best_score = candidates[0], None
+    for path in candidates:
+        records = glob.glob(os.path.join(path, "claude-code-sessions", "*", "*", "local_*.json"))
+        newest = 0.0
+        for record in records:
+            try:
+                newest = max(newest, os.path.getmtime(record))
+            except OSError:
+                continue
+        score = (os.path.isfile(os.path.join(path, "config.json")), len(records), newest)
+        if best_score is None or score > best_score:
+            best, best_score = path, score
+    return best
+
+
 def sessions_root():
     """Where the desktop app keeps its per-chat records."""
-    return os.path.join(os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming"),
-                        "Claude", "claude-code-sessions")
+    override = os.environ.get("C4X_SESSIONS_ROOT")
+    if override:
+        return override
+    return os.path.join(claude_appdata(), "claude-code-sessions")
 
 
 def read_archived_record(path):

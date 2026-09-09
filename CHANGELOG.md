@@ -27,6 +27,27 @@ removed and nothing here said so.
 - **`install --evict-missing`**, which removes c4x wiring pointing at a root that no longer exists.
   Moving a checkout used to strand hooks that `status` never named.
 - **Project import and export**, with the manifest verified before a row is written.
+- **Export and import now move the CONVERSATIONS, not only the rows**, and the import lands where
+  you choose. `c4x/appstate.py` carries the four things Claude Code holds outside the store: the
+  transcripts and their per-session directories, project memory, `~/.claude/tasks/<session>`, the
+  `~/.claude.json` entry (which is `hasTrustDialogAccepted`), and the desktop app's own record.
+  Before this, an import touched exactly one file, `context.db`, so the project appeared in c4x and
+  was invisible in the desktop app.
+  - `import --into "<working directory>"`, and the page offers the same field with the directory
+    name it produces shown beside it. Everything is rebuilt from that path on the CURRENT user's
+    machine: the slug directory, the config key, the desktop record, and the `cwd` in the rows.
+    Nothing absolute from the exporting machine is used as a destination.
+  - **The desktop record is filed under THIS machine's account and organisation.** Those two
+    directory levels are the machine's, not the project's, so copying the source path would put
+    the record where the destination app never looks. Measured, with the resolution rule and the
+    evidence for it, in `.md/20260909-desktop-record-addressing.md`.
+  - **Source always wins**, and every file is re-read and re-hashed after writing. A replacement
+    that SHRINKS a file is named, because a compacted transcript is newer and shorter.
+  - `verify-mirror <export> [--into ...]` answers "is this machine byte for byte what the export
+    carries?" standalone, exits non-zero on a difference, and runs automatically at the end of
+    every import. Files the export does not carry are reported and never deleted: a slug directory
+    is shared by every session with the same working directory.
+- **`--dry-run` on import**, which names every destination and writes nothing.
 - **Pre-compaction transcript snapshots are documented**, including where they live, the size cap,
   `C4X_SNAPSHOT=0`, and that `--purge` deletes them.
 - **What a tool call turned out to be**, on `tool_calls` as `outcome` and `denial_kind`, from
@@ -87,6 +108,15 @@ removed and nothing here said so.
 
 ### Fixed
 
+- **A delete no longer orphans the two cost tables.** `cost_state` and `cost_state_models` were
+  appended to `BY_SESSION` after `sessions`, which put deletion back in the window that ordering
+  exists to close: `sessions` gone while rows still pointed at it. The self-test had been
+  reporting it as a FAIL. Nothing but the deletion order reads that sequence, so exports and
+  footprints are unaffected.
+- **No test can reach the real `~/.claude`, `~/.claude.json` or `%APPDATA%\Claude`.** An autouse
+  fixture points all three at a temporary directory. The risk was not in the tests that mean to
+  touch those paths; it was in the export tests that now capture app state and did not know they
+  would read the developer's own machine.
 - **Mutation routes refuse a cross-origin request.** A multipart POST is a CORS simple request, so
   it reached the import handler and staged the upload to disk before anything validated it. The
   guard is middleware rather than a route dependency, because FastAPI reads the body first.

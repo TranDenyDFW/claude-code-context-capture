@@ -24,6 +24,21 @@ export function pathOf(cohort: string | null | undefined): string | null {
   return value || null
 }
 
+/**
+ * The directory name Claude Code gives a working directory under `~/.claude/projects`.
+ *
+ * Every character that is not a letter or a digit becomes a hyphen, so `P:\Skills` is `P--Skills`.
+ * Shown live beside the destination field: a typo in the path is invisible, and the slug it
+ * produces is not.
+ *
+ * A SECOND COPY OF `c4x/appstate.py::slug_for`, which is a real cost and the cheaper of two. The
+ * alternative is a round trip per keystroke to render a label. `ProjectMoves.test.tsx` pins the
+ * cases the Python side pins, so the two cannot drift silently.
+ */
+export function slugFor(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, '-')
+}
+
 function Problem({ error }: { error: unknown }) {
   const detail = error instanceof ApiError ? error.detail : undefined
   const said =
@@ -67,6 +82,10 @@ export function ProjectMoves({
   const [error, setError] = useState<unknown>(null)
   const [imported, setImported] = useState<ImportReport | null>(null)
   const [deleted, setDeleted] = useState<DeleteReport | null>(null)
+  // The chosen file is HELD, not imported on sight. Picking one runs a dry run, which reports
+  // where every file would land; the import only happens once the destination has been seen.
+  const [staged, setStaged] = useState<{ file: File; plan: ImportReport } | null>(null)
+  const [into, setInto] = useState('')
   const upload = useRef<HTMLInputElement>(null)
 
   const project = pathOf(cohort)
@@ -78,21 +97,48 @@ export function ProjectMoves({
     setError(null)
     setImported(null)
     setDeleted(null)
+    setStaged(null)
+    setInto('')
   }
 
-  const doImport = async (file: File) => {
+  /**
+   * Step one: ask the server where this export WOULD land, and write nothing.
+   *
+   * Uploaded twice on purpose. A browser cannot enumerate directories on the server, so the only
+   * honest way to show the destination before committing to it is to let the server answer, and
+   * the alternative, importing on sight and reporting afterwards, is what made a wrong destination
+   * something you find out about by looking at the filesystem.
+   */
+  const stage = async (file: File) => {
     setBusy('import')
     setError(null)
     setImported(null)
+    setStaged(null)
     try {
-      setImported(await api.project.import(file))
-      onChanged()
+      const plan = await api.project.import(file, undefined, true)
+      setStaged({ file, plan })
+      setInto(plan.into[0] ?? '')
     } catch (problem) {
       setError(problem)
     } finally {
       setBusy(null)
       // Cleared so choosing the SAME file again still fires a change event.
       if (upload.current) upload.current.value = ''
+    }
+  }
+
+  const doImport = async () => {
+    if (!staged) return
+    setBusy('import')
+    setError(null)
+    try {
+      setImported(await api.project.import(staged.file, into.trim() || undefined))
+      setStaged(null)
+      onChanged()
+    } catch (problem) {
+      setError(problem)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -226,8 +272,9 @@ export function ProjectMoves({
               <section>
                 <h3 className="text-sm font-semibold text-ink">Import</h3>
                 <p className="mt-0.5 text-xs text-ink-faint">
-                  Verified before a single row is written, and safe to run twice: rows already here
-                  are left exactly as they are.
+                  Carries the conversations too, not only the rows: the transcripts, the project
+                  memory, the trust setting, and the desktop app's own record, so the project opens
+                  in the app afterwards. Verified byte for byte, and safe to run twice.
                 </p>
                 <input
                   ref={upload}
@@ -237,7 +284,7 @@ export function ProjectMoves({
                   disabled={!writesEnabled || busy !== null}
                   onChange={(event) => {
                     const file = event.target.files?.[0]
-                    if (file) void doImport(file)
+                    if (file) void stage(file)
                   }}
                   className="mt-2 block w-full text-sm text-ink-dim file:mr-3 file:rounded-md
                              file:border file:border-edge file:bg-page file:px-2.5 file:py-1.5
@@ -246,10 +293,136 @@ export function ProjectMoves({
                 {busy === 'import' && (
                   <p className="mt-2 text-sm text-ink-dim">Verifying and loading…</p>
                 )}
+                {staged && (
+                  // WHERE IT WILL LAND, BEFORE IT LANDS. The server has read the file and written
+                  // nothing; this is its plan.
+                  <div className="mt-2 rounded-md border border-edge bg-page px-3 py-2 text-sm">
+                    <p className="text-ink">
+                      {staged.plan.project ?? 'The export'}, from{' '}
+                      {staged.plan.from ?? 'another machine'}
+                    </p>
+                    <label className="mt-2 block text-xs text-ink-dim" htmlFor="import-into">
+                      Import into this working directory on this machine
+                    </label>
+                    <input
+                      id="import-into"
+                      type="text"
+                      value={into}
+                      spellCheck={false}
+                      onChange={(event) => setInto(event.target.value)}
+                      className="mt-1 w-full rounded-md border border-edge bg-page px-2 py-1
+                                 font-mono text-xs text-ink"
+                    />
+                    <p className="mt-1 text-xs text-ink-faint">
+                      Transcripts go to <code>~/.claude/projects/{slugFor(into.trim())}</code>. The
+                      trust setting, the desktop record and the rows all follow this path, so the
+                      app and this page agree on one location.
+                    </p>
+                    <p className="mt-1 text-xs text-ink-faint">
+                      {staged.plan.app_state?.written.length ?? 0} file(s) would be written,{' '}
+                      {staged.plan.app_state?.written.filter((w) => w.exists).length ?? 0} of them
+                      over something already there.
+                    </p>
+                    {(staged.plan.app_state?.refused.length ?? 0) > 0 && (
+                      <p className="mt-1 text-xs text-warn">
+                        Refused:{' '}
+                        {staged.plan.app_state!.refused
+                          .map((r) => `${r.relpath} (${r.why})`)
+                          .join(' · ')}
+                      </p>
+                    )}
+                    {staged.plan.not_moved.length > 0 && (
+                      <p className="mt-1 text-xs text-warn">
+                        Left where they were, being neither this project's directory nor under it:{' '}
+                        {staged.plan.not_moved.join(' · ')}
+                      </p>
+                    )}
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        onClick={() => void doImport()}
+                        disabled={busy !== null || !into.trim()}
+                        className="rounded-md border border-edge bg-page px-2.5 py-1 text-sm
+                                   text-ink hover:bg-edge/20 disabled:opacity-50"
+                      >
+                        Import
+                      </button>
+                      <button
+                        onClick={() => setStaged(null)}
+                        disabled={busy !== null}
+                        className="rounded-md px-2.5 py-1 text-sm text-ink-dim hover:text-ink"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {imported && (
-                  <div className="mt-2 rounded-md border border-good/40 bg-good/5 px-3 py-2
-                                  text-sm">
-                    <p className="text-good">Imported {imported.project ?? 'the export'}</p>
+                  // THE BORDER FOLLOWS THE MIRROR, NOT THE HTTP STATUS. A 200 with a non-empty
+                  // `differs` means files landed and are not what the export carries, and showing
+                  // that in green is the exact claim this change exists to stop.
+                  <div
+                    className={`mt-2 rounded-md border px-3 py-2 text-sm ${
+                      imported.mirror && !imported.mirror.ok
+                        ? 'border-bad/40 bg-bad/5'
+                        : 'border-good/40 bg-good/5'
+                    }`}
+                  >
+                    <p className={imported.mirror && !imported.mirror.ok ? 'text-bad' : 'text-good'}>
+                      Imported {imported.project ?? 'the export'} into{' '}
+                      <code>{imported.into.join(', ')}</code>
+                    </p>
+                    {imported.mirror && (
+                      <p className="mt-1 text-xs">
+                        {imported.mirror.ok ? (
+                          <span className="text-good">
+                            Byte for byte identical to the export, re-read and re-hashed after
+                            writing.
+                          </span>
+                        ) : (
+                          <span className="text-bad">
+                            NOT a mirror. {imported.mirror.missing.length} missing,{' '}
+                            {imported.mirror.differs.length} different:{' '}
+                            {[...imported.mirror.missing, ...imported.mirror.differs]
+                              .slice(0, 4)
+                              .map((f) => f.relpath)
+                              .join(' · ')}
+                          </span>
+                        )}
+                      </p>
+                    )}
+                    {imported.app_state && (
+                      <p className="mt-1 text-xs">
+                        Files restored: {imported.app_state.written.length} (
+                        {(imported.app_state.bytes / 1048576).toFixed(1)} MB)
+                        {imported.app_state.desktop.length > 0 &&
+                          `, including ${imported.app_state.desktop.length} desktop app record(s), so it opens in the app`}
+                      </p>
+                    )}
+                    {(imported.app_state?.replaced_shorter.length ?? 0) > 0 && (
+                      // A compacted transcript is NEWER and SHORTER, so a true mirror can replace
+                      // a longer local record with less conversation. That was the choice; doing
+                      // it quietly was never part of it.
+                      <p className="mt-1 text-xs text-warn">
+                        Replaced with a SHORTER file, so a longer local copy is gone:{' '}
+                        {imported.app_state!.replaced_shorter.map((f) => f.relpath).join(' · ')}
+                      </p>
+                    )}
+                    {(imported.app_state?.refused.length ?? 0) > 0 && (
+                      <p className="mt-1 text-xs text-warn">
+                        Refused:{' '}
+                        {imported.app_state!.refused
+                          .map((r) => `${r.relpath} (${r.why})`)
+                          .join(' · ')}
+                      </p>
+                    )}
+                    {(imported.mirror?.not_carried.length ?? 0) > 0 && (
+                      <p className="mt-1 text-xs text-ink-faint">
+                        The export itself did not carry{' '}
+                        {imported.mirror!.not_carried.reduce((n, e) => n + e.files, 0)} file(s) in
+                        that directory, belonging to sessions it has no rows for. They are still on
+                        the machine it came from.
+                      </p>
+                    )}
                     <p className="mt-1 text-xs">
                       Added: <Counts counts={imported.inserted} />
                     </p>
