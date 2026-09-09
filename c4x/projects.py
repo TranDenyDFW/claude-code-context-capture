@@ -37,7 +37,6 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from c4x import appstate
 from c4x.frames import records
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -69,11 +68,6 @@ STORE_WIDE = ("probes", "probe_categories", "probe_details", "probe_message_brea
               "sqlite_sequence")
 
 MANIFEST_TABLE = "c4x_export"
-
-#: Claude Code's OWN state for the project, carried inside the export rather than beside it.
-#: A row per file, so the existing digest and verify machinery covers it for free and the
-#: export stays ONE artifact that either verifies or does not.
-APP_STATE_TABLE = "c4x_app_state"
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +173,7 @@ def unhandled_tables(con):
     is how an export starts silently omitting something. Reported instead.
     """
     known = set(BY_SESSION) | set(BY_COMPACTION) | set(BY_TRANSCRIPT) | set(STORE_WIDE)
-    known.update({MANIFEST_TABLE, APP_STATE_TABLE})
+    known.add(MANIFEST_TABLE)
     live = {r[0] for r in con.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     return sorted(live - known)
@@ -271,12 +265,7 @@ def verify(path):
 
     # And every one of them must be a table this module carries. The name reaches SQL as a bare
     # identifier, so an allow-list is the guard, not the quoting.
-    #
-    # APP_STATE_TABLE belongs on this list because export now digests it. It is NOT in the three
-    # groups above, which are the tables an import copies row for row into the live store; this one
-    # is read by `restore_app_state` and written to the filesystem instead. Leaving it off made
-    # every fresh export fail its own verify with "names tables this store does not export".
-    known = set(BY_SESSION) | set(BY_COMPACTION) | set(BY_TRANSCRIPT) | {APP_STATE_TABLE}
+    known = set(BY_SESSION) | set(BY_COMPACTION) | set(BY_TRANSCRIPT)
     unknown = sorted(digested - known)
     if unknown:
         problems.append(f"manifest names tables this store does not export: {unknown}")
@@ -355,19 +344,6 @@ def export(project, out_path):
                         WHERE session_id IN ({marks}) AND transcript_path IS NOT NULL)""", ids)
             source.commit()
             source.execute("DETACH DATABASE dest")
-
-            # LAYERS 2 AND 3, the ones a disk clone moves and this export did not. Measured
-            # on a second machine: an import used to touch exactly one file, context.db, and
-            # left ~/.claude and ~/.claude.json byte-identical, so an imported project was
-            # visible in c4x and invisible to the desktop app.
-            out.execute(
-                f"CREATE TABLE IF NOT EXISTS {APP_STATE_TABLE} (kind TEXT, path TEXT, "
-                "mtime REAL, blob BLOB, PRIMARY KEY (kind, path))")
-            for kind, rel, stamp, payload in appstate.capture(appstate.cwds_for(ids), ids):
-                out.execute(
-                    f"INSERT OR REPLACE INTO {APP_STATE_TABLE} VALUES (?,?,?,?)",
-                    (kind, rel, stamp, payload))
-            out.commit()
         finally:
             out.close()
 
@@ -375,10 +351,7 @@ def export(project, out_path):
         # of the manifest is to describe what is actually in there.
         out = sqlite3.connect(str(out_path))
         try:
-            # APP_STATE_TABLE joins the carried set, so the digest and verify cover it. The
-            # commit message claimed they already did; they did not, and an export with the
-            # whole table dropped returned verify() True with no problems reported.
-            carried = BY_SESSION + BY_COMPACTION + BY_TRANSCRIPT + (APP_STATE_TABLE,)
+            carried = BY_SESSION + BY_COMPACTION + BY_TRANSCRIPT
             counts = {t: out.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in carried}
             digests = {t: digest(out, t) for t in carried}
             manifest = {
@@ -394,9 +367,6 @@ def export(project, out_path):
                 # rather than failing or, worse, shifting values into the wrong columns.
                 "tables": list(carried),
                 "unhandled_tables_at_export": unhandled_tables(out),
-                # What of Claude Code's own state came with it, so a reader of the file can
-                # tell a complete export from a store-only one without opening the table.
-                "app_state": app_state_summary(out),
             }
             out.execute(f"CREATE TABLE IF NOT EXISTS {MANIFEST_TABLE} "
                         "(key TEXT PRIMARY KEY, value TEXT)")
@@ -418,18 +388,6 @@ def export(project, out_path):
 # ---------------------------------------------------------------------------
 # Import
 # ---------------------------------------------------------------------------
-def app_state_summary(con):
-    """What layers 2 and 3 the export actually carries, read from the FILE."""
-    try:
-        rows = con.execute(
-            f"SELECT kind, COUNT(*), COALESCE(SUM(LENGTH(blob)),0) FROM {APP_STATE_TABLE}"
-            " GROUP BY kind").fetchall()
-    except sqlite3.Error:
-        return {"present": False}
-    return {"present": bool(rows),
-            "by_kind": {k: {"files": n, "bytes": b} for k, n, b in rows}}
-
-
 def import_(path):
     """Load an export into this store, verifying it first and inserting only what is missing.
 
@@ -466,12 +424,7 @@ def import_(path):
         con.execute("ATTACH DATABASE ? AS src", (str(path),))
         try:
             # The verified set, never manifest["tables"]. See carried_tables().
-            #
-            # APP_STATE_TABLE is verified with the rest and applied by `restore_app_state` to the
-            # FILESYSTEM, not copied row for row into the store, which has no such table. Left in
-            # this loop it fell through the "this store has no such table" branch and was reported
-            # under `dropped_columns`, which reads as data lost when nothing was.
-            for table in (t for t in carried_tables(manifest) if t != APP_STATE_TABLE):
+            for table in carried_tables(manifest):
                 # `PRAGMA main.table_info(t)`, not `PRAGMA table_info(main.t)`. The schema is a
                 # prefix on the pragma itself; put it inside the parentheses and SQLite reports a
                 # syntax error at the dot.
@@ -494,10 +447,13 @@ def import_(path):
                 report["already_present"][table] = offered - (after - before)
         except Exception:
             # ROLLBACK, NOT COMMIT. This was a bare `finally: con.commit()`, which ends the
-            # transaction so DETACH can run and, in doing so, COMMITS a half-finished import:
-            # `store.write()` documents that it rolls back on any exception, and an unconditional
+            # transaction so DETACH can run and, in doing so, COMMITS a half-finished import.
+            # `store.write()` documents that it rolls back on any exception and an unconditional
             # commit here overrode that promise. Demonstrated by an independent reviewer: a
             # failure mid-loop left 9 session rows behind with the rest of their tables missing.
+            #
+            # Predates the app-state work and outlives it: that feature was reverted, this was
+            # not, because the defect and the fix are both independent of it.
             con.rollback()
             raise
         else:
@@ -507,50 +463,7 @@ def import_(path):
             # attached database and SQLite answers DETACH with "database src is locked" rather
             # than anything naming the cause.
             con.execute("DETACH DATABASE src")
-
-    # LAYERS 2 AND 3, after the rows and outside the store transaction. These write to
-    # ~/.claude and ~/.claude.json, which have nothing to do with the SQLite lock, and holding a
-    # write transaction open across a filesystem walk is how an import blocks the harvest.
-    #
-    # An export written before this feature has no such table and restores nothing, which is the
-    # correct answer for it rather than an error: it genuinely carried no app state.
-    report["app_state"] = restore_app_state(path)
     return report
-
-
-def restore_app_state(export_path, project=None, when_exists="newer"):
-    """Put Claude Code's own state back, from an export that carries it.
-
-    THE WORKING DIRECTORY COMES FROM THE EXPORT'S OWN `sessions` ROWS, never from the manifest's
-    project name and never from a caller. That name can be a PAGE LABEL: `session_rows()` appends
-    `\\archived` once the desktop app has archived a chat, and threading it in here put a restored
-    transcript into `P--Skills-archived/`, a directory Claude Code will never read, and merged the
-    config entry under a project path that does not exist. Caught by diffing the target machine's
-    filesystem, not by reading the code.
-
-    That was the FOURTH place the same label-for-path substitution went wrong in this change, which
-    is why the cwd is now taken from the data rather than passed along: the export knows what
-    directory its sessions ran in, so nothing upstream has to be trusted to say.
-
-    Separate and callable on its own, so a store imported before this existed can be completed
-    later from the same file without re-importing the rows.
-    """
-    con = sqlite3.connect(f"file:{Path(export_path)}?mode=ro", uri=True)
-    try:
-        rows = con.execute(f"SELECT kind, path, mtime, blob FROM {APP_STATE_TABLE}").fetchall()
-        cwds = [r[0] for r in con.execute(
-            "SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL AND cwd <> ''").fetchall()]
-    except sqlite3.Error:
-        return {"present": False, "note": "this export predates app-state capture"}
-    finally:
-        con.close()
-    if not rows:
-        return {"present": False, "note": "the export carries no Claude Code state"}
-    if not cwds:
-        return {"present": False, "note": "the export names no working directory to restore into"}
-    out = appstate.restore(cwds, rows, when_exists=when_exists)
-    out.update({"present": True, "restored_into": cwds[0]})
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -644,11 +557,6 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
         ids = session_ids(con, project)
         if not ids:
             raise ValueError(f"no sessions with cwd {project!r}")
-        # RESOLVED BEFORE THE ROWS GO. Asking afterwards returns an empty list every time,
-        # because the sessions it reads are the ones just deleted, and the fallback to a
-        # project NAME was then the only branch that ever ran: a page label reached
-        # `claude project purge`, which purged nothing, while layers 1 and 3 were gone.
-        real_cwds = appstate.cwds_for(ids)
         marks = ",".join("?" * len(ids))
         removed = {}
         # Survivors before compactions, and everything before sessions: no foreign keys means
@@ -673,39 +581,7 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
                         "VALUES (?,?,?)",
                         (project, datetime.now(UTC).isoformat(timespec="seconds"),
                          f"deleted, exported to {backup.name}"))
-    # LAYERS 2 AND 3, and only now: the export above is verified before anything is removed, and
-    # it is the ONLY copy of the transcripts once this runs. Deleting the app's state before the
-    # backup was proven readable would make the one irreversible step depend on an unchecked file.
-    #
-    # Layer 2 goes through `claude project purge` rather than a sweep written here, because the
-    # footprint is not stable: this build deletes two items where the documentation describes five,
-    # so a hand-rolled sweep is correct until the next release and silently wrong after it.
-    app = {"cli": [], "desktop_removed": [], "cwds": real_cwds, "incomplete": []}
-    desktop_root = Path(store.sessions_root())
-    for real in real_cwds:
-        outcome = {"project": real, **appstate.purge(real)}
-        app["cli"].append(outcome)
-        # A PURGE THAT DID NOT RUN, OR RAN AND FAILED, LEAVES A HALF-DELETED PROJECT: the store
-        # rows are gone and the exclusion is recorded, so harvest will never bring them back,
-        # while Claude Code still holds every transcript and the trust entry. That combination is
-        # worse than either outcome alone, and it used to be reported only inside `app_state`,
-        # which nothing outside this module reads. It is now named at the top level so a caller
-        # that prints one line still prints this one.
-        if outcome["ran"] and outcome["code"]:
-            app["incomplete"].append(
-                f"{real}: claude project purge exited {outcome['code']}")
-        elif not outcome["ran"] and outcome["reason"] != "Claude Code holds no state for that path":
-            app["incomplete"].append(f"{real}: {outcome['reason']}")
-    for rel, _mtime, _blob in appstate.desktop_records(ids, with_mtime=True):
-        try:
-            (desktop_root / rel).unlink()
-            app["desktop_removed"].append(rel)
-        except OSError as exc:
-            app["desktop_removed"].append(f"{rel}: FAILED {type(exc).__name__}")
-            app["incomplete"].append(f"desktop record {rel}: {type(exc).__name__}")
-    return {"project": project, "backup": str(backup), "removed": removed, "app_state": app,
-            # THE HEADLINE, not a nested field. The store now says this project is gone.
-            "app_state_incomplete": app["incomplete"],
+    return {"project": project, "backup": str(backup), "removed": removed,
             "excluded": not keep_capturing, "exported_sessions": manifest["sessions"]}
 
 
@@ -827,19 +703,7 @@ def main(argv=None):
         print(f"  exported to {result['backup']} before deleting")
         for table, n in result["removed"].items():
             print(f"    {table:22} {n:>8,} removed")
-        app = result["app_state"]
-        print(f"  Claude Code state purged for: {', '.join(app['cwds']) or 'nothing'}")
-        print(f"  desktop records removed: {len(app['desktop_removed'])}")
         print(f"  excluded from future harvests: {result['excluded']}")
-        # PRINTED AND NON-ZERO. A half-deleted project reads as a successful delete otherwise:
-        # the rows are gone and excluded, and Claude Code still has the conversation.
-        if result["app_state_incomplete"]:
-            print("  INCOMPLETE. The store rows are gone and the exclusion is recorded, but "
-                  "Claude Code still holds state for this project:")
-            for line in result["app_state_incomplete"]:
-                print(f"    {line}")
-            print(f"  The export at {result['backup']} is intact; nothing else was lost.")
-            return 1
         return 0
     if args.command == "include":
         print(f"  removed {include(args.project)} exclusion(s) for {args.project}")
