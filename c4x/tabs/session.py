@@ -353,6 +353,18 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                            font=dict(color=DANGER, size=10, family=MONO))
 
     unresolved = 0
+    # ONE LABEL PER DISTINCT THRESHOLD, not one per segment.
+    #
+    # The line is drawn for every segment, because its x-range is what says WHICH turns that
+    # threshold governed. The words are not: a session that switches model or window several times
+    # produced one annotation per segment, all at the same y and all anchored at the same left
+    # edge, so they printed over each other into a smear that no reader could resolve. Measured on
+    # the README's own hero session, which is how it was noticed.
+    #
+    # The loop immediately below already learned this: "Label them only when there are few: a
+    # session with 46 compactions printed the word 46 times into one stack." Same lesson, one loop
+    # up, applied late.
+    at_threshold: dict[int, dict] = {}
     for s in segs:
         if not s.get("window"):
             unresolved += 1
@@ -363,10 +375,30 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                    if ts_list[i] and ts_list[i] <= s["endTs"]), len(ts_list))
         fig.add_shape(type="line", x0=x0, x1=max(x1, x0), y0=thr, y1=thr,
                       line=dict(color=WARN, width=1.5, dash="dash"))
+        seen = at_threshold.setdefault(thr, {"x": x0, "window": s["window"], "models": []})
+        seen["x"] = min(seen["x"], x0)
+        if s["model"] not in seen["models"]:
+            seen["models"].append(s["model"])
+
+    # ONE LABEL PER THRESHOLD VALUE, not per segment and not per model.
+    #
+    # The line is drawn for every segment, because its x-range is what says WHICH turns that
+    # threshold governed. The words are not. This wrote one annotation per segment, all at the
+    # same y and all anchored at the same left edge, so they printed over each other into a smear.
+    # Deduplicating the TEXT was not enough and is the reason this comment is specific: several
+    # models share the same 967k threshold, so the texts differ while the positions do not.
+    #
+    # The loop below already learned the general lesson: "Label them only when there are few: a
+    # session with 46 compactions printed the word 46 times into one stack."
+    for thr, seen in at_threshold.items():
+        models = seen["models"]
+        who = models[0] if len(models) == 1 else f"{len(models)} models"
         fig.add_annotation(
-            x=x0, y=thr, xanchor="left", yanchor="bottom", showarrow=False,
-            text=f"{s['model']} | compact at {fmt_tokens(thr)} ({fmt_tokens(s['window'])} window)",
-            font=dict(color=WARN, size=9, family=MONO))
+            x=seen["x"], y=thr, xanchor="left", yanchor="bottom", showarrow=False,
+            text=f"{who} | compact at {fmt_tokens(thr)} "
+                 f"({fmt_tokens(seen['window'])} window)",
+            font=dict(color=WARN, size=9, family=MONO),
+            hovertext=", ".join(models) if len(models) > 1 else None)
 
     # Compaction boundaries, placed at the nearest turn by timestamp. Label them only when
     # there are few: a session with 46 compactions printed the word 46 times into one stack.

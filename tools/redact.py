@@ -226,6 +226,72 @@ def sweep(db, maps):
                                   f"{stable_id(value)}{suffix}")
             if changes:
                 touched[f"{table}.{column} (swept)"] = _map_update(db, table, column, changes)
+    touched.update(scrub_substrings(db, maps, tables))
+    return touched
+
+
+# Long enough to be identifying, and the SAME rule the leak gate uses. A shorter name matches
+# unrelated words in every table; the two have to agree or one of them is wrong by construction.
+IDENTIFYING = 12
+
+
+def scrub_substrings(db, maps, tables):
+    """Replace mapped server and title names wherever they appear INSIDE a text value.
+
+    The sweep above rewrites a value that looks like a path, and `_map_update` rewrites a value
+    that IS one of the mapped names. Neither touches a name sitting inside a longer string, so an
+    MCP server name in a tool-input preview survived both: measured on this store,
+    `tool_calls.input_preview` kept two of them and the leak gate correctly refused to let the copy
+    be photographed.
+
+    The gate is what made this visible, which is the argument for having written it that way: it
+    greps the copy for every fragment the mapping says should be gone, so a redaction that misses a
+    SHAPE rather than a value still fails.
+    """
+    pairs = []
+    for kind in ("server", "title"):
+        for real, fake in (maps.get(kind) or {}).items():
+            if real and len(str(real)) > IDENTIFYING:
+                pairs.append((str(real), str(fake)))
+    if not pairs:
+        return {}
+    pairs.sort(key=lambda kv: -len(kv[0]))          # longest first, so no name eats another's tail
+
+    # ONE SCAN PER COLUMN, not one per name per column. The first version ran an
+    # `UPDATE ... WHERE col LIKE '%name%'` for every name against every text column, which is
+    # hundreds of full scans of a 1.5 GB copy and had not finished after twenty two minutes of CPU.
+    # This reads each column once for rows matching ANY name, computes the replacements in Python,
+    # and applies them through the same indexed whole-value update the rest of this file uses.
+    where = " OR ".join("{col} LIKE '%' || ? || '%'" for _ in pairs)
+    touched = {}
+    for table in tables:
+        if table.startswith("sqlite_"):
+            continue
+        try:
+            cols = [(c, k) for _i, c, k, *_r in db.execute(f"PRAGMA table_info({table})")]
+        except sqlite3.Error:
+            continue
+        for column, kind in cols:
+            if str(kind).upper() in ("INTEGER", "REAL", "NUMERIC", "BLOB"):
+                continue
+            try:
+                values = [v for (v,) in db.execute(
+                    f"SELECT DISTINCT {column} FROM {table} WHERE "
+                    + where.format(col=column) + " LIMIT 200000",
+                    [real for real, _ in pairs]) if isinstance(v, str)]
+            except sqlite3.Error:
+                continue
+            changes = {}
+            for value in values:
+                rewritten = value
+                for real, fake in pairs:
+                    if real in rewritten:
+                        rewritten = rewritten.replace(real, fake)
+                if rewritten != value:
+                    changes[value] = rewritten
+            if changes:
+                touched[f"{table}.{column} (names inside text)"] = _map_update(
+                    db, table, column, changes)
     return touched
 
 
