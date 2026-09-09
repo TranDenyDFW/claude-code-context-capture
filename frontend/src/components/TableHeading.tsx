@@ -46,28 +46,31 @@ export function joinNotes(...notes: (string | null | undefined)[]): string | nul
 export function Heading({
   name,
   note,
+  alert,
   level,
   as: Tag = 'h3',
 }: {
   name: string
   note: string | null
+  /** The levelled half. Shown on the page; `note` stays the hover, whatever this is. */
+  alert?: string | null
   level?: NoteLevel
   as?: 'h1' | 'h2' | 'h3'
 }) {
-  const loud = Boolean(level && note)
+  const loud = Boolean(level && alert)
   return (
     <div className="min-w-0">
       <Tag
         className="text-md font-semibold text-ink-dim"
         // A NOTE SHOWN ON THE PAGE IS NOT ALSO THE HOVER. The same sentence in both places reads
         // as two, and a screen reader announces it twice.
-        title={loud ? undefined : note ?? undefined}
+        title={note ?? undefined}
       >
         {name}
       </Tag>
       {loud && (
         <p role="note" data-note-level={level} className="mt-1 text-sm leading-relaxed text-warn">
-          {note}
+          {alert}
         </p>
       )}
     </div>
@@ -77,13 +80,15 @@ export function Heading({
 export function TableHeading({
   name,
   note,
+  alert,
   level,
   as,
 }: {
   name: string
   note: string | null
+  alert?: string | null
   level?: NoteLevel
   as?: 'h1' | 'h2' | 'h3'
 }) {
-  return <Heading name={name} note={note} level={level} as={as} />
+  return <Heading name={name} note={note} alert={alert} level={level} as={as} />
 }

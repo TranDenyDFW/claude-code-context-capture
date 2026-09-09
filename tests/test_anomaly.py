@@ -140,7 +140,7 @@ def test_the_band_is_drawn_behind_the_lines(drawn):
     it describes. The band's two traces must come before resident and cache read."""
     names = [t["name"] for t in drawn[0]["traces"]]
     assert "Resident" in names and "Cache Read" in names
-    band = next(i for i, n in enumerate(names) if n and n.startswith("usual range"))
+    band = next(i for i, n in enumerate(names) if n and n.startswith("Usual Range"))
     assert band < names.index("Resident")
     assert band < names.index("Cache Read")
 
@@ -149,7 +149,7 @@ def test_the_marks_are_capped_and_the_count_is_not(drawn):
     """A chart with 1,018 markers on it has no markers on it. The cap must never be reported as
     the number of anomalies, which is the way a cap quietly becomes a finding."""
     figure, note, outside = drawn
-    marks = [t for t in figure["traces"] if t["name"] and t["name"].startswith("outside it")]
+    marks = [t for t in figure["traces"] if t["name"] and t["name"].startswith("Outside It")]
     if not outside:
         assert not marks, "nothing fell outside the band and something was marked anyway"
         pytest.skip("no call in this store falls outside its session's band")
@@ -190,7 +190,7 @@ def test_the_cap_holds_when_there_are_more_anomalies_than_it_will_draw():
     figure = go.Figure()
     drew, note = anomaly_band(figure, list(range(1, len(series) + 1)), series)
     assert drew
-    marks = [t for t in figure.data if t.name and t.name.startswith("outside it")]
+    marks = [t for t in figure.data if t.name and t.name.startswith("Outside It")]
     assert marks, "anomalies were found and none were marked"
     assert len(marks[0].x) == ANOMALY_MARKS, (
         f"{len(marks[0].x)} markers drawn against a cap of {ANOMALY_MARKS}")

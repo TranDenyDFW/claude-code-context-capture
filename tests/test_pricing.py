@@ -242,5 +242,12 @@ def test_the_compare_table_labels_cost_as_an_estimate(has_store):
     from c4x.panels import COMPARE_ROWS
     row = [r for r in COMPARE_ROWS if r[0] == "cost_usd"]
     assert row, "the compare table carries no cost row"
-    assert "estimate" in row[0][2], "the cost row's unit does not say it is an estimate"
-    assert pricing.PRICE_TABLE_DATE in row[0][2], "the cost row's unit omits the table date"
+    # THE WORD MOVED, THE REQUIREMENT DID NOT. "estimate" was in the unit and is now in
+    # the label ("estimated cost, USD"), because the unit column was narrowed to the
+    # unit and its date. This asserted the unit alone and has been red since that change.
+    # What matters is that the row says it is an estimate SOMEWHERE a reader sees, and
+    # that the unit still dates the price table it came from.
+    label, unit = row[0][1], row[0][2]
+    assert "estimate" in f"{label} {unit}", (
+        f"neither the cost row's label nor its unit says it is an estimate: {label!r} {unit!r}")
+    assert pricing.PRICE_TABLE_DATE in unit, "the cost row's unit omits the table date"

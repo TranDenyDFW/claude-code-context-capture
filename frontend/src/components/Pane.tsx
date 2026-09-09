@@ -179,7 +179,8 @@ export function Pane({
           <section key={index} className="rounded-lg bg-panel shadow-panel p-4">
             <div className="mb-2 flex items-baseline justify-between gap-3">
               {name
-                ? <Heading name={name} note={note} level={figureMeta[index]?.note_level} />
+                ? <Heading name={name} note={note} alert={figureMeta[index]?.alert}
+                           level={figureMeta[index]?.note_level} />
                 : <span />}
               {/* THE SAME AFFORDANCE A TABLE HAS. A chart on a dashboard is drawn at the height
                   the panel allows; one somebody is reading wants the window, and the address
@@ -241,8 +242,25 @@ export function Pane({
           // Keyed by INDEX, not by id. Five of the Cost tab's six tables report the id
           // `(anonymous)`, so keying on it collided four times and React warned on every render.
           <section key={index} className="flex flex-col gap-2">
-            <TableHeading name={name} note={note} level={meta[index]?.note_level} />
+            <TableHeading name={name} note={note} alert={meta[index]?.alert}
+                          level={meta[index]?.note_level} />
+            {/*
+              KEYED ON THE TAB AS WELL AS THE INDEX, so a different table gets a different
+              component instance.
+
+              DataTable seeds its hidden columns, its column order and its page size from the
+              server's metadata in `useState` initialisers, and those run ONCE per instance. The
+              section above is keyed by index alone, so switching from one tab to another handed
+              table 0 of the new tab the instance that already belonged to table 0 of the old one,
+              and the new table's declared hidden columns were ignored: 0d881f1 was silently undone
+              on every return to an already-visited tab, and which columns a CSV export carried
+              depended on where the reader had been.
+
+              Not keyed on the table id, for the reason the section's own comment gives: five of
+              the Cost tab's six tables report `(anonymous)`.
+            */}
             <DataTable
+              key={`${payload.tab}:${index}`}
               table={table}
               meta={meta[index]}
               title={name}

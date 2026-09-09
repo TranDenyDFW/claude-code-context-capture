@@ -112,7 +112,7 @@ def anomaly_band(fig, x, series):
     fig.add_trace(go.Scatter(
         x=x, y=lower, mode="lines", line=dict(width=0), fill="tonexty",
         fillcolor="rgba(163,113,247,0.13)", hoverinfo="skip",
-        name=f"usual range ({ANOMALY_WINDOW}-call mean +/- {ANOMALY_SIGMA:g} sd)"))
+        name=f"Usual Range ({ANOMALY_WINDOW}-call mean +/- {ANOMALY_SIGMA:g} sd)"))
     total = int(outside.sum())
     if total:
         # Ranked by DISTANCE outside the band, in band widths, so the marks are the calls least
@@ -124,7 +124,7 @@ def anomaly_band(fig, x, series):
         fig.add_trace(go.Scatter(
             x=[x[i] for i in range(len(x)) if series.index[i] in picked],
             y=[series.iloc[i] for i in range(len(x)) if series.index[i] in picked],
-            mode="markers", name=f"outside it ({total:,})",
+            mode="markers", name=f"Outside It ({total:,})",
             marker=dict(color=DANGER, size=7, symbol="circle-open", line=dict(width=1.5)),
             hovertemplate="turn %{x}<br>%{y:,.0f} cache read, outside the usual range"
                           "<extra></extra>"))
@@ -450,7 +450,7 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                 ys.append(r.total_resident)
         if xs:
             fig.add_trace(go.Scatter(
-                x=xs, y=ys, mode="markers", name=f"survived ({len(xs)} matched)",
+                x=xs, y=ys, mode="markers", name=f"Survived ({len(xs)} matched)",
                 marker=dict(color=GOOD, size=7, symbol="diamond",
                             line=dict(color=BG, width=1)),
                 hovertemplate="turn %{x}<br>survived a compaction<extra></extra>",

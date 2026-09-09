@@ -23,7 +23,15 @@ def table_lines(table, max_rows=MAX_ROWS):
     Never silently: a table printed short with no note reads as a table that short.
     """
     rows = table["rows"]
-    columns = table["columns"] or (list(rows[0]) if rows else [])
+    # HIDDEN MEANS HIDDEN HERE TOO. This renderer draws whatever `columns` declares, and the Dash
+    # table it mirrors draws `columns` MINUS `hidden_columns`. That difference was invisible while
+    # nothing hid anything. The moment the outcome work started declaring its three raw counts and
+    # hiding them, this printed all three beside the merged cell on four tables, so the defect was
+    # closed on the dashboard and reopened on the CLI and the API dump in the same commit that
+    # added `hidden_columns` to the payload so a consumer could tell the difference.
+    hidden = set(table.get("hidden_columns") or ())
+    columns = [c for c in (table["columns"] or (list(rows[0]) if rows else []))
+               if c not in hidden]
     lines = [f"-- table {table['id']}  ({len(rows)} rows)"]
     if not columns:
         lines.append("   (no columns)")

@@ -247,9 +247,17 @@ class TestWhenATotalMayCarryAVerdict:
 
     def test_a_total_is_judged_when_the_arms_really_are_the_same_size(self):
         # Within ten per cent. The verdict is the point of the row, so it must still appear.
+        #
+        # THE BASIS IS "total", NOT "same size". The wording changed when the Basis column
+        # was rewritten and this assertion kept the old string, so it has been red ever
+        # since. What the check is FOR is that a comparable pair is not marked incomparable,
+        # and the shipped vocabulary says that by contrast: "total" against "total, arms
+        # are different sizes". Both halves are asserted so a future rewording cannot pass
+        # by dropping the qualifier from the other case.
         v = verdicts_from(1000, 1050)
         assert v["cache re-reads"][0] == "B worse", v["cache re-reads"]
-        assert "same size" in v["cache re-reads"][1]
+        assert v["cache re-reads"][1] == "total", v["cache re-reads"]
+        assert "different sizes" in verdicts_from(4618, 88)["cache re-reads"][1]
 
     def test_the_per_unit_rows_are_judged_either_way(self):
         # They are the ones that compare unequal arms honestly, which is the whole reason the

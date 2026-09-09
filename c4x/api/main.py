@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
 
 import re  # noqa: E402
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile  # noqa: E402
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse, Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -224,6 +224,9 @@ def _figure_meta(node, count):
         lines = [t for t in (first["note"], second["note"]) if t]
         out.append({"note": "\n".join(lines) or None,
                     "absorbed": list(first["absorbed"]) + list(second["absorbed"]),
+                    # The heading-above-the-chart note is never levelled, so only the marked half
+                    # can raise an alert. `note` stays the hover, whatever else is on the page.
+                    "alert": second.get("alert"),
                     "note_level": second.get("note_level")})
     return out
 
@@ -369,6 +372,12 @@ def _marked_notes(node, count, mark, kind):
 
     notes: dict[int, list[str]] = {i: [] for i in range(count)}
     levels: dict[int, str | None] = dict.fromkeys(range(count))
+    # LEVELLED LINES ARE KEPT APART FROM THE REST, because they are rendered differently and
+    # joining them made one drag the other onto the page. The Session chart carries a warning
+    # ("nothing is selected, so this is the most recent session") AND an ordinary caption ("the
+    # shaded bands are the warn, compact and blocked zones"); joined under one level, the caption
+    # was shown in warning amber alongside it, which is a paragraph of alarm over a legend key.
+    alerts: dict[int, list[str]] = {i: [] for i in range(count)}
     absorbed: dict[int, list[str]] = {i: [] for i in range(count)}
     for at, event in enumerate(events):
         if event[0] != "note":
@@ -391,7 +400,9 @@ def _marked_notes(node, count, mark, kind):
                 chosen = index_at[after[0]]
         if chosen is None or chosen not in notes:
             continue
-        notes[chosen].extend(line for line in lines if line and line.strip())
+        keep = [line for line in lines if line and line.strip()]
+        (alerts if level else notes)[chosen].extend(keep)
+        # ABSORBED COVERS BOTH, so neither channel prints the line as loose prose as well.
         absorbed[chosen].extend(lines)
         # THE FIRST LEVEL WINS, and today that is the only one there is. A chart carrying both a
         # warning and an ordinary caption must not have the warning demoted by whichever of the
@@ -402,6 +413,7 @@ def _marked_notes(node, count, mark, kind):
     # Joined with a newline, not a space: the Window tab's composition chart carries three separate
     # statements and running them together makes one unreadable sentence in a tooltip.
     return [{"note": "\n".join(notes[i]) or None, "absorbed": absorbed[i],
+             "alert": "\n".join(alerts[i]) or None,
              "note_level": levels[i]}
             for i in range(count)]
 
@@ -449,6 +461,7 @@ def _render_payload(pane):
             # carry a level, because only those come through the marked path; a note written above
             # is paired by position and has nowhere to declare one.
             entry["note_level"] = extra.get("note_level")
+            entry["alert"] = extra.get("alert")
     # TEXT THAT BELONGS TO A DASH-ONLY CONTROL. The window calculator's labels and constants
     # sentence are marked in the tree; the page drops these lines rather than printing the
     # labels of inputs it does not draw. The parity surface keeps them: they are real text.
@@ -741,6 +754,31 @@ def _table_meta(node, found=None):
                 pending["head"], pending["note"] = None, None
             hidden = set(getattr(node, "hidden_columns", None) or [])
             bands = _heat_bands(getattr(node, "style_data_conditional", None) or [])
+            # THE ONE COLUMN WORTH CAPPING, chosen from the data rather than from a hand-list.
+            #
+            # Cells do not wrap, so one long value widens the whole table into a horizontal
+            # scroll. Capping EVERY column is the blunt fix and it costs the wrong ones: measured
+            # across the tabs, Messages.preview reaches 220 characters and Sessions.title 200,
+            # while Last Active is 19 and Compactions is 11, and a cap wide enough for a title is
+            # meaningless on a date. Capping the widest TWO left the table scrolling anyway.
+            #
+            # So the server marks the single widest column, and only when it is long enough to be
+            # the problem. A table whose columns are all short marks nothing and is left alone,
+            # which is the rule: narrow the column that needs it, never every column.
+            widest, widest_at = 0, None
+            for row in (getattr(node, "data", None) or []):
+                if not isinstance(row, dict):
+                    continue
+                for key, value in row.items():
+                    if key in hidden:
+                        continue
+                    size = len(str(value)) if value is not None else 0
+                    if size > widest:
+                        widest, widest_at = size, key
+            # 60 characters is where a cell stops being a value and starts being a paragraph. Every
+            # column that is not the offender measured under it; every offender measured over 150.
+            if widest < 60:
+                widest_at = None
             columns = []
             for spec in (getattr(node, "columns", None) or []):
                 if not isinstance(spec, dict):
@@ -763,6 +801,8 @@ def _table_meta(node, found=None):
                     # hard to read down a column of numbers; aligning only the cells is neither.
                     "align": "right" if numeric else "left",
                     "hidden": cid in hidden,
+                    # The page caps THIS column and leaves the rest at their natural width.
+                    "wide": cid == widest_at,
                     "bands": bands.get(cid, []),
                 })
             # The note as the reader should see it on the heading: without the row count, which
@@ -1323,8 +1363,22 @@ _IMPORT_MAX_BYTES = 1 << 30
 
 
 @api.post("/api/project/import")
-async def project_import(file: UploadFile = File(...)):
-    """Load an exported project. Verified before a single row is written."""
+async def project_import(file: UploadFile = File(...), into: str = Form(default=""),
+                         dry_run: bool = Form(default=False)):
+    """Load an exported project. Verified before a single row is written.
+
+    `into` is the working directory on THIS machine to import into, and everything is rebuilt from
+    it: the slug directory under `~/.claude/projects`, the `~/.claude.json` key, the desktop app's
+    record, and the `cwd` in the rows. Empty means the directory the export came from, which is the
+    same-machine case.
+
+    IT IS A FORM FIELD RATHER THAN A PICKER because a browser cannot open a native folder dialog
+    for a path on the server. The page fills it in from the export and lets it be edited; the API
+    and the page normally run on the same machine, so the path the user types is one they can see.
+
+    `dry_run` names every destination and writes nothing, which is the only cheap way to catch a
+    wrong `into` before it lands.
+    """
     from c4x import projects
     _require_writes()
     staged = ROOT / "tmp" / "imports"
@@ -1349,7 +1403,7 @@ async def project_import(file: UploadFile = File(...)):
                         "error": f"an import is capped at {_IMPORT_MAX_BYTES // (1 << 20)} MB",
                         "file": given})
                 fh.write(chunk)
-        return projects.import_(path)
+        return projects.import_(path, into=(into or None), dry_run=dry_run)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400,
                             detail={"error": str(exc), "file": given}) from exc
