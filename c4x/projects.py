@@ -201,6 +201,32 @@ def sessions_with_cwds(con, cwds):
     return [r[0] for r in found]
 
 
+def surviving_normalised_cwds(con):
+    """Every working directory still in this store, in the form the config capture matches by.
+
+    `_capture_config` (`c4x/appstate.py:489`) selects keys with `normalised(key) in wanted`, and
+    `normalised` folds slash spelling and case. So deleting `P:` + `Alpha` spelled with a backslash
+    carries the forward slash entry into the backup too. The survivor test that decided whether to
+    keep them was `sessions_with_cwds`, a byte exact `WHERE cwd IN`, so a session filed under the
+    other spelling was not a survivor and `_drop_config` removed BOTH keys by exact match. The live
+    project then lost its trust entry and its per project settings, and the report said the
+    settings had been kept.
+
+    One import with `--into` using the other slash spelling is enough to produce both forms in one
+    store, so this is reachable through the app's own commands. It is the same class as
+    `sessions_sharing_slug`: the half that CAPTURES and the half that PROTECTS have to agree on
+    what "the same working directory" means, and here they did not.
+    """
+    from c4x import appstate
+    out = set()
+    for (cwd,) in con.execute("SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL"):
+        try:
+            out.add(appstate.normalised(cwd))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def sessions_sharing_slug(con, cwds):
     """Every session still filed in a slug directory these working directories map to.
 
@@ -938,6 +964,13 @@ def import_(path, into=None, dry_run=False):
     # ignore what is already there and files are overwritten from the export either way.
     report["app_state"] = restore_app_state(path, mapping)
     report["mirror"] = verify_mirror(path, mapping=mapping)
+
+    # THE SAME CACHES A DELETE CLEARS, for the same reason and in the other direction. An import
+    # adds sessions and writes transcripts, and `store` holds the session frame and the transcript
+    # scan for 45 seconds, so the imported project was absent from the page for up to that long
+    # while the panel said it had landed. Only `delete` called this.
+    from c4x import store as _s
+    _s.invalidate()
     return report
 
 
@@ -1157,6 +1190,9 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
         # and many strings map to one slug. Using the string test for both let a delete strip a
         # live project's memory and then report that it had kept it.
         slug_survivors = sessions_sharing_slug(con, cwds)
+        # THE THIRD KEYING. Rows follow the session id, `memory/` follows the slug directory, and
+        # the `~/.claude.json` entry follows the working directory string as `normalised` folds it.
+        surviving_norm = surviving_normalised_cwds(con)
         excluded_cwds: list[str] = []
         still_captured: list[str] = []
         if not keep_capturing:
@@ -1190,16 +1226,27 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
     # files still there, which one import of the backup puts back; the other order leaves rows
     # pointing at transcripts that are not there any more.
     rows = app_state_rows(backup, with_blobs=False)
-    shared_kept: list[dict] = []
-    shared = set()
-    if slug_survivors:
-        shared.add(appstate.MEMORY)
-    if survivors:
-        shared.add(appstate.CONFIG)
-    if shared:
-        shared_kept = [{"relpath": row["relpath"], "kind": row["kind"]}
-                       for row in rows if row["kind"] in shared]
-        rows = [row for row in rows if row["kind"] not in shared]
+
+    def _belongs_to_a_survivor(row):
+        """Per ROW, and each kind by the key it is actually filed under.
+
+        Deciding this per KIND was wrong twice over. `memory/` is one directory shared by every
+        spelling that slugs to it, so it is kept when any session still slugs there. A config entry
+        is one key per spelling, and the capture selects keys by `normalised`, so each carried key
+        is kept only when a session still lives in the directory THAT key names.
+        """
+        if row["kind"] == appstate.MEMORY:
+            return bool(slug_survivors)
+        if row["kind"] == appstate.CONFIG:
+            try:
+                return appstate.normalised(row["cwd"]) in surviving_norm
+            except (TypeError, ValueError):
+                return False
+        return False
+
+    shared_kept = [{"relpath": row["relpath"], "kind": row["kind"]}
+                   for row in rows if _belongs_to_a_survivor(row)]
+    rows = [row for row in rows if not _belongs_to_a_survivor(row)]
     purged = appstate.purge(rows, cwds)
 
     snapshots = snapshot_files(ids)
@@ -1234,6 +1281,11 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
             # was left behind and named nowhere.
             "not_carried": (manifest.get("app_state") or {}).get("not_carried") or [],
             "too_large": (manifest.get("app_state") or {}).get("too_large") or [],
+            # A file the export could not READ. Same class as the two above and it was dropped:
+            # the backup does not hold it, the delete did not remove it, and nothing said so.
+            "skipped": (manifest.get("app_state") or {}).get("skipped") or [],
+            # Directory walks the prune refused because it could not prove where to stop.
+            "prune_refused": purged["prune_refused"],
             # Sessions in the same SLUG directory under a different working directory string. They
             # are why `memory/` can be kept when `surviving_sessions` is empty.
             "sessions_sharing_slug": sorted(set(slug_survivors) - set(survivors)),
@@ -1541,7 +1593,11 @@ def main(argv=None):
         for entry in result.get("not_carried") or []:
             print(f"  NOT CARRIED  {entry['files']:,} file(s)  {entry['path']}: {entry['why']}")
         for entry in result.get("too_large") or []:
-            print(f"  TOO LARGE  {entry.get('relpath', entry)}")
+            print(f"  TOO LARGE  {entry['bytes']:,} bytes  {entry['path']}")
+        for entry in result.get("skipped") or []:
+            print(f"  SKIPPED  {entry.get('path', entry)}: {entry.get('why', '')}")
+        for entry in result.get("prune_refused") or []:
+            print(f"  PRUNE REFUSED  {entry['path']}: {entry['why']}")
         for entry in result.get("still_here") or []:
             print(f"  STILL HERE  {entry['kind']}  {entry['path']}")
         return 1 if result.get("still_here") else 0

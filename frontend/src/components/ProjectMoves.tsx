@@ -99,6 +99,11 @@ export function ProjectMoves({
   const close = () => {
     setOpen(false)
     setTyped('')
+    // BOTH CHECKBOXES RESET. `purgeSnapshots` reaches the one thing the backup cannot put back,
+    // and it stayed ticked after the dialog was closed, so the next project it was opened for
+    // inherited it silently from a decision made about a different project.
+    setKeepCapturing(false)
+    setPurgeSnapshots(false)
     setError(null)
     setImported(null)
     setDeleted(null)
@@ -596,12 +601,24 @@ export function ProjectMoves({
                       Backup: <code>{deleted.backup}</code>
                     </p>
                     {deleted.shared_with_surviving_sessions.length > 0 && (
+                      // TWO COUNTS AND TWO KINDS. This called every kept row a memory file and
+                      // counted only `surviving_sessions`, so it could read "shared with 0
+                      // session(s)" directly above a line naming the files it had kept: memory is
+                      // kept for a session that merely shares the slug directory, and that session
+                      // is in `sessions_sharing_slug`, not in `surviving_sessions`.
                       <p className="mt-0.5 text-xs text-warn">
                         Left alone:{' '}
-                        {deleted.shared_with_surviving_sessions.length.toLocaleString()} memory
-                        file(s) and settings shared with{' '}
-                        {deleted.surviving_sessions.length} session(s) still in this working
-                        directory.
+                        {deleted.shared_with_surviving_sessions.filter((e) => e.kind === 'memory')
+                          .length.toLocaleString()}{' '}
+                        memory file(s) and{' '}
+                        {deleted.shared_with_surviving_sessions.filter((e) => e.kind === 'config')
+                          .length.toLocaleString()}{' '}
+                        trust and settings entr(ies), because{' '}
+                        {(
+                          deleted.surviving_sessions.length +
+                          deleted.sessions_sharing_slug.length
+                        ).toLocaleString()}{' '}
+                        session(s) still live in this working directory.
                       </p>
                     )}
                     {deleted.kept_files.map((entry) => (
@@ -612,6 +629,28 @@ export function ProjectMoves({
                     {deleted.refused_files.map((entry) => (
                       <p key={entry.relpath} className="mt-0.5 break-all text-xs text-warn">
                         Refused <code>{entry.relpath}</code>: {entry.why}
+                      </p>
+                    ))}
+                    {deleted.config_keys_kept.map((entry) => (
+                      <p key={entry.key} className="mt-0.5 break-all text-xs text-warn">
+                        Trust entry kept for <code>{entry.key}</code>: {entry.why}
+                      </p>
+                    ))}
+                    {deleted.skipped.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Left on disk, the export could not read it: <code>{entry.path}</code>{' '}
+                        {entry.why}
+                      </p>
+                    ))}
+                    {deleted.too_large.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Left on disk, too large to carry ({(entry.bytes / 1048576).toFixed(1)} MB):{' '}
+                        <code>{entry.path}</code>
+                      </p>
+                    ))}
+                    {deleted.prune_refused.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Prune refused <code>{entry.path}</code>: {entry.why}
                       </p>
                     ))}
                     {deleted.not_carried.map((entry) => (

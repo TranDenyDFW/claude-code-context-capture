@@ -371,7 +371,12 @@ export interface DeleteReport {
    * so they are the one thing "removes exactly what the backup contains" does not account for.
    */
   not_carried: { path: string; files: number; why: string }[]
-  too_large: { relpath: string; bytes: number }[]
+  /** `path`, not `relpath`: this is what `_write_app_state` actually appends. */
+  too_large: { path: string; bytes: number }[]
+  /** A file the export could not READ. Same class: on disk, and not in the backup. */
+  skipped: { path: string; why: string }[]
+  /** A directory walk the prune refused because it could not prove where to stop. */
+  prune_refused: { path: string; why: string }[]
   snapshots: { files: number; removed: number; bytes: number }
   /**
    * THE ACCEPTANCE TEST. A delete removes exactly what the backup contains, and nothing else, so

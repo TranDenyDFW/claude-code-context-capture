@@ -478,6 +478,14 @@ class _RowsCache(TypedDict):
 
 _rows_cache: _RowsCache = {"at": 0.0, "df": None}
 
+# BUMPED BY `invalidate`, AND CHECKED BY EVERY CACHED READER BEFORE IT INSTALLS WHAT IT READ. A
+# clear alone is not enough: a reader that started before the delete finishes after it, and writes
+# the answer it computed from the pre-delete store into the slot the delete just emptied. The
+# window is the whole length of the uncached read, which for the session frame is an aggregate
+# over every turn in the store. Three processes write this store by design, so the race is
+# reachable rather than theoretical.
+_generation = {"n": 0}
+
 
 def session_rows(ttl: float = 45.0) -> pd.DataFrame:
     """Cached wrapper. The uncached query is a GROUP BY over every turn in the store.
@@ -489,9 +497,11 @@ def session_rows(ttl: float = 45.0) -> pd.DataFrame:
     now = _time.time()
     if _rows_cache["df"] is not None and now - _rows_cache["at"] < ttl:
         return _rows_cache["df"]
+    seen = _generation["n"]
     df = _session_rows_uncached()
-    _rows_cache["at"] = now
-    _rows_cache["df"] = df
+    if seen == _generation["n"]:
+        _rows_cache["at"] = now
+        _rows_cache["df"] = df
     return df
 
 
@@ -513,6 +523,7 @@ def invalidate():
     is why it is cached at all. A removal is rare enough to pay for all four, and a page that draws
     a project the user just deleted costs more than a subprocess does.
     """
+    _generation["n"] += 1
     _rows_cache.update({"at": 0.0, "df": None})
     _archived_cache.update({"map": None, "at": 0.0, "root": None})
     _transcript_cache.update({"ids": None, "at": 0.0})
@@ -655,12 +666,14 @@ def archived_sessions(root=None, ttl: float = 45.0) -> dict:
     if (_archived_cache["map"] is not None and _archived_cache["root"] == root
             and now - _archived_cache["at"] < ttl):
         return _archived_cache["map"]
+    seen = _generation["n"]
     found = {}
     for path in glob.glob(os.path.join(root, "*", "*", "*.json")):
         row = read_archived_record(path)
         if row is not None:
             found[row[0]] = row[1]
-    _archived_cache.update({"map": found, "at": now, "root": root})
+    if seen == _generation["n"]:
+        _archived_cache.update({"map": found, "at": now, "root": root})
     return found
 
 
@@ -688,6 +701,7 @@ def transcript_ids(ttl: float = 45.0):
     now = _time.time()
     if _transcript_cache["ids"] is not None and now - _transcript_cache["at"] < ttl:
         return _transcript_cache["ids"]
+    seen = _generation["n"]
     ids = set()
     root = os.path.join(HOME, ".claude", "projects")
     try:
@@ -703,8 +717,9 @@ def transcript_ids(ttl: float = 45.0):
                     ids.add(entry.name[: -len(".jsonl")])
         except OSError:
             continue          # a directory that vanished between the two scans is simply absent
-    _transcript_cache["ids"] = ids
-    _transcript_cache["at"] = now
+    if seen == _generation["n"]:
+        _transcript_cache["ids"] = ids
+        _transcript_cache["at"] = now
     return ids
 
 

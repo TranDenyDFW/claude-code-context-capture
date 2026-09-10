@@ -50,6 +50,7 @@ function deleteReport(over: Partial<DeleteReport> = {}): DeleteReport {
     still_captured: [], removed_files: 0, removed_bytes: 0, kept_files: [], refused_files: [],
     config_keys_removed: [], config_keys_kept: [], shared_with_surviving_sessions: [],
     surviving_sessions: [], sessions_sharing_slug: [], not_carried: [], too_large: [],
+    skipped: [], prune_refused: [],
     snapshots: { files: 0, removed: 0, bytes: 0 }, still_here: [],
     appeared_since_backup: [], ...over,
   }
@@ -155,6 +156,60 @@ describe('delete', () => {
     await screen.findByText(/Deleted/)
 
     expect(screen.queryByText(/not a session this export carries/)).not.toBeNull()
+  })
+
+  it('counts both kept kinds and both survivor lists, not memory and surviving_sessions', async () => {
+    // It called every kept row a memory file and counted only `surviving_sessions`, so it could
+    // read "shared with 0 session(s)" directly above a line naming the files it had kept. Memory
+    // is kept for a session that merely shares the slug directory, and that session is in
+    // `sessions_sharing_slug`.
+    vi.spyOn(api.project, 'delete').mockResolvedValue(
+      deleteReport({
+        shared_with_surviving_sessions: [
+          { relpath: 'memory/notes.md', kind: 'memory' },
+          { relpath: 'F:\SecDb', kind: 'config' },
+        ],
+        surviving_sessions: [],
+        sessions_sharing_slug: ['other-0'],
+      }),
+    )
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    await screen.findByText(/Deleted/)
+
+    const line = screen.getByText(/Left alone/).textContent ?? ''
+    expect(line).toMatch(/1 memory file\(s\)/)
+    expect(line).toMatch(/1 trust and settings/)
+    expect(line).toMatch(/1 session\(s\) still live/)
+    expect(line).not.toMatch(/0 session\(s\)/)
+  })
+
+  it('explains a trust entry it kept, rather than only painting it red', async () => {
+    vi.spyOn(api.project, 'delete').mockResolvedValue(
+      deleteReport({
+        config_keys_kept: [{ key: PROJECT, why: 'the entry under this key is not the one the backup holds' }],
+      }),
+    )
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    await screen.findByText(/Deleted/)
+
+    expect(screen.queryByText(/not the one the backup holds/)).not.toBeNull()
+  })
+
+  it('disarms the irreversible option when the dialog is closed', () => {
+    show()
+    const snapshots = screen.getByLabelText(/pre-compaction snapshots/i) as HTMLInputElement
+    fireEvent.click(snapshots)
+    expect(snapshots.checked).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: /^close$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /project/i }))
+
+    expect((screen.getByLabelText(/pre-compaction snapshots/i) as HTMLInputElement).checked)
+      .toBe(false)
   })
 
   it('sends the cohort untouched, not the bare path', async () => {

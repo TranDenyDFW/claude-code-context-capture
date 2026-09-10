@@ -840,7 +840,12 @@ def purge_paths(row, dest_cwd, root=None):
         return [], f"{row['relpath']!r}: a desktop record is carried as a filename alone"
     base = Path(root or sessions_root())
     if not base.is_dir():
-        return [], "this machine keeps no desktop records, so there is none of this one to remove"
+        # NO PATHS AND NO REFUSAL. This machine keeps no desktop records at all, so there is
+        # nothing of this one to remove and nothing unresolved about it: `purge` files that under
+        # `absent`, which is what it is. It used to be a refusal, and because it was, every caller
+        # had to skip refusals to avoid a false alarm on a machine with no desktop app. That skip
+        # is what made a genuinely unresolved row invisible to the acceptance check.
+        return [], None
     found = sorted(base.glob(f"*/*/{parts[0]}"))
     # ONE ROW, ONE FILE. The filename carries a uuid so a second match is not expected, but the
     # glob spans every account and organisation pair on the machine and `purge` would remove both.
@@ -876,7 +881,8 @@ def purge(rows, cwds, sessions_root=None, dry_run=False):
     mapping = {cwd: cwd for cwd in _cwds(cwds)}
     report: dict[str, Any] = {
         "removed": [], "kept": [], "absent": [], "refused": [], "config_keys": [],
-        "config_kept": [], "pruned": [], "bytes": 0, "dry_run": bool(dry_run)}
+        "config_kept": [], "pruned": [], "prune_refused": [], "bytes": 0,
+        "dry_run": bool(dry_run)}
 
     # 1. TYPES, before anything is opened. A purge decides what to remove by comparing the hash in
     # the row against the bytes on the disk, so a row carrying no hash would compare unequal, keep
@@ -1001,8 +1007,8 @@ def purge(rows, cwds, sessions_root=None, dry_run=False):
         # FINDS a path and the function that BOUNDS it resolve it differently. Refused and named,
         # because a prune that cannot say where it must stop has no business walking.
         if floor is not None and not _is_within(current, floor):
-            report["refused"].append({
-                "relpath": str(current), "kind": "prune",
+            report["prune_refused"].append({
+                "path": str(current),
                 "why": f"{floor} is not a parent of {current}, so there is no floor to stop at"})
             continue
         while floor is not None and str(current).casefold() != str(floor).casefold():
@@ -1045,6 +1051,11 @@ def still_present(rows, cwds, sessions_root=None):
             continue
         paths, refusal = purge_paths(row, destination_cwd(row["cwd"], mapping), sessions_root)
         if refusal:
+            # A REFUSAL IS "I CANNOT TELL", WHICH IS NOT "IT IS GONE". This skipped, so a carried
+            # file that `purge` refused to touch left `still_here` empty, the CLI exited 0 and the
+            # panel painted green over a delete that had not removed it.
+            out.append({"relpath": row["relpath"], "kind": row["kind"], "path": None,
+                        "why": refusal})
             continue
         for path in paths:
             if path.exists():

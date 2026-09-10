@@ -13,9 +13,18 @@ with that working directory, and measured on this machine the extreme case is
 `P:\\ClaudeExt\\QuestionExtension\\archived`, which would carry 21 of the 2,430 files in its slug
 directory while the base project carries 2,382 of them.
 
-Every root is monkeypatched onto a temporary directory, layered over the autouse isolation in
-`conftest.py`, so nothing here can read or write the real `~/.claude`, `~/.claude.json` or
-`%APPDATA%\\Claude`.
+Every root these tests WRITE through is monkeypatched onto a temporary directory, layered over the
+autouse isolation in `conftest.py`, so nothing here can write the real `~/.claude`,
+`~/.claude.json` or the desktop app's application data directory.
+
+READS ARE NOT FULLY ISOLATED, and claiming they were was wider than the truth. `conftest.py`
+patches `appstate.CLAUDE_DIR`, `appstate.CONFIG_PATH` and `appstate.sessions_root`. It
+deliberately does NOT patch `store.sessions_root`, because that is what puts the archived marker
+on every session row and pointing it at an empty directory silently removed the marker from the
+whole suite. Neither is `store.HOME` (`store.py:35`), which is resolved at import. So `delete` to
+`session_ids` to `session_rows` to `classify` scans the real projects directory, and
+`archived_sessions` globs the real application data directory. Both are reads, both are harmless,
+and no test here may depend on what they return.
 """
 import hashlib
 import json
@@ -261,9 +270,50 @@ class TestAnArchivedLabelTakesOnlyItsOwnSession:
             "another project is still filed in this slug directory and its memory is in it")
         assert result["surviving_sessions"] == [], "no session has that exact working directory"
         assert result["sessions_sharing_slug"] == ["other-0"]
-        assert {e["kind"] for e in result["shared_with_surviving_sessions"]} == {"memory"}, (
-            "the config entry is keyed by the exact string, so it goes; memory is not, so it stays")
-        assert ALPHA not in config_of(machine)["projects"]
+        # BOTH SHARED LAYERS STAY, for two different reasons, which is why they are decided per row
+        # rather than per kind. `memory/` stays because a session still slugs into that directory.
+        # The trust entry stays because `normalised` folds the slash spelling, so the surviving
+        # session at the forward slash spelling IS a session in the directory this key names, and
+        # `_capture_config` carried the key on exactly that basis.
+        assert {e["kind"] for e in result["shared_with_surviving_sessions"]} == {"memory", "config"}
+        assert ALPHA in config_of(machine)["projects"], (
+            "a live project is in this directory, and without its trust entry Claude Code asks to "
+            "trust the directory again")
+        assert result["config_keys_removed"] == []
+
+    def test_a_surviving_project_under_the_other_slash_spelling_keeps_its_trust_entry(
+            self, store_at, machine, tmp_path):
+        """`_capture_config` selects keys with `normalised(key)`, so it carries BOTH spellings.
+
+        The survivor test that decided whether to keep them was a byte exact `WHERE cwd IN`, so a
+        session filed under the other spelling was not a survivor and `_drop_config` deleted both
+        keys by exact match. The live project lost its trust entry and its per project settings,
+        Claude Code would ask to trust that directory again, and the report said the settings had
+        been kept while `config_keys_removed` named both.
+
+        One `import --into` with the other slash spelling puts both forms in one store, so this is
+        reachable through the app's own commands.
+        """
+        config = config_of(machine)
+        config["projects"]["P:/Alpha"] = {"hasTrustDialogAccepted": True, "other": "spelling"}
+        machine.config.write_text(json.dumps(config), encoding="utf-8")
+        con = sqlite3.connect(str(store_at))
+        con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                    ("other-0", "slug-0", "P:/Alpha", None, "2.1.229", "cli",
+                     "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z", "C:/t/other-0.jsonl"))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        after = config_of(machine)["projects"]
+        assert "P:/Alpha" in after, "the surviving project's own key"
+        assert ALPHA in after, "the same directory under the spelling the backup carried"
+        assert result["config_keys_removed"] == []
+        assert {e["relpath"] for e in result["shared_with_surviving_sessions"]} >= {
+            ALPHA, "P:/Alpha"}
+        assert r"P:\Beta" in after, "every unrelated project is untouched"
 
     def test_memory_and_the_trust_entry_belong_to_the_directory_and_stay(
             self, store_at, machine, tmp_path, monkeypatch):
@@ -313,8 +363,13 @@ class TestNothingTheBackupDoesNotHold:
 
         assert machine.stray.exists(), (
             "that file belongs to a session this store has no row for, so it is not ours to take")
-        not_carried = projects.read_manifest(result["backup"])["app_state"]["not_carried"]
-        assert any(str(machine.stray) == entry["path"] for entry in not_carried)
+        # THE DELETE'S OWN REPORT, not the manifest. Reading the manifest here tested
+        # `export`, which already behaved this way, so `"not_carried": []` in the delete report
+        # passed. These files are on disk and not in the backup, which is the one thing the
+        # acceptance rule does not cover, so the delete has to say so itself.
+        assert any(str(machine.stray) == entry["path"] for entry in result["not_carried"])
+        carried = projects.read_manifest(result["backup"])["app_state"]["not_carried"]
+        assert result["not_carried"] == carried
 
     def test_nothing_outside_this_project_changes(self, store_at, machine, tmp_path):
         """Hash the whole fake machine before and after, and account for every difference."""
@@ -332,8 +387,15 @@ class TestNothingTheBackupDoesNotHold:
         assert added == {str(machine.config) + ".c4x-before"}, (
             "a copy is kept beside the config, as the import does")
         assert removed, "nothing was removed at all"
+        # NOT the bare substring "tasks", which is satisfied by `~/.claude/tasks` ITSELF. That
+        # directory belongs to the machine and holds every other project's task directories, so
+        # raising the TASKS prune floor by one level removed it and this assertion still passed.
+        own_tasks = str(machine.claude / "tasks" / "s0-0")
         for path in removed:
-            assert str(machine.base) in path or "tasks" in path or DESKTOP_FILE in path, path
+            assert (str(machine.base) in path or path.startswith(own_tasks)
+                    or DESKTOP_FILE in path), path
+        assert str(machine.claude / "tasks") in after, (
+            "the tasks directory is the machine's, and every other project has one under it")
         assert r"P:\Beta" in config_of(machine)["projects"], (
             "the other project's trust entry is in the same file and is not this delete's")
 
@@ -425,6 +487,165 @@ class TestTheDesktopRecord:
         assert source.exists() and (twin / DESKTOP_FILE).exists()
 
 
+class TestARefusalIsNotARemoval:
+    def test_a_row_the_purge_refused_reaches_the_acceptance_check(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """A refusal means "I cannot tell", which is not "it is gone".
+
+        `still_present` skipped every refusal, so a carried file the purge would not touch left
+        `still_here` empty: the CLI exited 0 and the panel painted green over a delete that had
+        not removed it. The refusal is forced here rather than staged on disk, because the natural
+        cause, two records under one name, is already gated one layer down and staging it would
+        make the backup carry two rows for one relpath.
+        """
+        from c4x import appstate
+        real = appstate.purge_paths
+
+        def refuse_the_record(row, dest_cwd, root=None):
+            if row["kind"] == appstate.DESKTOP:
+                return [], "forced by the test: this machine cannot resolve that record"
+            return real(row, dest_cwd, root)
+
+        monkeypatch.setattr(appstate, "purge_paths", refuse_the_record)
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert (machine.sessions / FOREIGN_ACCOUNT / ORG / DESKTOP_FILE).exists(), (
+            "the purge would not touch it, so it is still there")
+        assert [entry["relpath"] for entry in result["refused_files"]] == [DESKTOP_FILE]
+        assert [entry["relpath"] for entry in result["still_here"]] == [DESKTOP_FILE], (
+            "the acceptance check has to see what the purge would not touch, or a delete that "
+            "removed less than the backup holds reports success")
+
+
+    def test_a_machine_with_no_desktop_records_reports_absence_not_a_refusal(self, tmp_path):
+        """The other end of the same fix, and the reason the skip existed at all.
+
+        Calling "there is no such record anywhere on this machine" a refusal meant every caller had
+        to skip refusals or raise a false alarm on any machine without the desktop app. That skip
+        is what hid a genuinely unresolved row from the acceptance check. It is an absence, so it
+        is reported as one and `purge` files it under `absent`.
+        """
+        from c4x import appstate
+        row = {"kind": appstate.DESKTOP, "relpath": DESKTOP_FILE, "cwd": ALPHA,
+               "sha256": "x", "rebased_sha256": "x"}
+
+        paths, refusal = appstate.purge_paths(row, ALPHA, str(tmp_path / "no-such-root"))
+
+        assert paths == []
+        assert refusal is None
+
+
+class TestTheCachesTellTheTruthAfterAChange:
+    def test_a_reader_in_flight_does_not_reinstall_what_a_change_cleared(
+            self, store_at, monkeypatch):
+        """Clearing is not enough on its own.
+
+        A reader that started before the delete finishes after it and writes the answer it computed
+        from the pre delete store into the slot the delete just emptied. The window is the whole
+        length of the uncached read, which here is an aggregate over every turn in the store, and
+        three processes write this store by design.
+        """
+        from c4x import store
+        real = store._session_rows_uncached
+
+        def a_delete_lands_mid_read():
+            df = real()
+            store.invalidate()
+            return df
+
+        monkeypatch.setattr(store, "_session_rows_uncached", a_delete_lands_mid_read)
+        store.invalidate()
+
+        store.session_rows()
+
+        assert store._rows_cache["df"] is None, (
+            "that frame describes the store as it was before the change, so installing it puts "
+            "the stale answer back behind a fresh timestamp")
+
+    def test_an_import_clears_them_too(self, store_at, machine, tmp_path):
+        """Only `delete` did. An import adds sessions and writes transcripts."""
+        from c4x import store
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups",
+                                 keep_capturing=True)
+        forget_cached_rows()
+        store.session_rows()
+        assert store._rows_cache["df"] is not None, "warm, or this proves nothing"
+
+        projects.import_(result["backup"])
+
+        assert store._rows_cache["df"] is None
+        assert store._transcript_cache["ids"] is None
+
+
+class TestThePruneKnowsWhereToStop:
+    """Each of the two guards, on its own.
+
+    THE END TO END TEST CANNOT CATCH EITHER OF THEM ALONE, and that is a property of the fix rather
+    than a flaw in the test: the corrected floor and the ancestry check are independently
+    sufficient, so reverting one leaves the other protecting the tree. That is good defence and a
+    bad gate, because either line could rot with the suite still green and nothing would be left
+    holding the other end. These two assert each line directly.
+    """
+
+    def test_a_desktop_records_floor_is_where_it_was_found(self, machine):
+        """Not `desktop_dir(sessions_root)`, which is the pair the app writes to NOW.
+
+        `purge_paths` finds the record wherever it actually is. When the two disagree the floor is
+        not an ancestor of the directory being walked, the loop that stops on equality never stops,
+        and the walk removes the org directory, the account directory and the sessions root.
+        """
+        from c4x import appstate
+        record = machine.sessions / FOREIGN_ACCOUNT / ORG / DESKTOP_FILE
+
+        floor = appstate._prune_floor(appstate.DESKTOP, ALPHA, str(machine.sessions), record)
+
+        assert floor == record.parent
+        assert floor != appstate.desktop_dir(str(machine.sessions)), (
+            "the fixture files the record under an account this machine is not signed in to, "
+            "which is the case that tells the two answers apart")
+
+    def test_a_floor_that_is_not_a_parent_is_not_a_floor(self):
+        """The guard, as its own claim, because the loop it protects stops only on equality."""
+        from c4x import appstate
+        here = Path("C:/a/b/c")
+
+        assert appstate._is_within(here, Path("C:/a/b"))
+        assert appstate._is_within(here, here), "a directory is within itself"
+        assert appstate._is_within(here, Path("C:/A/B")), "NTFS does not care about case"
+        assert not appstate._is_within(here, Path("C:/a/x")), (
+            "a sibling is not a parent, and walking up from c would never reach it")
+        assert not appstate._is_within(Path("C:/a"), here), "a parent is not within its child"
+
+
+    def test_a_prune_whose_floor_is_not_a_parent_refuses_instead_of_walking(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """The guard AT ITS CALL SITE, forced, because a correct floor never reaches it.
+
+        Testing `_is_within` alone was not enough: reverting the call site to `if False:` left the
+        helper correct and its unit test green, so the branch that actually protects the tree could
+        have been deleted with the suite still passing. Forcing a wrong floor is the only way to
+        reach it once the floor beside it is right.
+        """
+        from c4x import appstate
+        real = appstate._prune_floor
+
+        def wrong(kind, dest_cwd, sessions_root=None, path=None):
+            if kind == appstate.DESKTOP:
+                return machine.sessions / "no-such-account" / "no-such-org"
+            return real(kind, dest_cwd, sessions_root, path)
+
+        monkeypatch.setattr(appstate, "_prune_floor", wrong)
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert machine.sessions.is_dir(), "the sessions root belongs to the machine"
+        assert (machine.sessions / FOREIGN_ACCOUNT).is_dir(), "so does the account directory"
+        assert [entry["path"] for entry in result["prune_refused"]] == [
+            str(machine.sessions / FOREIGN_ACCOUNT / ORG)]
+        assert "is not a parent of" in result["prune_refused"][0]["why"]
+
+
 class TestTheInverseOfTheMirror:
     def test_every_carried_file_is_missing_afterwards(self, store_at, machine, tmp_path):
         result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
@@ -473,19 +694,25 @@ class TestTheInverseOfTheMirror:
 class TestNothingIsRemovedOnTheStrengthOfABackupThatDoesNotRead:
     def test_an_export_that_cannot_verify_deletes_nothing(
             self, store_at, machine, tmp_path, monkeypatch):
-        before = tree(machine.claude, machine.sessions)
+        # THE CONFIG FILE IS IN THE COMPARISON. `machine.config` lives beside `.claude`, not
+        # under it, so hashing only those two roots left the one layer a delete EDITS rather than
+        # unlinks outside the check: dropping the project key before the export refused was
+        # invisible here.
+        roots = (machine.claude, machine.sessions, machine.config.parent)
+        before = tree(*roots)
         monkeypatch.setattr(projects, "verify",
                             lambda path: (False, ["deliberately refused by the test"]))
 
         with pytest.raises(RuntimeError):
             projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
 
-        assert tree(machine.claude, machine.sessions) == before
+        assert tree(*roots) == before
+        assert ALPHA in config_of(machine)["projects"]
 
     def test_a_config_that_does_not_parse_stops_the_delete_before_the_backup(
             self, store_at, machine, tmp_path):
         """The defect that cost 26 project entries on the test laptop, as a refusal."""
-        before = tree(machine.claude, machine.sessions)
+        before = tree(machine.claude, machine.sessions, machine.config.parent)
         machine.config.write_text("{not json at all", encoding="utf-8")
         out_dir = tmp_path / "backups"
 
@@ -493,7 +720,7 @@ class TestNothingIsRemovedOnTheStrengthOfABackupThatDoesNotRead:
             projects.delete(ALPHA, confirm=ALPHA, out_dir=out_dir)
 
         assert (machine.base / "s0-0.jsonl").exists()
-        assert set(tree(machine.claude, machine.sessions)) == set(before)
+        assert set(tree(machine.claude, machine.sessions, machine.config.parent)) == set(before)
         assert not out_dir.exists() or list(out_dir.iterdir()) == [], (
             "no backup is written for a delete that is going to refuse")
 
