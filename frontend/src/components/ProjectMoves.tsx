@@ -82,6 +82,7 @@ export function ProjectMoves({
   const [open, setOpen] = useState(false)
   const [typed, setTyped] = useState('')
   const [keepCapturing, setKeepCapturing] = useState(false)
+  const [purgeSnapshots, setPurgeSnapshots] = useState(false)
   const [busy, setBusy] = useState<'import' | 'delete' | 'include' | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [imported, setImported] = useState<ImportReport | null>(null)
@@ -169,7 +170,7 @@ export function ProjectMoves({
     setBusy('delete')
     setError(null)
     try {
-      setDeleted(await api.project.delete(cohort, typed, keepCapturing))
+      setDeleted(await api.project.delete(cohort, typed, keepCapturing, purgeSnapshots))
       setTyped('')
       onChanged()
     } catch (problem) {
@@ -511,7 +512,9 @@ export function ProjectMoves({
                   <>
                     <p className="mt-0.5 text-xs text-ink-faint">
                       An export is written and read back first, so this is undoable by importing
-                      the file it leaves behind. The transcripts on disk are untouched.
+                      the file it leaves behind. It removes exactly what that backup holds and
+                      nothing else: the rows, the transcripts, the tasks, and the chat in the
+                      desktop app.
                     </p>
                     <label className="mt-2 flex items-center gap-2 text-xs text-ink-dim">
                       <input
@@ -520,6 +523,15 @@ export function ProjectMoves({
                         onChange={(event) => setKeepCapturing(event.target.checked)}
                       />
                       Keep capturing this project (it will come back on the next harvest)
+                    </label>
+                    <label className="mt-1 flex items-center gap-2 text-xs text-ink-dim">
+                      <input
+                        type="checkbox"
+                        checked={purgeSnapshots}
+                        onChange={(event) => setPurgeSnapshots(event.target.checked)}
+                      />
+                      Also remove its pre-compaction snapshots (the backup does not carry them, so
+                      this part cannot be undone)
                     </label>
                     <label className="mt-2 block text-xs text-ink-dim">
                       Type the project path to confirm:
@@ -548,15 +560,67 @@ export function ProjectMoves({
                       </button>
                     </div>
                     {deleted && (
-                      <div className="mt-2 rounded-md border border-good/40 bg-good/5 px-3 py-2
-                                      text-sm">
-                        <p className="text-good">Deleted {deleted.project}</p>
+                      // THE VERDICT IS `still_here`, NOT THE ABSENCE OF AN EXCEPTION. A delete
+                      // removes exactly what the backup holds and nothing else, so anything left
+                      // behind is the claim failing and is painted as such.
+                      <div
+                        className={`mt-2 rounded-md border px-3 py-2 text-sm ${
+                          deleted.still_here.length > 0
+                            ? 'border-bad/40 bg-bad/5'
+                            : 'border-good/40 bg-good/5'
+                        }`}
+                      >
+                        <p className={deleted.still_here.length > 0 ? 'text-bad' : 'text-good'}>
+                          {deleted.still_here.length > 0
+                            ? `Deleted ${deleted.project}, and ${deleted.still_here.length} file(s) are still here`
+                            : `Deleted ${deleted.project}`}
+                        </p>
                         <p className="mt-1 text-xs">
                           Removed: <Counts counts={deleted.removed} />
+                        </p>
+                        <p className="mt-0.5 text-xs text-ink-dim">
+                          {deleted.removed_files.toLocaleString()} file(s),{' '}
+                          {(deleted.removed_bytes / 1048576).toFixed(1)} MB
+                          {deleted.config_keys_removed.length > 0 &&
+                            ', and the trust and settings entry'}
                         </p>
                         <p className="mt-0.5 break-all text-xs text-ink-dim">
                           Backup: <code>{deleted.backup}</code>
                         </p>
+                        {deleted.shared_with_surviving_sessions.length > 0 && (
+                          <p className="mt-0.5 text-xs text-warn">
+                            Left alone:{' '}
+                            {deleted.shared_with_surviving_sessions.length.toLocaleString()} memory
+                            file(s) and settings shared with{' '}
+                            {deleted.surviving_sessions.length} session(s) still in this working
+                            directory.
+                          </p>
+                        )}
+                        {deleted.kept_files.map((entry) => (
+                          <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                            Kept <code>{entry.path}</code>: {entry.why}
+                          </p>
+                        ))}
+                        {deleted.still_here.map((entry) => (
+                          <p key={entry.path} className="mt-0.5 break-all text-xs text-bad">
+                            Still here: <code>{entry.path}</code>
+                          </p>
+                        ))}
+                        {deleted.snapshots.files > 0 && (
+                          <p className="mt-0.5 text-xs text-ink-dim">
+                            {deleted.snapshots.removed > 0
+                              ? `${deleted.snapshots.removed} pre-compaction snapshot(s) removed, `
+                              : `${deleted.snapshots.files} pre-compaction snapshot(s) kept, `}
+                            {(deleted.snapshots.bytes / 1048576).toFixed(1)} MB. The backup does
+                            not carry them.
+                          </p>
+                        )}
+                        {deleted.still_captured.map((cwd) => (
+                          <p key={cwd} className="mt-0.5 break-all text-xs text-ink-dim">
+                            Still captured: <code>{cwd}</code> has sessions this delete did not
+                            take.
+                          </p>
+                        ))}
                         <p className="mt-0.5 text-xs text-ink-dim">
                           {deleted.excluded
                             ? 'Harvest will skip it from now on. Diagnostics lists it.'

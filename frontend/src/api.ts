@@ -350,6 +350,26 @@ export interface DeleteReport {
   backup: string
   removed: Record<string, number>
   excluded: boolean
+  excluded_cwds: string[]
+  /** Directories still harvested, because sessions this delete did not take live in them. */
+  still_captured: string[]
+  removed_files: number
+  removed_bytes: number
+  /** On disk still, with the reason. A file that changed since the backup is not the backup's. */
+  kept_files: { path: string; kind: string; why: string }[]
+  refused_files: { relpath: string; why: string }[]
+  config_keys_removed: string[]
+  config_keys_kept: { key: string; why: string }[]
+  /** Memory and trust settings left alone, because they belong to the working directory. */
+  shared_with_surviving_sessions: { relpath: string; kind: string }[]
+  surviving_sessions: string[]
+  snapshots: { files: number; removed: number; bytes: number }
+  /**
+   * THE ACCEPTANCE TEST. A delete removes exactly what the backup contains, and nothing else, so
+   * anything named here is a delete that did not finish. Empty is the only good answer.
+   */
+  still_here: { path: string; kind: string }[]
+  appeared_since_backup: string[]
 }
 
 export class ApiError extends Error {
@@ -472,12 +492,18 @@ export const api = {
       return post<ImportReport>('/api/project/import', body)
     },
 
-    /** `confirm` must be the project path exactly. The server checks it; this does not. */
-    delete: (cohort: string, confirm: string, keepCapturing = false) =>
+    /**
+     * `confirm` must be the project path exactly. The server checks it; this does not.
+     *
+     * `purgeSnapshots` reaches the pre-compaction snapshots, which the backup does NOT carry, so
+     * it is the one part of a delete that importing the backup cannot undo.
+     */
+    delete: (cohort: string, confirm: string, keepCapturing = false, purgeSnapshots = false) =>
       post<DeleteReport>('/api/project/delete', {
         cohort,
         confirm,
         keep_capturing: keepCapturing,
+        purge_snapshots: purgeSnapshots,
       }),
 
     include: (project: string) =>

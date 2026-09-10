@@ -1413,10 +1413,13 @@ async def project_import(file: UploadFile = File(...), into: str = Form(default=
 
 @api.post("/api/project/delete")
 def project_delete(body: dict):
-    """Export, verify, remove, then stop capturing. It stops at the first thing that fails.
+    """Export, verify, remove every layer, then stop capturing. First failure stops it.
 
     `confirm` must be the project path exactly. A boolean cannot tell the wrong project from the
     right one, and that is the entire risk here.
+
+    `purge_snapshots` reaches the one thing the backup does not carry, so it defaults to false and
+    the report names the count and the bytes either way.
     """
     from c4x import projects
     _require_writes()
@@ -1424,7 +1427,8 @@ def project_delete(body: dict):
     try:
         return projects.delete(project,
                                confirm=str(body.get("confirm", "")),
-                               keep_capturing=bool(body.get("keep_capturing")))
+                               keep_capturing=bool(body.get("keep_capturing")),
+                               purge_snapshots=bool(body.get("purge_snapshots")))
     except ValueError as exc:
         # 409, not 400: the request was well formed and the server refused it. A wrong confirmation
         # string is the guard working, and it should read differently from a malformed cohort.

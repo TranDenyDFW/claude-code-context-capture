@@ -8,7 +8,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { api } from '@/api'
-import type { ImportReport } from '@/api'
+import type { DeleteReport, ImportReport } from '@/api'
 import { ProjectMoves, pathOf, slugFor } from './ProjectMoves'
 // Vite's ?raw import, not node:fs. The app tsconfig types `vite/client` and NOT `node`, so
 // readFileSync/process do not type-check here at all: `npm run typecheck` reported three
@@ -29,6 +29,23 @@ function show(props: Partial<Parameters<typeof ProjectMoves>[0]> = {}) {
   )
   fireEvent.click(screen.getByRole('button', { name: /project/i }))
   return { onChanged }
+}
+
+/**
+ * A clean delete report, so each case states the ONE thing it is about.
+ *
+ * Typed as `DeleteReport` on purpose: it is the compiler, not a runtime assertion, that catches a
+ * stub which has drifted from the server's shape. These stubs carried four fields and the page
+ * grew to read nine, so three cases died on `undefined.length` and said nothing about the page.
+ */
+function deleteReport(over: Partial<DeleteReport> = {}): DeleteReport {
+  return {
+    project: PROJECT, backup: 'tmp/x.db', removed: {}, excluded: false, excluded_cwds: [],
+    still_captured: [], removed_files: 0, removed_bytes: 0, kept_files: [], refused_files: [],
+    config_keys_removed: [], config_keys_kept: [], shared_with_surviving_sessions: [],
+    surviving_sessions: [], snapshots: { files: 0, removed: 0, bytes: 0 }, still_here: [],
+    appeared_since_backup: [], ...over,
+  }
 }
 
 const confirmField = () => screen.getByLabelText(/type the project path to confirm/i)
@@ -84,27 +101,78 @@ describe('delete', () => {
   })
 
   it('sends the cohort untouched, not the bare path', async () => {
-    const sent = vi.spyOn(api.project, 'delete').mockResolvedValue({
-      project: PROJECT, backup: 'tmp/x.db', removed: { turns: 3 }, excluded: true,
-    })
+    const sent = vi.spyOn(api.project, 'delete').mockResolvedValue(
+      deleteReport({ removed: { turns: 3 }, excluded: true }),
+    )
     const { onChanged } = show()
     fireEvent.change(confirmField(), { target: { value: PROJECT } })
     fireEvent.click(deleteButton())
     await screen.findByText(/Deleted/)
-    expect(sent).toHaveBeenCalledWith(COHORT, PROJECT, false)
+    expect(sent).toHaveBeenCalledWith(COHORT, PROJECT, false, false)
     expect(onChanged).toHaveBeenCalled()
   })
 
   it('passes keep-capturing through when it is ticked', async () => {
-    const sent = vi.spyOn(api.project, 'delete').mockResolvedValue({
-      project: PROJECT, backup: 'tmp/x.db', removed: {}, excluded: false,
-    })
+    const sent = vi.spyOn(api.project, 'delete').mockResolvedValue(deleteReport())
     show()
     fireEvent.click(screen.getByLabelText(/keep capturing/i))
     fireEvent.change(confirmField(), { target: { value: PROJECT } })
     fireEvent.click(deleteButton())
     await screen.findByText(/Deleted/)
-    expect(sent).toHaveBeenCalledWith(COHORT, PROJECT, true)
+    expect(sent).toHaveBeenCalledWith(COHORT, PROJECT, true, false)
+  })
+
+  it('passes purge-snapshots through, and it is off unless it is ticked', async () => {
+    // The one part of a delete the backup cannot undo, so it is opt in and the page has to say
+    // which way it went rather than assuming the default.
+    const sent = vi.spyOn(api.project, 'delete').mockResolvedValue(deleteReport())
+    show()
+    fireEvent.click(screen.getByLabelText(/pre-compaction snapshots/i))
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    await screen.findByText(/Deleted/)
+    expect(sent).toHaveBeenCalledWith(COHORT, PROJECT, false, true)
+  })
+
+  it('a file left behind is reported as a failure, not as a success', async () => {
+    // "Deleted" printed above a non-empty `still_here` is the exact claim this whole change
+    // exists to stop, and it is the same defect as "imported" printed above a non-empty `differs`.
+    vi.spyOn(api.project, 'delete').mockResolvedValue(deleteReport({
+      still_here: [{ path: 'C:\\fake\\s0-1.jsonl', kind: 'transcript' }],
+      kept_files: [{ path: 'C:\\fake\\s0-1.jsonl', kind: 'transcript',
+                     why: 'changed since the backup was written' }],
+    }))
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    expect(await screen.findByText(/1 file\(s\) are still here/)).toBeTruthy()
+    expect(screen.getByText(/changed since the backup was written/)).toBeTruthy()
+  })
+
+  it('names what it left alone because another session still lives there', async () => {
+    vi.spyOn(api.project, 'delete').mockResolvedValue(deleteReport({
+      shared_with_surviving_sessions: [{ relpath: 'memory/notes.md', kind: 'memory' }],
+      surviving_sessions: ['s0-1', 's0-2'],
+      still_captured: [PROJECT],
+    }))
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    expect(await screen.findByText(/Left alone/)).toBeTruthy()
+    expect(screen.getByText(/sessions this delete did not take/)).toBeTruthy()
+  })
+
+  it('says the snapshots were kept and that the backup does not carry them', async () => {
+    vi.spyOn(api.project, 'delete').mockResolvedValue(deleteReport({
+      snapshots: { files: 14, removed: 0, bytes: 1_174_000_000 },
+    }))
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    const line = await screen.findByText(/14 pre-compaction snapshot\(s\) kept/)
+    // The whole paragraph, not a text match: "does not carry them" is also on the checkbox label
+    // above, so a bare query finds two nodes and says nothing about which one carries the claim.
+    expect(line.closest('p')?.textContent).toMatch(/1119\.6 MB\. The backup does\s+not carry them/)
   })
 
   it('shows what the server refused instead of failing silently', async () => {
@@ -121,9 +189,7 @@ describe('delete', () => {
   })
 
   it('says the project is still being captured when it was kept', async () => {
-    vi.spyOn(api.project, 'delete').mockResolvedValue({
-      project: PROJECT, backup: 'tmp/x.db', removed: {}, excluded: false,
-    })
+    vi.spyOn(api.project, 'delete').mockResolvedValue(deleteReport())
     show()
     fireEvent.click(screen.getByLabelText(/keep capturing/i))
     fireEvent.change(confirmField(), { target: { value: PROJECT } })

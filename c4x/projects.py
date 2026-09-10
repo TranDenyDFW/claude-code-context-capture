@@ -179,6 +179,55 @@ def cwds_for(con, ids):
     return [r[0] for r in found]
 
 
+def sessions_with_cwds(con, cwds):
+    """Every session this store still has for these working directories.
+
+    A SLUG DIRECTORY IS SHARED BY EVERY SESSION WITH THAT WORKING DIRECTORY, and two of the five
+    layers are keyed by the directory rather than the session: `memory/` and the `~/.claude.json`
+    entry. So a delete of one label has to ask whether anything else still lives there before it
+    takes either.
+
+    Measured on this machine on 2026-09-10, and it is not a corner. The label
+    `P:\\ClaudeExt\\QuestionExtension\\archived` would carry 21 of the 2,430 files in its slug
+    directory while `P:\\ClaudeExt\\QuestionExtension` carries 2,382. They are one directory under
+    two labels, so deleting the archived one and taking the shared layers with it would strip the
+    memory and the trust entry from a project the user did not delete.
+    """
+    if not cwds:
+        return []
+    marks = ",".join("?" * len(cwds))
+    found = con.execute(
+        f"SELECT DISTINCT session_id FROM sessions WHERE cwd IN ({marks})", list(cwds)).fetchall()
+    return [r[0] for r in found]
+
+
+def snapshots_dir():
+    """Where `hooks/compact-hook.mjs` keeps its verbatim pre-compaction copies.
+
+    Beside the store rather than under the repo root, for the reason `delete` spells out about its
+    backup directory: with the path following `C4X_DB`, a fixture run reads and writes beside the
+    fixture and production beside production.
+    """
+    from c4x import store
+    return store.DB_PATH.parent / "snapshots"
+
+
+def snapshot_files(ids):
+    """The pre-compaction snapshots belonging to these sessions.
+
+    The hook names them `<session id>.<stamp>.pre-compact.jsonl`, so they can be addressed exactly,
+    which is why leaving them is a decision rather than a limitation. Measured on this machine on
+    2026-09-10: 1,190 MB across 377 sessions, of which this repo's own project is 1,119.7 MB in 14
+    files, and 3 of 35 sampled projects had any at all.
+    """
+    base = snapshots_dir()
+    if not base.is_dir():
+        return []
+    wanted = {str(s) for s in ids}
+    return sorted(p for p in base.iterdir()
+                  if p.is_file() and p.name.split(".", 1)[0] in wanted)
+
+
 def primary_cwd(con, ids):
     """The working directory most of these sessions have, which is what `--into` replaces."""
     if not ids:
@@ -277,17 +326,29 @@ def _has_table(con, name):
                             (name,)).fetchone())
 
 
-def app_state_rows(path):
-    """Every carried file, as `appstate` wants them. Read one row at a time, never all at once."""
+def app_state_rows(path, with_blobs=True):
+    """Every carried file, as `appstate` wants them.
+
+    `with_blobs=False` leaves the bytes in the file. `restore` needs them, because writing a file
+    is what it does. `purge` does not: it compares the hash the row already carries against the
+    bytes on the disk, so loading a backup of this repo's own project, 694.5 MB of blobs, to
+    decide whether to delete the files those blobs were read from would spend the memory to learn
+    nothing the row did not already say.
+    """
+    columns = "kind, path, cwd, mtime, sha256, rebased_sha256"
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         if not _has_table(con, APP_STATE_TABLE):
             return []
+        if not with_blobs:
+            return [{"kind": k, "relpath": p, "cwd": c, "mtime": m,
+                     "sha256": s, "rebased_sha256": r}
+                    for k, p, c, m, s, r in con.execute(
+                        f"SELECT {columns} FROM {APP_STATE_TABLE}")]
         return [{"kind": k, "relpath": p, "cwd": c, "mtime": m,
                  "sha256": s, "rebased_sha256": r, "blob": bytes(b)}
                 for k, p, c, m, s, r, b in con.execute(
-                    f"SELECT kind, path, cwd, mtime, sha256, rebased_sha256, blob "
-                    f"FROM {APP_STATE_TABLE}")]
+                    f"SELECT {columns}, blob FROM {APP_STATE_TABLE}")]
     finally:
         con.close()
 
@@ -472,7 +533,7 @@ def _empty_app_state(out_path, cwds):
     return {"files": 0, "bytes": 0, "by_kind": {}, "cwds": cwds, "not_carried": [],
             "not_carried_files": 0, "skipped": [], "too_large": [],
             "source_desktop_pair": None,
-            "why_empty": "this export carries rows only; see delete() for why"}
+            "why_empty": "this export was written with app_state off, so it carries rows only"}
 
 
 def export(project, out_path, app_state=True):
@@ -879,9 +940,12 @@ def verify_mirror(path, into=None, mapping=None):
     result["into"] = sorted(set(mapping.values()))
     result["not_carried"] = (manifest.get("app_state") or {}).get("not_carried") or []
     # AN EXPORT THAT CARRIES NO FILES IS NOT A FAILED MIRROR, it is a mirror question that does not
-    # apply, and the difference is not academic. `delete` takes its backup with `app_state=False`,
-    # so EVERY undo of a delete imports a rows-only export. Answering that with ok=False made the
-    # documented recovery path report itself as a failure, exit non-zero, and paint red on the page.
+    # apply, and the difference is not academic. It was written when `delete` took its backup with
+    # `app_state=False`, so every undo of a delete imported a rows-only export and answering with
+    # ok=False made the documented recovery path report itself as a failure, exit non-zero, and
+    # paint red on the page. `delete` now carries the files, because it now removes them, but a
+    # rows-only export is still what `export(app_state=False)` writes and what every backup taken
+    # before this change is, so the answer stays "not asked" rather than "no".
     #
     # The original complaint was still right: returning a bare ok=True over a file that carries
     # nothing reads as "this machine matches the export" when nothing was compared. So the answer
@@ -942,19 +1006,51 @@ def file_name(project, stamped=False):
     return f"{safe}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.db"
 
 
-def delete(project, confirm, out_dir=None, keep_capturing=False):
-    """Export, verify, then remove, then stop capturing. It stops at the first thing that fails.
+def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots=False):
+    """Export, verify, then remove every layer, then stop capturing. First failure stops it.
 
     THE EXPORT COMES FIRST AND IS VERIFIED BEFORE ANYTHING IS REMOVED, so a delete is always
     undoable by importing the file it just wrote. If the export cannot be read back, nothing is
     deleted.
 
+    THE ACCEPTANCE RULE IS ONE SENTENCE: a delete removes exactly what the backup contains, and
+    nothing else. It is checkable in a way "we deleted the project" is not, and it is the inverse
+    of the property the import already proves. `appstate.purge` enforces the first half by
+    removing a file only when its bytes hash to what the backup holds; the two clauses below
+    enforce the second.
+
+    A SLUG DIRECTORY AND A CONFIG KEY BELONG TO A WORKING DIRECTORY, NOT TO A SESSION. When any
+    session with this project's working directory survives the delete, which is what happens when
+    an archived label is deleted and its base project stays, `memory/` and the `~/.claude.json`
+    entry are LEFT and named. They are in the backup, so this is the one deliberate exception, and
+    it exists because taking them would strip a project the user did not delete: measured on this
+    machine, that case is 2,409 of 2,430 files.
+
+    THE EXCLUSION FOLLOWS THE SAME RULE. Excluding a working directory stops the harvester
+    capturing everything under it, so a cwd that still has sessions is not excluded, or deleting
+    one archived label would silently stop capturing the live project sharing that directory.
+
     `confirm` must be the project path exactly. Not a yes/no: the whole risk here is deleting the
     wrong project, and a boolean cannot tell those apart.
+
+    `purge_snapshots` reaches `data/snapshots`, which the backup does NOT carry, so it is the one
+    thing here that importing the backup cannot put back. Off by default, counted and named either
+    way: those files are the only copy of what a compaction dropped, and carrying them would turn
+    this repo's own delete backup from about 2 MB into 1.1 GB.
     """
-    from c4x import store
+    from c4x import appstate, store
     if confirm != project:
         raise ValueError("confirmation does not match the project path; nothing was deleted")
+
+    # THE CONFIG IS READ FIRST, BEFORE THE BACKUP IS EVEN WRITTEN. `read_config` raises on a file
+    # it cannot parse, and one of the five layers this delete removes lives in that file. Finding
+    # out afterwards would mean a backup that does not hold the project's trust and settings, and
+    # a delete that cannot remove them either. It is also the cheapest possible refusal: no 694 MB
+    # backup is written for a delete that is going to stop.
+    #
+    # The same fallback this replaces, `except ValueError: config = {}`, turned 26 project entries
+    # into 1 on the test laptop over a byte order mark.
+    appstate.read_config()
 
     # NOT tmp/, AND NOT DERIVED FROM THE REPO ROOT. Two faults in one line.
     #
@@ -975,13 +1071,16 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
     out_dir = Path(out_dir or (_store.DB_PATH.parent / "deleted-projects"))
     out_dir.mkdir(parents=True, exist_ok=True)
     backup = out_dir / file_name(project, stamped=True)
-    # ROWS ONLY, deliberately. This delete is store-only: it does not touch `~/.claude/projects`,
-    # so those files are not going anywhere and copying them here would turn a 2 MB backup into a
-    # 694 MB one to protect against a removal that never happens. Redesigning delete to reach the
-    # other layers is separate work, blocked on `claude project purge` matching by slug PREFIX:
-    # measured across all 91 project entries here, 11 of them would destroy a neighbouring
-    # project's transcripts.
-    manifest = export(project, backup, app_state=False)    # raises if it cannot be verified
+    # WITH THE FILES, because they are about to be removed and this is the only copy. A rows-only
+    # backup was right while delete was store-only: nothing outside the store was going anywhere,
+    # so carrying 694 MB protected against a removal that never happened. It is now the undo for
+    # an actual removal, and a backup that does not hold what was deleted is not a backup.
+    #
+    # Nothing here calls `claude project purge`, which is what blocked this: that command matches
+    # by slug PREFIX, so deleting `L:\\Books` also takes `L--Books-Courses`, and 21 of the 518 slug
+    # directories on this machine are a prefix of another. `appstate.project_dir(cwd)` is an exact
+    # lookup and takes none of them.
+    manifest = export(project, backup, app_state=True)     # raises if it cannot be verified
 
     with store.write() as con:
         # THE SET THE BACKUP HOLDS, not a fresh resolution. This called `session_ids` again here,
@@ -1010,7 +1109,13 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
         for table in BY_SESSION:
             removed[table] = con.execute(
                 f"DELETE FROM {table} WHERE session_id IN ({marks})", ids).rowcount
+        # WHAT STILL LIVES IN THIS DIRECTORY, asked AFTER the rows are gone, so the answer is
+        # about survivors rather than about the set being deleted. It decides both of the
+        # working-directory clauses in this function's docstring.
+        cwds: list[str] = manifest.get("cwds") or [project]
+        survivors = sessions_with_cwds(con, cwds)
         excluded_cwds: list[str] = []
+        still_captured: list[str] = []
         if not keep_capturing:
             # THE WORKING DIRECTORIES, NOT THE LABEL. This wrote `project`, and a project's label
             # is `<cwd>\archived` whenever the desktop app archived its chats, which 764bc0b
@@ -1019,17 +1124,61 @@ def delete(project, confirm, out_dir=None, keep_capturing=False):
             # row back while this function reported `excluded: True`. Measured on this store, 16 of
             # the labels the menu offers are of that shape.
             ensure_exclusions(con)
-            excluded_cwds = manifest.get("cwds") or []
-            if not excluded_cwds:                # an export written before cwds were recorded
-                excluded_cwds = [project]
-            for cwd in excluded_cwds:
+            for cwd in cwds:
+                # NOT EVERY CARRIED cwd. An exclusion is by directory and the harvester skips
+                # everything under it, so excluding one that still has sessions would stop
+                # capturing a project this delete did not touch.
+                if sessions_with_cwds(con, [cwd]):
+                    still_captured.append(cwd)
+                    continue
+                excluded_cwds.append(cwd)
                 con.execute("INSERT OR REPLACE INTO excluded_projects (cwd, excluded_at, note) "
                             "VALUES (?,?,?)",
                             (cwd, datetime.now(UTC).isoformat(timespec="seconds"),
                              f"deleted, exported to {backup.name}"))
+
+    # THE FILES, after the rows. A file removal that fails partway leaves rows already gone and
+    # files still there, which one import of the backup puts back; the other order leaves rows
+    # pointing at transcripts that are not there any more.
+    rows = app_state_rows(backup, with_blobs=False)
+    shared_kept: list[dict] = []
+    if survivors:
+        shared = {appstate.MEMORY, appstate.CONFIG}
+        shared_kept = [{"relpath": row["relpath"], "kind": row["kind"]}
+                       for row in rows if row["kind"] in shared]
+        rows = [row for row in rows if row["kind"] not in shared]
+    purged = appstate.purge(rows, cwds)
+
+    snapshots = snapshot_files(ids)
+    snapshot_report = {"files": len(snapshots), "removed": 0,
+                       "bytes": sum(p.stat().st_size for p in snapshots)}
+    if purge_snapshots:
+        for path in snapshots:
+            path.unlink()
+            if path.exists():
+                raise RuntimeError(f"{path} was removed and is still there")
+            snapshot_report["removed"] += 1
+
     return {"project": project, "backup": str(backup), "removed": removed,
-            "excluded": not keep_capturing, "excluded_cwds": excluded_cwds,
+            "excluded": bool(excluded_cwds), "excluded_cwds": excluded_cwds,
+            # Directories this delete deliberately kept capturing, because sessions it did not
+            # delete are still in them.
+            "still_captured": still_captured,
             "exported_sessions": manifest["sessions"],
+            "removed_files": len(purged["removed"]), "removed_bytes": purged["bytes"],
+            "kept_files": purged["kept"], "refused_files": purged["refused"],
+            "config_keys_removed": purged["config_keys"],
+            "config_keys_kept": purged["config_kept"],
+            "pruned_dirs": purged["pruned"],
+            # The one exception to "everything the backup holds": layers keyed by the working
+            # directory, left because a session this delete did not take still lives there.
+            "shared_with_surviving_sessions": shared_kept,
+            "surviving_sessions": sorted(survivors),
+            "snapshots": snapshot_report,
+            # THE ACCEPTANCE TEST, re-resolved from the backup rather than from the bookkeeping
+            # above, so a purge that reported a removal it did not make is caught here. Empty is
+            # the only good answer.
+            "still_here": appstate.still_present(rows, cwds),
             # Sessions that arrived between the backup and the delete. They are NOT deleted, and
             # naming them is the difference between a race and a silent loss.
             "appeared_since_backup": appeared}
@@ -1192,6 +1341,10 @@ def main(argv=None):
     p_delete.add_argument("--confirm", default="", help="the project path, exactly")
     p_delete.add_argument("--keep-capturing", action="store_true",
                           help="do not exclude it, so the next harvest brings it back")
+    p_delete.add_argument("--purge-snapshots", action="store_true",
+                          help="also remove this project's pre-compaction snapshots. They are the "
+                               "only copy of what a compaction dropped, the backup does not carry "
+                               "them, and importing the backup cannot put them back.")
     p_delete.add_argument("--out-dir", default=None)
 
     p_include = sub.add_parser("include", help="stop excluding a project")
@@ -1284,18 +1437,47 @@ def main(argv=None):
     if args.command == "verify-mirror":
         return _print_mirror(verify_mirror(args.path, into=args.into))
     if args.command == "delete":
-        result = delete(args.project, args.confirm, args.out_dir, args.keep_capturing)
+        result = delete(args.project, args.confirm, args.out_dir, args.keep_capturing,
+                        args.purge_snapshots)
         print(f"  exported to {result['backup']} before deleting")
         for table, n in result["removed"].items():
             print(f"    {table:22} {n:>8,} removed")
-        if result["excluded"]:
-            for cwd in result.get("excluded_cwds") or []:
-                print(f"  excluded from future harvests: {cwd}")
-        else:
+        print(f"    {'files removed':22} {result['removed_files']:>8,}  "
+              f"({result['removed_bytes'] / 1048576:.1f} MB)")
+        for key in result.get("config_keys_removed") or []:
+            print(f"    trust and settings removed for  {key}")
+        for entry in result.get("kept_files") or []:
+            print(f"    KEPT  {entry['path']}: {entry['why']}")
+        for entry in result.get("config_keys_kept") or []:
+            print(f"    KEPT  {entry['key']}: {entry['why']}")
+        for entry in result.get("refused_files") or []:
+            print(f"    REFUSED  {entry['relpath']}: {entry['why']}")
+        shared = result.get("shared_with_surviving_sessions") or []
+        if shared:
+            print(f"  {len(shared)} file(s) and config entries LEFT: "
+                  f"{len(result['surviving_sessions'])} session(s) still have this working "
+                  "directory, and memory and trust settings belong to the directory")
+        snapshots = result.get("snapshots") or {}
+        if snapshots.get("files"):
+            if snapshots.get("removed"):
+                print(f"  {snapshots['removed']} pre-compaction snapshot(s) removed, "
+                      f"{snapshots['bytes'] / 1048576:.1f} MB, NOT in the backup")
+            else:
+                print(f"  {snapshots['files']} pre-compaction snapshot(s) kept, "
+                      f"{snapshots['bytes'] / 1048576:.1f} MB. --purge-snapshots removes them")
+        for cwd in result.get("excluded_cwds") or []:
+            print(f"  excluded from future harvests: {cwd}")
+        for cwd in result.get("still_captured") or []:
+            print(f"  STILL CAPTURED: {cwd} has sessions this delete did not take")
+        if not result["excluded"] and not result.get("still_captured"):
             print("  still being captured, so the next harvest brings it back")
         for sid in result.get("appeared_since_backup") or []:
             print(f"  KEPT, arrived after the backup was written and is not in it: {sid}")
-        return 0
+        # NON-ZERO WHEN SOMETHING THE DELETE ASKED TO REMOVE IS STILL THERE. Printing the list
+        # under a zero exit is the same defect as "imported" printed above a non-empty `differs`.
+        for entry in result.get("still_here") or []:
+            print(f"  STILL HERE  {entry['kind']}  {entry['path']}")
+        return 1 if result.get("still_here") else 0
     if args.command == "include":
         print(f"  removed {include(args.project)} exclusion(s) for {args.project}")
         return 0
