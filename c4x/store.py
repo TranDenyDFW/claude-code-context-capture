@@ -506,9 +506,12 @@ def invalidate():
     have a transcript", which is the predicate a session prune deletes on, so a set scanned before
     a removal is the wrong basis for the next decision.
 
-    Clearing all four rather than the one that changed, because the next read of each is a single
-    query or a single scandir and a removal is rare, while working out which cache a given removal
-    invalidated is exactly the reasoning that gets a cache wrong.
+    Clearing all four rather than the one that changed, because working out which cache a given
+    removal invalidated is exactly the reasoning that gets a cache wrong. The refills are not all
+    equally cheap: `_rows_cache` costs one aggregate over `turns`, `_transcript_cache` and
+    `_archived_cache` one directory scan each, and `_window_cache` spawns node per session, which
+    is why it is cached at all. A removal is rare enough to pay for all four, and a page that draws
+    a project the user just deleted costs more than a subprocess does.
     """
     _rows_cache.update({"at": 0.0, "df": None})
     _archived_cache.update({"map": None, "at": 0.0, "root": None})

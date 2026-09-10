@@ -24,11 +24,17 @@ const cohorts = [
 
 function show(props: Partial<Parameters<typeof ProjectMoves>[0]> = {}) {
   const onChanged = vi.fn()
-  render(
-    <ProjectMoves cohort={COHORT} cohorts={cohorts} writesEnabled onChanged={onChanged} {...props} />,
-  )
+  const all = { cohort: COHORT, cohorts, writesEnabled: true, onChanged, ...props }
+  const view = render(<ProjectMoves {...all} />)
   fireEvent.click(screen.getByRole('button', { name: /project/i }))
-  return { onChanged }
+  return {
+    onChanged,
+    // What App actually does after a delete: `onChanged` clears the cohort, so the panel is
+    // re-rendered with none. Nothing in this file could see that before, so nothing noticed that
+    // it took the delete report off the screen with it.
+    withCohort: (cohort: string | null) =>
+      view.rerender(<ProjectMoves {...all} cohort={cohort} />),
+  }
 }
 
 /**
@@ -43,7 +49,8 @@ function deleteReport(over: Partial<DeleteReport> = {}): DeleteReport {
     project: PROJECT, backup: 'tmp/x.db', removed: {}, excluded: false, excluded_cwds: [],
     still_captured: [], removed_files: 0, removed_bytes: 0, kept_files: [], refused_files: [],
     config_keys_removed: [], config_keys_kept: [], shared_with_surviving_sessions: [],
-    surviving_sessions: [], snapshots: { files: 0, removed: 0, bytes: 0 }, still_here: [],
+    surviving_sessions: [], sessions_sharing_slug: [], not_carried: [], too_large: [],
+    snapshots: { files: 0, removed: 0, bytes: 0 }, still_here: [],
     appeared_since_backup: [], ...over,
   }
 }
@@ -98,6 +105,56 @@ describe('delete', () => {
 
     fireEvent.change(confirmField(), { target: { value: PROJECT } })
     expect(deleteButton().disabled).toBe(false)
+  })
+
+  it('keeps the report on screen after App clears the cohort, which it always does', async () => {
+    // THE REPORT IS THE ONLY PLACE THE BACKUP PATH APPEARS, and that backup is the undo for a
+    // destructive operation. `doDelete` calls `onChanged`, App sets the cohort to null, and the
+    // report lived inside the `project ? ... : ...` branch, so the whole verdict, the counts, the
+    // still_here list and the backup path were replaced by "Choose a project under Population
+    // first." before anyone could read them.
+    vi.spyOn(api.project, 'delete').mockResolvedValue(
+      deleteReport({ backup: 'tmp/the-only-copy.db', removed: { turns: 3 } }),
+    )
+    const { withCohort } = show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    await screen.findByText(/Deleted/)
+
+    withCohort(null)
+
+    expect(screen.queryByText(/Deleted/)).not.toBeNull()
+    expect(screen.queryByText('tmp/the-only-copy.db')).not.toBeNull()
+  })
+
+  it('shows a refused file, which the server reports and the page ignored', async () => {
+    vi.spyOn(api.project, 'delete').mockResolvedValue(
+      deleteReport({
+        refused_files: [{ relpath: 'local_x.json', kind: 'desktop', why: 'two records, one row' }],
+      }),
+    )
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    await screen.findByText(/Deleted/)
+
+    expect(screen.queryByText(/two records, one row/)).not.toBeNull()
+  })
+
+  it('names a file the export could not carry, which is still on disk', async () => {
+    // The one thing "removes exactly what the backup contains" does not account for. The import
+    // panel had always surfaced this; the delete report dropped it on the floor.
+    vi.spyOn(api.project, 'delete').mockResolvedValue(
+      deleteReport({
+        not_carried: [{ path: 'C:\\x\\stray', files: 3, why: 'not a session this export carries' }],
+      }),
+    )
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    await screen.findByText(/Deleted/)
+
+    expect(screen.queryByText(/not a session this export carries/)).not.toBeNull()
   })
 
   it('sends the cohort untouched, not the bare path', async () => {

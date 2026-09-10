@@ -151,14 +151,29 @@ def machine_with_extras(machine, store_at):
 
 
 def tree(*roots):
-    """{path: sha256} for every file under these roots. The before and after of a delete."""
+    """{path: sha256 or DIRECTORY} for everything under these roots. The before and after.
+
+    DIRECTORIES ARE IN HERE, AND THE ROOTS THEMSELVES ARE TOO, because leaving them out made this
+    helper blind to the one class of damage the delete can actually do outside the project. It
+    hashed `path.is_file()` only, so a delete that walked its prune past its floor and removed the
+    machine wide `claude-code-sessions` directory changed nothing this returned, and every
+    "nothing outside this project changed" assertion in the file passed over it. That is exactly
+    what happened: an unbounded prune deleted the sessions root and `TestTheDesktopRecord` stayed
+    green.
+
+    An empty directory is not nothing. It is where the desktop app puts the next record.
+    """
     out = {}
     for root in roots:
         root = Path(root)
         if not root.exists():
+            out[str(root)] = "ABSENT"
             continue
+        out[str(root)] = "DIRECTORY" if root.is_dir() else "FILE"
         for path in sorted(root.rglob("*")):
-            if path.is_file():
+            if path.is_dir():
+                out[str(path)] = "DIRECTORY"
+            elif path.is_file():
                 out[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
     return out
 
@@ -218,6 +233,37 @@ class TestAnArchivedLabelTakesOnlyItsOwnSession:
         gone = set(before) - set(after)
         assert all("s0-0" in path or DESKTOP_FILE in path for path in gone), sorted(gone)
         assert result["surviving_sessions"] == ["s0-1", "s0-2"]
+
+    def test_memory_is_kept_for_a_project_that_only_shares_the_slug_directory(
+            self, store_at, machine, tmp_path):
+        """The survivor test compared cwd STRINGS while `memory/` is keyed by the SLUG directory.
+
+        `slug_for` turns every character that is not a letter or a digit into a hyphen, so a
+        forward slash and a backslash in the same place produce one directory from two different
+        working directories, with two different `~/.claude.json` keys. Asking "does any session
+        still have this exact cwd" answered no and the delete took a live project's memory with it,
+        then listed it under `shared_with_surviving_sessions` as kept.
+        """
+        from c4x import appstate
+        assert appstate.slug_for("P:/Alpha") == appstate.slug_for(ALPHA), (
+            "the fixture depends on these two strings sharing one slug directory")
+        con = sqlite3.connect(str(store_at))
+        con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                    ("other-0", "slug-0", "P:/Alpha", None, "2.1.229", "cli",
+                     "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z", r"C:	\other-0.jsonl"))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert (machine.base / "memory" / "notes.md").exists(), (
+            "another project is still filed in this slug directory and its memory is in it")
+        assert result["surviving_sessions"] == [], "no session has that exact working directory"
+        assert result["sessions_sharing_slug"] == ["other-0"]
+        assert {e["kind"] for e in result["shared_with_surviving_sessions"]} == {"memory"}, (
+            "the config entry is keyed by the exact string, so it goes; memory is not, so it stays")
+        assert ALPHA not in config_of(machine)["projects"]
 
     def test_memory_and_the_trust_entry_belong_to_the_directory_and_stay(
             self, store_at, machine, tmp_path, monkeypatch):
@@ -329,6 +375,55 @@ class TestTheDesktopRecord:
 
         assert not record.exists()
 
+    def test_the_prune_stops_at_the_record_and_leaves_the_machines_directories(
+            self, store_at, machine, tmp_path):
+        """An account and an organisation directory belong to the MACHINE, not to this project.
+
+        The prune walked straight past them and removed `claude-code-sessions` itself. The floor it
+        was handed was `desktop_dir(sessions_root)`, the pair the app writes to NOW, while
+        `purge_paths` finds the record where it actually IS, and this fixture makes those two
+        differ on purpose. A floor that is not an ancestor is never reached by a loop that stops on
+        equality, so nothing bounded the walk.
+
+        It stayed invisible because `tree()` hashed files and ignored directories, so no assertion
+        in this file could see a directory disappear.
+        """
+        record = machine.sessions / FOREIGN_ACCOUNT / ORG / DESKTOP_FILE
+        before = tree(machine.sessions)
+
+        projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert not record.exists()
+        assert (machine.sessions / FOREIGN_ACCOUNT / ORG).is_dir(), (
+            "the organisation directory is the machine's and holds every other chat under it")
+        assert (machine.sessions / FOREIGN_ACCOUNT).is_dir()
+        assert machine.sessions.is_dir(), (
+            "claude-code-sessions is where the desktop app writes the NEXT record")
+        gone = set(before) - set(tree(machine.sessions))
+        assert gone == {str(record)}, (
+            f"the delete removed more than the one record it carried: {sorted(gone)}")
+
+    def test_one_row_naming_two_files_is_refused_rather_than_removing_both(self, machine):
+        """The glob spans every account and organisation pair, the backup holds ONE row.
+
+        That row cannot say which of two files it describes, and removing a file the backup does
+        not separately hold is the one thing this delete promises never to do.
+        """
+        from c4x import appstate
+        source = machine.sessions / FOREIGN_ACCOUNT / ORG / DESKTOP_FILE
+        twin = machine.sessions / ACCOUNT / ORG
+        twin.mkdir(parents=True, exist_ok=True)
+        (twin / DESKTOP_FILE).write_bytes(source.read_bytes())
+        row = {"kind": appstate.DESKTOP, "relpath": DESKTOP_FILE, "cwd": ALPHA,
+               "sha256": "x", "rebased_sha256": "x"}
+
+        paths, refusal = appstate.purge_paths(row, ALPHA, str(machine.sessions))
+
+        assert paths == []
+        assert "more than one record under that name" in refusal
+        assert str(source) in refusal and str(twin / DESKTOP_FILE) in refusal
+        assert source.exists() and (twin / DESKTOP_FILE).exists()
+
 
 class TestTheInverseOfTheMirror:
     def test_every_carried_file_is_missing_afterwards(self, store_at, machine, tmp_path):
@@ -343,9 +438,21 @@ class TestTheInverseOfTheMirror:
         assert {"s0-0.jsonl", "s0-1.jsonl", "s0-2.jsonl", "memory/notes.md",
                 "s0-0/task.json", DESKTOP_FILE} <= carried, sorted(carried)
         assert {entry["relpath"] for entry in mirror["missing"]} == carried
-        assert [entry for entry in mirror["differs"] if entry["kind"] != "config"] == []
         assert result["still_here"] == []
         assert result["removed_files"] == len(carried)
+
+        # ASSERTING `differs` IS EMPTY HERE PROVED NOTHING. A file is either missing or different,
+        # and the line above just asserted every carried file is missing, so `differs` was empty by
+        # construction and the assertion could not fail. Put one back with other bytes instead, so
+        # the channel is exercised rather than assumed.
+        assert [entry for entry in mirror["differs"] if entry["kind"] != "config"] == []
+        # The slug directory itself was pruned, correctly, because the delete emptied it.
+        machine.base.mkdir(parents=True, exist_ok=True)
+        (machine.base / "s0-1.jsonl").write_bytes(b"not what the backup holds")
+        again = projects.verify_mirror(backup)
+        assert {entry["relpath"] for entry in again["differs"]
+                if entry["kind"] != "config"} == {"s0-1.jsonl"}
+        assert "s0-1.jsonl" not in {entry["relpath"] for entry in again["missing"]}
 
     def test_importing_the_backup_puts_the_whole_project_back(self, store_at, machine, tmp_path):
         """The round trip, which is the claim the Delete panel makes on the page."""
@@ -482,6 +589,34 @@ class TestPurgeRefusesWhatRestoreRefuses:
         assert report["removed"] == []
         assert "absolute" in report["refused"][0]["why"]
 
+    def test_a_trust_entry_changed_since_the_backup_is_kept_and_named(
+            self, store_at, machine, tmp_path):
+        """`_drop_config` drops a key ONLY when the entry under it is the one the backup holds.
+
+        Nothing exercised that branch. The config is the one layer a purge edits in place rather
+        than unlinking, and this guard is what stops a delete discarding a setting the user changed
+        after the backup was written, which the backup cannot then put back.
+        """
+        from c4x import appstate
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups",
+                                 keep_capturing=True)
+        forget_cached_rows()
+        projects.import_(result["backup"])
+        rows = projects.app_state_rows(result["backup"], with_blobs=False)
+        config = config_of(machine)
+        assert ALPHA in config["projects"], "the import put the entry back, or this proves nothing"
+        config["projects"][ALPHA] = {"hasTrustDialogAccepted": True, "changedSince": True}
+        machine.config.write_text(json.dumps(config), encoding="utf-8")
+
+        report = appstate.purge(rows, [ALPHA])
+
+        assert report["config_keys"] == [], "the entry is not the one the backup holds"
+        assert [entry["key"] for entry in report["config_kept"]] == [ALPHA]
+        assert "not the one the backup holds" in report["config_kept"][0]["why"]
+        assert config_of(machine)["projects"][ALPHA] == {
+            "hasTrustDialogAccepted": True, "changedSince": True}
+        assert r"P:\Beta" in config_of(machine)["projects"], "every other project is untouched"
+
     def test_a_dry_run_names_every_path_and_removes_nothing(self, store_at, machine, tmp_path):
         from c4x import appstate
         result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups",
@@ -494,7 +629,11 @@ class TestPurgeRefusesWhatRestoreRefuses:
         report = appstate.purge(rows, [ALPHA], dry_run=True)
 
         assert report["dry_run"] is True
-        assert report["removed"], "a dry run that names nothing proves nothing"
+        # NAMED, NOT TRUTHY. `assert report["removed"]` passed on a dry run that listed one row of
+        # six, which is the whole failure this test exists to catch.
+        assert {entry["relpath"] for entry in report["removed"]} == {
+            row["relpath"] for row in rows if row["kind"] != "config"}
+        assert report["config_keys"] == [ALPHA]
         assert tree(machine.claude, machine.sessions) == before
 # ---------------------------------------------------------------------------
 # The caches that outlive a removal
@@ -528,6 +667,31 @@ class TestARemovalDoesNotLeaveTheRowOnThePage:
             "session_rows() served a 45 second old frame, so the panel would still draw the "
             "project that was just deleted")
         assert "s1-0" in after, "the other project was not deleted and must still be listed"
+
+    def test_the_caches_are_cleared_even_when_the_delete_raises_after_the_rows_are_gone(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """`invalidate()` sat at the end, after everything that can raise.
+
+        The rows are committed when the write transaction closes, and the file removal, the
+        snapshot pass and the acceptance check all run after it and all raise. On exactly those
+        runs the caches still held the deleted project, so the page went on drawing rows that were
+        already gone, for up to the full ttl, at the moment the user most needed it to be true.
+        """
+        from c4x import appstate, store
+
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("the file half failed")
+
+        monkeypatch.setattr(appstate, "purge", explode)
+        store.session_rows()
+        assert store._rows_cache["df"] is not None, "warm, or this proves nothing"
+
+        with pytest.raises(RuntimeError, match="the file half failed"):
+            projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert store._rows_cache["df"] is None, (
+            "the rows were committed, so the frame the page serves is wrong until this is cleared")
+        assert store._transcript_cache["ids"] is None
 
     def test_every_cache_the_removal_invalidates_is_actually_cleared(
             self, store_at, machine, tmp_path):

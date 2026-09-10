@@ -357,12 +357,21 @@ export interface DeleteReport {
   removed_bytes: number
   /** On disk still, with the reason. A file that changed since the backup is not the backup's. */
   kept_files: { path: string; kind: string; why: string }[]
-  refused_files: { relpath: string; why: string }[]
+  /** Named, never removed. `kind` is the layer, or "prune" for a directory walk that refused. */
+  refused_files: { relpath: string; kind: string; why: string }[]
   config_keys_removed: string[]
   config_keys_kept: { key: string; why: string }[]
   /** Memory and trust settings left alone, because they belong to the working directory. */
   shared_with_surviving_sessions: { relpath: string; kind: string }[]
   surviving_sessions: string[]
+  /** Sessions in the same slug directory under a different working directory string. */
+  sessions_sharing_slug: string[]
+  /**
+   * What the EXPORT could not carry. These are still on disk and the backup does not hold them,
+   * so they are the one thing "removes exactly what the backup contains" does not account for.
+   */
+  not_carried: { path: string; files: number; why: string }[]
+  too_large: { relpath: string; bytes: number }[]
   snapshots: { files: number; removed: number; bytes: number }
   /**
    * THE ACCEPTANCE TEST. A delete removes exactly what the backup contains, and nothing else, so

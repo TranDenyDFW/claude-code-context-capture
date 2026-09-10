@@ -201,6 +201,44 @@ def sessions_with_cwds(con, cwds):
     return [r[0] for r in found]
 
 
+def sessions_sharing_slug(con, cwds):
+    """Every session still filed in a slug directory these working directories map to.
+
+    `sessions_with_cwds` compares cwd STRINGS, and that is right for the `~/.claude.json` entry,
+    which is keyed by the exact string. It is wrong for `memory/`, which lives in the SLUG
+    directory, because `slug_for` replaces every character that is not a letter or a digit with a
+    hyphen. A hyphen, an underscore and a dot in the same position all become one hyphen, so
+    three different projects, with three different config keys, share ONE directory. A survivor
+    test by string reports that directory as free while
+    another project's memory is sitting in it, and the delete then removes it and reports under
+    `shared_with_surviving_sessions` that it kept it.
+
+    A scan rather than SQL because the slug rule lives in Python and restating it as a SQL
+    expression would be a second copy of the one rule this repo already warns is unvalidatable.
+    """
+    from c4x import appstate
+    if not cwds:
+        return []
+    wanted = set()
+    for cwd in cwds:
+        try:
+            wanted.add(appstate.slug_for(cwd).casefold())
+        except ValueError:
+            continue
+    if not wanted:
+        return []
+    rows = con.execute(
+        "SELECT DISTINCT session_id, cwd FROM sessions WHERE cwd IS NOT NULL").fetchall()
+    out = []
+    for sid, cwd in rows:
+        try:
+            if appstate.slug_for(cwd).casefold() in wanted:
+                out.append(sid)
+        except ValueError:
+            continue
+    return out
+
+
 def snapshots_dir():
     """Where `hooks/compact-hook.mjs` keeps its verbatim pre-compaction copies.
 
@@ -1114,6 +1152,11 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
         # working-directory clauses in this function's docstring.
         cwds: list[str] = manifest.get("cwds") or [project]
         survivors = sessions_with_cwds(con, cwds)
+        # TWO SURVIVOR TESTS, BECAUSE THE TWO SHARED LAYERS ARE KEYED DIFFERENTLY. The config entry
+        # is keyed by the exact working directory string; `memory/` is keyed by the slug directory,
+        # and many strings map to one slug. Using the string test for both let a delete strip a
+        # live project's memory and then report that it had kept it.
+        slug_survivors = sessions_sharing_slug(con, cwds)
         excluded_cwds: list[str] = []
         still_captured: list[str] = []
         if not keep_capturing:
@@ -1137,13 +1180,23 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
                             (cwd, datetime.now(UTC).isoformat(timespec="seconds"),
                              f"deleted, exported to {backup.name}"))
 
+    # THE MOMENT THE ROWS ARE COMMITTED, not at the end. Everything below this line can raise,
+    # and when it did the caches still held the deleted project: the page went on drawing rows that
+    # were already gone, for up to the full 45 second ttl, on exactly the runs where something had
+    # gone wrong and the user most needed the page to be true.
+    store.invalidate()
+
     # THE FILES, after the rows. A file removal that fails partway leaves rows already gone and
     # files still there, which one import of the backup puts back; the other order leaves rows
     # pointing at transcripts that are not there any more.
     rows = app_state_rows(backup, with_blobs=False)
     shared_kept: list[dict] = []
+    shared = set()
+    if slug_survivors:
+        shared.add(appstate.MEMORY)
     if survivors:
-        shared = {appstate.MEMORY, appstate.CONFIG}
+        shared.add(appstate.CONFIG)
+    if shared:
         shared_kept = [{"relpath": row["relpath"], "kind": row["kind"]}
                        for row in rows if row["kind"] in shared]
         rows = [row for row in rows if row["kind"] not in shared]
@@ -1158,11 +1211,6 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
             if path.exists():
                 raise RuntimeError(f"{path} was removed and is still there")
             snapshot_report["removed"] += 1
-
-    # THE PAGE IS SERVED FROM CACHES THAT OUTLIVE THIS CALL. Four of them in `store`, all 45
-    # seconds, and none was cleared by anything: a project deleted from the panel stayed on screen
-    # for up to that long, which is indistinguishable from a delete that silently failed.
-    store.invalidate()
 
     return {"project": project, "backup": str(backup), "removed": removed,
             "excluded": bool(excluded_cwds), "excluded_cwds": excluded_cwds,
@@ -1179,6 +1227,16 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
             # directory, left because a session this delete did not take still lives there.
             "shared_with_surviving_sessions": shared_kept,
             "surviving_sessions": sorted(survivors),
+            # WHAT THE EXPORT COULD NOT CARRY, carried through to the delete's own report. These
+            # files are still on disk and the backup does not hold them, so they are the one thing
+            # here that "removes exactly what the backup contains" does not account for. The import
+            # already surfaces the same field; the delete did not, so a file the backup skipped
+            # was left behind and named nowhere.
+            "not_carried": (manifest.get("app_state") or {}).get("not_carried") or [],
+            "too_large": (manifest.get("app_state") or {}).get("too_large") or [],
+            # Sessions in the same SLUG directory under a different working directory string. They
+            # are why `memory/` can be kept when `surviving_sessions` is empty.
+            "sessions_sharing_slug": sorted(set(slug_survivors) - set(survivors)),
             "snapshots": snapshot_report,
             # THE ACCEPTANCE TEST, re-resolved from the backup rather than from the bookkeeping
             # above, so a purge that reported a removal it did not make is caught here. Empty is
@@ -1480,6 +1538,10 @@ def main(argv=None):
             print(f"  KEPT, arrived after the backup was written and is not in it: {sid}")
         # NON-ZERO WHEN SOMETHING THE DELETE ASKED TO REMOVE IS STILL THERE. Printing the list
         # under a zero exit is the same defect as "imported" printed above a non-empty `differs`.
+        for entry in result.get("not_carried") or []:
+            print(f"  NOT CARRIED  {entry['files']:,} file(s)  {entry['path']}: {entry['why']}")
+        for entry in result.get("too_large") or []:
+            print(f"  TOO LARGE  {entry.get('relpath', entry)}")
         for entry in result.get("still_here") or []:
             print(f"  STILL HERE  {entry['kind']}  {entry['path']}")
         return 1 if result.get("still_here") else 0

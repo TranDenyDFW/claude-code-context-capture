@@ -782,21 +782,37 @@ def _merge_config(config_rows, mapping):
 # ---------------------------------------------------------------------------
 # Purge, which is restore run backwards
 # ---------------------------------------------------------------------------
-def _prune_floor(kind, dest_cwd, sessions_root=None):
+def _is_within(path, ancestor):
+    """True when `ancestor` is `path` itself or one of its parents. Case insensitive, as NTFS is."""
+    a = [part.casefold() for part in Path(ancestor).parts]
+    b = [part.casefold() for part in Path(path).parts]
+    return len(a) <= len(b) and b[:len(a)] == a
+
+
+def _prune_floor(kind, dest_cwd, sessions_root=None, path=None):
     """The directory a prune walks up to and never past.
 
     `~/.claude/projects` and `~/.claude/tasks` belong to the machine and hold every other project,
     so they are the floor rather than a candidate. What sits directly beneath them, the slug
-    directory and `tasks/<session id>`, IS this project's and goes when it is empty. A desktop
-    record's account and organisation directories are the machine's as well, measured in
-    `docs/desktop-records.md`, so the floor there is the directory the record sits in.
+    directory and `tasks/<session id>`, IS this project's and goes when it is empty.
+
+    A DESKTOP RECORD'S FLOOR IS ITS OWN DIRECTORY, so nothing is pruned for that kind. Its account
+    and organisation directories are the machine's, measured in `docs/desktop-records.md`, and this
+    returned `desktop_dir(sessions_root)` instead: the pair the app writes to NOW. `purge_paths`
+    deliberately answers the opposite question, "where IS this record", so the two disagree exactly
+    when the record was filed under a pair that is no longer current. The floor was then not an
+    ancestor of the directory being walked at all, the equality test below could never become true,
+    and the walk climbed through the org directory, the account directory and `claude-code-sessions`
+    itself, removing every level that happened to be empty. Reproduced on this repo's own `machine`
+    fixture, which files the record under a foreign account on purpose: the test passed and the
+    sessions root was gone.
     """
     if kind in (TRANSCRIPT, MEMORY):
         return project_dir(dest_cwd).parent
     if kind == TASKS:
         return tasks_dir()
     if kind == DESKTOP:
-        return desktop_dir(sessions_root)
+        return Path(path).parent if path is not None else None
     return None
 
 
@@ -825,7 +841,15 @@ def purge_paths(row, dest_cwd, root=None):
     base = Path(root or sessions_root())
     if not base.is_dir():
         return [], "this machine keeps no desktop records, so there is none of this one to remove"
-    return sorted(base.glob(f"*/*/{parts[0]}")), None
+    found = sorted(base.glob(f"*/*/{parts[0]}"))
+    # ONE ROW, ONE FILE. The filename carries a uuid so a second match is not expected, but the
+    # glob spans every account and organisation pair on the machine and `purge` would remove both.
+    # The backup holds one row, which cannot say which of two files it describes, and removing a
+    # file the backup does not separately hold breaks the one rule this delete is built on.
+    if len(found) > 1:
+        return [], ("this machine keeps more than one record under that name and the backup's "
+                    "single row does not say which: " + ", ".join(str(p) for p in found))
+    return found, None
 
 
 def purge(rows, cwds, sessions_root=None, dry_run=False):
@@ -959,7 +983,7 @@ def purge(rows, cwds, sessions_root=None, dry_run=False):
                 raise RuntimeError(f"{path} was removed and is still there")
             report["removed"].append(entry)
             report["bytes"] += len(landed)
-            floor = _prune_floor(row["kind"], dest_cwd, sessions_root)
+            floor = _prune_floor(row["kind"], dest_cwd, sessions_root, path)
             if floor is not None:
                 touched[str(path.parent).casefold()] = path.parent
                 floors[str(path.parent).casefold()] = Path(floor)
@@ -969,6 +993,18 @@ def purge(rows, cwds, sessions_root=None, dry_run=False):
     for key in sorted(touched, key=len, reverse=True):
         current = touched[key]
         floor = floors.get(key)
+        # THE FLOOR MUST BE AN ANCESTOR, AND THAT IS CHECKED RATHER THAN ASSUMED. The loop below
+        # stops on equality, so a floor that is not on this directory's path upward is not a floor
+        # at all: the test never fires and the only thing left between an `rmdir` walk and the
+        # drive root is whichever parent happens to be non-empty. That is not a hypothetical, it is
+        # the defect this guard was written for, and the shape recurs whenever the function that
+        # FINDS a path and the function that BOUNDS it resolve it differently. Refused and named,
+        # because a prune that cannot say where it must stop has no business walking.
+        if floor is not None and not _is_within(current, floor):
+            report["refused"].append({
+                "relpath": str(current), "kind": "prune",
+                "why": f"{floor} is not a parent of {current}, so there is no floor to stop at"})
+            continue
         while floor is not None and str(current).casefold() != str(floor).casefold():
             try:
                 if not current.is_dir() or any(current.iterdir()):
