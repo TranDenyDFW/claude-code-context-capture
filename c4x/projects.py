@@ -201,6 +201,52 @@ def sessions_with_cwds(con, cwds):
     return [r[0] for r in found]
 
 
+def surviving_slugs(con):
+    """Every slug directory that still has a session in it, casefolded.
+
+    `sessions_sharing_slug` answers "does ANY carried directory still have a neighbour", which is
+    one boolean over the whole delete. A project can carry more than one working directory, and
+    then the boolean kept `memory/` for a slug directory with no survivor at all, leaving the file
+    on disk and reporting it under `shared_with_surviving_sessions` as a deliberate exception. The
+    decision belongs to the row, and the row carries the directory it came from.
+    """
+    from c4x import appstate
+    out = set()
+    for (cwd,) in con.execute("SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL"):
+        try:
+            out.add(appstate.slug_for(cwd).casefold())
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def one_working_directory(con, project):
+    """The sessions a project label owns, refusing a label that names two different projects.
+
+    THE LABEL SPACE IS AMBIGUOUS AND THE CODEBASE ALREADY KNOWS IT. `store.session_rows` labels a
+    desktop-archived session by appending the archived suffix to its working directory, and
+    `project_label` returns the bare working directory otherwise, so an archived chat of a project
+    and a REAL project whose working directory happens to end in that suffix produce the identical
+    label. `cohort_sessions` then matches both, and the second half of `session_ids` adds the real
+    project's below-floor sessions on top. `check_destination` refuses exactly this ambiguity on
+    the import side; nothing consulted it on the delete side, and this branch is what made the
+    consequence reach transcripts, tasks, the trust entry and a permanent exclusion rather than
+    rows alone.
+
+    A label that resolves to more than one working directory cannot be told apart from itself, so
+    it is refused by name rather than guessed at. Every unambiguous label resolves to exactly one.
+    """
+    ids = session_ids(con, project)
+    cwds = cwds_for(con, ids)
+    if len(cwds) > 1:
+        raise ValueError(
+            f"{project!r} names more than one working directory on this machine: "
+            + ", ".join(repr(c) for c in cwds)
+            + ". An archived label and a real directory of that name are the same string here, so "
+              "this delete cannot tell which one you mean; nothing was deleted.")
+    return ids, cwds
+
+
 def surviving_normalised_cwds(con):
     """Every working directory still in this store, in the form the config capture matches by.
 
@@ -1123,6 +1169,15 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
     # into 1 on the test laptop over a byte order mark.
     appstate.read_config()
 
+    # AND THE LABEL IS CHECKED BEFORE THE BACKUP IS WRITTEN, for the same reason: it is the
+    # cheapest possible refusal, and a delete that cannot say which project it is about must not
+    # start by writing a backup of both of them.
+    _ro = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
+    try:
+        one_working_directory(_ro, project)
+    finally:
+        _ro.close()
+
     # NOT tmp/, AND NOT DERIVED FROM THE REPO ROOT. Two faults in one line.
     #
     # This wrote the only backup of a destructive operation into ROOT/tmp/exports, which .gitignore
@@ -1162,6 +1217,24 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
         if not ids:
             raise ValueError(f"no sessions with cwd {project!r}")
         appeared = [s for s in session_ids(con, project) if s not in set(ids)]
+        # WHICH TRANSCRIPT FILES THIS PROJECT SHARES WITH ANOTHER, asked BEFORE the rows go,
+        # because afterwards there is nothing left to join on. `tools/harvest.mjs:1351` abandons a
+        # whole file as soon as the first record carrying a cwd names an excluded directory, so the
+        # exclusion's real unit is the FILE and the survivor test below asks about the directory.
+        # Measured on this store: 7 transcript files hold two sessions each and 2 of them span two
+        # working directories, so excluding one would stop capturing a project this delete did not
+        # touch, silently and permanently.
+        marks_all = ",".join("?" * len(ids))
+        shared_transcripts = [
+            {"cwd": a_cwd, "with_cwd": b_cwd, "transcript": path}
+            for a_cwd, b_cwd, path in con.execute(
+                f"""SELECT DISTINCT a.cwd, b.cwd, a.transcript_path
+                      FROM sessions a JOIN sessions b ON a.transcript_path = b.transcript_path
+                     WHERE a.session_id IN ({marks_all})
+                       AND b.session_id NOT IN ({marks_all})
+                       AND a.transcript_path IS NOT NULL AND b.cwd IS NOT NULL""",
+                ids + ids).fetchall()]
+        shares_a_file = {entry["cwd"] for entry in shared_transcripts}
         marks = ",".join("?" * len(ids))
         removed = {}
         # Survivors before compactions, and everything before sessions: no foreign keys means
@@ -1193,6 +1266,7 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
         # THE THIRD KEYING. Rows follow the session id, `memory/` follows the slug directory, and
         # the `~/.claude.json` entry follows the working directory string as `normalised` folds it.
         surviving_norm = surviving_normalised_cwds(con)
+        surviving_slug_set = surviving_slugs(con)
         excluded_cwds: list[str] = []
         still_captured: list[str] = []
         if not keep_capturing:
@@ -1208,6 +1282,11 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
                 # everything under it, so excluding one that still has sessions would stop
                 # capturing a project this delete did not touch.
                 if sessions_with_cwds(con, [cwd]):
+                    still_captured.append(cwd)
+                    continue
+                if cwd in shares_a_file:
+                    # No session of this directory is left, but a transcript FILE it wrote also
+                    # holds another project's session, and the harvester drops the whole file.
                     still_captured.append(cwd)
                     continue
                 excluded_cwds.append(cwd)
@@ -1236,7 +1315,13 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
         is kept only when a session still lives in the directory THAT key names.
         """
         if row["kind"] == appstate.MEMORY:
-            return bool(slug_survivors)
+            # THIS ROW'S OWN DIRECTORY. `bool(slug_survivors)` was one answer for every carried
+            # working directory at once, so a project spanning two slug directories kept the
+            # memory of the one with no survivor and called it deliberate.
+            try:
+                return appstate.slug_for(row["cwd"]).casefold() in surviving_slug_set
+            except (TypeError, ValueError):
+                return False
         if row["kind"] == appstate.CONFIG:
             try:
                 return appstate.normalised(row["cwd"]) in surviving_norm
@@ -1264,6 +1349,9 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
             # Directories this delete deliberately kept capturing, because sessions it did not
             # delete are still in them.
             "still_captured": still_captured,
+            # Transcript files this project shared with another working directory. The harvester
+            # abandons a file, not a session, so these are why a directory can be left capturing.
+            "shared_transcripts": shared_transcripts,
             "exported_sessions": manifest["sessions"],
             "removed_files": len(purged["removed"]), "removed_bytes": purged["bytes"],
             "kept_files": purged["kept"], "refused_files": purged["refused"],

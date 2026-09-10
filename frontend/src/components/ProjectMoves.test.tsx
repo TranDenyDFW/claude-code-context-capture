@@ -50,7 +50,7 @@ function deleteReport(over: Partial<DeleteReport> = {}): DeleteReport {
     still_captured: [], removed_files: 0, removed_bytes: 0, kept_files: [], refused_files: [],
     config_keys_removed: [], config_keys_kept: [], shared_with_surviving_sessions: [],
     surviving_sessions: [], sessions_sharing_slug: [], not_carried: [], too_large: [],
-    skipped: [], prune_refused: [],
+    skipped: [], prune_refused: [], shared_transcripts: [],
     snapshots: { files: 0, removed: 0, bytes: 0 }, still_here: [],
     appeared_since_backup: [], ...over,
   }
@@ -210,6 +210,42 @@ describe('delete', () => {
 
     expect((screen.getByLabelText(/pre-compaction snapshots/i) as HTMLInputElement).checked)
       .toBe(false)
+  })
+
+  it('names a refused row in the failure banner, which carries no path', async () => {
+    // The server sends path: null for a row the purge REFUSED, because it could not resolve where
+    // the file is. Rendering `entry.path` alone printed an empty code element under a red banner
+    // that said something was still here and named nothing at all.
+    vi.spyOn(api.project, 'delete').mockResolvedValue(
+      deleteReport({
+        still_here: [
+          { path: null, kind: 'desktop', relpath: 'local_x.json', why: 'two records, one row' },
+        ],
+      }),
+    )
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    await screen.findByText(/file\(s\) are still here/)
+
+    const line = screen.getByText(/Still here/).textContent ?? ''
+    expect(line).toMatch(/local_x\.json/)
+    expect(line).toMatch(/two records, one row/)
+  })
+
+  it('names a session that arrived while the backup was being written', async () => {
+    // Reported by the server since this branch began and rendered nowhere. It is the difference
+    // between a race and a silent loss: that session is NOT deleted and NOT in the backup.
+    vi.spyOn(api.project, 'delete').mockResolvedValue(
+      deleteReport({ appeared_since_backup: ['s9-9'] }),
+    )
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    await screen.findByText(/Deleted/)
+
+    expect(screen.queryByText(/arrived while the backup was being written/)).not.toBeNull()
+    expect(screen.queryByText('s9-9')).not.toBeNull()
   })
 
   it('sends the cohort untouched, not the bare path', async () => {

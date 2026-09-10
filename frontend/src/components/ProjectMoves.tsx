@@ -661,8 +661,29 @@ export function ProjectMoves({
                       </p>
                     ))}
                     {deleted.still_here.map((entry) => (
-                      <p key={entry.path} className="mt-0.5 break-all text-xs text-bad">
-                        Still here: <code>{entry.path}</code>
+                      // A REFUSED ROW HAS NO PATH. Rendering `entry.path` alone printed an empty
+                      // code element under a red banner that said something was still here, and
+                      // named nothing at all.
+                      <p
+                        key={entry.path ?? entry.relpath}
+                        className="mt-0.5 break-all text-xs text-bad"
+                      >
+                        Still here: <code>{entry.path ?? entry.relpath}</code>
+                        {entry.why !== undefined && ` (${entry.why})`}
+                      </p>
+                    ))}
+                    {deleted.appeared_since_backup.length > 0 && (
+                      <p className="mt-0.5 break-all text-xs text-warn">
+                        Not deleted, and not in the backup:{' '}
+                        {deleted.appeared_since_backup.length.toLocaleString()} session(s) arrived
+                        while the backup was being written.{' '}
+                        <code>{deleted.appeared_since_backup.join(', ')}</code>
+                      </p>
+                    )}
+                    {deleted.shared_transcripts.map((entry) => (
+                      <p key={entry.transcript} className="mt-0.5 break-all text-xs text-ink-dim">
+                        Still captured: <code>{entry.cwd}</code> shares a transcript with{' '}
+                        <code>{entry.with_cwd}</code>, and the harvester skips whole files.
                       </p>
                     ))}
                     {deleted.snapshots.files > 0 && (

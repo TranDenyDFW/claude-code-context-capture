@@ -487,6 +487,124 @@ class TestTheDesktopRecord:
         assert source.exists() and (twin / DESKTOP_FILE).exists()
 
 
+class TestALabelThatNamesTwoProjects:
+    """The archived label and a real directory of that name are the same string.
+
+    `store.session_rows` builds the archived label by appending the suffix to the working
+    directory, and `project_label` returns the bare working directory otherwise, so the two live in
+    one string space. `cohort_sessions` matches both halves and the second half of `session_ids`
+    adds the real project's below-floor sessions on top, so one confirmed delete took a project the
+    user never named: its rows, its transcripts, its tasks, its trust entry, and a permanent
+    exclusion. `check_destination` already refuses this on the import side. Nothing consulted it
+    here.
+
+    Every path below is built with `Path` rather than a literal, because the suffix begins with a
+    character that an ordinary Python string turns into a bell.
+    """
+
+    @staticmethod
+    def nested_cwd():
+        from c4x import store
+        return str(Path(ALPHA) / store.ARCHIVED_SUFFIX)
+
+    def a_real_project_named_archived(self, store_path):
+        con = sqlite3.connect(str(store_path))
+        for n in range(2):
+            con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                        (f"nested-{n}", "slug-n", self.nested_cwd(), None, "2.1.229", "cli",
+                         "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z", f"C:/t/nested-{n}.jsonl"))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+
+    def test_it_is_refused_by_name_rather_than_guessed_at(
+            self, store_at, machine, tmp_path, monkeypatch):
+        self.a_real_project_named_archived(store_at)
+        label = archive_only(monkeypatch, ["s0-0"])
+        assert label == self.nested_cwd(), "the collision is the whole point of this fixture"
+
+        with pytest.raises(ValueError, match="more than one working directory"):
+            projects.delete(label, confirm=label, out_dir=tmp_path / "backups")
+
+        assert (machine.base / "s0-0.jsonl").exists(), "nothing is removed by a refusal"
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            left = con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
+                               (self.nested_cwd(),)).fetchone()[0]
+        finally:
+            con.close()
+        assert left == 2, "the project the user did not name is untouched"
+
+    def test_the_refusal_happens_before_a_backup_is_written(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """The rule the config read follows: refuse before writing a copy of both projects."""
+        self.a_real_project_named_archived(store_at)
+        label = archive_only(monkeypatch, ["s0-0"])
+        out_dir = tmp_path / "backups"
+
+        with pytest.raises(ValueError, match="more than one working directory"):
+            projects.delete(label, confirm=label, out_dir=out_dir)
+
+        assert not out_dir.exists() or list(out_dir.iterdir()) == []
+
+    def test_memory_is_decided_per_directory_when_the_label_guard_is_bypassed(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """The layer under the guard, which the guard itself now keeps unreachable.
+
+        `bool(slug_survivors)` was one answer for every carried working directory at once, so a
+        delete spanning two slug directories kept the memory of the one with NO survivor and
+        reported it as a deliberate exception. Forced past the label guard, because otherwise this
+        line could not be asserted at all.
+        """
+        from c4x import appstate
+        self.a_real_project_named_archived(store_at)
+        nested_base = machine.claude / "projects" / appstate.slug_for(self.nested_cwd())
+        (nested_base / "memory").mkdir(parents=True)
+        (nested_base / "memory" / "notes.md").write_bytes(b"# the nested project's memory")
+        for n in range(2):
+            (nested_base / f"nested-{n}.jsonl").write_bytes(b"line")
+        label = archive_only(monkeypatch, ["s0-0"])
+        monkeypatch.setattr(projects, "one_working_directory", lambda con, project: (None, None))
+
+        result = projects.delete(label, confirm=label, out_dir=tmp_path / "backups")
+
+        assert (machine.base / "memory" / "notes.md").exists(), (
+            "s0-1 and s0-2 are still in that slug directory, so its memory is shared")
+        assert not (nested_base / "memory" / "notes.md").exists(), (
+            "no session is left in THAT slug directory, so its memory was never shared")
+        kept = {entry["relpath"] for entry in result["shared_with_surviving_sessions"]}
+        assert "memory/notes.md" in kept, "the one that IS shared is still reported"
+
+
+class TestTheExclusionsUnitIsTheFile:
+    def test_a_directory_sharing_a_transcript_keeps_being_captured(
+            self, store_at, machine, tmp_path):
+        """`tools/harvest.mjs` abandons a FILE as soon as its first cwd-bearing record is excluded.
+
+        The survivor test asked whether any session still carries that working directory, which is
+        a different unit. Measured on the live store, 7 transcript files hold two sessions each and
+        2 of them span two working directories, so an exclusion written on the directory test
+        stops capturing a project this delete did not touch, silently and permanently.
+        """
+        shared = "C:/t/shared.jsonl"
+        con = sqlite3.connect(str(store_at))
+        con.execute("UPDATE sessions SET transcript_path = ? WHERE session_id = ?",
+                    (shared, "s0-0"))
+        con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                    ("lodger-0", "slug-l", r"P:\Gamma", None, "2.1.229", "cli",
+                     "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z", shared))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert result["excluded_cwds"] == [], "excluding it would drop the lodger's file too"
+        assert result["still_captured"] == [ALPHA]
+        assert [entry["with_cwd"] for entry in result["shared_transcripts"]] == [r"P:\Gamma"]
+        assert result["shared_transcripts"][0]["transcript"] == shared
+
+
 class TestARefusalIsNotARemoval:
     def test_a_row_the_purge_refused_reaches_the_acceptance_check(
             self, store_at, machine, tmp_path, monkeypatch):
@@ -576,6 +694,59 @@ class TestTheCachesTellTheTruthAfterAChange:
 
         assert store._rows_cache["df"] is None
         assert store._transcript_cache["ids"] is None
+
+
+class TestTheGuardCoversEveryReaderThatGotIt:
+    """Three cached readers were given the generation guard and one of them was gated.
+
+    One line of three is not a gate for three lines: the other two could be reverted with the suite
+    green, and they are the two a session prune reads to decide what to delete.
+    """
+
+    def test_the_transcript_scan_does_not_install_what_a_change_cleared(
+            self, tmp_path, monkeypatch):
+        from c4x import store
+        root = tmp_path / ".claude" / "projects" / "P--X"
+        root.mkdir(parents=True)
+        (root / "abc.jsonl").write_bytes(b"x")
+        monkeypatch.setattr(store, "HOME", str(tmp_path))
+        store.invalidate()
+        real = store.os.scandir
+        calls = {"n": 0}
+
+        def a_change_lands_mid_scan(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                store.invalidate()
+            return real(path)
+
+        monkeypatch.setattr(store.os, "scandir", a_change_lands_mid_scan)
+
+        found = store.transcript_ids()
+
+        assert found == {"abc"}, "the caller still gets what the scan found"
+        assert store._transcript_cache["ids"] is None, (
+            "that set was scanned before the change, so it must not be installed after it")
+
+    def test_the_desktop_record_scan_does_not_either(self, tmp_path, monkeypatch):
+        from c4x import store
+        pair = tmp_path / "acct" / "org"
+        pair.mkdir(parents=True)
+        (pair / "local_x.json").write_text('{"cliSessionId": "s0-0", "isArchived": true}',
+                                           encoding="utf-8")
+        store.invalidate()
+        real = store.read_archived_record
+
+        def a_change_lands_mid_glob(path):
+            store.invalidate()
+            return real(path)
+
+        monkeypatch.setattr(store, "read_archived_record", a_change_lands_mid_glob)
+
+        found = store.archived_sessions(root=str(tmp_path), ttl=45.0)
+
+        assert found == {"s0-0": True}
+        assert store._archived_cache["map"] is None
 
 
 class TestThePruneKnowsWhereToStop:
@@ -843,6 +1014,30 @@ class TestPurgeRefusesWhatRestoreRefuses:
         assert config_of(machine)["projects"][ALPHA] == {
             "hasTrustDialogAccepted": True, "changedSince": True}
         assert r"P:\Beta" in config_of(machine)["projects"], "every other project is untouched"
+
+    def test_a_dry_run_does_not_promise_a_removal_the_run_would_refuse(
+            self, store_at, machine, tmp_path):
+        """It listed every resolved path as `removed` without making the hash test the run makes.
+
+        So a file changed since the backup was written was announced as "this will go" and then
+        kept. A dry run whose answer differs from the run is worse than no dry run.
+        """
+        from c4x import appstate
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups",
+                                 keep_capturing=True)
+        forget_cached_rows()
+        projects.import_(result["backup"])
+        rows = projects.app_state_rows(result["backup"], with_blobs=False)
+        (machine.base / "s0-1.jsonl").write_bytes(b"edited since the backup was written")
+
+        report = appstate.purge(rows, [ALPHA], dry_run=True)
+
+        assert "s0-1.jsonl" not in {entry["relpath"] for entry in report["removed"]}
+        kept = {entry["relpath"]: entry["why"] for entry in report["kept"]}
+        assert "s0-1.jsonl" in kept
+        assert "does not hold what is here now" in kept["s0-1.jsonl"]
+        assert "s0-0.jsonl" in {entry["relpath"] for entry in report["removed"]}, (
+            "the untouched files are still promised")
 
     def test_a_dry_run_names_every_path_and_removes_nothing(self, store_at, machine, tmp_path):
         from c4x import appstate

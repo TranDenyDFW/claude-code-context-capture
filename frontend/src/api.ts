@@ -377,12 +377,21 @@ export interface DeleteReport {
   skipped: { path: string; why: string }[]
   /** A directory walk the prune refused because it could not prove where to stop. */
   prune_refused: { path: string; why: string }[]
+  /**
+   * Transcript files this project shared with another working directory. The harvester abandons a
+   * FILE, not a session, so these are why a directory can be left capturing.
+   */
+  shared_transcripts: { cwd: string; with_cwd: string; transcript: string }[]
   snapshots: { files: number; removed: number; bytes: number }
   /**
    * THE ACCEPTANCE TEST. A delete removes exactly what the backup contains, and nothing else, so
    * anything named here is a delete that did not finish. Empty is the only good answer.
    */
-  still_here: { path: string; kind: string }[]
+  /**
+   * `path` is null for a row the purge REFUSED: it could not resolve where the file is, which is
+   * "I cannot tell", not "it is gone". The `why` says which.
+   */
+  still_here: { path: string | null; kind: string; relpath?: string; why?: string }[]
   appeared_since_backup: string[]
 }
 

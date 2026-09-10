@@ -857,6 +857,30 @@ def purge_paths(row, dest_cwd, root=None):
     return found, None
 
 
+def _would_refuse(row, path):
+    """Why a purge would keep this file, or None when it would remove it.
+
+    Pulled out so the dry run and the run cannot drift: they were two copies of one decision and
+    only one of them had the hash test in it.
+    """
+    if not path.exists():
+        return None
+    try:
+        landed = path.read_bytes()
+    except OSError as exc:
+        return f"unreadable: {exc.strerror or exc}"
+    if row["kind"] == DESKTOP:
+        actual = sha256_bytes(rebase_marked(landed, DESKTOP_CWD_FIELDS) or landed)
+        wanted = row["rebased_sha256"]
+    else:
+        actual = sha256_bytes(landed)
+        wanted = row["sha256"]
+    if actual != wanted:
+        return ("changed since the backup was written, so the backup does not hold "
+                "what is here now")
+    return None
+
+
 def purge(rows, cwds, sessions_root=None, dry_run=False):
     """Remove exactly what these rows carry, from this machine, and nothing else.
 
@@ -941,8 +965,17 @@ def purge(rows, cwds, sessions_root=None, dry_run=False):
                 report["absent"].append({"relpath": row["relpath"], "kind": row["kind"],
                                          "path": None})
             for path in paths:
-                report["removed"].append({"relpath": row["relpath"], "kind": row["kind"],
-                                          "path": str(path), "exists": path.exists()})
+                entry = {"relpath": row["relpath"], "kind": row["kind"], "path": str(path),
+                         "exists": path.exists()}
+                # THE SAME HASH TEST THE REAL RUN MAKES. Listing every resolved path as `removed`
+                # promised removals the real run would refuse, so a dry run answered "this is what
+                # will go" with files that were never going to go. A dry run whose answer differs
+                # from the run is worse than no dry run.
+                why = _would_refuse(row, path)
+                if why is None:
+                    report["removed"].append(entry)
+                else:
+                    report["kept"].append({**entry, "why": why})
         return report
 
     # 4. REMOVE, then CONFIRM IT IS GONE. `removed: N` is a coverage number and coverage numbers
