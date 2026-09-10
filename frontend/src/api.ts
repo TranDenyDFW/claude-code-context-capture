@@ -300,7 +300,9 @@ export interface MirrorResult {
   /**
    * The export carried rows only, so there was nothing to compare and `ok` answers no question.
    *
-   * `delete` writes its backup this way, which makes every undo of a delete a rows-only import.
+   * NO LONGER TRUE OF `delete`, which carries the files as of this branch: its backup is
+   * written with app_state on, so an undo restores the transcripts and the trust entry too.
+   * A rows-only export is what `export(app_state=False)` still writes.
    * Reading `ok` alone painted that correct restore red and named nothing, because `missing` and
    * `differs` are both empty when nothing was carried.
    */

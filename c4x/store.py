@@ -128,6 +128,13 @@ def write():
     con = sqlite3.connect(str(DB_PATH))
     try:
         con.execute("PRAGMA foreign_keys = ON")
+        # BEGIN IMMEDIATE, so a READ inside this block is inside the transaction too. Python's
+        # sqlite3 defers the BEGIN until the first statement that changes something, so every
+        # SELECT a writer makes first ran in autocommit: a caller that checked the store and then
+        # deleted on the strength of that check had an open window between the two, and this store
+        # has three writers by design. Taking the write lock up front closes it, at the cost of
+        # making two concurrent writers serialise, which is what they should do.
+        con.execute("BEGIN IMMEDIATE")
         yield con
         con.commit()
     except Exception:
@@ -1484,6 +1491,7 @@ def session_window(session_id: str, ttl: float = 60.0):
     tools/segments.mjs already performs that reasoning, so it is asked rather than reimplemented -
     once per session per ttl, to keep a node spawn off the per-tick path.
     """
+    seen = _generation["n"]
     hit = _window_cache.get(session_id)
     now = _time.time()
     if hit and now - hit[0] < ttl:
@@ -1497,7 +1505,11 @@ def session_window(session_id: str, ttl: float = 60.0):
             confidence = segs[-1].get("confidence") or "segment"
     except Exception:                               # noqa: BLE001 - unresolved is a valid answer
         pass
-    _window_cache[session_id] = (now, window, confidence)
+    # THE FOURTH CACHE, AND THE ONE THAT WAS MISSED. `invalidate` clears it, but a resolution
+    # already in flight re-installed its answer afterwards, exactly as the other three did before
+    # they were guarded. This one spawns node to refill, so the window is the longest of the four.
+    if seen == _generation["n"]:
+        _window_cache[session_id] = (now, window, confidence)
     return window, confidence
 
 

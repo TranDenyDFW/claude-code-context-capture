@@ -1438,6 +1438,12 @@ def project_delete(body: dict):
         # string is the guard working, and it should read differently from a malformed cohort.
         raise HTTPException(status_code=409,
                             detail={"error": str(exc), "project": project}) from exc
+    except RuntimeError as exc:
+        # A FAILURE AFTER THE BACKUP EXISTS, and its path is inside the message by construction.
+        # Unhandled, this was a 500 with an empty body, so the one thing the user needed, where
+        # the undo is, never reached the page.
+        raise HTTPException(status_code=500,
+                            detail={"error": str(exc), "project": project}) from exc
 
 
 @api.post("/api/project/include")

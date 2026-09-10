@@ -392,6 +392,8 @@ export function ProjectMoves({
                   // `differs` means files landed and are not what the export carries, and showing
                   // that in green is the exact claim this change exists to stop.
                   // A rows-only export carried no files, so `ok` answers no question and the two
+                  // panes below would be empty. A delete's backup is NOT one of these any more:
+                  // it carries the files, so its undo restores them.
                   // lists are empty. `delete` writes its backup that way, so reading `ok` alone
                   // painted the documented undo-a-delete path red while naming nothing.
                   <div
@@ -697,8 +699,9 @@ export function ProjectMoves({
                     )}
                     {deleted.still_captured.map((cwd) => (
                       <p key={cwd} className="mt-0.5 break-all text-xs text-ink-dim">
-                        Still captured: <code>{cwd}</code> has sessions this delete did not
-                        take.
+                        Still captured: <code>{cwd}</code>. Either sessions this delete did not
+                        take are still in it, or it shares a transcript with another project and
+                        the harvester skips whole files. Any line above says which.
                       </p>
                     ))}
                     <p className="mt-0.5 text-xs text-ink-dim">

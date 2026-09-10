@@ -615,6 +615,180 @@ class TestTheBackupHoldsEveryRowTheDeleteRemoves:
             con.close()
 
 
+class TestTheDryRunAndTheRunAgree:
+    def test_a_writer_holds_the_lock_before_it_reads(self, store_at):
+        """Python's sqlite3 defers the BEGIN until the first statement that changes something.
+
+        So every SELECT a writer made first ran in autocommit, and a caller that checks the store
+        and then deletes on the strength of that check had an open window between the two. This
+        store has three writers by design, and the delete's own row guard is exactly such a
+        check-then-delete.
+        """
+        from c4x import store
+        with store.write() as con:
+            assert con.in_transaction, (
+                "the write lock has to be held before the first read, or the guard is not atomic "
+                "with what it guards")
+
+    def test_a_file_that_is_not_there_is_absent_in_both(self, store_at, machine, tmp_path):
+        """The dry run called it `removed`; the run calls it `absent`.
+
+        Same drift the hash test was added to close, one branch further up: a dry run that
+        disagrees with the run about what will happen is worse than no dry run.
+        """
+        from c4x import appstate
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups",
+                                 keep_capturing=True)
+        forget_cached_rows()
+        projects.import_(result["backup"])
+        rows = projects.app_state_rows(result["backup"], with_blobs=False)
+        (machine.base / "s0-1.jsonl").unlink()
+
+        dry = appstate.purge(rows, [ALPHA], dry_run=True)
+
+        assert "s0-1.jsonl" in {entry["relpath"] for entry in dry["absent"]}
+        assert "s0-1.jsonl" not in {entry["relpath"] for entry in dry["removed"]}
+
+    def test_the_window_cache_has_the_guard_the_other_three_got(self, store_at, monkeypatch):
+        """The fourth cached reader. It spawns node to refill, so its window is the longest."""
+        from c4x import store
+        store.invalidate()
+
+        def a_change_lands_mid_resolution(session_id):
+            store.invalidate()
+            return {"segments": [{"window": 200000, "confidence": "segment"}]}
+
+        monkeypatch.setattr(store, "segments_for", a_change_lands_mid_resolution)
+
+        window, confidence = store.session_window("s0-0")
+
+        assert window == 200000, "the caller still gets what was resolved"
+        assert "s0-0" not in store._window_cache, (
+            "that answer was resolved before the change, so it must not be installed after it")
+
+
+class TestTheRowHalfIsEnforcedByContent:
+    def test_an_in_place_update_during_the_backup_stops_the_delete(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """The first version of this guard compared row COUNTS, which this write does not change.
+
+        It is also the write the harvester makes most: `setToolResult` filling in an outcome, the
+        three `--backfill-*` sweeps whose own success condition is that the count does NOT change,
+        and the upserts on a re-read. Those rows were deleted while the backup held the stale copy
+        and the report said nothing.
+        """
+        real = projects.export
+
+        def a_backfill_lands_after_the_backup(project, out_path, app_state=True):
+            manifest = real(project, out_path, app_state=app_state)
+            con = sqlite3.connect(str(store_at))
+            con.execute("UPDATE turns SET parent_uuid = ? WHERE uuid = ?",
+                        ("s0-0-tPARENT", "s0-0-t0"))
+            con.commit()
+            con.close()
+            return manifest
+
+        monkeypatch.setattr(projects, "export", a_backfill_lands_after_the_backup)
+
+        with pytest.raises(ValueError, match="the store changed while the backup"):
+            projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            assert con.execute("SELECT parent_uuid FROM turns WHERE uuid = ?",
+                               ("s0-0-t0",)).fetchone()[0] == "s0-0-tPARENT"
+        finally:
+            con.close()
+
+    def test_a_survivor_with_no_working_directory_still_blocks_the_exclusion(
+            self, store_at, machine, tmp_path):
+        """The shared-transcript join dropped any session whose cwd was never recorded.
+
+        That session is still in the file, and the harvester abandons files, so excluding the
+        directory stops capturing it. Its cwd being NULL is exactly why nothing else notices.
+        """
+        con = sqlite3.connect(str(store_at))
+        con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                    ("nocwd-0", "slug-n", None, None, "2.1.229", "cli",
+                     "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z", r"C:\t\s0-0.jsonl"))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert result["excluded_cwds"] == []
+        assert result["still_captured"] == [ALPHA]
+        assert [entry["with_cwd"] for entry in result["shared_transcripts"]] == [
+            "(no working directory recorded)"]
+
+    def test_a_file_written_after_the_capture_is_left_and_named(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """`appeared_since_backup` names SESSIONS. This names files.
+
+        A transcript written for one of these sessions between the app-state capture and the purge
+        is not in the backup, so the purge leaves it, correctly. Nothing said so, and the slug
+        directory kept files for a session the store no longer has.
+        """
+        real = projects.export
+        late = machine.base / "s0-0.late-subagent.jsonl"
+
+        def a_write_lands_after_the_capture(project, out_path, app_state=True):
+            manifest = real(project, out_path, app_state=app_state)
+            late.write_bytes(b"written after the backup was taken")
+            return manifest
+
+        monkeypatch.setattr(projects, "export", a_write_lands_after_the_capture)
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert late.exists(), "the backup does not hold it, so the purge must not take it"
+        assert [entry["path"] for entry in result["appeared_files"]] == [str(late)]
+
+    def test_a_failure_after_the_backup_still_names_the_backup(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """The backup exists by then and is the only undo.
+
+        A traceback that does not name it leaves a half-finished delete and nowhere to look. Over
+        HTTP it was a 500 with an empty body.
+        """
+        from c4x import appstate
+
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("the file half failed")
+
+        monkeypatch.setattr(appstate, "purge", explode)
+
+        with pytest.raises(RuntimeError, match="backup was written first") as caught:
+            projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert "the file half failed" in str(caught.value)
+        assert str(tmp_path / "backups") in str(caught.value)
+
+    def test_a_config_that_stops_parsing_is_reported_rather_than_raised(self, monkeypatch):
+        """`_drop_config` read the file OUTSIDE its guard, after every other layer was gone.
+
+        `purge` checks the config at the top precisely so a delete refuses before removing
+        anything, and that check is what makes this the narrow case: the file has to stop parsing
+        BETWEEN that check and this write. Uncaught, it killed the delete and the caller never saw
+        the report naming what had already been removed, which is the only record of it.
+        """
+        from c4x import appstate
+
+        def no_longer_parses():
+            raise ValueError("does not parse as JSON any more")
+
+        monkeypatch.setattr(appstate, "read_config", no_longer_parses)
+        row = {"kind": appstate.CONFIG, "cwd": ALPHA, "relpath": ALPHA,
+               "sha256": "sha256:x", "rebased_sha256": "sha256:x"}
+
+        dropped, kept = appstate._drop_config([(row, ALPHA)])
+
+        assert dropped == []
+        assert [entry["key"] for entry in kept] == [ALPHA]
+        assert "could not be read" in kept[0]["why"]
+
+
 class TestALabelThatNamesTwoProjects:
     """The archived label and a real directory of that name are the same string.
 
@@ -1133,6 +1307,10 @@ class TestPurgeRefusesWhatRestoreRefuses:
         absence, which is the acceptance rule this branch is built on saying the wrong thing.
         """
         from c4x import appstate
+        # THE FILE THE ROWS ACTUALLY NAME. Asserting on `s0-0.jsonl` proved nothing here: no row
+        # in this test names it, so it could not have been removed either way.
+        landed = machine.base / "A.jsonl"
+        landed.write_bytes(b"one file, two rows point at it")
         rows = [{"kind": "transcript", "cwd": ALPHA, "relpath": name,
                  "sha256": "sha256:x", "rebased_sha256": "sha256:x"}
                 for name in ("A.jsonl", "a.jsonl")]
@@ -1140,7 +1318,7 @@ class TestPurgeRefusesWhatRestoreRefuses:
         with pytest.raises(ValueError, match="two rows resolve to one file"):
             appstate.purge(rows, [ALPHA])
 
-        assert (machine.base / "s0-0.jsonl").exists(), "it refuses before anything is removed"
+        assert landed.exists(), "it refuses before anything is removed"
 
     def test_a_trust_entry_changed_since_the_backup_is_kept_and_named(
             self, store_at, machine, tmp_path):

@@ -399,8 +399,13 @@ def unhandled_tables(con):
 # ---------------------------------------------------------------------------
 # The manifest, and the digest that makes it worth having
 # ---------------------------------------------------------------------------
-def digest(con, table):
+def digest(con, table, where="", params=()):
     """A hash over a table's CONTENT, independent of how SQLite happened to store it.
+
+    `where` narrows it to a subset, which is what makes it comparable across two stores. The
+    manifest's digests are taken over the EXPORT file, whose tables hold only the carried sessions,
+    so the same digest on the live store has to be scoped to the same rows or it would include
+    every other project.
 
     Not a sha256 of the file, for two reasons. The obvious one is that a hash of the file cannot
     live inside the file it describes, and the manifest is going in the export. The better one is
@@ -415,7 +420,7 @@ def digest(con, table):
         return None
     listed = ",".join(f'"{c}"' for c in cols)
     running = hashlib.sha256()
-    rows = con.execute(f"SELECT {listed} FROM {table}").fetchall()
+    rows = con.execute(f"SELECT {listed} FROM {table} {where}", params).fetchall()
     for row in sorted(repr(tuple(r)) for r in rows):
         running.update(row.encode("utf-8"))
     return f"sha256:{running.hexdigest()}"
@@ -1219,6 +1224,25 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
     # lookup and takes none of them.
     manifest = export(project, backup, app_state=True)     # raises if it cannot be verified
 
+    try:
+        return _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snapshots)
+    except ValueError:
+        # A refusal. The guards raise these deliberately and nothing has been removed, so the
+        # caller gets the reason as it stands.
+        raise
+    except Exception as exc:
+        # ANYTHING ELSE, AND THE BACKUP PATH GOES WITH IT. The backup exists by this point and is
+        # the only undo; a traceback that does not name it leaves the user with a half-finished
+        # delete and nowhere to look. Over HTTP this was a 500 with an empty body.
+        raise RuntimeError(
+            f"{exc}. The backup was written first and is at {backup}, so this delete is undoable "
+            f"by importing it.") from exc
+
+
+def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snapshots):
+    """The body of `delete`, after the backup exists. Split out so no failure can hide its path."""
+    from c4x import appstate, store
+
     with store.write() as con:
         # THE SET THE BACKUP HOLDS, not a fresh resolution. This called `session_ids` again here,
         # so a harvest landing between the export and this transaction added a session that was
@@ -1239,11 +1263,13 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
         shared_transcripts = [
             {"cwd": a_cwd, "with_cwd": b_cwd, "transcript": path}
             for a_cwd, b_cwd, path in con.execute(
-                f"""SELECT DISTINCT a.cwd, b.cwd, a.transcript_path
+                f"""SELECT DISTINCT a.cwd,
+                           COALESCE(b.cwd, '(no working directory recorded)'),
+                           a.transcript_path
                       FROM sessions a JOIN sessions b ON a.transcript_path = b.transcript_path
                      WHERE a.session_id IN ({marks_all})
                        AND b.session_id NOT IN ({marks_all})
-                       AND a.transcript_path IS NOT NULL AND b.cwd IS NOT NULL""",
+                       AND a.transcript_path IS NOT NULL""",
                 ids + ids).fetchall()]
         shares_a_file = {entry["cwd"] for entry in shared_transcripts}
         marks = ",".join("?" * len(ids))
@@ -1259,31 +1285,46 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
         # The manifest already carries the number that catches it. Refusing is right rather than
         # deleting the extra rows: the backup is the undo, and a row the backup does not hold has
         # no undo.
-        carried: dict = manifest.get("counts") or {}
+        # BY CONTENT, NOT BY COUNT. The first version of this guard compared row COUNTS, and
+        # every in-place write the harvester makes leaves the count alone: `setToolResult` filling
+        # in an outcome, the three `--backfill-*` sweeps whose own success condition is that the
+        # row count does NOT change, and the `INSERT OR REPLACE` upserts on a re-read. Those rows
+        # were deleted and the backup held the stale copy, and the report said nothing.
+        #
+        # The file half of this same rule has always been enforced byte for byte, by hashing the
+        # disk against the row and KEEPING anything that differs. This is the row half of it. The
+        # digests come from the manifest, where they are taken over the export file, whose tables
+        # hold only the carried sessions, so the live side is scoped to the same rows.
+        carried: dict = manifest.get("digests") or {}
+        carried_counts: dict = manifest.get("counts") or {}
         moved: dict = {}
 
-        def _moved(table, live):
-            if table in carried and live != carried[table]:
-                moved[table] = {"backup": carried[table], "live": live}
+        def _moved(table, where, params):
+            if table not in carried:
+                return
+            live = digest(con, table, where, params)
+            if live != carried[table]:
+                moved[table] = {
+                    "backup": carried[table], "live": live,
+                    "backup_rows": carried_counts.get(table),
+                    "live_rows": con.execute(
+                        f"SELECT COUNT(*) FROM {table} {where}", params).fetchone()[0]}
 
         for table in BY_SESSION:
-            _moved(table, con.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE session_id IN ({marks})", ids).fetchone()[0])
+            _moved(table, f"WHERE session_id IN ({marks})", ids)
         for table in BY_COMPACTION:
-            _moved(table, con.execute(
-                f"""SELECT COUNT(*) FROM {table} WHERE compaction_uuid IN
-                    (SELECT uuid FROM compactions WHERE session_id IN ({marks}))""",
-                ids).fetchone()[0])
+            _moved(table, f"""WHERE compaction_uuid IN
+                    (SELECT uuid FROM compactions WHERE session_id IN ({marks}))""", ids)
         for table in BY_TRANSCRIPT:
-            _moved(table, con.execute(
-                f"""SELECT COUNT(*) FROM {table} WHERE path IN
+            _moved(table, f"""WHERE path IN
                     (SELECT transcript_path FROM sessions WHERE session_id IN ({marks})
-                      AND transcript_path IS NOT NULL)""", ids).fetchone()[0])
+                      AND transcript_path IS NOT NULL)""", ids)
         if moved:
             raise ValueError(
                 "the store changed while the backup was being written, so the backup no longer "
                 "holds what this delete would remove: "
-                + "; ".join(f"{table} has {n['live']} rows and the backup carries {n['backup']}"
+                + "; ".join(f"{table} now holds {n['live_rows']} rows that do not match the "
+                            f"{n['backup_rows']} in the backup"
                             for table, n in sorted(moved.items()))
                 + ". Nothing was deleted. Run it again and it will back up what is there now.")
 
@@ -1396,6 +1437,25 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
     # The stems of transcripts a surviving session is also in. A snapshot of one of those files
     # holds that session's history too, and the backup does not carry snapshots.
     shared_stems = {Path(entry["transcript"]).stem for entry in shared_transcripts}
+    # WHAT ARRIVED AFTER THE CAPTURE. `appeared_since_backup` names sessions; this names FILES.
+    # A transcript or tool-output directory written for one of these sessions between the app-state
+    # capture and the purge is not in the backup, so the purge leaves it, correctly, and nothing
+    # said so: the slug directory kept files for a session the store no longer has.
+    carried_relpaths = {row["relpath"] for row in app_state_rows(backup, with_blobs=False)}
+    appeared_files = []
+    for cwd in cwds:
+        base = appstate.project_dir(cwd)
+        if not base.is_dir():
+            continue
+        for entry in sorted(base.iterdir()):
+            if not any(entry.name.startswith(sid) for sid in ids):
+                continue
+            if entry.name in carried_relpaths or f"{entry.name}/" in carried_relpaths:
+                continue
+            if any(rel.startswith(f"{entry.name}/") for rel in carried_relpaths):
+                continue
+            appeared_files.append({"path": str(entry), "cwd": cwd})
+
     snapshots = snapshot_files(ids, shared_stems)
     snapshot_report = {"files": len(snapshots), "removed": 0,
                        "bytes": sum(p.stat().st_size for p in snapshots)}
@@ -1414,6 +1474,10 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
             # No session under this label has a working directory recorded, so there is no
             # directory to purge and no exclusion that harvest could ever match.
             "unlocated": unlocated,
+            # Files for a deleted session that arrived after the backup was taken. Left on disk on
+            # purpose, because the backup cannot restore what it never held, and named so that is
+            # a decision rather than a leak.
+            "appeared_files": appeared_files,
             # Transcript files this project shared with another working directory. The harvester
             # abandons a file, not a session, so these are why a directory can be left capturing.
             "shared_transcripts": shared_transcripts,

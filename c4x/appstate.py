@@ -992,6 +992,11 @@ def purge(rows, cwds, sessions_root=None, dry_run=False):
             for path in paths:
                 entry = {"relpath": row["relpath"], "kind": row["kind"], "path": str(path),
                          "exists": path.exists()}
+                if not path.exists():
+                    # THE RUN FILES THIS UNDER `absent`, so the dry run must too. It listed it as
+                    # a removal, which is the same drift the hash test below was added to close.
+                    report["absent"].append(entry)
+                    continue
                 # THE SAME HASH TEST THE REAL RUN MAKES. Listing every resolved path as `removed`
                 # promised removals the real run would refuse, so a dry run answered "this is what
                 # will go" with files that were never going to go. A dry run whose answer differs
@@ -1130,7 +1135,15 @@ def _drop_config(config_rows):
     longer the one the backup holds is KEPT and named, because dropping it would lose a change the
     backup cannot put back.
     """
-    config = read_config()
+    # READ INSIDE THE GUARD. `read_config` raises on a file it cannot parse, this runs after every
+    # other layer is already gone, and the config can stop parsing between `purge`'s check at the
+    # top and this call. Uncaught, that killed the delete and the caller never saw the report
+    # naming what had been removed. A config that cannot be read is a config that was KEPT.
+    try:
+        config = read_config()
+    except (OSError, ValueError) as exc:
+        return [], [{"key": row["cwd"], "why": f"the config could not be read: {exc}"}
+                    for row, _dest_cwd in config_rows]
     projects = config.get("projects")
     dropped: list[str] = []
     kept: list[dict] = []
@@ -1160,7 +1173,7 @@ def _drop_config(config_rows):
         temporary = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-delete")
         temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
         os.replace(temporary, CONFIG_PATH)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return [], kept + [{"key": key, "why": f"the config could not be written: {exc}"}
                            for key in sorted(dropped)]
     return sorted(dropped), kept
