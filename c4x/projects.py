@@ -1159,6 +1159,11 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
                 raise RuntimeError(f"{path} was removed and is still there")
             snapshot_report["removed"] += 1
 
+    # THE PAGE IS SERVED FROM CACHES THAT OUTLIVE THIS CALL. Four of them in `store`, all 45
+    # seconds, and none was cleared by anything: a project deleted from the panel stayed on screen
+    # for up to that long, which is indistinguishable from a delete that silently failed.
+    store.invalidate()
+
     return {"project": project, "backup": str(backup), "removed": removed,
             "excluded": bool(excluded_cwds), "excluded_cwds": excluded_cwds,
             # Directories this delete deliberately kept capturing, because sessions it did not

@@ -229,12 +229,12 @@ def pinned_store(store, url=None):
     store.DB_PATH = snapshot
     # q() reads DB_PATH per call, but session_rows() caches its frame, so a warm cache would serve
     # live rows into a pinned run and the pin would be only half applied.
-    store._rows_cache.update({"at": 0.0, "df": None})
+    store.invalidate()
     try:
         yield snapshot
     finally:
         store.DB_PATH = live
-        store._rows_cache.update({"at": 0.0, "df": None})
+        store.invalidate()
         for suffix in ("", "-wal", "-shm"):
             with contextlib.suppress(OSError):
                 Path(f"{snapshot}{suffix}").unlink()

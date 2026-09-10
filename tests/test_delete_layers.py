@@ -496,3 +496,59 @@ class TestPurgeRefusesWhatRestoreRefuses:
         assert report["dry_run"] is True
         assert report["removed"], "a dry run that names nothing proves nothing"
         assert tree(machine.claude, machine.sessions) == before
+# ---------------------------------------------------------------------------
+# The caches that outlive a removal
+# ---------------------------------------------------------------------------
+class TestARemovalDoesNotLeaveTheRowOnThePage:
+    """`store` holds four module level caches for 45 seconds and nothing cleared any of them.
+
+    So a delete driven from the panel removed the rows and then went on drawing them for up to the
+    full ttl, which is indistinguishable from a delete that silently did nothing and invites a
+    second one.
+
+    The cache that matters most is not the visible one. `transcript_ids()` answers "does this
+    session still have a transcript", which is the predicate a session prune deletes on, so a set
+    scanned before a removal is the wrong basis for the next decision.
+
+    EVERY CACHE HERE IS WARMED BEFORE THE DELETE, AND THE WARMTH IS ASSERTED. Checking a cold cache
+    would pass whether or not anything ever cleared it, which is a gate that cannot fail.
+    """
+
+    def test_the_deleted_sessions_are_gone_from_the_frame_at_the_default_ttl(
+            self, store_at, machine, tmp_path):
+        from c4x import store
+        warm = set(store.session_rows()["session_id"])
+        assert {"s0-0", "s0-1", "s0-2"} <= warm, (
+            "the frame cache must be warm and hold this project, or this proves nothing")
+
+        projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        after = set(store.session_rows()["session_id"])
+        assert not ({"s0-0", "s0-1", "s0-2"} & after), (
+            "session_rows() served a 45 second old frame, so the panel would still draw the "
+            "project that was just deleted")
+        assert "s1-0" in after, "the other project was not deleted and must still be listed"
+
+    def test_every_cache_the_removal_invalidates_is_actually_cleared(
+            self, store_at, machine, tmp_path):
+        """One assertion per line of `store.invalidate`, so reverting any one of them fails here."""
+        import time
+
+        from c4x import store
+        # Stamped NOW rather than in the far future. A far future stamp also defeats the `ttl=0`
+        # that `session_ids` uses to force a fresh read before a write, so the delete under test
+        # would have resolved its own id set from the sentinel.
+        now = time.time()
+        store.session_rows()
+        store._archived_cache.update({"map": {"s0-0": True}, "at": now, "root": "sentinel root"})
+        store._transcript_cache.update({"ids": {"sentinel"}, "at": now})
+        store._window_cache["s0-0"] = "sentinel window"
+        assert store._rows_cache["df"] is not None, "warm, or this proves nothing"
+        assert store.transcript_ids() == {"sentinel"}, "warm, or this proves nothing"
+
+        projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert store._rows_cache["df"] is None
+        assert store._archived_cache["map"] is None
+        assert store._transcript_cache["ids"] is None
+        assert store._window_cache == {}

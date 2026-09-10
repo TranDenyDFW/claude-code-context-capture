@@ -495,6 +495,27 @@ def session_rows(ttl: float = 45.0) -> pd.DataFrame:
     return df
 
 
+def invalidate():
+    """Forget every cached read of the store and of this machine's Claude directory.
+
+    A REMOVAL THAT DOES NOT CALL THIS LEAVES THE ROW ON THE PAGE. Four caches in this module hold a
+    45 second answer and nothing cleared any of them, so a project deleted from the page stayed
+    drawn until the ttl expired. That reads as "the delete did not work" and invites a second one.
+
+    `_transcript_cache` is the one that is worse than cosmetic. It answers "does this session still
+    have a transcript", which is the predicate a session prune deletes on, so a set scanned before
+    a removal is the wrong basis for the next decision.
+
+    Clearing all four rather than the one that changed, because the next read of each is a single
+    query or a single scandir and a removal is rare, while working out which cache a given removal
+    invalidated is exactly the reasoning that gets a cache wrong.
+    """
+    _rows_cache.update({"at": 0.0, "df": None})
+    _archived_cache.update({"map": None, "at": 0.0, "root": None})
+    _transcript_cache.update({"ids": None, "at": 0.0})
+    _window_cache.clear()
+
+
 ARCHIVED_SUFFIX = "archived"
 
 # Enough of a session record to reach isArchived, which sits near the top of a file whose bulk is
