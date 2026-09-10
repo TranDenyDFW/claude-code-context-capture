@@ -1428,7 +1428,11 @@ def project_delete(body: dict):
         return projects.delete(project,
                                confirm=str(body.get("confirm", "")),
                                keep_capturing=bool(body.get("keep_capturing")),
-                               purge_snapshots=bool(body.get("purge_snapshots")))
+                               # LITERAL true, NOT truthy. This is the one flag whose
+                               # effect the backup cannot undo, and `bool()` accepted the
+                               # string "false", 0.1, [0] and any non-empty string from a
+                               # hand-written request.
+                               purge_snapshots=body.get("purge_snapshots") is True)
     except ValueError as exc:
         # 409, not 400: the request was well formed and the server refused it. A wrong confirmation
         # string is the guard working, and it should read differently from a malformed cohort.

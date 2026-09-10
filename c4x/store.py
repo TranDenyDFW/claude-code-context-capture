@@ -513,8 +513,10 @@ def invalidate():
     drawn until the ttl expired. That reads as "the delete did not work" and invites a second one.
 
     `_transcript_cache` is the one that is worse than cosmetic. It answers "does this session still
-    have a transcript", which is the predicate a session prune deletes on, so a set scanned before
-    a removal is the wrong basis for the next decision.
+    have a transcript", and `classify` turns that into the label a session is filed under, so a set
+    scanned before a removal keeps sessions in the wrong section of the page. It is also the
+    predicate any future prune would delete on, which is why it is cleared rather than left to
+    expire, but nothing on this branch deletes from it.
 
     Clearing all four rather than the one that changed, because working out which cache a given
     removal invalidated is exactly the reasoning that gets a cache wrong. The refills are not all

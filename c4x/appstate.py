@@ -857,6 +857,23 @@ def purge_paths(row, dest_cwd, root=None):
     return found, None
 
 
+def _config_would_refuse(row):
+    """Why `_drop_config` would keep this key, or None when it would drop it.
+
+    One decision, one place, so the dry run and the run cannot disagree about the config the way
+    they had already been made not to disagree about files.
+    """
+    try:
+        projects = read_config().get("projects")
+    except (OSError, ValueError) as exc:
+        return f"the config could not be read: {exc}"
+    if not isinstance(projects, dict) or row["cwd"] not in projects:
+        return "this machine's config has no such key"
+    if sha256_bytes(canonical_json(projects[row["cwd"]])) != row["sha256"]:
+        return "the entry under this key is not the one the backup holds"
+    return None
+
+
 def _would_refuse(row, path):
     """Why a purge would keep this file, or None when it would remove it.
 
@@ -959,7 +976,15 @@ def purge(rows, cwds, sessions_root=None, dry_run=False):
     if dry_run:
         for row, paths, _dest_cwd in planned:
             if row["kind"] == CONFIG:
-                report["config_keys"].append(row["cwd"])
+                # THE SAME ENTRY TEST `_drop_config` MAKES. This appended every carried key
+                # unconditionally, so a dry run promised to remove a key the run keeps because the
+                # entry under it is no longer the one the backup holds, and a key this machine does
+                # not have at all.
+                why = _config_would_refuse(row)
+                if why is None:
+                    report["config_keys"].append(row["cwd"])
+                else:
+                    report["config_kept"].append({"key": row["cwd"], "why": why})
                 continue
             if not paths:
                 report["absent"].append({"relpath": row["relpath"], "kind": row["kind"],
@@ -1124,11 +1149,20 @@ def _drop_config(config_rows):
         dropped.append(key)
     if not dropped:
         return dropped, kept
-    if CONFIG_PATH.exists():
-        shutil.copy2(CONFIG_PATH, CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-before"))
-    temporary = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-delete")
-    temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    os.replace(temporary, CONFIG_PATH)
+    # THE ONE UNCAUGHT WRITE, AND IT RUNS LAST. Every other layer is already gone by the time
+    # this executes, so raising here aborts the delete after the transcripts, the tasks and the
+    # desktop record have been removed, and the caller never gets the report naming them. A failure
+    # to edit the config is a config that was KEPT, which is a thing this function already knows
+    # how to say.
+    try:
+        if CONFIG_PATH.exists():
+            shutil.copy2(CONFIG_PATH, CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-before"))
+        temporary = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-delete")
+        temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        os.replace(temporary, CONFIG_PATH)
+    except OSError as exc:
+        return [], kept + [{"key": key, "why": f"the config could not be written: {exc}"}
+                           for key in sorted(dropped)]
     return sorted(dropped), kept
 
 

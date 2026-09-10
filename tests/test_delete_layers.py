@@ -487,6 +487,134 @@ class TestTheDesktopRecord:
         assert source.exists() and (twin / DESKTOP_FILE).exists()
 
 
+class TestTheBackupHoldsEveryRowTheDeleteRemoves:
+    def test_rows_written_while_the_backup_was_being_taken_stop_the_delete(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """`appeared_since_backup` closes this race at SESSION granularity and no finer.
+
+        The row copy happens at the top of `export`; the DELETEs run minutes later against `ids`.
+        Anything a concurrent harvest writes for a session ALREADY in `ids` was removed and was in
+        no copy, and `still_here` only re-resolves the app-state FILES, so the row half of "a
+        delete removes exactly what the backup contains" was unchecked. `hook_events` is the class
+        with no recovery path at all, because its watermark row is not deleted.
+        """
+        real = projects.export
+
+        def a_harvest_lands_after_the_backup(project, out_path, app_state=True):
+            manifest = real(project, out_path, app_state=app_state)
+            con = sqlite3.connect(str(store_at))
+            con.execute(
+                """INSERT INTO turns (uuid,session_id,ts,model,request_id,input_tokens,
+                     cache_creation_input_tokens,cache_read_input_tokens,output_tokens,
+                     thinking_tokens,eph_1h,eph_5m,service_tier,total_resident,is_sidechain,
+                     file_path,line_no,parent_uuid)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ("s0-0-LATE", "s0-0", "2026-08-01T01:00:00Z", "claude-opus-5", "req-late",
+                 1, 2, 3, 4, 0, 0, 0, "x", 5, 0, "C:/t/s0-0.jsonl", 99, None))
+            con.commit()
+            con.close()
+            return manifest
+
+        monkeypatch.setattr(projects, "export", a_harvest_lands_after_the_backup)
+
+        with pytest.raises(ValueError, match="the store changed while the backup"):
+            projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            assert con.execute("SELECT COUNT(*) FROM turns WHERE uuid = ?",
+                               ("s0-0-LATE",)).fetchone()[0] == 1, "the late row is still there"
+            assert con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
+                               (ALPHA,)).fetchone()[0] == 3, "and so is every session"
+        finally:
+            con.close()
+        assert (machine.base / "s0-0.jsonl").exists(), "and every file"
+
+    def test_a_snapshot_of_a_transcript_a_survivor_is_also_in_is_kept(
+            self, store_at, machine, tmp_path):
+        """A snapshot is a byte copy of a transcript FILE, and a file can hold two sessions.
+
+        `hooks/compact-hook.mjs` names it from the transcript's basename, so matching that stem
+        against a session id asks "does this session own that file", which is false for 8 sessions
+        across 7 files on the live store. The backup does not carry snapshots, so removing one
+        takes another project's only copy of what a compaction dropped.
+        """
+        con = sqlite3.connect(str(store_at))
+        con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                    ("lodger-0", "slug-l", "P:/Gamma", None, "2.1.229", "cli",
+                     "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z", r"C:\t\s0-0.jsonl"))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        snaps = Path(store_at).parent / "snapshots"
+        snaps.mkdir(parents=True, exist_ok=True)
+        shared = snaps / "s0-0.20260101-000000.pre-compact.jsonl"
+        alone = snaps / "s0-1.20260101-000000.pre-compact.jsonl"
+        shared.write_bytes(b"two sessions are in this file")
+        alone.write_bytes(b"only one session is in this file")
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups",
+                                 purge_snapshots=True)
+
+        assert shared.exists(), (
+            "lodger-0 is in that same transcript, and this is the only copy of what its "
+            "compaction dropped")
+        assert not alone.exists(), "the one this project owns outright still goes"
+        assert result["snapshots"]["removed"] == 1
+
+    def test_a_config_that_cannot_be_written_is_reported_rather_than_raised(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """It is the last write, after every other layer is already gone.
+
+        Raising here aborted the delete once the transcripts, the tasks and the desktop record had
+        been removed, so the caller never got the report naming them. A config that could not be
+        edited is a config that was KEPT, which this function already knows how to say.
+        """
+        from c4x import appstate
+
+        def refuse(*_args, **_kwargs):
+            raise OSError(13, "Permission denied")
+
+        monkeypatch.setattr(appstate.os, "replace", refuse)
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert result["config_keys_removed"] == []
+        assert [entry["key"] for entry in result["config_keys_kept"]] == [ALPHA]
+        assert "could not be written" in result["config_keys_kept"][0]["why"]
+        assert not (machine.base / "s0-0.jsonl").exists(), "the rest of the delete still happened"
+
+    def test_a_project_with_no_working_directory_writes_no_exclusion(
+            self, store_at, machine, tmp_path):
+        """`manifest["cwds"] or [project]` fed a PAGE LABEL to everything below it.
+
+        For sessions with no working directory recorded the label is
+        `<slug> (no working directory recorded)`, and the `excluded_projects` row written for that
+        string can never equal any `d.cwd`, so harvest never skips them and they return on the next
+        pass with their offset row already gone.
+        """
+        con = sqlite3.connect(str(store_at))
+        con.execute("UPDATE sessions SET cwd = NULL WHERE cwd = ?", (ALPHA,))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        from c4x import store
+        label = store.project_label(None, "slug-0")
+        assert "no working directory" in label, label
+        assert label in {entry["project"] for entry in projects.projects()}, (
+            "the picker offers this label, which is what makes it deletable")
+
+        result = projects.delete(label, confirm=label, out_dir=tmp_path / "backups")
+
+        assert result["unlocated"] is True
+        assert result["excluded_cwds"] == [], "no directory means no exclusion harvest could match"
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            assert con.execute("SELECT COUNT(*) FROM excluded_projects").fetchone()[0] == 0
+        finally:
+            con.close()
+
+
 class TestALabelThatNamesTwoProjects:
     """The archived label and a real directory of that name are the same string.
 
@@ -891,7 +1019,15 @@ class TestNothingIsRemovedOnTheStrengthOfABackupThatDoesNotRead:
             projects.delete(ALPHA, confirm=ALPHA, out_dir=out_dir)
 
         assert (machine.base / "s0-0.jsonl").exists()
-        assert set(tree(machine.claude, machine.sessions, machine.config.parent)) == set(before)
+        # HASHES, NOT A SET OF PATHS. `set(...)` compares the keys and drops every value, so a file
+        # rewritten in place during the refusal changed nothing this could see. Only the config is
+        # excluded, because this test is the thing that rewrote it.
+        after = tree(machine.claude, machine.sessions, machine.config.parent)
+        config_path = str(machine.config)
+        assert ({k: v for k, v in after.items() if k != config_path}
+                == {k: v for k, v in before.items() if k != config_path})
+        assert machine.config.read_text(encoding="utf-8") == "{not json at all", (
+            "the refusal must not have rewritten the file it refused to parse")
         assert not out_dir.exists() or list(out_dir.iterdir()) == [], (
             "no backup is written for a delete that is going to refuse")
 
@@ -987,6 +1123,25 @@ class TestPurgeRefusesWhatRestoreRefuses:
         assert report["removed"] == []
         assert "absolute" in report["refused"][0]["why"]
 
+    def test_two_rows_landing_on_one_file_are_refused_before_anything_is_removed(self, machine):
+        """The fourth refusal, which `restore` has a test for and `purge` did not.
+
+        `tests/test_appstate.py` gates it for restore. purge grew the identical guard on this
+        branch and nothing exercised it: mutating `if key in seen:` to `if False:` left the whole
+        delete area green. Without it the first row removes the file and the second finds it
+        absent, so a delete that took one file reports two removals and calls the second an
+        absence, which is the acceptance rule this branch is built on saying the wrong thing.
+        """
+        from c4x import appstate
+        rows = [{"kind": "transcript", "cwd": ALPHA, "relpath": name,
+                 "sha256": "sha256:x", "rebased_sha256": "sha256:x"}
+                for name in ("A.jsonl", "a.jsonl")]
+
+        with pytest.raises(ValueError, match="two rows resolve to one file"):
+            appstate.purge(rows, [ALPHA])
+
+        assert (machine.base / "s0-0.jsonl").exists(), "it refuses before anything is removed"
+
     def test_a_trust_entry_changed_since_the_backup_is_kept_and_named(
             self, store_at, machine, tmp_path):
         """`_drop_config` drops a key ONLY when the entry under it is the one the backup holds.
@@ -1014,6 +1169,30 @@ class TestPurgeRefusesWhatRestoreRefuses:
         assert config_of(machine)["projects"][ALPHA] == {
             "hasTrustDialogAccepted": True, "changedSince": True}
         assert r"P:\Beta" in config_of(machine)["projects"], "every other project is untouched"
+
+    def test_a_dry_run_does_not_promise_a_config_key_the_run_keeps(
+            self, store_at, machine, tmp_path):
+        """The dry run listed every carried key with no entry test at all.
+
+        `_drop_config` drops a key only when the entry under it is the one the backup holds, so a
+        dry run that appends every key promised removals the run refuses, in the one layer that is
+        edited in place rather than unlinked.
+        """
+        from c4x import appstate
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups",
+                                 keep_capturing=True)
+        forget_cached_rows()
+        projects.import_(result["backup"])
+        rows = projects.app_state_rows(result["backup"], with_blobs=False)
+        config = config_of(machine)
+        config["projects"][ALPHA] = {"hasTrustDialogAccepted": True, "changedSince": True}
+        machine.config.write_text(json.dumps(config), encoding="utf-8")
+
+        report = appstate.purge(rows, [ALPHA], dry_run=True)
+
+        assert report["config_keys"] == [], "it would be kept, so it must not be promised"
+        assert [entry["key"] for entry in report["config_kept"]] == [ALPHA]
+        assert "not the one the backup holds" in report["config_kept"][0]["why"]
 
     def test_a_dry_run_does_not_promise_a_removal_the_run_would_refuse(
             self, store_at, machine, tmp_path):

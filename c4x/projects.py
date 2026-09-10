@@ -322,20 +322,31 @@ def snapshots_dir():
     return store.DB_PATH.parent / "snapshots"
 
 
-def snapshot_files(ids):
-    """The pre-compaction snapshots belonging to these sessions.
+def snapshot_files(ids, shared_stems=()):
+    """The pre-compaction snapshots these sessions own outright.
 
-    The hook names them `<session id>.<stamp>.pre-compact.jsonl`, so they can be addressed exactly,
-    which is why leaving them is a decision rather than a limitation. Measured on this machine on
-    2026-09-10: 1,190 MB across 377 sessions, of which this repo's own project is 1,119.7 MB in 14
-    files, and 3 of 35 sampled projects had any at all.
+    A SNAPSHOT IS A COPY OF A TRANSCRIPT FILE, NOT OF A SESSION. `hooks/compact-hook.mjs:73` names
+    it from `basename(transcript_path)` and line 74 copies the whole file, so the stem is the
+    FILE's and matching it against a session id really asks "is this session the owner of that
+    file". That is false whenever a transcript holds more than one session, which on this store is
+    8 sessions across 7 files, 2 of those files spanning two working directories. The docstring
+    here used to claim the hook named them per session; it does not.
+
+    `shared_stems` are the stems of transcripts a surviving session is also in. They are skipped,
+    because removing one takes another project's only copy of what a compaction dropped and the
+    backup does not carry snapshots at all.
+
+    Measured on this machine on 2026-09-10: 1,190 MB across 377 sessions, of which this repo's own
+    project is 1,119.7 MB in 14 files, and 3 of 35 sampled projects had any at all.
     """
     base = snapshots_dir()
     if not base.is_dir():
         return []
     wanted = {str(s) for s in ids}
+    shared = {str(s) for s in shared_stems}
     return sorted(p for p in base.iterdir()
-                  if p.is_file() and p.name.split(".", 1)[0] in wanted)
+                  if p.is_file() and p.name.split(".", 1)[0] in wanted
+                  and p.name.split(".", 1)[0] not in shared)
 
 
 def primary_cwd(con, ids):
@@ -1236,6 +1247,46 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
                 ids + ids).fetchall()]
         shares_a_file = {entry["cwd"] for entry in shared_transcripts}
         marks = ",".join("?" * len(ids))
+
+        # THE ROW LAYER HAD NO ACCEPTANCE CHECK. `appeared` closes the export/delete race at
+        # SESSION granularity, and the DELETEs below run at delete time against a backup taken at
+        # export time, so anything a concurrent harvest wrote for a session ALREADY in `ids` was
+        # removed and is in no copy. The window is the whole of the app-state capture plus
+        # `verify`, which for a large project is minutes, and three processes write this store by
+        # design. `hook_events` is the class with no recovery path either: its watermark row is not
+        # deleted, so the log line ends up behind it and the row cannot be rebuilt from anything.
+        #
+        # The manifest already carries the number that catches it. Refusing is right rather than
+        # deleting the extra rows: the backup is the undo, and a row the backup does not hold has
+        # no undo.
+        carried: dict = manifest.get("counts") or {}
+        moved: dict = {}
+
+        def _moved(table, live):
+            if table in carried and live != carried[table]:
+                moved[table] = {"backup": carried[table], "live": live}
+
+        for table in BY_SESSION:
+            _moved(table, con.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE session_id IN ({marks})", ids).fetchone()[0])
+        for table in BY_COMPACTION:
+            _moved(table, con.execute(
+                f"""SELECT COUNT(*) FROM {table} WHERE compaction_uuid IN
+                    (SELECT uuid FROM compactions WHERE session_id IN ({marks}))""",
+                ids).fetchone()[0])
+        for table in BY_TRANSCRIPT:
+            _moved(table, con.execute(
+                f"""SELECT COUNT(*) FROM {table} WHERE path IN
+                    (SELECT transcript_path FROM sessions WHERE session_id IN ({marks})
+                      AND transcript_path IS NOT NULL)""", ids).fetchone()[0])
+        if moved:
+            raise ValueError(
+                "the store changed while the backup was being written, so the backup no longer "
+                "holds what this delete would remove: "
+                + "; ".join(f"{table} has {n['live']} rows and the backup carries {n['backup']}"
+                            for table, n in sorted(moved.items()))
+                + ". Nothing was deleted. Run it again and it will back up what is there now.")
+
         removed = {}
         # Survivors before compactions, and everything before sessions: no foreign keys means
         # nothing cleans up after a half-finished delete, so the order is the safety.
@@ -1256,7 +1307,15 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
         # WHAT STILL LIVES IN THIS DIRECTORY, asked AFTER the rows are gone, so the answer is
         # about survivors rather than about the set being deleted. It decides both of the
         # working-directory clauses in this function's docstring.
-        cwds: list[str] = manifest.get("cwds") or [project]
+        # NO FALLBACK TO THE LABEL. This read `manifest.get("cwds") or [project]`, and `project`
+        # is a page label: for sessions with no working directory recorded it is
+        # `<slug> (no working directory recorded)`. That string was then handed to
+        # `appstate.purge`, whose `_cwds` guard exists to refuse exactly a label and accepts it
+        # because it is a non-empty string, and written into `excluded_projects`, where no `d.cwd`
+        # can ever equal it, so the exclusion never fires and the sessions return on the next
+        # harvest with their offset row already removed.
+        cwds: list[str] = manifest.get("cwds") or []
+        unlocated = not cwds
         survivors = sessions_with_cwds(con, cwds)
         # TWO SURVIVOR TESTS, BECAUSE THE TWO SHARED LAYERS ARE KEYED DIFFERENTLY. The config entry
         # is keyed by the exact working directory string; `memory/` is keyed by the slug directory,
@@ -1334,7 +1393,10 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
     rows = [row for row in rows if not _belongs_to_a_survivor(row)]
     purged = appstate.purge(rows, cwds)
 
-    snapshots = snapshot_files(ids)
+    # The stems of transcripts a surviving session is also in. A snapshot of one of those files
+    # holds that session's history too, and the backup does not carry snapshots.
+    shared_stems = {Path(entry["transcript"]).stem for entry in shared_transcripts}
+    snapshots = snapshot_files(ids, shared_stems)
     snapshot_report = {"files": len(snapshots), "removed": 0,
                        "bytes": sum(p.stat().st_size for p in snapshots)}
     if purge_snapshots:
@@ -1349,6 +1411,9 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
             # Directories this delete deliberately kept capturing, because sessions it did not
             # delete are still in them.
             "still_captured": still_captured,
+            # No session under this label has a working directory recorded, so there is no
+            # directory to purge and no exclusion that harvest could ever match.
+            "unlocated": unlocated,
             # Transcript files this project shared with another working directory. The harvester
             # abandons a file, not a session, so these are why a directory can be left capturing.
             "shared_transcripts": shared_transcripts,
@@ -1687,7 +1752,10 @@ def main(argv=None):
         for entry in result.get("prune_refused") or []:
             print(f"  PRUNE REFUSED  {entry['path']}: {entry['why']}")
         for entry in result.get("still_here") or []:
-            print(f"  STILL HERE  {entry['kind']}  {entry['path']}")
+            # A REFUSED ROW HAS NO PATH, so this printed the word None and nothing else useful.
+            where = entry.get("path") or entry.get("relpath")
+            why = entry.get("why")
+            print(f"  STILL HERE  {entry['kind']}  {where}" + (f": {why}" if why else ""))
         return 1 if result.get("still_here") else 0
     if args.command == "include":
         print(f"  removed {include(args.project)} exclusion(s) for {args.project}")
