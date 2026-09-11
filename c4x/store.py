@@ -573,13 +573,28 @@ def _read_links() -> tuple[dict, dict]:
     df = q("SELECT session_id, head_id, prefix_uuids FROM session_links")
     if df.empty:
         return {}, {}
-    head_of = dict(zip(df["session_id"], df["head_id"], strict=True))
-    members_of: dict = {}
+    raw = dict(zip(df["session_id"], df["head_id"], strict=True))
+
+    # FLATTENED HERE, whatever the rows say. Harvest writes head_id already resolved, but a row can
+    # outlive the pass that wrote it (a prefix's transcript deleted from disk, a directory whose
+    # later pass failed), and then B -> A and A -> Z can coexist. Read literally that put B in a
+    # chat that never reached Z. Following the chain to a session with no row of its own is cheap
+    # and makes every reader agree.
+    def resolve(sid):
+        seen = set()
+        while sid in raw and sid not in seen:
+            seen.add(sid)
+            sid = raw[sid]
+        return sid
+
+    head_of = {sid: resolve(sid) for sid in raw}
     # Newest prefix first. A later session in a chain holds more records than an earlier one, so
-    # prefix_uuids orders the members without a second query.
-    ranked = sorted(zip(df["session_id"], df["head_id"], df["prefix_uuids"], strict=True),
-                    key=lambda r: -int(r[2] or 0))
-    for sid, head, _size in ranked:
+    # prefix_uuids orders the members without a second query. NULL reads as 0, not as an error:
+    # pandas turns a nullable INTEGER column into floats with NaN, and int(NaN) raises.
+    sizes = {sid: (0 if pd.isna(n) else int(n))
+             for sid, n in zip(df["session_id"], df["prefix_uuids"], strict=True)}
+    members_of: dict = {}
+    for sid, head in sorted(head_of.items(), key=lambda kv: -sizes.get(kv[0], 0)):
         members_of.setdefault(head, [head]).append(sid)
     return head_of, members_of
 
@@ -615,6 +630,20 @@ def chat_members(session_id) -> list:
     head_of, members_of = chat_links()
     head = head_of.get(session_id, session_id)
     return list(members_of.get(head, [head]))
+
+
+def chat_members_sql(column: str) -> str:
+    """A subquery naming every session of the chat that `column` belongs to, for an `IN (...)`.
+
+    The SQL twin of `chat_members`, for queries that start from a ROW rather than from a selected
+    id: a compaction's owner session, say, whose chat's earlier members hold the messages it
+    replaced. On a store without the table the chat is the session itself.
+    """
+    if not tables_present("session_links"):
+        return f"SELECT {column}"
+    head = f"COALESCE((SELECT l.head_id FROM session_links l WHERE l.session_id = {column}), {column})"
+    return (f"SELECT m.session_id FROM session_links m WHERE m.head_id = {head} "
+            f"UNION SELECT {head}")
 
 
 def chain_where(session_id, column: str = "session_id") -> tuple[str, tuple]:
@@ -1154,7 +1183,9 @@ def _collapse_chains(df, head_of, members_of) -> pd.DataFrame:
             named = by_recency[[isinstance(t, str) and bool(t.strip()) for t in by_recency["title"]]]
             if not named.empty:
                 r["title"], r["title_kind"] = named.iloc[0]["title"], named.iloc[0]["title_kind"]
-        r["cli_sessions"] = int(len(g))
+        # The members with a turns row, plus the head itself when it has none: a chat resumed and
+        # closed without an API call still spans that session.
+        r["cli_sessions"] = int(len(g)) + (1 if own.empty else 0)
         rows.append(r)
     out = pd.DataFrame(rows).drop(columns=["_head"])
     if orphan_heads:
@@ -1659,13 +1690,16 @@ def all_compactions(session_id=None, cohort=None) -> pd.DataFrame:
     # scope="all": a compaction is a property of the session, not of one thread inside it, so the
     # sidechain filter does not apply to this table.
     where, args = scoped(session_id, "all", alias="c", cohort=cohort)
+    # The model in force at the boundary is the newest turn BEFORE it, which for a compaction that
+    # happened just after a resume sits in the chat's previous session.
+    members = chat_members_sql("c.session_id")
     return q(f"""
         SELECT c.uuid, c.ts, c.trigger, c.version,
                COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project,
                c.pre_tokens, c.post_tokens, c.cumulative_dropped_tokens AS dropped,
                c.duration_ms,
                (SELECT t.model FROM turns t
-                 WHERE t.session_id = c.session_id AND t.ts <= c.ts
+                 WHERE t.session_id IN ({members}) AND t.ts <= c.ts
                  ORDER BY t.ts DESC LIMIT 1) AS model,
                (SELECT COUNT(*) FROM compaction_survivors v
                  WHERE v.compaction_uuid = c.uuid) AS survivors
@@ -1698,12 +1732,15 @@ def compaction_dropped(compaction_uuid: str, limit: int = 300) -> pd.DataFrame:
     holds no message for cannot be matched, and a message with no readable text was never stored,
     so this lists what can be shown to have gone rather than everything that went.
     """
+    # OVER THE WHOLE CHAT. A compaction just after a resume replaced messages the chat's earlier
+    # sessions hold, and the store attributes each message to the session that produced it.
+    members = chat_members_sql("c.session_id")
     return q(
-        """
+        f"""
         SELECT m.uuid, m.ts, m.role, m.type, m.chars,
                substr(replace(replace(m.text, char(10), ' '), char(13), ' '), 1, 220) AS preview
         FROM compactions c
-        JOIN messages m ON m.session_id = c.session_id AND m.ts < c.ts
+        JOIN messages m ON m.session_id IN ({members}) AND m.ts < c.ts
         WHERE c.uuid = ?
           AND m.uuid NOT IN (SELECT uuid FROM compaction_survivors WHERE compaction_uuid = c.uuid)
           AND m.uuid <> COALESCE(c.summary_uuid, '')
@@ -1805,11 +1842,12 @@ def compaction_dropped_count(compaction_uuid: str) -> int:
     compaction_dropped() caps its result, and reporting the capped length as the count states the
     limit as though it were a finding.
     """
+    members = chat_members_sql("c.session_id")
     df = q(
-        """
+        f"""
         SELECT COUNT(*) AS n
         FROM compactions c
-        JOIN messages m ON m.session_id = c.session_id AND m.ts < c.ts
+        JOIN messages m ON m.session_id IN ({members}) AND m.ts < c.ts
         WHERE c.uuid = ?
           AND m.uuid NOT IN (SELECT uuid FROM compaction_survivors WHERE compaction_uuid = c.uuid)
           AND m.uuid <> COALESCE(c.summary_uuid, '')
@@ -1921,7 +1959,10 @@ def load_compaction_windows():
 
 
 def segments_for(session_id: str):
-    return _node_json_argv([str(ROOT / "tools" / "segments.mjs"), "--session", session_id])
+    # Every member of the chat, joined: the compaction or the peak that proves the window can sit
+    # in a session the chat has since resumed out of.
+    return _node_json_argv([str(ROOT / "tools" / "segments.mjs"), "--session",
+                            ",".join(chat_members(session_id) or [session_id])])
 
 
 MATH = load_math()

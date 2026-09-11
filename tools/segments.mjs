@@ -139,14 +139,19 @@ function db() {
   return d;
 }
 
+// One session id, or several joined by commas: a chat the desktop app resumed is several CLI
+// sessions, and its window is proved by compactions and peaks that may sit in any of them, so the
+// store passes every member of the chat and this reads them as one timeline.
 export function loadSession(sessionId) {
+  const ids = String(sessionId).split(',').map((s) => s.trim()).filter(Boolean);
+  const marks = ids.map(() => '?').join(',');
   const d = db();
   const rows = d.prepare(
-    'SELECT ts, model, total_resident, is_sidechain FROM turns WHERE session_id = ? ORDER BY ts'
-  ).all(sessionId);
+    `SELECT ts, model, total_resident, is_sidechain FROM turns WHERE session_id IN (${marks}) ORDER BY ts`
+  ).all(...ids);
   const comps = d.prepare(
-    'SELECT ts, pre_tokens FROM compactions WHERE session_id = ? ORDER BY ts'
-  ).all(sessionId);
+    `SELECT ts, pre_tokens FROM compactions WHERE session_id IN (${marks}) ORDER BY ts`
+  ).all(...ids);
   d.close();
   return { rows, comps };
 }

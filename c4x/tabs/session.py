@@ -15,6 +15,7 @@ from c4x.store import (
     THRESHOLDS,
     chain_where,
     chat_head,
+    chat_members,
     cohort_named,
     cohort_sessions,
     measured_cost,
@@ -534,7 +535,9 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
                        FROM api_calls WHERE 1=1 {cw} GROUP BY model""", cargs)
     cost_usd, cost_calls, _unpriced = cost_of_rows(_by_model.to_dict("records"))
     # One session, so the population match is exact and needs no derivation.
-    _measured = measured_cost([session_id])
+    # The whole chat. Claude Code's cost ledger stays owned by the session that opened it, so a
+    # resumed chat's figure sits under an earlier member and the head alone reads "not recorded".
+    _measured = measured_cost(chat_members(session_id))
     cost_usd = cost_usd if cost_calls else None
     cache_total = int(cdf.iloc[0]["churn"] or 0) if not cdf.empty else 0
     churn_peak = int(cdf.iloc[0]["peak"] or 0) if not cdf.empty else 0

@@ -731,7 +731,15 @@ def export(project, out_path, app_state=True):
 
             source.execute("ATTACH DATABASE ? AS dest", (str(out_path),))
             counts = {}
+            # A table this store does not have yet is carried as nothing, not as an error: a store
+            # harvested by an older build has no session_links, and the Python package never
+            # creates tables, so the export must read what exists. The manifest's table list is
+            # built from the destination below, so the import side sees exactly what was carried.
+            present = {r[0] for r in source.execute(
+                "SELECT name FROM main.sqlite_master WHERE type = 'table'")}
             for table in BY_SESSION:
+                if table not in present:
+                    continue
                 source.execute(
                     f"INSERT INTO dest.{table} SELECT * FROM main.{table} "
                     f"WHERE session_id IN ({marks})", ids)
@@ -1025,7 +1033,13 @@ def import_(path, into=None, dry_run=False):
                     report["dropped_columns"][table] = missing
                 before = con.execute(f"SELECT COUNT(*) FROM main.{table}").fetchone()[0]
                 listed = ",".join(f'"{c}"' for c in shared)
-                con.execute(f"INSERT OR IGNORE INTO main.{table} ({listed}) "
+                # A LINK IS REPLACED, everything else is kept. A chain that was resumed on the
+                # source after an earlier import now points every member at a newer head, and the
+                # rows this store holds for those members are the stale ones: keeping them would
+                # split one chat into two rows here. Every other table is keyed on identities that
+                # do not change meaning between exports.
+                verb = "INSERT OR REPLACE" if table == "session_links" else "INSERT OR IGNORE"
+                con.execute(f"{verb} INTO main.{table} ({listed}) "
                             f"SELECT {listed} FROM src.{table}")
                 after = con.execute(f"SELECT COUNT(*) FROM main.{table}").fetchone()[0]
                 offered = con.execute(f"SELECT COUNT(*) FROM src.{table}").fetchone()[0]
@@ -1381,8 +1395,14 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
                     "live_rows": con.execute(
                         f"SELECT COUNT(*) FROM {table} {where}", params).fetchone()[0]}
 
+        # A table this store does not have (session_links on a store harvested by an older build)
+        # is neither compared nor deleted: the export above carried nothing for it, so there is
+        # nothing in the backup for it to match.
+        present = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
         for table in BY_SESSION:
-            _moved(table, f"WHERE session_id IN ({marks})", ids)
+            if table in present:
+                _moved(table, f"WHERE session_id IN ({marks})", ids)
         for table in BY_COMPACTION:
             _moved(table, f"""WHERE compaction_uuid IN
                     (SELECT uuid FROM compactions WHERE session_id IN ({marks}))""", ids)
@@ -1414,6 +1434,8 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
                     (SELECT transcript_path FROM sessions WHERE session_id IN ({marks})
                       AND transcript_path IS NOT NULL)""", ids).rowcount
         for table in BY_SESSION:
+            if table not in present:
+                continue
             removed[table] = con.execute(
                 f"DELETE FROM {table} WHERE session_id IN ({marks})", ids).rowcount
         # WHAT STILL LIVES IN THIS DIRECTORY, asked AFTER the rows are gone, so the answer is
