@@ -682,6 +682,19 @@ export function ProjectMoves({
                         <code>{deleted.appeared_since_backup.join(', ')}</code>
                       </p>
                     )}
+                    {deleted.unlocated && (
+                      <p className="mt-0.5 text-xs text-warn">
+                        No working directory was recorded for any of these sessions, so no files
+                        were purged and no exclusion could be written that the harvester would
+                        ever match.
+                      </p>
+                    )}
+                    {deleted.appeared_files.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Left on disk, arrived after the backup and is not in it:{' '}
+                        <code>{entry.path}</code>
+                      </p>
+                    ))}
                     {deleted.shared_transcripts.map((entry) => (
                       <p key={entry.transcript} className="mt-0.5 break-all text-xs text-ink-dim">
                         Still captured: <code>{entry.cwd}</code> shares a transcript with{' '}

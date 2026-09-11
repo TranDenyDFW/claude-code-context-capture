@@ -51,6 +51,7 @@ function deleteReport(over: Partial<DeleteReport> = {}): DeleteReport {
     config_keys_removed: [], config_keys_kept: [], shared_with_surviving_sessions: [],
     surviving_sessions: [], sessions_sharing_slug: [], not_carried: [], too_large: [],
     skipped: [], prune_refused: [], shared_transcripts: [],
+    appeared_files: [], unlocated: false,
     snapshots: { files: 0, removed: 0, bytes: 0 }, still_here: [],
     appeared_since_backup: [], ...over,
   }
@@ -246,6 +247,24 @@ describe('delete', () => {
 
     expect(screen.queryByText(/arrived while the backup was being written/)).not.toBeNull()
     expect(screen.queryByText('s9-9')).not.toBeNull()
+  })
+
+  it('names a file that arrived after the backup and a project with no directory', async () => {
+    // Both were computed by the server and reached no user anywhere: the one case the guard DOES
+    // catch was named in no surface at all.
+    vi.spyOn(api.project, 'delete').mockResolvedValue(
+      deleteReport({
+        appeared_files: [{ path: 'C:/x/late.jsonl', cwd: PROJECT }],
+        unlocated: true,
+      }),
+    )
+    show()
+    fireEvent.change(confirmField(), { target: { value: PROJECT } })
+    fireEvent.click(deleteButton())
+    await screen.findByText(/Deleted/)
+
+    expect(screen.queryByText(/arrived after the backup and is not in it/)).not.toBeNull()
+    expect(screen.queryByText(/No working directory was recorded/)).not.toBeNull()
   })
 
   it('sends the cohort untouched, not the bare path', async () => {

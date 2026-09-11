@@ -615,6 +615,65 @@ class TestTheBackupHoldsEveryRowTheDeleteRemoves:
             con.close()
 
 
+class TestWhatTheReportReachesAUserAs:
+    def test_a_late_write_inside_a_carried_directory_is_named(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """`appeared_files` compared a top-level entry NAME against a flat set of relpaths.
+
+        Three mistakes in one line: a tasks or desktop relpath could shadow a slug entry of the
+        same name; a directory that carried ONE file was treated as fully carried, so a write
+        inside it was invisible; and an entry name never equals a nested relpath anyway. The file
+        this field exists to name was exactly the one it missed.
+        """
+        real = projects.export
+        late = machine.base / "s0-0" / "subagents" / "arrived-late.jsonl"
+
+        def a_write_lands_after_the_capture(project, out_path, app_state=True):
+            manifest = real(project, out_path, app_state=app_state)
+            late.parent.mkdir(parents=True, exist_ok=True)
+            late.write_bytes(b"written after the backup was taken")
+            return manifest
+
+        monkeypatch.setattr(projects, "export", a_write_lands_after_the_capture)
+
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert late.exists(), "the backup does not hold it, so the purge must not take it"
+        assert str(late) in {entry["path"] for entry in result["appeared_files"]}, (
+            "it is inside a directory that DID carry files, which is what hid it")
+
+    def test_the_cli_does_not_print_the_two_sentences_that_were_false(
+            self, store_at, machine, tmp_path, capsys):
+        """Nothing read CLI output, so two sentences this branch proved false stayed in it.
+
+        One named "0 session(s) still have this working directory" as the REASON it kept files,
+        whenever memory was kept for a session sharing the slug directory. The other told the user
+        a still-captured directory "has sessions this delete did not take", which is exactly untrue
+        for the shared-transcript case, and suppressed the it-comes-back warning while doing it.
+        """
+        con = sqlite3.connect(str(store_at))
+        con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                    ("lodger-0", "slug-l", "P:/Gamma", None, "2.1.229", "cli",
+                     "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z", r"C:\t\s0-0.jsonl"))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+
+        code = projects.main(["delete", ALPHA, "--confirm", ALPHA,
+                              "--out-dir", str(tmp_path / "backups")])
+        printed = capsys.readouterr().out
+
+        assert code == 0, printed
+        assert "has sessions this delete did not take" not in printed, (
+            "that directory has no sessions left at all; it is kept capturing because it shares a "
+            "transcript FILE, and the harvester abandons files")
+        assert "STILL CAPTURED" in printed
+        assert "shares" in printed and "skips whole files" in printed
+        assert "the next harvest brings it back" in printed, (
+            "it is not excluded, so it does come back, and that is the case the old condition "
+            "suppressed the warning for")
+
+
 class TestTheDryRunAndTheRunAgree:
     def test_a_writer_holds_the_lock_before_it_reads(self, store_at):
         """Python's sqlite3 defers the BEGIN until the first statement that changes something.
@@ -745,9 +804,9 @@ class TestTheRowHalfIsEnforcedByContent:
         assert late.exists(), "the backup does not hold it, so the purge must not take it"
         assert [entry["path"] for entry in result["appeared_files"]] == [str(late)]
 
-    def test_a_failure_after_the_backup_still_names_the_backup(
+    def test_a_failure_after_the_rows_are_gone_says_so_and_names_the_backup(
             self, store_at, machine, tmp_path, monkeypatch):
-        """The backup exists by then and is the only undo.
+        """The backup exists by then and is the ONLY copy, because the rows are already committed.
 
         A traceback that does not name it leaves a half-finished delete and nowhere to look. Over
         HTTP it was a 500 with an empty body.
@@ -759,11 +818,67 @@ class TestTheRowHalfIsEnforcedByContent:
 
         monkeypatch.setattr(appstate, "purge", explode)
 
-        with pytest.raises(RuntimeError, match="backup was written first") as caught:
+        with pytest.raises(projects.AfterTheRowsWereRemoved) as caught:
             projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
 
         assert "the file half failed" in str(caught.value)
+        assert "THE ROWS ARE ALREADY GONE" in str(caught.value)
         assert str(tmp_path / "backups") in str(caught.value)
+
+    def test_a_value_error_after_the_commit_is_not_reported_as_a_refusal(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """`except ValueError: raise` said "nothing has been removed" and that was false.
+
+        `appstate.purge` re-reads `~/.claude.json` AFTER the write transaction commits, and
+        `read_config` raises ValueError on a file it cannot parse, which Claude Code rewrites
+        continuously. Reproduced on this fixture before the fix: every session row and turn gone, a
+        permanent exclusion written, all five files still on disk, and the caller told it was a
+        refusal, over HTTP a 409 that named no backup. That is worse than either outcome.
+        """
+        real = projects.export
+
+        def export_then_the_config_tears(project, out_path, app_state=True):
+            manifest = real(project, out_path, app_state=app_state)
+            machine.config.write_text('{"projects": {', encoding="utf-8")
+            return manifest
+
+        monkeypatch.setattr(projects, "export", export_then_the_config_tears)
+
+        with pytest.raises(projects.AfterTheRowsWereRemoved) as caught:
+            projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert "does not parse as JSON" in str(caught.value)
+        assert "THE ROWS ARE ALREADY GONE" in str(caught.value)
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            assert con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
+                               (ALPHA,)).fetchone()[0] == 0, (
+                "the rows really are gone, which is the whole point of not calling this a refusal")
+        finally:
+            con.close()
+
+    def test_a_failure_before_the_rows_go_says_nothing_was_removed(
+            self, store_at, machine, tmp_path, monkeypatch):
+        """The other half. Telling someone to import the backup here restores what never left."""
+        from c4x import store
+
+        def explode():
+            raise OSError("the store could not be opened")
+
+        monkeypatch.setattr(store, "write", explode)
+
+        with pytest.raises(RuntimeError) as caught:
+            projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
+
+        assert not isinstance(caught.value, projects.AfterTheRowsWereRemoved)
+        assert "Nothing was removed" in str(caught.value)
+        assert "can be discarded" in str(caught.value)
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            assert con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
+                               (ALPHA,)).fetchone()[0] == 3
+        finally:
+            con.close()
 
     def test_a_config_that_stops_parsing_is_reported_rather_than_raised(self, monkeypatch):
         """`_drop_config` read the file OUTSIDE its guard, after every other layer was gone.
@@ -849,34 +964,36 @@ class TestALabelThatNamesTwoProjects:
 
         assert not out_dir.exists() or list(out_dir.iterdir()) == []
 
-    def test_memory_is_decided_per_directory_when_the_label_guard_is_bypassed(
+    def test_the_guard_runs_again_inside_the_transaction(
             self, store_at, machine, tmp_path, monkeypatch):
-        """The layer under the guard, which the guard itself now keeps unreachable.
+        """The first check is on a read-only connection BEFORE the export, and cannot be the last.
 
-        `bool(slug_survivors)` was one answer for every carried working directory at once, so a
-        delete spanning two slug directories kept the memory of the one with NO survivor and
-        reported it as a deliberate exception. Forced past the label guard, because otherwise this
-        line could not be asserted at all.
+        The export takes minutes on a large project and a session landing in that window can make
+        the label ambiguous after the check has already passed. Bypassing the early check is how
+        that window is reproduced deterministically: the manifest still carries two working
+        directories, and the delete must refuse on those rather than on what it saw first.
         """
-        from c4x import appstate
         self.a_real_project_named_archived(store_at)
-        nested_base = machine.claude / "projects" / appstate.slug_for(self.nested_cwd())
-        (nested_base / "memory").mkdir(parents=True)
-        (nested_base / "memory" / "notes.md").write_bytes(b"# the nested project's memory")
-        for n in range(2):
-            (nested_base / f"nested-{n}.jsonl").write_bytes(b"line")
         label = archive_only(monkeypatch, ["s0-0"])
         monkeypatch.setattr(projects, "one_working_directory", lambda con, project: (None, None))
 
-        result = projects.delete(label, confirm=label, out_dir=tmp_path / "backups")
+        with pytest.raises(ValueError, match="more than one working directory"):
+            projects.delete(label, confirm=label, out_dir=tmp_path / "backups")
 
-        assert (machine.base / "memory" / "notes.md").exists(), (
-            "s0-1 and s0-2 are still in that slug directory, so its memory is shared")
-        assert not (nested_base / "memory" / "notes.md").exists(), (
-            "no session is left in THAT slug directory, so its memory was never shared")
-        kept = {entry["relpath"] for entry in result["shared_with_surviving_sessions"]}
-        assert "memory/notes.md" in kept, "the one that IS shared is still reported"
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            assert con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
+                               (self.nested_cwd(),)).fetchone()[0] == 2, (
+                "the project the user did not name is untouched, by the second guard this time")
+        finally:
+            con.close()
 
+    # The per-row memory decision under these guards is now UNREACHABLE through `delete`:
+    # both guards refuse a label that resolves to two working directories, so a delete never
+    # carries more than one. The per-row form is kept in `_belongs_to_a_survivor` as defence
+    # rather than as live behaviour, and the test that reached it by defeating the guards was
+    # removed with them, because a test that can only pass by disabling two refusals is
+    # asserting something the code no longer does.
 
 class TestTheExclusionsUnitIsTheFile:
     def test_a_directory_sharing_a_transcript_keeps_being_captured(

@@ -1024,15 +1024,20 @@ def import_(path, into=None, dry_run=False):
     # order is chosen for what a failure leaves behind: rows without files is a project c4x can
     # show and the desktop app cannot open, and re-running the import fixes it, because inserts
     # ignore what is already there and files are overwritten from the export either way.
-    report["app_state"] = restore_app_state(path, mapping)
-    report["mirror"] = verify_mirror(path, mapping=mapping)
-
+    # THE MOMENT THE ROWS ARE COMMITTED, not at the end, which is the placement `delete`'s own
+    # comment calls wrong and which this had anyway. `restore_app_state` and `verify_mirror` both
+    # run after the transaction and both can raise, and on exactly those runs the page went on
+    # serving a frame without the rows that had just landed.
+    #
     # THE SAME CACHES A DELETE CLEARS, for the same reason and in the other direction. An import
     # adds sessions and writes transcripts, and `store` holds the session frame and the transcript
-    # scan for 45 seconds, so the imported project was absent from the page for up to that long
-    # while the panel said it had landed. Only `delete` called this.
+    # scan for 45 seconds, so the imported project was absent from the page for that long while the
+    # panel said it had landed. Only `delete` called this.
     from c4x import store as _s
     _s.invalidate()
+
+    report["app_state"] = restore_app_state(path, mapping)
+    report["mirror"] = verify_mirror(path, mapping=mapping)
     return report
 
 
@@ -1226,22 +1231,40 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
 
     try:
         return _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snapshots)
+    except AfterTheRowsWereRemoved:
+        # Already carries the rows-are-gone message and the backup path. Nothing to add.
+        raise
     except ValueError:
-        # A refusal. The guards raise these deliberately and nothing has been removed, so the
-        # caller gets the reason as it stands.
+        # A REFUSAL, AND ONLY A PRE-COMMIT ONE REACHES HERE. This caught every ValueError and said
+        # "nothing has been removed", which was false for any raised after the write transaction
+        # committed: `appstate.purge` re-reads `~/.claude.json` there and `read_config` raises
+        # ValueError on a file it cannot parse, which Claude Code rewrites continuously. Measured
+        # on a fixture: every session row and turn gone, a permanent exclusion written, all five
+        # files still on disk, and the caller told it was a refusal. `_delete_with` now labels
+        # anything past the commit, so this branch means what it says.
         raise
     except Exception as exc:
-        # ANYTHING ELSE, AND THE BACKUP PATH GOES WITH IT. The backup exists by this point and is
-        # the only undo; a traceback that does not name it leaves the user with a half-finished
-        # delete and nowhere to look. Over HTTP this was a 500 with an empty body.
+        # PRE-COMMIT, SO NOTHING WAS REMOVED, and the message must not tell anyone to import the
+        # backup: that would restore a project that never left. The path is still named, because
+        # the backup exists and the user is entitled to know a file was written.
         raise RuntimeError(
-            f"{exc}. The backup was written first and is at {backup}, so this delete is undoable "
-            f"by importing it.") from exc
+            f"{exc}. Nothing was removed from the store: this failed before the delete ran. A "
+            f"backup was already written to {backup} and can be discarded.") from exc
+
+
+class AfterTheRowsWereRemoved(RuntimeError):
+    """A delete that failed once the store transaction had already committed.
+
+    Its own class because the caller has to tell it from a refusal, and the two need opposite
+    advice: a refusal removed nothing and the backup can be discarded, this one removed every row
+    and the backup is the only way back. `delete` used to answer both with the same bare re-raise,
+    so a half-finished delete was reported as "nothing has been removed" and returned 409.
+    """
 
 
 def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snapshots):
     """The body of `delete`, after the backup exists. Split out so no failure can hide its path."""
-    from c4x import appstate, store
+    from c4x import store
 
     with store.write() as con:
         # THE SET THE BACKUP HOLDS, not a fresh resolution. This called `session_ids` again here,
@@ -1263,7 +1286,8 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
         shared_transcripts = [
             {"cwd": a_cwd, "with_cwd": b_cwd, "transcript": path}
             for a_cwd, b_cwd, path in con.execute(
-                f"""SELECT DISTINCT a.cwd,
+                f"""SELECT DISTINCT
+                           COALESCE(a.cwd, '(no working directory recorded)'),
                            COALESCE(b.cwd, '(no working directory recorded)'),
                            a.transcript_path
                       FROM sessions a JOIN sessions b ON a.transcript_path = b.transcript_path
@@ -1295,6 +1319,20 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
         # disk against the row and KEEPING anything that differs. This is the row half of it. The
         # digests come from the manifest, where they are taken over the export file, whose tables
         # hold only the carried sessions, so the live side is scoped to the same rows.
+        # THE LABEL GUARD AGAIN, AGAINST THE SET THAT IS ABOUT TO BE DELETED. The first check runs
+        # on a read-only connection before the export, which is right for refusing early and
+        # cheaply and useless as the last word: the export takes minutes on a large project, and a
+        # session landing in that window can make the label ambiguous after the check passed. The
+        # manifest carries the working directories the export actually resolved, so the same rule
+        # is applied to those, inside the transaction, where nothing can move underneath it.
+        manifest_cwds = manifest.get("cwds") or []
+        if len(manifest_cwds) > 1:
+            raise ValueError(
+                f"{project!r} names more than one working directory on this machine: "
+                + ", ".join(repr(c) for c in manifest_cwds)
+                + ". An archived label and a real directory of that name are the same string "
+                  "here, so this delete cannot tell which one you mean; nothing was deleted.")
+
         carried: dict = manifest.get("digests") or {}
         carried_counts: dict = manifest.get("counts") or {}
         moved: dict = {}
@@ -1401,6 +1439,29 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
     # gone wrong and the user most needed the page to be true.
     store.invalidate()
 
+    # EVERYTHING PAST THIS POINT RUNS WITH THE ROWS ALREADY GONE, so every failure in it is a
+    # half-finished delete rather than a refusal, and has to say so. `appstate.purge` alone raises
+    # ValueError from its config re-read, from an unknown kind, and from a two-rows-one-file
+    # collision, and `delete`'s handler read all three as "nothing has been removed".
+    try:
+        return _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots,
+                                 ids, cwds, unlocated, survivors, slug_survivors, surviving_norm,
+                                 surviving_slug_set, removed, excluded_cwds, still_captured,
+                                 shared_transcripts, appeared)
+    except Exception as exc:
+        raise AfterTheRowsWereRemoved(
+            f"{exc}. THE ROWS ARE ALREADY GONE: the store transaction committed before this ran, "
+            f"so the project is half removed. The backup at {backup} is the only copy of it and "
+            f"importing that file puts it back.") from exc
+
+
+def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots,
+                      ids, cwds, unlocated, survivors, slug_survivors, surviving_norm,
+                      surviving_slug_set, removed, excluded_cwds, still_captured,
+                      shared_transcripts, appeared):
+    """The half that runs after the rows are committed. Separate so its failures are labelled."""
+    from c4x import appstate
+
     # THE FILES, after the rows. A file removal that fails partway leaves rows already gone and
     # files still there, which one import of the backup puts back; the other order leaves rows
     # pointing at transcripts that are not there any more.
@@ -1441,20 +1502,30 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
     # A transcript or tool-output directory written for one of these sessions between the app-state
     # capture and the purge is not in the backup, so the purge leaves it, correctly, and nothing
     # said so: the slug directory kept files for a session the store no longer has.
-    carried_relpaths = {row["relpath"] for row in app_state_rows(backup, with_blobs=False)}
+    # PER FILE AND PER KIND. The first version compared a top-level entry NAME against a flat set
+    # of relpaths drawn from all four kinds at once, which is three mistakes in one line: a tasks
+    # or desktop relpath could shadow a slug entry of the same name; a directory that carried ONE
+    # file was treated as fully carried, so a late write inside `<sid>/subagents/` was invisible;
+    # and the entry name never equals a nested relpath anyway. `_walk` records a TRANSCRIPT row's
+    # relpath as a POSIX path relative to the slug directory, so that is what this compares, and
+    # the name test is capture's own rule applied to the first segment.
+    carried_transcripts = {row["relpath"] for row in app_state_rows(backup, with_blobs=False)
+                           if row["kind"] == appstate.TRANSCRIPT}
     appeared_files = []
     for cwd in cwds:
         base = appstate.project_dir(cwd)
         if not base.is_dir():
             continue
-        for entry in sorted(base.iterdir()):
-            if not any(entry.name.startswith(sid) for sid in ids):
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
                 continue
-            if entry.name in carried_relpaths or f"{entry.name}/" in carried_relpaths:
+            rel = path.relative_to(base).as_posix()
+            head = rel.split("/", 1)[0]
+            if not any(head.startswith(sid) for sid in ids):
                 continue
-            if any(rel.startswith(f"{entry.name}/") for rel in carried_relpaths):
+            if rel in carried_transcripts:
                 continue
-            appeared_files.append({"path": str(entry), "cwd": cwd})
+            appeared_files.append({"path": str(path), "cwd": cwd})
 
     snapshots = snapshot_files(ids, shared_stems)
     snapshot_report = {"files": len(snapshots), "removed": 0,
@@ -1786,9 +1857,17 @@ def main(argv=None):
             print(f"    REFUSED  {entry['relpath']}: {entry['why']}")
         shared = result.get("shared_with_surviving_sessions") or []
         if shared:
-            print(f"  {len(shared)} file(s) and config entries LEFT: "
+            # BOTH SURVIVOR LISTS, AND THE TWO KINDS APART. Counting only `surviving_sessions`
+            # printed "0 session(s) still have this working directory" as the REASON it had kept
+            # files, whenever memory was kept for a session that merely shares the slug directory.
+            # The React panel was fixed for exactly this and the CLI was left saying it.
+            memory = sum(1 for entry in shared if entry["kind"] == "memory")
+            trust = sum(1 for entry in shared if entry["kind"] == "config")
+            others = len(result.get("sessions_sharing_slug") or [])
+            print(f"  LEFT: {memory} memory file(s) and {trust} trust entr(ies), because "
                   f"{len(result['surviving_sessions'])} session(s) still have this working "
-                  "directory, and memory and trust settings belong to the directory")
+                  f"directory and {others} more are in the same slug directory under another "
+                  "spelling; memory follows the directory and the trust entry follows the string")
         snapshots = result.get("snapshots") or {}
         if snapshots.get("files"):
             if snapshots.get("removed"):
@@ -1800,8 +1879,22 @@ def main(argv=None):
         for cwd in result.get("excluded_cwds") or []:
             print(f"  excluded from future harvests: {cwd}")
         for cwd in result.get("still_captured") or []:
-            print(f"  STILL CAPTURED: {cwd} has sessions this delete did not take")
-        if not result["excluded"] and not result.get("still_captured"):
+            # NOT NECESSARILY "has sessions this delete did not take". A directory is also left
+            # capturing when it shares a transcript FILE with another project, because the
+            # harvester abandons whole files, and then it has no sessions left at all.
+            print(f"  STILL CAPTURED: {cwd}")
+        for entry in result.get("shared_transcripts") or []:
+            print(f"    shares {entry['transcript']} with {entry['with_cwd']}, "
+                  "and the harvester skips whole files")
+        if result.get("unlocated"):
+            print("  NO WORKING DIRECTORY RECORDED for any of these sessions, so no files were "
+                  "purged and no exclusion could be written that harvest would ever match")
+        for entry in result.get("appeared_files") or []:
+            print(f"  LEFT ON DISK, arrived after the backup and is not in it: {entry['path']}")
+        if not result["excluded"]:
+            # WHETHER IT COMES BACK TURNS ON THE EXCLUSION ALONE. This also required
+            # `still_captured` to be empty, so the one case that guarantees a return, a directory
+            # deliberately left capturing, was the case that suppressed the warning.
             print("  still being captured, so the next harvest brings it back")
         for sid in result.get("appeared_since_backup") or []:
             print(f"  KEPT, arrived after the backup was written and is not in it: {sid}")

@@ -359,7 +359,8 @@ export interface DeleteReport {
   removed_bytes: number
   /** On disk still, with the reason. A file that changed since the backup is not the backup's. */
   kept_files: { path: string; kind: string; why: string }[]
-  /** Named, never removed. `kind` is the layer, or "prune" for a directory walk that refused. */
+  /** Named, never removed. `kind` is the layer the row belongs to: transcript, memory, tasks,
+   * config or desktop. A directory walk that refuses has its own channel, `prune_refused`. */
   refused_files: { relpath: string; kind: string; why: string }[]
   config_keys_removed: string[]
   config_keys_kept: { key: string; why: string }[]
@@ -384,6 +385,13 @@ export interface DeleteReport {
    * FILE, not a session, so these are why a directory can be left capturing.
    */
   shared_transcripts: { cwd: string; with_cwd: string; transcript: string }[]
+  /**
+   * Files for a deleted session that arrived AFTER the backup was taken. Left on disk on purpose,
+   * because the backup cannot restore what it never held, and named so that is a decision.
+   */
+  appeared_files: { path: string; cwd: string }[]
+  /** No session under this label had a working directory, so no files were purged at all. */
+  unlocated: boolean
   snapshots: { files: number; removed: number; bytes: number }
   /**
    * THE ACCEPTANCE TEST. A delete removes exactly what the backup contains, and nothing else, so
