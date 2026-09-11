@@ -1234,7 +1234,7 @@ export function deriveLinks(index, records, threshold = 0.9) {
     return descendsMemo.get(key);
   };
   const next = new Map();
-  const stats = { anchors_kept: 0, candidates_considered: 0, continuations: 0,
+  const linkStats = { anchors_kept: 0, candidates_considered: 0, continuations: 0,
                   refused_foreign: 0, refused_lineage: 0, refused_cousin: 0 };
   for (const a of index) {
     if (a.uuids.size === 0) continue;
@@ -1258,18 +1258,18 @@ export function deriveLinks(index, records, threshold = 0.9) {
       if (b.uuids.size > a.uuids.size && overlap >= threshold) how = 'copy';
       else if (leadingRun(b.firstUuids, a.uuids) >= CONTINUATION_MIN) how = 'continuation';
       if (!how) continue;
-      if (sharedNative < Math.ceil(shared * NATIVE_SHARE)) { stats.refused_foreign++; continue; }
-      if (viaFork >= CONTINUATION_MIN) { stats.refused_lineage++; continue; }
-      if (a.native.size > 0 && sharedOwn === 0) { stats.refused_cousin++; continue; }
-      stats.candidates_considered++;
+      if (sharedNative < Math.ceil(shared * NATIVE_SHARE)) { linkStats.refused_foreign++; continue; }
+      if (viaFork >= CONTINUATION_MIN) { linkStats.refused_lineage++; continue; }
+      if (a.native.size > 0 && sharedOwn === 0) { linkStats.refused_cousin++; continue; }
+      linkStats.candidates_considered++;
       const kind = kindOf(b.id);
       const cand = { b, shared, overlap, how, kind,
                      key: [how === 'copy' ? 0 : 1, -Math.round(overlap * 100), rank[kind], b.uuids.size, b.id] };
       if (!best || keyCompare(cand.key, best.key) < 0) best = cand;
     }
     if (!best) continue;
-    if (records.has(a.id)) { stats.anchors_kept++; continue; }
-    if (best.how === 'continuation') stats.continuations++;
+    if (records.has(a.id)) { linkStats.anchors_kept++; continue; }
+    if (best.how === 'continuation') linkStats.continuations++;
     next.set(a.id, best);
   }
   const byId = new Map(index.map((f) => [f.id, f]));
@@ -1286,7 +1286,7 @@ export function deriveLinks(index, records, threshold = 0.9) {
       prefix_uuids: byId.get(id).uuids.size, next_uuids: n.b.uuids.size, shared_uuids: n.shared,
     });
   }
-  return { rows, stats };
+  return { rows, stats: linkStats };
 }
 
 // PURE. The session that PRODUCED each record that appears in more than one transcript.
@@ -1357,9 +1357,9 @@ export async function reconcileDirectory(db, dir, records, { write = true, thres
                    moved: { turns: 0, messages: 0, compactions: 0, tool_calls: 0 },
                    repaired: { cwd: 0, project_slug: 0, transcript_path: 0 } };
   if (!index.length) return result;
-  const { rows, stats } = deriveLinks(index, records, threshold);
+  const { rows, stats: linkStats } = deriveLinks(index, records, threshold);
   const { owner, toolOwner } = deriveOwners(index);
-  result.anchors_kept = stats.anchors_kept;
+  result.anchors_kept = linkStats.anchors_kept;
   result.rows = rows;
   result.links = rows.length;
   // THE SESSION ROW'S IDENTITY, from its own transcript: the directory it lives in (`cwd` by the
@@ -3090,8 +3090,8 @@ async function selfTest() {
     checks.push(['chains: every transcript in the directory is indexed', index.length === 13, String(index.length)]);
     checks.push(['chains: a file without a cliSessionId is not a chat', records.size === 4, String(records.size)]);
     checks.push(['chains: the fork flag comes from the record field', records.get(S.F)?.fork === true && records.get(S.C)?.fork === false]);
-    const { rows, stats } = deriveLinks(index, records);
-    const row = (s) => rows.find((r) => r.session_id === s);
+    const { rows: linkRows, stats: linkStats } = deriveLinks(index, records);
+    const row = (s) => linkRows.find((r) => r.session_id === s);
     checks.push(['chains: a prefix links to its chain head (gate can fail)',
       row(S.A)?.head_id === S.C && row(S.B)?.head_id === S.C]);
     checks.push(['chains: the record holder outranks a smaller record-less container',
@@ -3101,13 +3101,13 @@ async function selfTest() {
     // Two anchors had a container: AN sits whole inside AN2 (a copy), and C's fork F begins with
     // C's records (a continuation). Neither links, and both are counted.
     checks.push(['chains: a record holder never becomes a prefix, even contained whole',
-      !row(S.AN) && !row(S.C) && !row(S.F) && stats.anchors_kept === 2, String(stats.anchors_kept)]);
+      !row(S.AN) && !row(S.C) && !row(S.F) && linkStats.anchors_kept === 2, String(linkStats.anchors_kept)]);
     checks.push(['chains: a session with nothing above it gets no row',
       !row(S.X) && !row(S.AN2) && !row(S.NEAR2) && !row(S.FAR2)]);
     checks.push(['chains: a fork record holder contains its own line, which resumed into it natively',
       row(S.G)?.head_id === S.H && row(S.G)?.head_kind === 'fork']);
-    checks.push(['chains: every head is a session with no link of its own', rows.every((r) => !row(r.head_id))]);
-    checks.push(['chains: four links and nothing else', rows.length === 4, String(rows.length)]);
+    checks.push(['chains: every head is a session with no link of its own', linkRows.every((r) => !row(r.head_id))]);
+    checks.push(['chains: four links and nothing else', linkRows.length === 4, String(linkRows.length)]);
     const { owner, toolOwner } = deriveOwners(index);
     checks.push(['owners: a copied record belongs to the earliest-starting transcript',
       owner.get('a1') === S.A && owner.get('b1') === S.B && owner.get('g1') === S.G]);

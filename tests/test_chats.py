@@ -44,15 +44,20 @@ def chain_store(tmp_path, monkeypatch):
     link(con, MID, HEAD, HEAD, 34)
     link(con, OLD, HEAD, MID, 17)
     for sid, hour in ((MID, "T01:"), (OLD, "T02:")):
-        con.execute("UPDATE turns SET ts = replace(ts, 'T00:', ?) WHERE session_id = ?", (hour, sid))
-        con.execute("UPDATE messages SET ts = replace(ts, 'T00:', ?) WHERE session_id = ?", (hour, sid))
+        con.execute("UPDATE turns SET ts = replace(ts, 'T00:', ?) WHERE session_id = ?",
+                    (hour, sid))
+        con.execute("UPDATE messages SET ts = replace(ts, 'T00:', ?) WHERE session_id = ?",
+                    (hour, sid))
     # DISTINCT RESIDENT TOTALS PER MEMBER, so peak and current have one right answer each and it
     # is a different member's row: build_store gives every session the same values, under which a
     # collapse that took the head's peak, or the newest member's, passed the same assertions.
     # The chain's peak sits in the MIDDLE member; its newest turn (the current) is the OLD one's.
-    con.execute("UPDATE turns SET total_resident = 5000000 + line_no * 1000 WHERE session_id = ?", (MID,))
-    con.execute("UPDATE turns SET total_resident = 9007199254740995 WHERE session_id = ? AND line_no = 5", (MID,))
-    con.execute("UPDATE turns SET total_resident = 7000000 + (16 - line_no) * 1000 WHERE session_id = ?", (OLD,))
+    con.execute("UPDATE turns SET total_resident = 5000000 + line_no * 1000 WHERE session_id = ?",
+                (MID,))
+    con.execute("UPDATE turns SET total_resident = 9007199254740995 "
+                "WHERE session_id = ? AND line_no = 5", (MID,))
+    con.execute("UPDATE turns SET total_resident = 7000000 + (16 - line_no) * 1000 "
+                "WHERE session_id = ?", (OLD,))
     con.commit()
     con.close()
     records = tmp_path / "records"
@@ -93,15 +98,20 @@ class TestOneRowPerChat:
                                             WHERE session_id IN ({marks})""", tuple(CHAIN))[0]
         comps = sql(chain_store, f"SELECT COUNT(*) FROM compactions WHERE session_id IN ({marks})",
                     tuple(CHAIN))[0][0]
-        current = sql(chain_store, f"""SELECT total_resident FROM turns WHERE session_id IN ({marks})
+        current = sql(chain_store, f"""SELECT total_resident FROM turns
+                                        WHERE session_id IN ({marks})
                                         ORDER BY ts DESC LIMIT 1""", tuple(CHAIN))[0][0]
         assert int(row["turns"]) == turns == 51, "turns is the sum over the chain"
-        assert int(row["peak"]) == peak == 9007199254740995, "peak is the max over the chain, a MID row"
+        assert int(row["peak"]) == peak == 9007199254740995, (
+            "peak is the max over the chain, a MID row")
         assert int(row["compactions"]) == comps == 3
-        assert int(row["current"]) == current == 7000000, "current is the newest turn across the chain, an OLD row"
+        assert int(row["current"]) == current == 7000000, (
+            "current is the newest turn across the chain, an OLD row")
         assert int(row["cli_sessions"]) == 3
-        head_peak = sql(chain_store, "SELECT MAX(total_resident) FROM turns WHERE session_id = ?", (HEAD,))[0][0]
-        assert head_peak != peak, "the fixture must put the peak outside the head for this to prove anything"
+        head_peak = sql(chain_store, "SELECT MAX(total_resident) FROM turns WHERE session_id = ?",
+                        (HEAD,))[0][0]
+        assert head_peak != peak, (
+            "the fixture must put the peak outside the head for this to prove anything")
 
     def test_the_head_alone_does_not_account_for_the_row(self, chain_store, store):
         """The control: the numbers above are not what the head's own rows would give."""
@@ -145,7 +155,8 @@ class TestTheName:
         assert row["title"] == "Alpha chat" and row["title_kind"] == "desktop"
 
     def test_without_a_record_the_head_keeps_its_own_stored_title(self, chain_store, store):
-        stored = sql(chain_store, "SELECT title FROM session_titles WHERE session_id = ?", (HEAD,))[0][0]
+        stored = sql(chain_store, "SELECT title FROM session_titles WHERE session_id = ?",
+                     (HEAD,))[0][0]
         assert frame(store).set_index("session_id").loc[HEAD]["title"] == stored
 
     def test_a_head_with_no_title_takes_the_newest_members(self, chain_store, store):
@@ -154,8 +165,10 @@ class TestTheName:
         con.commit()
         con.close()
         newest = sql(chain_store, "SELECT session_id FROM turns ORDER BY ts DESC LIMIT 1")[0][0]
-        assert newest != HEAD, "the fixture's newest member must not be the head for this to test anything"
-        expected = sql(chain_store, "SELECT title FROM session_titles WHERE session_id = ?", (newest,))[0][0]
+        assert newest != HEAD, (
+            "the fixture's newest member must not be the head for this to test anything")
+        expected = sql(chain_store, "SELECT title FROM session_titles WHERE session_id = ?",
+                       (newest,))[0][0]
         assert frame(store).set_index("session_id").loc[HEAD]["title"] == expected
 
     def test_a_prefix_id_is_named_by_its_chat(self, chain_store, store):
@@ -182,7 +195,8 @@ class TestSectionAndFloor:
         con.commit()
         con.close()
         for sid in ("s1-0", "s1-1"):
-            assert sql(chain_store, "SELECT COUNT(*) FROM turns WHERE session_id = ?", (sid,))[0][0] == 3
+            assert sql(chain_store, "SELECT COUNT(*) FROM turns WHERE session_id = ?",
+                       (sid,))[0][0] == 3
         df = frame(store).set_index("session_id")
         assert "s1-0" in df.index and int(df.loc["s1-0"]["turns"]) == 6, (
             "two members below the floor make one chat above it")
@@ -226,7 +240,8 @@ class TestCohortsAndSelection:
         """A boundary just after a resume replaced messages that sit under the earlier members."""
         con = sqlite3.connect(str(chain_store))
         # Move the head's boundary to after every member's messages (the members' are at T01, T02).
-        con.execute("UPDATE compactions SET ts = '2026-08-01T03:00:00Z' WHERE session_id = ?", (HEAD,))
+        con.execute("UPDATE compactions SET ts = '2026-08-01T03:00:00Z' WHERE session_id = ?",
+                    (HEAD,))
         con.commit()
         con.close()
         forget_cached_rows()
@@ -239,13 +254,16 @@ class TestCohortsAndSelection:
             f"the count over the chain ({over_chain}) must exceed the head's own ({own_only})")
         assert len(store.compaction_dropped(cid, limit=500)) == over_chain
 
-    def test_the_compaction_readers_use_the_same_flattened_chat_as_the_list(self, chain_store, store):
-        """On a stale chain (HEAD -> s1-0 outliving the pass that wrote MID -> HEAD), the SQL twin of
+    def test_the_compaction_readers_use_the_same_flattened_chat_as_the_list(
+            self, chain_store, store):
+        """On a stale chain (HEAD -> s1-0 outliving the pass that wrote MID -> HEAD), the SQL twin
+        of
         the member map used to resolve one hop while every other reader followed the chain, so a
         compaction page counted over a different chat from the list it was reached from."""
         con = sqlite3.connect(str(chain_store))
         link(con, HEAD, "s1-0", "s1-0", 51)
-        con.execute("UPDATE compactions SET ts = '2026-08-01T03:00:00Z' WHERE session_id = ?", (HEAD,))
+        con.execute("UPDATE compactions SET ts = '2026-08-01T03:00:00Z' WHERE session_id = ?",
+                    (HEAD,))
         con.commit()
         con.close()
         forget_cached_rows()
@@ -266,7 +284,8 @@ class TestCohortsAndSelection:
                                                              UNION SELECT c.session_id)
                                         AND m.ts < c.ts WHERE c.uuid = ?""", (cid,))[0][0]
         assert store.compaction_dropped_count(cid) == by_hand
-        assert one_hop < by_hand, "the fixture must make the one-hop answer differ, or this proves nothing"
+        assert one_hop < by_hand, (
+            "the fixture must make the one-hop answer differ, or this proves nothing")
         assert len(store.compaction_dropped(cid, limit=500)) == by_hand
         models = store.all_compactions().set_index("uuid")
         assert cid in models.index, "the compaction is listed once, under its flattened chat"
@@ -299,6 +318,7 @@ class TestTheApi:
     def test_a_prefix_selection_is_resolved_and_reported(self, chain_store, store):
         pytest.importorskip("fastapi")
         from fastapi.testclient import TestClient
+
         from c4x.api import cache
         from c4x.api.main import api
         client = TestClient(api, base_url="http://127.0.0.1:8059")
@@ -315,12 +335,16 @@ class TestTheApi:
         assert again.json()["session"] == HEAD
         # no_cache keeps the header too, so a caller bypassing the cache is told the same thing.
         fresh = client.get("/api/tab/tab-session/render", params={"session": OLD, "no_cache": 1})
-        assert fresh.headers.get("x-c4x-session-requested") == OLD and fresh.json()["session"] == HEAD
+        assert fresh.headers.get("x-c4x-session-requested") == OLD
+        assert fresh.json()["session"] == HEAD
 
-    def test_an_other_arm_inside_the_selected_chat_is_replaced_and_reported(self, chain_store, store):
-        """A superseded id of arm A's own chat arriving as arm B rendered the chat against itself."""
+    def test_an_other_arm_inside_the_selected_chat_is_replaced_and_reported(
+            self, chain_store, store):
+        """A superseded id of arm A's own chat arriving as arm B rendered the chat against
+        itself."""
         pytest.importorskip("fastapi")
         from fastapi.testclient import TestClient
+
         from c4x.api import cache
         from c4x.api.main import _resolve_selection, api
         from c4x.tabs.compare import default_arm_b
@@ -332,7 +356,8 @@ class TestTheApi:
         assert _resolve_selection(HEAD, "s1-1", "session") == (HEAD, "s1-1", None)
         client = TestClient(api, base_url="http://127.0.0.1:8059")
         cache.clear()
-        page = client.get("/api/tab/tab-compare/render", params={"session": HEAD, "compare_with": MID})
+        page = client.get("/api/tab/tab-compare/render",
+                          params={"session": HEAD, "compare_with": MID})
         assert page.status_code == 200
         assert page.headers.get("x-c4x-compare-requested") == MID
         assert "x-c4x-session-requested" not in page.headers
@@ -349,7 +374,8 @@ class TestExportAndDelete:
             "a backup of the chat must name its superseded sessions, not only the head")
         assert len(sql(out, "SELECT * FROM session_links")) == 2
 
-    def test_a_delete_removes_the_chain_and_leaves_another_chats_links(self, chain_store, store, tmp_path):
+    def test_a_delete_removes_the_chain_and_leaves_another_chats_links(
+            self, chain_store, store, tmp_path):
         from c4x import projects
         con = sqlite3.connect(str(chain_store))
         link(con, "s1-1", "s1-0", "s1-0", 17)
@@ -366,7 +392,8 @@ class TestExportAndDelete:
             left = sql(chain_store, f"SELECT COUNT(*) FROM {table} WHERE session_id IN ({marks})",
                        tuple(CHAIN))[0][0]
             assert left == 0, f"{table} still holds rows of the deleted chat"
-        assert sql(chain_store, "SELECT session_id, head_id FROM session_links") == [("s1-1", "s1-0")]
+        assert sql(chain_store, "SELECT session_id, head_id FROM session_links") == [
+            ("s1-1", "s1-0")]
         assert HEAD not in set(frame(store)["session_id"])
 
 

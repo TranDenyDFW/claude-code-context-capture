@@ -31,8 +31,8 @@ def test_row_count_matches_the_population_the_page_states(table, q, pane):
     satisfy: the label could sit on one card and the number on another and the test would not know.
     A card is a label, a figure and a caption that belong to each other, so that is the unit.
     """
-    from c4x.api.main import _stats
     from c4x import store
+    from c4x.api.main import _stats
     # ONE ROW PER CHAT. A resumed chat's sessions fold into the newest one, so the population is
     # counted over chain heads and the floor is applied to the chat's total, not to each member.
     # A store harvest has not chained yet has no session_links table and every session is its own
@@ -45,7 +45,8 @@ def test_row_count_matches_the_population_the_page_states(table, q, pane):
                          (SESSION_TURN_FLOOR,)).iloc[0]["n"])
     else:
         expected = int(q("""SELECT COUNT(*) AS n FROM (
-                              SELECT session_id FROM turns GROUP BY session_id HAVING COUNT(*) >= ?)""",
+                              SELECT session_id FROM turns GROUP BY session_id
+                              HAVING COUNT(*) >= ?)""",
                          (SESSION_TURN_FLOOR,)).iloc[0]["n"])
     assert len(table["rows"]) == expected
     cards = {c["label"].strip().lower(): c for c in _stats(pane("tab-sessions"))}

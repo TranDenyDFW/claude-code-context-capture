@@ -454,7 +454,8 @@ class TestExport:
         out = tmp_path / "older.db"
         manifest = projects.export(r"P:\Alpha", out)
         assert "session_links" not in manifest["tables"]
-        assert "session_links" not in manifest["digests"] and "session_links" not in manifest["counts"]
+        assert "session_links" not in manifest["digests"]
+        assert "session_links" not in manifest["counts"]
         assert projects.verify(out)[0]
         con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
         preview = projects.footprint(con, r"P:\Alpha")

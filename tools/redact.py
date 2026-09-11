@@ -21,7 +21,8 @@ AND ONE THING ON THE PAGE IS NOT IN THE STORE. A session's title is now read fro
 own record files at render time, so it is not in the database this tool rewrites and the gate below
 cannot see it: rendered on the machine those records live on, the real chat names would come back
 over the redacted ones with every check still green. The fix keeps the argument above rather than
-breaking it, because the fact goes INSIDE the artifact: every copy is stamped with a `redacted_store`
+breaking it, because the fact goes INSIDE the artifact: every copy is stamped with a
+`redacted_store`
 table, `c4x/store.py` suppresses the overlay whenever it sees one, and the pass below refuses to
 report success on a copy that lost the stamp. Nothing has to be remembered at screenshot time.
 

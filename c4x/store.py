@@ -1193,7 +1193,8 @@ def _collapse_chains(df, head_of, members_of) -> pd.DataFrame:
         r["last_ts"] = g["last_ts"].max()
         r["last_turn_ts"] = g["last_turn_ts"].max()
         if not (isinstance(r.get("title"), str) and r["title"].strip()):
-            named = by_recency[[isinstance(t, str) and bool(t.strip()) for t in by_recency["title"]]]
+            named = by_recency[[isinstance(t, str) and bool(t.strip())
+                                for t in by_recency["title"]]]
             if not named.empty:
                 r["title"], r["title_kind"] = named.iloc[0]["title"], named.iloc[0]["title_kind"]
         # Every session the chat spans, from the map, not the rows in hand: a member with no turns
@@ -1204,7 +1205,8 @@ def _collapse_chains(df, head_of, members_of) -> pd.DataFrame:
     out = pd.DataFrame(rows).drop(columns=["_head"])
     if orphan_heads:
         marks = ",".join("?" * len(orphan_heads))
-        own = q(f"SELECT session_id, {', '.join(identity)} FROM sessions WHERE session_id IN ({marks})",
+        own = q(f"SELECT session_id, {', '.join(identity)} FROM sessions "
+                f"WHERE session_id IN ({marks})",
                 tuple(orphan_heads))
         for row in own.itertuples(index=False):
             mask = out["session_id"] == row.session_id
@@ -1673,7 +1675,8 @@ def scoped(session_id, scope="main", alias="", cohort=None):
     consistent.
     """
     a = f"{alias}." if alias else ""
-    bits, args = [], []
+    bits: list[str] = []
+    args: list[str] = []
     if session_id:
         # A session id names the CHAT it belongs to. The head's own rows are only what happened
         # after the last resume; the rest sit under the sessions it superseded.

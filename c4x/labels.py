@@ -120,7 +120,8 @@ def titled_path(path, titles, keep=2):
     `titles` is a mapping of kind to text for this session. The order is deliberate and the fallback
     is the risky one: a `desktop` title is what the app is calling the chat right now, a `custom`
     title was typed by a person into a transcript that has since stopped changing, an `ai` one was
-    written to be a title, and a `last-prompt` is merely whatever was said first. Measured on this store, all three
+    written to be a title, and a `last-prompt` is merely whatever was said first. Measured on
+    this store, all three
     folder-less chats have ONLY a last-prompt, so the fallback is not the rare path, it is the
     normal one, and it is cut hard and marked so it cannot be mistaken for a name someone chose.
     """

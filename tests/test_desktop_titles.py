@@ -182,7 +182,8 @@ class TestWhichNameWins:
         ]))
         store.invalidate()
         out = store.titles_for([TITLED])
-        assert out[TITLED]["custom"] == "A name from the transcript", "the stored row is still there"
+        assert out[TITLED]["custom"] == "A name from the transcript", (
+            "the stored row is still there")
         assert out[TITLED]["desktop"] == "Remove hooks"
         from c4x.labels import titled_path
         scratch = "C:/x/scratch-workspaces/u/scratch-2026-09-07-433162"
