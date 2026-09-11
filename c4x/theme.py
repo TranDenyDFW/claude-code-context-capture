@@ -393,8 +393,10 @@ COLUMN_HELP = {
                 "has archived. An unmarked path means NOT KNOWN to be archived: the flag is only "
                 "readable for chats the app kept a record of, which is a minority of these."),
     "last active": "The last recorded activity, not when the session was created.",
-    "title": ("Read from the transcript. Imported sessions carry a generated Imported_YYYYMMDD "
-              "name instead, because the only titler there is walks this machine's transcripts."),
+    "title": ("The name the desktop app shows, when it has a record of the chat. Otherwise it is "
+              "read from the transcript: a title typed into the chat, then one Claude generated, "
+              "then the opening prompt as a last resort. Imported sessions carry a generated "
+              "Imported_YYYYMMDD name, because neither source is on this machine for them."),
 
     # Breakdown and the probe detail
     "percent": "Share of the whole context window, not of the resident total.",

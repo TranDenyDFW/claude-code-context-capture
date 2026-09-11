@@ -534,9 +534,14 @@ def invalidate():
     """
     _generation["n"] += 1
     _rows_cache.update({"at": 0.0, "df": None})
-    _archived_cache.update({"map": None, "at": 0.0, "root": None})
+    _archived_cache.update({"map": None, "at": 0.0, "root": None, "sig": None})
     _transcript_cache.update({"ids": None, "at": 0.0})
     _window_cache.clear()
+    # A fifth, and unlike the four above it is not a 45 second answer: whether the open store is a
+    # redacted copy is a property of the file and changes only if the file is replaced. It is
+    # cleared here anyway, because the cost is one `sqlite_master` read and the alternative is a
+    # memo that can outlive the store it describes.
+    _redacted_cache.clear()
 
 
 ARCHIVED_SUFFIX = "archived"
@@ -549,15 +554,90 @@ _HEAD_BYTES = 8192
 _CLI_ID = re.compile(r'"cliSessionId"\s*:\s*"([0-9a-fA-F-]{36})"')
 _ARCHIVED = re.compile(r'"isArchived"\s*:\s*(true|false)')
 
-class _ArchivedCache(TypedDict):
-    """Which chats the desktop app has archived, and where that was read from."""
 
-    map: dict[str, bool] | None
+def _top_level_string(head, wanted):
+    r"""The value of a TOP-LEVEL string key inside a bounded prefix, or None.
+
+    A REGEX WOULD BE WRONG HERE, and that is the one way `title` differs from the two fields above.
+    "cliSessionId" and "isArchived" occur once in a record and match a fixed shape, so a first match
+    is the match. A title is neither unique nor shaped, and it fails in two distinct ways.
+
+    THE ONE THAT BITES TODAY IS ESCAPING. Record 3c886370 is titled `Claude asking questions on
+    "yours to call"`, which is stored with escaped quotes, and `"title"\s*:\s*"([^"]*)"` returns
+    `Claude asking questions on \` for it. Measured across the 180 titled records here that is the
+    single disagreement between a naive regex and the whole-file parse, and this scanner agrees
+    with `json.load` on all 180.
+
+    THE ONE THAT IS LATENT IS NESTING. 129 of the 194 files carry more than one `"title"` key; the
+    extras are MCP tool schemas several levels down
+    (`remoteMcpServersConfig[].tools[].inputSchema.properties.title`). The chat's own title happens
+    to be written first in every record that has one, so on ordering alone a regex is right today
+    and would start returning a tool's parameter name the first time a record is serialised in a
+    different order, with nothing to say it had.
+
+    So the prefix is walked once, string-aware and brace-aware, and only a key at depth 1 counts.
+    A string the prefix cut in half returns None rather than a truncated answer, which is what
+    sends the caller to the whole-file parse.
+    """
+    depth, i, n, pending = 0, 0, len(head), None
+    while i < n:
+        ch = head[i]
+        if ch == '"':
+            start = i
+            i += 1
+            while i < n:
+                if head[i] == "\\":
+                    i += 2
+                    continue
+                if head[i] == '"':
+                    break
+                i += 1
+            if i >= n:
+                # The bound landed inside a string. Nothing after it can be trusted either, since
+                # this scanner no longer knows whether it is inside quotes.
+                return None
+            raw = head[start:i + 1]
+            i += 1
+            after = i
+            while after < n and head[after] in " \t\r\n":
+                after += 1
+            if after < n and head[after] == ":":
+                pending = raw if depth == 1 else None
+                i = after + 1
+                continue
+            if pending is not None and depth == 1:
+                try:
+                    if json.loads(pending) == wanted:
+                        return json.loads(raw)
+                except ValueError:
+                    return None
+            pending = None
+            continue
+        if ch in "{[":
+            depth += 1
+            pending = None
+        elif ch in "}]":
+            depth -= 1
+            pending = None
+        i += 1
+    return None
+
+class _ArchivedCache(TypedDict):
+    """What the desktop app records say about each chat, and where that was read from.
+
+    One entry per chat: (archived, title). It holds BOTH fields rather than one because the scan
+    that fills it is the expensive part, and the two callers that want those fields want them for
+    the same rows on the same render. Reading the directory twice to answer two questions about the
+    same 194 files is the mistake this shape exists to prevent.
+    """
+
+    map: dict[str, tuple[bool, str | None]] | None
     at: float
     root: str | None
+    sig: tuple[int, int] | None
 
 
-_archived_cache: _ArchivedCache = {"map": None, "at": 0.0, "root": None}
+_archived_cache: _ArchivedCache = {"map": None, "at": 0.0, "root": None, "sig": None}
 
 
 def _claude_appdata_candidates():
@@ -614,6 +694,17 @@ def claude_appdata():
         if key is not None:
             seen.add(key)
         candidates.append(path)
+    if len(candidates) == 1:
+        # NOTHING TO CHOOSE BETWEEN, so do not pay to choose. The scoring below globs every record
+        # under every candidate, which is 11 ms on this machine, and it used to run even when the
+        # identity collapse above had already left a single answer. That was affordable when this
+        # was called once per page build and stopped being affordable when the API cache started
+        # calling it to build a version stamp for EVERY request, including cache hits.
+        #
+        # Both names collapse to one directory here; the two-root case this scoring exists for is
+        # a different machine (a packaged install where %APPDATA% holds 1 record and the package
+        # container holds 16), and there it still scores, because there it genuinely has to.
+        return candidates[0]
     best, best_score = candidates[0], None
     for path in candidates:
         records = glob.glob(os.path.join(path, "claude-code-sessions", "*", "*", "local_*.json"))
@@ -637,13 +728,78 @@ def sessions_root():
     return os.path.join(claude_appdata(), "claude-code-sessions")
 
 
-def read_archived_record(path):
-    """(cli session id, archived) for one record file, or None when it is not a session record.
+def records_fingerprint(root=None):
+    """(file count, newest mtime) for the desktop records, or None when there are none.
 
-    Reads a bounded prefix first. If either field is missing from it the whole file is parsed, so a
+    CHEAP ENOUGH TO ASK EVERY TIME, which is the whole point: reading the records costs about 47 ms
+    and this costs about 1.6 ms, so it can answer "has anything changed" without doing the work.
+    Two callers need exactly that. `desktop_records` uses it so a chat renamed in the app shows its
+    new name on the next render instead of whenever a 45 second timer happens to lapse, and the API
+    response cache uses it because a rename touches no database and so moved nothing it watched.
+
+    A COUNT AS WELL AS AN MTIME. Deleting a record moves neither the newest mtime nor anything else
+    that would be noticed.
+
+    `os.scandir` rather than `glob`, measured on the 194 records here: the walk costs 1.6 ms and
+    the equivalent glob costs 10.5 ms.
+    """
+    root = root or sessions_root()
+    if not root:
+        return None
+    newest = count = 0
+    try:
+        with os.scandir(root) as accounts:
+            for account in accounts:
+                if not account.is_dir():
+                    continue
+                with os.scandir(account.path) as orgs:
+                    for org in orgs:
+                        if not org.is_dir():
+                            continue
+                        with os.scandir(org.path) as files:
+                            for entry in files:
+                                if not entry.name.endswith(".json"):
+                                    continue
+                                try:
+                                    info = entry.stat()
+                                except OSError:
+                                    continue
+                                count += 1
+                                newest = max(newest, int(info.st_mtime_ns))
+    except OSError:
+        # No desktop app, no records directory, or it went away mid-walk. A machine with no
+        # records has nothing to notice a change in.
+        return None
+    return (count, newest)
+
+
+def read_archived_record(path):
+    """(cli session id, archived, title) for one record, or None when it is not a session record.
+
+    Reads a bounded prefix first. If any field is missing from it the whole file is parsed, so a
     record that happens to order its keys differently is answered correctly rather than skipped.
-    That directory also holds scheduled-tasks.json files, which carry neither field and are not
-    session records; those return None rather than counting as a failed read.
+    That directory also holds scheduled-tasks.json files, which carry none of the fields and are
+    not session records; those return None rather than counting as a failed read.
+
+    THE TITLE IS THE NAME THE DESKTOP APP SHOWS, and it was being thrown away. This function has
+    always opened and parsed the one file that carries it while returning only two of its fields,
+    which is why a chat the app calls "Creating MCP server" was listed here under its first prompt.
+    It can be an empty string or absent entirely, and that is returned as None rather than "": a
+    record with no title and a record with a blank one are the same fact to every caller.
+
+    A MISSING TITLE COSTS THE PREFIX OPTIMISATION, deliberately. A prefix that carries the id and
+    the flag but no title is ambiguous between "this chat has no title" and "the title is past the
+    bound", and only the whole file can tell those apart.
+
+    COUNTED, not estimated, over the 194 files here: the whole-file parse ran on 24 of them before
+    this change and runs on 29 now, so the title added FIVE. It is five and not fourteen because
+    fourteen files lack a top-level title but nine of those are the scheduled-tasks.json files,
+    which carry no cliSessionId and so took the slow path already. The five are session records
+    with no title key at all.
+
+    The end-to-end scan went from 36.8 ms to 47.4 ms, and the two halves of that 10.6 ms are worth
+    naming because the obvious suspect is the smaller one: the five extra parses cost 6.3 ms, and
+    running the scanner over all 194 prefixes costs 5.6 ms whether or not a fallback follows.
     """
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -651,8 +807,9 @@ def read_archived_record(path):
     except OSError:
         return None
     cli, arch = _CLI_ID.search(head), _ARCHIVED.search(head)
-    if cli and arch:
-        return cli.group(1), arch.group(1) == "true"
+    title = _top_level_string(head, "title")
+    if cli and arch and title is not None:
+        return cli.group(1), arch.group(1) == "true", (title.strip() or None)
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             record = json.load(fh)
@@ -660,30 +817,111 @@ def read_archived_record(path):
         return None
     if not isinstance(record, dict) or not record.get("cliSessionId"):
         return None
-    return str(record["cliSessionId"]), bool(record.get("isArchived"))
+    whole = record.get("title")
+    whole = whole.strip() if isinstance(whole, str) else ""
+    return str(record["cliSessionId"]), bool(record.get("isArchived")), (whole or None)
 
 
-def archived_sessions(root=None, ttl: float = 45.0) -> dict:
-    """{session id: archived} for every chat the desktop app has a record of.
+def desktop_records(root=None, ttl: float = 45.0) -> dict:
+    """{session id: (archived, title)} for every chat the desktop app has a record of.
 
     Keyed by cliSessionId, which is what this store calls session_id. The desktop app's own
     sessionId is a different namespace entirely (`local_<uuid>`), and matching on it finds almost
     nothing, which is what made this look unreadable the first time.
+
+    ONE SCAN, TWO ANSWERS. `archived_sessions` and `desktop_titles` are both views over this, so a
+    render that wants the archived marker and the chat's name reads the directory once.
     """
     root = root or sessions_root()
     now = _time.time()
-    if (_archived_cache["map"] is not None and _archived_cache["root"] == root
-            and now - _archived_cache["at"] < ttl):
+    # A FINGERPRINT, NOT A TIMER, and the difference is user-visible. A 45 second timer meant a
+    # chat renamed in the desktop app kept its old name here until the timer happened to lapse,
+    # which is the same staleness the API response cache was just taught to avoid: fixing it there
+    # and leaving it here would move the delay rather than remove it. The fingerprint costs 1.6 ms
+    # against a rescan that costs 47 ms, so asking every time is affordable and the answer is
+    # always current. `ttl=0` still forces a rescan, which is what the tests use.
+    sig = records_fingerprint(root) if ttl else None
+    if (ttl and _archived_cache["map"] is not None and _archived_cache["root"] == root
+            and _archived_cache["sig"] == sig):
         return _archived_cache["map"]
     seen = _generation["n"]
     found = {}
     for path in glob.glob(os.path.join(root, "*", "*", "*.json")):
         row = read_archived_record(path)
         if row is not None:
-            found[row[0]] = row[1]
+            found[row[0]] = (row[1], row[2])
     if seen == _generation["n"]:
-        _archived_cache.update({"map": found, "at": now, "root": root})
+        _archived_cache.update({"map": found, "at": now, "root": root, "sig": sig})
     return found
+
+
+def archived_sessions(root=None, ttl: float = 45.0) -> dict:
+    """{session id: archived} for every chat the desktop app has a record of."""
+    return {sid: rec[0] for sid, rec in desktop_records(root, ttl).items()}
+
+
+# The table `tools/redact.py` writes into every copy it produces. Its presence is the copy saying
+# what it is, which is the only reason the check below can be automatic.
+REDACTION_MARK = "redacted_store"
+_redacted_cache: dict = {}
+
+
+def store_is_redacted() -> bool:
+    """Whether the open store is a redacted COPY rather than this machine's own store.
+
+    THIS EXISTS BECAUSE A TITLE READ AT RENDER TIME IS NOT IN THE STORE, and so cannot be redacted
+    by copying and rewriting one. `tools/redact.py` builds a scrubbed copy precisely so a README
+    screenshot cannot leak session titles, and its gate greps that copy for surviving fragments.
+    An overlay that reads the live records would paint the real names back over the redacted ones
+    at render time, and the gate would still pass, because the leak is not in the file it checks.
+
+    Its docstring argues, correctly, that the alternative to a copy is "a `--demo` switch applied
+    wherever a path becomes display text ... and missing one leaks". So this is NOT a switch. The
+    fact travels inside the artifact: redact.py stamps every copy it writes, and a stamped store
+    gets no overlay, on any machine, whether or not anyone remembered anything.
+    """
+    key = str(DB_PATH)
+    if key not in _redacted_cache:
+        _redacted_cache[key] = tables_present(REDACTION_MARK)
+    return _redacted_cache[key]
+
+
+def overlay_desktop_titles(df, named):
+    """Put the desktop app's name on every row it has one for. Mutates and returns `df`.
+
+    A MODULE-LEVEL FUNCTION RATHER THAN SIX LINES INLINE, because inline it was the user-visible
+    half of this feature and the only part with no test: reaching it needs a built session frame,
+    which needs a store, so nothing exercised it and deleting it would have kept the suite green.
+
+    Positional throughout. `list(df[col])` and iterating a Series both yield values in row order,
+    and assigning a list back to a column aligns by position, so a frame whose index is not a
+    clean range is handled correctly. That is worth stating because the obvious alternative,
+    `df.loc[mask, "title"] = ...`, aligns by LABEL and would put titles on the wrong rows there.
+    """
+    if df is None or not len(df) or not named:
+        return df
+    titles, kinds = list(df["title"]), list(df["title_kind"])
+    for i, sid in enumerate(df["session_id"]):
+        text = named.get(sid)
+        if text:
+            titles[i], kinds[i] = text, "desktop"
+    df["title"], df["title_kind"] = titles, kinds
+    return df
+
+
+def desktop_titles(root=None, ttl: float = 45.0) -> dict:
+    """{session id: title} for every chat the desktop app has a NAME for.
+
+    A chat with a record but no title is absent, not present with an empty value: the caller is
+    choosing a title to display and "the app has no name for this either" is the same answer as
+    "there is no record", not a different one.
+
+    Empty on a redacted copy. This is the one choke point both overlays go through, which is why
+    the check sits here rather than at each of them.
+    """
+    if store_is_redacted():
+        return {}
+    return {sid: rec[1] for sid, rec in desktop_records(root, ttl).items() if rec[1]}
 
 
 class _TranscriptCache(TypedDict):
@@ -866,12 +1104,33 @@ def _session_rows_uncached() -> pd.DataFrame:
     # rest under a sort by project. The flag is only knowable for the sessions the desktop app has
     # a record of, so `archived` is a tri-state: True, False, or None for "no record". None is NOT
     # folded into False, because the page says how many are unknown and that number would be a lie.
+    # `archived_sessions` and `desktop_titles` are both views over one cached scan, so calling both
+    # costs one directory read, not two. They are called SEPARATELY rather than through
+    # `desktop_records` on purpose: `archived_sessions` is the seam the delete tests patch to build
+    # an archived label without writing records, and reaching past it broke three of them.
     flags = archived_sessions()
     df["archived"] = [flags.get(sid) for sid in df["session_id"]]
     df["project"] = [
         project_label(c, s) + ("\\" + ARCHIVED_SUFFIX if archived else "")
         for c, s, archived in zip(df["cwd"], df["project_slug"], df["archived"], strict=True)
     ]
+    # THE NAME THE DESKTOP APP SHOWS WINS, and it wins over `custom` too, which is the part worth
+    # justifying because `custom` is also a title a person chose.
+    #
+    # Measured against this machine's 194 records joined to the store: 406 sessions are listed,
+    # 92 of them have a titled record. 73 already display a byte-identical title, 14 currently
+    # display their opening prompt and gain a real name, and 6 disagree. Every one of the 6 favours
+    # the record. Five are the record carrying a "(fork)" suffix the transcript lacks, which is the
+    # only thing distinguishing a fork from its parent in a list where both otherwise read the
+    # same. The sixth is decisive: record title "main", titleSource "user", and previousTitles
+    # holding exactly the string the store still shows. The person renamed the chat and the
+    # transcript kept the name they replaced.
+    #
+    # Note what does NOT decide this: file mtime. In that sixth case the transcript is the NEWER
+    # file and holds the STALER title, because a transcript's mtime moves on any later turn and
+    # says nothing about when its title record was written. A tiebreak on mtime would have got this
+    # exactly backwards.
+    overlay_desktop_titles(df, desktop_titles())
     # A session with no title of any kind says so, rather than showing an empty cell that reads
     # like a rendering fault. An imported one gets a name instead, because it is not merely
     # untitled, it is untitleable: every title in this store was read out of a transcript record by
@@ -1107,14 +1366,24 @@ def titles_for(session_ids) -> dict:
     nothing.
     """
     ids = [s for s in (session_ids or []) if s]
-    if not ids or not tables_present("session_titles"):
+    if not ids:
         return {}
-    marks = ",".join("?" * len(ids))
-    df = q(f"SELECT session_id, kind, title FROM session_titles WHERE session_id IN ({marks})",
-           tuple(ids))
     out: dict = {}
-    for _, row in df.iterrows():
-        out.setdefault(row["session_id"], {})[row["kind"]] = row["title"]
+    if tables_present("session_titles"):
+        marks = ",".join("?" * len(ids))
+        df = q(f"SELECT session_id, kind, title FROM session_titles WHERE session_id IN ({marks})",
+               tuple(ids))
+        for _, row in df.iterrows():
+            out.setdefault(row["session_id"], {})[row["kind"]] = row["title"]
+    # The desktop record is a title source like the others, and it is added HERE rather than only
+    # in the session frame because this is a second, independent read path: `labels.py` names a
+    # folder-less chat from whatever this returns, and leaving the overlay out of one of the two
+    # would have the same chat called two different things on two panes. The `desktop` kind is
+    # ranked by every consumer of this mapping, which is `labels.py:titled_path`.
+    wanted = set(ids)
+    for sid, text in desktop_titles().items():
+        if sid in wanted:
+            out.setdefault(sid, {})["desktop"] = text
     return out
 
 

@@ -91,7 +91,14 @@ def _cached(key, build):
     there is nothing to remember.
     """
     from c4x import store
-    version = cache.stamp(str(store.DB_PATH))
+    # The records directory is part of the version because two columns of the session frame are
+    # read from it rather than from the database: the archived marker and the chat's title. Without
+    # it, renaming a chat in the desktop app changes nothing this cache can see.
+    #
+    # This runs before `get`, so a cache HIT pays it too, which is why it has to stay cheap: the
+    # fingerprint is a 1.6 ms scandir, and `sessions_root` no longer globs every candidate root to
+    # score between them when the identity collapse has already left one.
+    version = cache.stamp(str(store.DB_PATH), store.records_fingerprint())
     found = cache.get(key, version)
     if found is not None:
         return Response(content=found, media_type="application/json",
