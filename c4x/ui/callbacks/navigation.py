@@ -7,6 +7,7 @@ tests and the table audit reach them as app._name and should not have to know wh
 from dash import Input, Output, State, callback, html
 
 from c4x.store import (
+    chat_head,
     population_label,
 )
 from c4x.tabs.session import most_recent_session
@@ -65,6 +66,9 @@ def _render_tab(idx, session_id, scope, cohort):
     if not (0 <= i < len(TABS)):
         i = 0
     tab_id, label, fn, _answers_to = TABS[i]
+    # A selection names a CHAT: a superseded session id resolves to its chain head before any tab
+    # sees it, so every pane describes the whole chat and the same one.
+    session_id = chat_head(session_id)
     try:
         body = fn(session_id, scope or "main", cohort)
     except Exception as exc:                        # noqa: BLE001 - a failed tab must say so

@@ -11,6 +11,25 @@ removed and nothing here said so.
 
 ### Added
 
+- **One row per chat, the way the desktop app lists them.** The app resumes a chat by starting a
+  NEW CLI session whose transcript is a copy of the old one plus what follows, so a chat resumed
+  four times was five rows here under five names. Harvest now derives the chain from transcript
+  uuid overlap into `session_links` (per directory, whenever a new transcript appears, and for
+  existing stores via `node tools/harvest.mjs --backfill-chains`), and the Sessions list, the
+  picker, cohorts, Compare and every scoped tab fold a chat's older sessions into its newest one:
+  named by that session's title, with turns, peak and compactions counted over the whole chain,
+  and a `cli sessions` column saying how many it spans. Selecting a superseded id, from a URL, a
+  table row or Compare's arm B, resolves to the chat server-side; the API says so in an
+  `x-c4x-session-requested` header rather than in the cached payload. A session with a desktop
+  record of its own is never folded: a fork copies history too, and the app shows it separately.
+- **Copied rows now belong to the session that produced them.** `turns`, `messages`,
+  `compactions` and `tool_calls` were written with `INSERT OR REPLACE` on their uuid, so a copied
+  row went to whichever transcript was harvested last, in directory order: one session that
+  produced 388 turns was left holding 3. Ingest now reads transcripts in first-timestamp order
+  and refuses to move a row to another session; `--backfill-chains` returns the rows written
+  under the old rule to their producer (25,729 turns and 21,612 messages on the author's store).
+  `attachments` and `record_types` are per-session counters and still count a copy twice; that is
+  stated here rather than fixed.
 - **An HTTP API and a React frontend.** `python -m c4x.api` serves `/api/tab/{id}` and a built
   bundle from `frontend/dist`, which is tracked on purpose so the documented install pulls nothing
   from npm. A suite check now compares the bundle's commit time against its source, because the

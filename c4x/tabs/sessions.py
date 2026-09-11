@@ -119,6 +119,9 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             "peak": int(r.peak or 0),
             "current": int(r.current or 0),
             "compactions": int(r.compactions or 0),
+            # How many CLI sessions this chat spans. 1 for most; a resumed chat is folded into
+            # one row and this is the only visible trace of the fold.
+            "cli sessions": int(r.cli_sessions or 1),
         })
     marked, known_not, unknown = archived_counts(df)
     return html.Div([
@@ -183,8 +186,8 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             # where an undeclared hidden column made every row click a silent no-op.
             columns=(_cols := numeric_columns(
                 ["section", "title", "project", "last active", "turns", "current", "peak",
-                 "compactions"],
-                {"turns", "current", "peak", "compactions"}) + [
+                 "compactions", "cli sessions"],
+                {"turns", "current", "peak", "compactions", "cli sessions"}) + [
                 {"name": "session_id", "id": "session_id"}]),
             tooltip_header=header_help(_cols),
             data=rows,

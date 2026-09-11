@@ -32,9 +32,21 @@ def test_row_count_matches_the_population_the_page_states(table, q, pane):
     A card is a label, a figure and a caption that belong to each other, so that is the unit.
     """
     from c4x.api.main import _stats
-    expected = int(q("""SELECT COUNT(*) AS n FROM (
-                          SELECT session_id FROM turns GROUP BY session_id HAVING COUNT(*) >= ?)""",
-                     (SESSION_TURN_FLOOR,)).iloc[0]["n"])
+    from c4x import store
+    # ONE ROW PER CHAT. A resumed chat's sessions fold into the newest one, so the population is
+    # counted over chain heads and the floor is applied to the chat's total, not to each member.
+    # A store harvest has not chained yet has no session_links table and every session is its own
+    # chat, which the plain form counts.
+    if store.tables_present("session_links"):
+        expected = int(q("""SELECT COUNT(*) AS n FROM (
+                              SELECT COALESCE(l.head_id, t.session_id) AS chat
+                              FROM turns t LEFT JOIN session_links l ON l.session_id = t.session_id
+                              GROUP BY chat HAVING COUNT(*) >= ?)""",
+                         (SESSION_TURN_FLOOR,)).iloc[0]["n"])
+    else:
+        expected = int(q("""SELECT COUNT(*) AS n FROM (
+                              SELECT session_id FROM turns GROUP BY session_id HAVING COUNT(*) >= ?)""",
+                         (SESSION_TURN_FLOOR,)).iloc[0]["n"])
     assert len(table["rows"]) == expected
     cards = {c["label"].strip().lower(): c for c in _stats(pane("tab-sessions"))}
     card = cards.get("listed sessions")
@@ -46,27 +58,34 @@ def test_row_count_matches_the_population_the_page_states(table, q, pane):
 
 
 
-def test_every_numeric_column_matches_its_own_sql(table, q):
-    """turns, peak, current and compactions, per session, recomputed here.
+def test_every_numeric_column_matches_its_own_sql(table, q, store):
+    """turns, peak, current and compactions, per CHAT, recomputed here over its member sessions.
 
     `turns` counts transcript ROWS, not deduped API calls: a streamed assistant message writes
     several rows under one request id. That is what the column means, and pinning it here stops the
     two being quietly swapped, which is the mistake the README calls the easiest in this codebase.
+
+    A row is a chat, and a resumed chat spans several CLI sessions, so every figure is recomputed
+    over `chat_members`: turns and compactions summed, peak the maximum, current the newest turn
+    across all of them. For an unresumed chat that is one session and the old arithmetic.
     """
     sample = table["rows"][:25]
     assert sample, "no rows to check"
     for row in sample:
         sid = row["session_id"]
-        truth = q("""SELECT COUNT(*) AS turns, MAX(total_resident) AS peak
-                       FROM turns WHERE session_id = ?""", (sid,)).iloc[0]
-        current = q("""SELECT total_resident FROM turns WHERE session_id = ?
-                        ORDER BY ts DESC LIMIT 1""", (sid,)).iloc[0]["total_resident"]
-        comps = int(q("SELECT COUNT(*) AS n FROM compactions WHERE session_id = ?",
-                      (sid,)).iloc[0]["n"])
+        members = store.chat_members(sid)
+        marks = ",".join("?" * len(members))
+        truth = q(f"""SELECT COUNT(*) AS turns, MAX(total_resident) AS peak
+                       FROM turns WHERE session_id IN ({marks})""", tuple(members)).iloc[0]
+        current = q(f"""SELECT total_resident FROM turns WHERE session_id IN ({marks})
+                        ORDER BY ts DESC LIMIT 1""", tuple(members)).iloc[0]["total_resident"]
+        comps = int(q(f"SELECT COUNT(*) AS n FROM compactions WHERE session_id IN ({marks})",
+                      tuple(members)).iloc[0]["n"])
         assert row["turns"] == int(truth["turns"]), f"turns wrong for {sid}"
         assert row["peak"] == int(truth["peak"] or 0), f"peak wrong for {sid}"
         assert row["current"] == int(current or 0), f"current wrong for {sid}"
         assert row["compactions"] == comps, f"compactions wrong for {sid}"
+        assert row["cli sessions"] == len(members), f"cli sessions wrong for {sid}"
 
 
 def test_current_never_exceeds_peak(table):

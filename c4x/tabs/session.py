@@ -13,6 +13,8 @@ from c4x.panels import baseline_marks
 from c4x.pricing import PRICE_TABLE_DATE, cost_of_rows
 from c4x.store import (
     THRESHOLDS,
+    chain_where,
+    chat_head,
     cohort_named,
     cohort_sessions,
     measured_cost,
@@ -215,7 +217,9 @@ def most_recent_session(cohort=None):
                     GROUP BY session_id ORDER BY MAX(ts) DESC LIMIT 1""", tuple(ids))
     else:
         df = q("SELECT session_id FROM turns GROUP BY session_id ORDER BY MAX(ts) DESC LIMIT 1")
-    return None if df.empty else df.iloc[0]["session_id"]
+    # The newest turn belongs to the newest session of its chat by construction, but resolve
+    # anyway: a default that named a prefix would describe a chat by its oldest third.
+    return None if df.empty else chat_head(df.iloc[0]["session_id"])
 
 
 def session_layout(session_id=None, scope="main", cohort=None):
@@ -644,8 +648,9 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
         m["ts"] = m["ts"].map(stamp)
         # The query is capped, so len(m) is how many are shown, not how many exist. Saying
         # "400 messages" when 400 is the LIMIT reports the cap as if it were a measurement.
-        total_msgs = int(q("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
-                           (session_id,)).iloc[0]["n"])
+        _chain, _params = chain_where(session_id)
+        total_msgs = int(q(f"SELECT COUNT(*) AS n FROM messages WHERE {_chain}",
+                           _params).iloc[0]["n"])
         # BOTH KINDS, because the table now holds both and reporting only the messages would call
         # a mixed count a message count. Stated separately rather than summed into one number,
         # since "1,204 rows" would hide which half the reader is short of.

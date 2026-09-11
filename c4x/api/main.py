@@ -79,7 +79,7 @@ def _jsonable(payload):
     return jsonable(payload)
 
 
-def _cached(key, build):
+def _cached(key, build, headers=None):
     """Serve `key` from the cache, or build it, serialise it once, and keep it.
 
     The endpoint returns raw bytes rather than a dict, which is not a micro-optimisation: FastAPI
@@ -100,14 +100,28 @@ def _cached(key, build):
     # score between them when the identity collapse has already left one.
     version = cache.stamp(str(store.DB_PATH), store.records_fingerprint())
     found = cache.get(key, version)
+    # `headers` are PER REQUEST and never enter the cache: two requests can share one entry (a
+    # superseded session id and the chat it resolves to do), and anything that describes the
+    # request rather than the answer would then be served to the wrong caller.
     if found is not None:
         return Response(content=found, media_type="application/json",
-                        headers={"x-c4x-cache": "hit"})
+                        headers={"x-c4x-cache": "hit", **(headers or {})})
     import json
     payload = json.dumps(build()).encode("utf-8")
     cache.put(key, version, payload)
     return Response(content=payload, media_type="application/json",
-                    headers={"x-c4x-cache": "miss"})
+                    headers={"x-c4x-cache": "miss", **(headers or {})})
+
+
+def _fresh(build, headers=None):
+    """`build()` serialised exactly as `_cached` would serialise it, and not kept.
+
+    NO `x-c4x-cache` HEADER, which is the contract `no_cache=1` has always had: the bench and a
+    reader who suspects the cache read its absence as proof the cache was bypassed.
+    """
+    import json
+    return Response(content=json.dumps(build()).encode("utf-8"), media_type="application/json",
+                    headers=dict(headers or {}))
 
 
 def _app():
@@ -189,6 +203,21 @@ def tabs():
              "help": tab_help(t[0])} for t in _app().TABS]
 
 
+def _resolve_selection(session, compare_with, compare_kind):
+    """The head of each selected chat, plus what was asked for when that differs.
+
+    A session id that has been superseded by a resume can still arrive here: from a bookmarked
+    URL, from any table's hidden session_id column, or as Compare's arm B. Resolved HERE, before
+    the cache key is built, so `?session=<prefix>` and `?session=<head>` are one cache entry and
+    the payload names the chat the page is actually describing. `session_requested` is set only
+    when a resolution happened, so a caller can tell.
+    """
+    from c4x import store
+    head = store.chat_head(session)
+    other = store.chat_head(compare_with) if compare_kind == "session" else compare_with
+    return head, other, (session if session and session != head else None)
+
+
 @api.get("/api/tab/{tab_id}")
 def tab(tab_id: str,
         session: str | None = Query(None),
@@ -203,6 +232,10 @@ def tab(tab_id: str,
     the parity differ compares and the surface the existing tests can be re-pointed at.
     """
     from c4x.cli import extract
+    session, compare_with, requested = _resolve_selection(session, compare_with, compare_kind)
+    # A HEADER, not a payload field: the payload is cached under the head and shared with every
+    # request that resolves to it, and which id THIS caller asked with is not part of the answer.
+    told = {"x-c4x-session-requested": requested} if requested else None
 
     def build():
         payload = extract.describe(
@@ -211,8 +244,9 @@ def tab(tab_id: str,
         return _jsonable(payload)
 
     if no_cache:
-        return build()
-    return _cached(("verify", tab_id, session, scope, cohort, compare_with, compare_kind), build)
+        return _fresh(build, told)
+    return _cached(("verify", tab_id, session, scope, cohort, compare_with, compare_kind),
+                   build, told)
 
 
 def _figure_meta(node, count):
@@ -534,6 +568,9 @@ def tab_render(tab_id: str,
     Charts are returned in the order they appear in the pane, so `plotly[i]` describes the same
     figure as `figures[i]`. A frontend that pairs them by index is relying on something real.
     """
+    session, compare_with, requested = _resolve_selection(session, compare_with, compare_kind)
+    told = {"x-c4x-session-requested": requested} if requested else None
+
     def build():
         pane = _pane(tab_id, session, scope, cohort, compare_with, compare_kind)
         payload = _render_payload(pane)
@@ -542,8 +579,9 @@ def tab_render(tab_id: str,
         payload["scoped"] = tab_id in SELECTION_SCOPED
         return _jsonable(payload)
     if no_cache:
-        return build()
-    return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind), build)
+        return _fresh(build, told)
+    return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind),
+                   build, told)
 
 
 def _population(node):

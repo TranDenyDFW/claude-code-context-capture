@@ -387,6 +387,10 @@ COLUMN_HELP = {
                 "high-water mark; the gap between them is what a compaction took out."),
     "peak": "The highest resident total this session ever reached, not where it sits now.",
     "compactions": "How many times this session's context window was compacted.",
+    "cli sessions": ("How many CLI sessions this chat spans. The desktop app resumes a chat by "
+                     "starting a new session that copies the old one; those are folded into one "
+                     "row here, named by the newest, with turns, peak and compactions counted over "
+                     "all of them. 1 for a chat that was never resumed."),
     "section": ("Read from disk, not stored: the working directory, the entrypoint, and whether "
                 "the transcript file still exists on this machine."),
     "project": ("The working directory. A path ending in \\archived is a chat the desktop app "

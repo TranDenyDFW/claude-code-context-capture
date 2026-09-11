@@ -64,6 +64,10 @@ if str(ROOT) not in sys.path:
 # unaffected.
 BY_SESSION = ("hook_events", "attachments", "tool_calls", "messages", "turns",
               "session_titles", "compactions", "cost_state", "cost_state_models",
+              # A link points at a session (its own id, and its head's), so it goes before the
+              # session rows do. Keyed on the PREFIX session's id: a chat's links travel and die
+              # with the chat's own sessions, which are in the same project by construction.
+              "session_links",
               "sessions")
 
 # Reached another way, and named so nothing depends on remembering it.
@@ -114,7 +118,11 @@ def projects():
     if not seen.empty:
         for label, n in seen["project"].value_counts().items():
             counts[str(label)] = int(n)
-    visible = set(seen["session_id"]) if not seen.empty else set()
+    # A listed row is a CHAT, and every session it spans is visible through it. Without the
+    # expansion a resumed chat's older sessions would be counted a second time below, as sessions
+    # the page cannot see, under their own cwd.
+    visible = ({m for h in seen["session_id"] for m in store.chat_members(h)}
+               if not seen.empty else set())
     rest = store.q("SELECT session_id, cwd FROM sessions WHERE cwd IS NOT NULL AND cwd <> ''")
     for row in rest.itertuples(index=False):
         if row.session_id not in visible:
@@ -149,6 +157,11 @@ def session_ids(con, project):
     So the test is "not in session_rows AT ALL", not "has no turns". A session the page cannot see
     under any label cannot have been attributed to another project by the archived rule, so its own
     cwd is the only evidence there is and it is safe to use.
+
+    A CHAT'S OLDER SESSIONS ARRIVE THROUGH THE FIRST HALF, not the second. `cohort_sessions`
+    returns every member of every chat in the cohort, head first, so a resumed chat's superseded
+    sessions are named here on purpose rather than swept up by the cwd fallback by accident. The
+    fallback is a fallback again, for sessions under the floor, which is what it was written for.
     """
     from c4x import store
     # ONE uncached read, not two. `ttl=0` here refreshes the shared cache, so the `session_rows()`
@@ -158,7 +171,8 @@ def session_ids(con, project):
     ids = list(store.cohort_sessions(f"project::{project}", ttl=0))
     known = set(ids)
     seen = store.session_rows()
-    visible = set(seen["session_id"]) if not seen.empty else set()
+    visible = ({m for h in seen["session_id"] for m in store.chat_members(h)}
+               if not seen.empty else set())
     unseen = con.execute("SELECT session_id FROM sessions WHERE cwd = ?", (project,)).fetchall()
     ids.extend(r[0] for r in unseen if r[0] not in known and r[0] not in visible)
     return ids

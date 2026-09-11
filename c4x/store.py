@@ -426,18 +426,18 @@ def overview_stats() -> dict:
     """
     small = q("""
         SELECT (SELECT COUNT(*) FROM sessions)                     AS sessions,
-               -- How many of those the picker and All sessions actually LIST. Shown beside the
-               -- total because the page shows both numbers and called them both "sessions",
-               -- leaving a reader to reconcile 1,325 against 317 with nothing to go on. The
-               -- threshold is SESSION_TURN_FLOOR, explained where it is defined.
-               (SELECT COUNT(*) FROM (SELECT session_id FROM turns
-                                       GROUP BY session_id HAVING COUNT(*) >= ?)) AS listed,
                (SELECT COUNT(*) FROM turns)                        AS turn_rows,
                (SELECT COUNT(*) FROM compactions)                  AS compactions,
                (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
                (SELECT COUNT(*) FROM files)                        AS files,
                (SELECT SUM(bytes_read) FROM files)                 AS bytes
-    """, (SESSION_TURN_FLOOR,)).iloc[0].to_dict()
+    """).iloc[0].to_dict()
+    # How many of those the picker and All sessions actually LIST. Shown beside the total because
+    # the page shows both numbers and called them both "sessions", leaving a reader to reconcile
+    # 1,325 against 317 with nothing to go on. ONE DEFINITION: the length of the frame the list
+    # draws, so the card and the list cannot disagree. That frame is one row per chat with the
+    # floor applied to the chat, which a HAVING over turns per session no longer reproduces.
+    small["listed"] = int(len(session_rows()))
     calls = q("""
         SELECT COUNT(*)                                                     AS api_calls,
                SUM(CASE WHEN COALESCE(is_sidechain,0)=0 THEN 1 ELSE 0 END)   AS main_calls,
@@ -537,6 +537,9 @@ def invalidate():
     _archived_cache.update({"map": None, "at": 0.0, "root": None, "sig": None})
     _transcript_cache.update({"ids": None, "at": 0.0})
     _window_cache.clear()
+    # The chain map, which a delete or an import can change: a removed prefix must stop folding
+    # into its head, and an imported chain must start to.
+    _links_cache.update({"at": 0.0, "head_of": None, "members_of": None})
     # A fifth, and unlike the four above it is not a 45 second answer: whether the open store is a
     # redacted copy is a property of the file and changes only if the file is replaced. It is
     # cleared here anyway, because the cost is one `sqlite_master` read and the alternative is a
@@ -545,6 +548,87 @@ def invalidate():
 
 
 ARCHIVED_SUFFIX = "archived"
+
+
+# ---------------------------------------------------------------------------
+# Chains: which sessions are one chat
+# ---------------------------------------------------------------------------
+# The desktop app resumes a chat by starting a NEW CLI session whose transcript is a copy of the
+# old one plus what follows, so one chat is N sessions and the app shows one entry. Harvest derives
+# the chain from transcript overlap into `session_links` (the schema comment there records the
+# measurement); this package only reads it. A session that is a prefix of a later one is folded
+# into that chain's HEAD everywhere a session is listed, named or selected, so that what the page
+# shows is what the app shows.
+_links_cache: dict = {"at": 0.0, "head_of": None, "members_of": None}
+
+
+def _read_links() -> tuple[dict, dict]:
+    """{member: head} and {head: [head, newest prefix, ..., oldest]}, or two empty dicts.
+
+    Empty on a store from before the table existed, and on any store harvest has not chained yet:
+    with no links every session is its own chat, which is exactly what the page showed before.
+    """
+    if not tables_present("session_links"):
+        return {}, {}
+    df = q("SELECT session_id, head_id, prefix_uuids FROM session_links")
+    if df.empty:
+        return {}, {}
+    head_of = dict(zip(df["session_id"], df["head_id"], strict=True))
+    members_of: dict = {}
+    # Newest prefix first. A later session in a chain holds more records than an earlier one, so
+    # prefix_uuids orders the members without a second query.
+    ranked = sorted(zip(df["session_id"], df["head_id"], df["prefix_uuids"], strict=True),
+                    key=lambda r: -int(r[2] or 0))
+    for sid, head, _size in ranked:
+        members_of.setdefault(head, [head]).append(sid)
+    return head_of, members_of
+
+
+def chat_links(ttl: float = 45.0) -> tuple[dict, dict]:
+    """The chain map, cached the way `session_rows` is and cleared by the same `invalidate`."""
+    now = _time.time()
+    if _links_cache["head_of"] is not None and now - _links_cache["at"] < ttl:
+        return _links_cache["head_of"], _links_cache["members_of"]
+    seen = _generation["n"]
+    head_of, members_of = _read_links()
+    if seen == _generation["n"]:
+        _links_cache.update({"at": now, "head_of": head_of, "members_of": members_of})
+    return head_of, members_of
+
+
+def chat_head(session_id):
+    """The session a selection resolves to: the newest of its chat, or itself when unlinked.
+
+    Identity for None and for an id the store has never seen, so every caller can apply it
+    unconditionally rather than guarding first.
+    """
+    if not session_id:
+        return session_id
+    head_of, _members = chat_links()
+    return head_of.get(session_id, session_id)
+
+
+def chat_members(session_id) -> list:
+    """Every session of the chat this id belongs to, head first. `[id]` when unlinked."""
+    if not session_id:
+        return []
+    head_of, members_of = chat_links()
+    head = head_of.get(session_id, session_id)
+    return list(members_of.get(head, [head]))
+
+
+def chain_where(session_id, column: str = "session_id") -> tuple[str, tuple]:
+    """`column = ?` or `column IN (...)` over the whole chat, with its params.
+
+    One home for the expansion every direct reader needs, so a table keyed by the CLI session that
+    wrote each row still answers for the chat: the head's own rows are only what happened after
+    the last resume.
+    """
+    members = chat_members(session_id)
+    if len(members) <= 1:
+        return f"{column} = ?", (members[0] if members else session_id,)
+    return f"{column} IN ({','.join('?' * len(members))})", tuple(members)
+
 
 # Enough of a session record to reach isArchived, which sits near the top of a file whose bulk is
 # an enabledMcpTools map. Measured across the 188 records on this machine: the field is inside the
@@ -1018,17 +1102,93 @@ def _ymd(ts) -> str:
     return text if len(text) == 8 and text.isdigit() else "unknown"
 
 
+def _collapse_chains(df, head_of, members_of) -> pd.DataFrame:
+    """One row per CHAT: every session folded into its chain head, totals over the chain.
+
+    The rule per column, stated so it can be checked rather than inferred from pandas:
+      session_id, cwd, project_slug, entrypoint, transcript_path   the head's own
+      turns, compactions                                           summed over members
+      peak                                                         max over members
+      last_ts, last_turn_ts                                        max over members
+      current                                                      the member with the latest turn
+      title, title_kind                                            the head's, else the newest
+                                                                   member's that has one
+      cli_sessions                                                 how many sessions the chat spans
+
+    Sums are exact because the store holds each uuid once and harvest attributes it to the session
+    that produced it, so a chat's rows are partitioned over its members with nothing counted twice.
+
+    A head with no turns row of its own (resumed and closed without an API call) still gets a row,
+    built from its newest member and re-labelled with the head's identity from `sessions`, so the
+    chat is listed under the transcript the app would resume.
+    """
+    df = df.copy()
+    if df.empty or not head_of:
+        df["cli_sessions"] = 1
+        return df
+    df["_head"] = [head_of.get(s, s) for s in df["session_id"]]
+    if not (df["_head"] != df["session_id"]).any():
+        df["cli_sessions"] = 1
+        return df.drop(columns=["_head"])
+    identity = ("cwd", "project_slug", "entrypoint", "transcript_path")
+    rows, orphan_heads = [], []
+    for head, g in df.groupby("_head", sort=False):
+        if len(g) == 1 and g["session_id"].iloc[0] == head:
+            r = g.iloc[0].to_dict()
+            r["cli_sessions"] = 1
+            rows.append(r)
+            continue
+        by_recency = g.sort_values("last_turn_ts", ascending=False, kind="mergesort")
+        own = g[g["session_id"] == head]
+        r = (own.iloc[0] if not own.empty else by_recency.iloc[0]).to_dict()
+        if own.empty:
+            orphan_heads.append(head)
+        r["session_id"] = head
+        r["turns"] = int(g["turns"].sum())
+        r["compactions"] = int(g["compactions"].sum())
+        r["peak"] = g["peak"].max()
+        r["current"] = by_recency.iloc[0]["current"]
+        r["last_ts"] = g["last_ts"].max()
+        r["last_turn_ts"] = g["last_turn_ts"].max()
+        if not (isinstance(r.get("title"), str) and r["title"].strip()):
+            named = by_recency[[isinstance(t, str) and bool(t.strip()) for t in by_recency["title"]]]
+            if not named.empty:
+                r["title"], r["title_kind"] = named.iloc[0]["title"], named.iloc[0]["title_kind"]
+        r["cli_sessions"] = int(len(g))
+        rows.append(r)
+    out = pd.DataFrame(rows).drop(columns=["_head"])
+    if orphan_heads:
+        marks = ",".join("?" * len(orphan_heads))
+        own = q(f"SELECT session_id, {', '.join(identity)} FROM sessions WHERE session_id IN ({marks})",
+                tuple(orphan_heads))
+        for row in own.itertuples(index=False):
+            mask = out["session_id"] == row.session_id
+            # The SELECT lists session_id then `identity` in order, so the tuple does too.
+            for col, value in zip(identity, row[1:], strict=True):
+                if isinstance(value, str) and value:
+                    out.loc[mask, col] = value
+    return out
+
+
 def _session_rows_uncached() -> pd.DataFrame:
-    """Every session worth picking, with the name it goes by and the section it belongs to.
+    """Every CHAT worth picking, with the name it goes by and the section it belongs to.
 
     Ordered the way the desktop sidebar orders: section, then project, then most recently active
     first. The old picker sorted 1,323 sessions by peak tokens, which interleaved every project and
     made the list unreadable.
+
+    ONE ROW PER CHAT, NOT PER SESSION. The SQL below is per session, as it always was; the collapse
+    happens in `_collapse_chains` afterwards and the floor is applied to the chat's total, which is
+    why the HAVING clause also admits every linked member: a prefix with three turns belongs to a
+    chat that may have a thousand.
     """
-    df = q("""
+    linked = ("SELECT session_id FROM session_links UNION SELECT head_id FROM session_links"
+              if tables_present("session_links") else "SELECT NULL WHERE 0")
+    df = q(f"""
         SELECT t.session_id,
                s.cwd, s.project_slug, s.entrypoint, s.transcript_path,
                COALESCE(s.last_ts, MAX(t.ts))                AS last_ts,
+               MAX(t.ts)                                     AS last_turn_ts,
                COUNT(*)                                      AS turns,
                MAX(t.total_resident)                         AS peak,
                (SELECT x.total_resident FROM turns x
@@ -1061,9 +1221,17 @@ def _session_rows_uncached() -> pd.DataFrame:
         -- disagree about.
         GROUP BY t.session_id
         -- Fewer than SESSION_TURN_FLOOR transcript rows and a session is not listed. The rule,
-        -- its measurement and its one warning are beside the constant.
-        HAVING COUNT(*) >= ?
+        -- its measurement and its one warning are beside the constant. A linked session is
+        -- admitted regardless, because the floor is applied to its CHAT after the collapse.
+        HAVING COUNT(*) >= ? OR t.session_id IN ({linked})
     """, (SESSION_TURN_FLOOR,))
+    if df.empty:
+        return df
+    # ttl=0: a frame and the chain map it was folded by must come from the same moment. The read
+    # is one small table and this only runs on a cache miss.
+    head_of, members_of = chat_links(ttl=0)
+    df = _collapse_chains(df, head_of, members_of)
+    df = df[df["turns"] >= SESSION_TURN_FLOOR].copy()
     if df.empty:
         return df
 
@@ -1161,11 +1329,12 @@ def session_turns(session_id: str, include_sidechain: bool = False) -> pd.DataFr
     a chart that quietly dropped it looked like the whole session.
     """
     where = "" if include_sidechain else "AND COALESCE(is_sidechain,0) = 0"
+    chain, params = chain_where(session_id)
     return q(f"""
         SELECT uuid, ts, model, input_tokens, cache_creation_input_tokens, cache_read_input_tokens,
                output_tokens, thinking_tokens, total_resident, is_sidechain
-        FROM turns WHERE session_id = ? {where} ORDER BY ts
-    """, (session_id,))
+        FROM turns WHERE {chain} {where} ORDER BY ts
+    """, params)
 
 
 def session_survivors(session_id: str) -> pd.DataFrame:
@@ -1174,21 +1343,23 @@ def session_survivors(session_id: str) -> pd.DataFrame:
     Only assistant turns can be matched, since those are the only uuids the store holds. The
     survivor set also names user and attachment records, which stay unmatched by design.
     """
-    return q("""
+    chain, params = chain_where(session_id, "c.session_id")
+    return q(f"""
         SELECT v.compaction_uuid, v.kind, v.uuid, t.ts, t.total_resident
         FROM compaction_survivors v
         JOIN compactions c ON c.uuid = v.compaction_uuid
         LEFT JOIN turns t ON t.uuid = v.uuid
-        WHERE c.session_id = ?
-    """, (session_id,))
+        WHERE {chain}
+    """, params)
 
 
 def session_compactions(session_id: str) -> pd.DataFrame:
-    return q("""
+    chain, params = chain_where(session_id)
+    return q(f"""
         SELECT ts, trigger, pre_tokens, post_tokens, cumulative_dropped_tokens,
                duration_ms, version, summary_chars
-        FROM compactions WHERE session_id = ? ORDER BY ts
-    """, (session_id,))
+        FROM compactions WHERE {chain} ORDER BY ts
+    """, params)
 
 
 COHORT_ALL = "__all__"
@@ -1224,7 +1395,9 @@ def cohort_options() -> list:
     # earns its place by the work done in it, which is the same rule for every project.
     calls = q("SELECT session_id, COUNT(*) AS n FROM api_calls GROUP BY session_id")
     per_session = dict(zip(calls["session_id"], calls["n"], strict=True))
-    work = (df.assign(_calls=[per_session.get(s, 0) for s in df["session_id"]])
+    # A row is a chat; its calls are the sum over the sessions it spans.
+    work = (df.assign(_calls=[sum(per_session.get(m, 0) for m in chat_members(s))
+                              for s in df["session_id"]])
               .groupby("project")
               .agg(sessions=("session_id", "count"), calls=("_calls", "sum"))
               .sort_values(["calls", "sessions"], ascending=False)
@@ -1332,7 +1505,15 @@ def cohort_sessions(cohort, ttl: float = 45.0) -> list:
     col = {"section": "section", "project": "project"}.get(kind)
     if not col:
         return []
-    return list(df.loc[df[col] == value, "session_id"])
+    # EVERY MEMBER OF EVERY CHAT, head first. The frame holds one row per chat, but the tables this
+    # list is applied to (turns, compactions, tool calls, and the delete and export sets) are keyed
+    # by the CLI session that wrote each row, so a list of heads alone would drop every prefix's
+    # rows from a scoped tab and, worse, from a backup.
+    _head_of, members_of = chat_links(ttl)
+    out: list = []
+    for head in df.loc[df[col] == value, "session_id"]:
+        out.extend(members_of.get(head, [head]))
+    return out
 
 
 def session_name(session_id) -> str:
@@ -1350,7 +1531,8 @@ def session_name(session_id) -> str:
     df = session_rows()
     if df.empty:
         return ""
-    row = df[df["session_id"] == session_id]
+    # A superseded session is named by its chat: the row it belongs to is the head's.
+    row = df[df["session_id"] == chat_head(session_id)]
     if row.empty:
         return ""
     r = row.iloc[0]
@@ -1424,7 +1606,13 @@ def population_label(session_id, cohort, scope) -> str:
         # SHORTENED AND NAMED. This printed the raw working directory, and for a chat started
         # without a project that is a 152-character scratch path in the one sentence telling the
         # reader what they just selected. It reaches both frontends.
-        return f"{plural(len(ids), 'session')} in {kind} {cohort_label(cohort, ids)}, {side}"
+        #
+        # COUNTED AS CHATS, which is what the picker lists and what the app calls a session:
+        # `ids` holds every CLI session of every chat, and that number is not one a reader can
+        # find anywhere on the page. Distinct heads rather than a frame lookup, so the sentence
+        # agrees with `cohort_sessions` by construction and needs no second read.
+        chats = len({chat_head(s) for s in ids})
+        return f"{plural(chats, 'session')} in {kind} {cohort_label(cohort, ids)}, {side}"
     return f"the whole store, every session, {side}"
 
 
@@ -1442,8 +1630,11 @@ def scoped(session_id, scope="main", alias="", cohort=None):
     a = f"{alias}." if alias else ""
     bits, args = [], []
     if session_id:
-        bits.append(f"AND {a}session_id = ?")
-        args.append(session_id)
+        # A session id names the CHAT it belongs to. The head's own rows are only what happened
+        # after the last resume; the rest sit under the sessions it superseded.
+        clause, params = chain_where(session_id, f"{a}session_id")
+        bits.append(f"AND {clause}")
+        args.extend(params)
     else:
         ids = cohort_sessions(cohort)
         if ids:
@@ -1645,13 +1836,14 @@ def session_messages(session_id: str, limit: int = 2000) -> pd.DataFrame:
     searching about a tenth of the average message; the page fetches the whole of the column when
     somebody actually searches.
     """
+    chain, params = chain_where(session_id)
     return q(
-        """
+        f"""
         SELECT uuid, ts, role, type, chars,
                substr(replace(replace(text, char(10), ' '), char(13), ' '), 1, 220) AS preview
-        FROM messages WHERE session_id = ? ORDER BY ts LIMIT ?
+        FROM messages WHERE {chain} ORDER BY ts LIMIT ?
         """,
-        (session_id, limit),
+        (*params, limit),
     )
 
 
@@ -1688,8 +1880,9 @@ def session_tool_calls(session_id: str, limit: int = 2000) -> pd.DataFrame:
     # same truncation that loses it inside input_preview 40% of the time.
     # Without the name the row says a call was proposed and not which,
     # and the name is the first thing a reader needs to make sense of the input that follows.
+    chain, params = chain_where(session_id)
     return q(
-        """
+        f"""
         SELECT tool_use_id AS uuid, ts,
                'assistant' AS role,
                'tool_use' AS type,
@@ -1698,10 +1891,10 @@ def session_tool_calls(session_id: str, limit: int = 2000) -> pd.DataFrame:
                       COALESCE(description || ' - ', '') ||
                       replace(replace(COALESCE(input_preview, ''), char(10), ' '), char(13), ' '),
                       1, 220) AS preview
-        FROM tool_calls WHERE session_id = ? AND input_preview IS NOT NULL
+        FROM tool_calls WHERE {chain} AND input_preview IS NOT NULL
         ORDER BY ts LIMIT ?
         """,
-        (session_id, limit),
+        (*params, limit),
     )
 
 def messages_text(uuids: list[str]) -> dict[str, str]:

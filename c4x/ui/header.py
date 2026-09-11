@@ -21,6 +21,7 @@ from dash import dcc, html
 from c4x.store import (
     ROOT,
     THRESHOLDS,
+    chain_where,
     q,
     restrict_to_cohort,
     scoped,
@@ -184,8 +185,10 @@ def live_context(session_id: str | None = None):
     whole reason for the selector: a header that silently switched between "the latest thing that
     happened anywhere" and "the thing you are looking at" is two different numbers in one place.
     """
-    where = "AND session_id = ?" if session_id else ""
-    args = (session_id,) if session_id else ()
+    # Over the whole chat: the newest call of a resumed chat is in its head, but asking for the
+    # chain costs nothing and stays right if a prefix id is what was selected.
+    chain, args = chain_where(session_id) if session_id else ("", ())
+    where = f"AND {chain}" if session_id else ""
     df = q(
         f"""
         SELECT session_id, ts, model, total_resident
