@@ -239,6 +239,47 @@ class TestCohortsAndSelection:
             f"the count over the chain ({over_chain}) must exceed the head's own ({own_only})")
         assert len(store.compaction_dropped(cid, limit=500)) == over_chain
 
+    def test_the_compaction_readers_use_the_same_flattened_chat_as_the_list(self, chain_store, store):
+        """On a stale chain (HEAD -> s1-0 outliving the pass that wrote MID -> HEAD), the SQL twin of
+        the member map used to resolve one hop while every other reader followed the chain, so a
+        compaction page counted over a different chat from the list it was reached from."""
+        con = sqlite3.connect(str(chain_store))
+        link(con, HEAD, "s1-0", "s1-0", 51)
+        con.execute("UPDATE compactions SET ts = '2026-08-01T03:00:00Z' WHERE session_id = ?", (HEAD,))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        members = store.chat_members(OLD)
+        assert set(members) == {"s1-0", HEAD, MID, OLD}
+        cid = sql(chain_store, "SELECT uuid FROM compactions WHERE session_id = ?", (HEAD,))[0][0]
+        marks = ",".join("?" * len(members))
+        by_hand = sql(chain_store, f"""SELECT COUNT(*) FROM compactions c JOIN messages m
+                                          ON m.session_id IN ({marks}) AND m.ts < c.ts
+                                        WHERE c.uuid = ?
+                                          AND m.uuid NOT IN (SELECT uuid FROM compaction_survivors
+                                                             WHERE compaction_uuid = c.uuid)
+                                          AND m.uuid <> COALESCE(c.summary_uuid, '')""",
+                      tuple(members) + (cid,))[0][0]
+        one_hop = sql(chain_store, """SELECT COUNT(*) FROM compactions c JOIN messages m
+                                         ON m.session_id IN (SELECT session_id FROM session_links
+                                                             WHERE head_id = c.session_id
+                                                             UNION SELECT c.session_id)
+                                        AND m.ts < c.ts WHERE c.uuid = ?""", (cid,))[0][0]
+        assert store.compaction_dropped_count(cid) == by_hand
+        assert one_hop < by_hand, "the fixture must make the one-hop answer differ, or this proves nothing"
+        assert len(store.compaction_dropped(cid, limit=500)) == by_hand
+        models = store.all_compactions().set_index("uuid")
+        assert cid in models.index, "the compaction is listed once, under its flattened chat"
+
+    def test_cli_sessions_counts_a_member_with_no_turns_row(self, chain_store, store):
+        con = sqlite3.connect(str(chain_store))
+        con.execute("DELETE FROM turns WHERE session_id = ?", (MID,))
+        con.commit()
+        con.close()
+        row = frame(store).set_index("session_id").loc[HEAD]
+        assert int(row["cli_sessions"]) == 3, "the middle session is still one the chat ran as"
+        assert int(row["turns"]) == 17 + 17
+
     def test_the_default_other_arm_is_never_a_member(self, chain_store, store):
         from c4x.tabs.compare import default_arm_b
         assert default_arm_b(HEAD) not in CHAIN
@@ -275,6 +316,26 @@ class TestTheApi:
         # no_cache keeps the header too, so a caller bypassing the cache is told the same thing.
         fresh = client.get("/api/tab/tab-session/render", params={"session": OLD, "no_cache": 1})
         assert fresh.headers.get("x-c4x-session-requested") == OLD and fresh.json()["session"] == HEAD
+
+    def test_an_other_arm_inside_the_selected_chat_is_replaced_and_reported(self, chain_store, store):
+        """A superseded id of arm A's own chat arriving as arm B rendered the chat against itself."""
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+        from c4x.api import cache
+        from c4x.api.main import _resolve_selection, api
+        from c4x.tabs.compare import default_arm_b
+        head, other, told = _resolve_selection(OLD, MID, "session")
+        assert head == HEAD and other == default_arm_b(HEAD) and other not in CHAIN
+        assert told == {"x-c4x-session-requested": OLD, "x-c4x-compare-requested": MID}
+        assert _resolve_selection(HEAD, "s1-0", "session") == (HEAD, "s1-0", None), (
+            "an arm outside the chat is left alone and nothing is reported")
+        assert _resolve_selection(HEAD, "s1-1", "session") == (HEAD, "s1-1", None)
+        client = TestClient(api, base_url="http://127.0.0.1:8059")
+        cache.clear()
+        page = client.get("/api/tab/tab-compare/render", params={"session": HEAD, "compare_with": MID})
+        assert page.status_code == 200
+        assert page.headers.get("x-c4x-compare-requested") == MID
+        assert "x-c4x-session-requested" not in page.headers
 
 
 class TestExportAndDelete:

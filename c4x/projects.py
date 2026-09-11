@@ -393,6 +393,20 @@ def primary_cwd(con, ids):
     return found[0] if found else None
 
 
+def tables_in(con, tables):
+    """The names in `tables` that exist on this connection's main database, in the given order.
+
+    The Python package never creates a table, so a store harvested by an older build lacks any
+    table a newer harvest added (`session_links` is the first). Every loop over BY_SESSION that
+    reads or writes the store goes through this, so that store is carried as what it has rather
+    than failing on what it lacks: the first version guarded the row copy alone and the manifest
+    count loop then raised `no such table` on the same export.
+    """
+    present = {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    return tuple(t for t in tables if t in present)
+
+
 def footprint(con, project):
     """Row counts per table for one project, so a delete can be previewed before it happens."""
     ids = session_ids(con, project)
@@ -400,7 +414,9 @@ def footprint(con, project):
     if not ids:
         return out
     marks = ",".join("?" * len(ids))
-    for table in BY_SESSION:
+    # A table this store does not have yet (session_links, on a store harvested by an older
+    # build) has no rows to count and is not a reason to fail the preview.
+    for table in tables_in(con, BY_SESSION):
         out[table] = con.execute(
             f"SELECT COUNT(*) FROM {table} WHERE session_id IN ({marks})", ids).fetchone()[0]
     for table in BY_COMPACTION:
@@ -734,12 +750,9 @@ def export(project, out_path, app_state=True):
             # A table this store does not have yet is carried as nothing, not as an error: a store
             # harvested by an older build has no session_links, and the Python package never
             # creates tables, so the export must read what exists. The manifest's table list is
-            # built from the destination below, so the import side sees exactly what was carried.
-            present = {r[0] for r in source.execute(
-                "SELECT name FROM main.sqlite_master WHERE type = 'table'")}
-            for table in BY_SESSION:
-                if table not in present:
-                    continue
+            # built from the SAME set below, so the import side sees exactly what was carried.
+            by_session = tables_in(source, BY_SESSION)
+            for table in by_session:
                 source.execute(
                     f"INSERT INTO dest.{table} SELECT * FROM main.{table} "
                     f"WHERE session_id IN ({marks})", ids)
@@ -770,7 +783,10 @@ def export(project, out_path, app_state=True):
         # of the manifest is to describe what is actually in there.
         out = sqlite3.connect(str(out_path))
         try:
-            carried = BY_SESSION + BY_COMPACTION + BY_TRANSCRIPT + (APP_STATE_TABLE,)
+            # THE TABLES THE FILE HOLDS, which is the source's set: the schema was copied from it.
+            # An independent review ran an export from a store without session_links and got
+            # `no such table` from this very loop, under a comment promising the opposite.
+            carried = by_session + BY_COMPACTION + BY_TRANSCRIPT + (APP_STATE_TABLE,)
             counts = {t: out.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in carried}
             digests = {t: (app_state_digest(out) if t == APP_STATE_TABLE else digest(out, t))
                        for t in carried}
@@ -1398,11 +1414,9 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
         # A table this store does not have (session_links on a store harvested by an older build)
         # is neither compared nor deleted: the export above carried nothing for it, so there is
         # nothing in the backup for it to match.
-        present = {r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'")}
-        for table in BY_SESSION:
-            if table in present:
-                _moved(table, f"WHERE session_id IN ({marks})", ids)
+        by_session = tables_in(con, BY_SESSION)
+        for table in by_session:
+            _moved(table, f"WHERE session_id IN ({marks})", ids)
         for table in BY_COMPACTION:
             _moved(table, f"""WHERE compaction_uuid IN
                     (SELECT uuid FROM compactions WHERE session_id IN ({marks}))""", ids)
@@ -1433,9 +1447,7 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
                 f"""DELETE FROM {table} WHERE path IN
                     (SELECT transcript_path FROM sessions WHERE session_id IN ({marks})
                       AND transcript_path IS NOT NULL)""", ids).rowcount
-        for table in BY_SESSION:
-            if table not in present:
-                continue
+        for table in by_session:
             removed[table] = con.execute(
                 f"DELETE FROM {table} WHERE session_id IN ({marks})", ids).rowcount
         # WHAT STILL LIVES IN THIS DIRECTORY, asked AFTER the rows are gone, so the answer is

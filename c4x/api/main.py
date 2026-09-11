@@ -203,19 +203,35 @@ def tabs():
              "help": tab_help(t[0])} for t in _app().TABS]
 
 
-def _resolve_selection(session, compare_with, compare_kind):
-    """The head of each selected chat, plus what was asked for when that differs.
+def _resolve_selection(session, compare_with, compare_kind, cohort=None):
+    """The head of each selected chat, plus the headers saying what was asked for when it differs.
 
     A session id that has been superseded by a resume can still arrive here: from a bookmarked
     URL, from any table's hidden session_id column, or as Compare's arm B. Resolved HERE, before
     the cache key is built, so `?session=<prefix>` and `?session=<head>` are one cache entry and
-    the payload names the chat the page is actually describing. `session_requested` is set only
-    when a resolution happened, so a caller can tell.
+    the payload names the chat the page is actually describing.
+
+    ARM B RESOLVING INTO ARM A'S OWN CHAT IS NOT A COMPARISON. A superseded id of the selected
+    chat can arrive as `compare_with` the same three ways, and resolving it silently rendered the
+    chat against itself: a page of 1.0 ratios with nothing saying why. That arm falls back to the
+    default the tab would have chosen with no arm named, and the header says which id was let go.
+    Returns (session, compare_with, headers) with a header per resolution that happened, so a
+    caller can tell; `None` headers when nothing was resolved.
     """
     from c4x import store
     head = store.chat_head(session)
-    other = store.chat_head(compare_with) if compare_kind == "session" else compare_with
-    return head, other, (session if session and session != head else None)
+    other = compare_with
+    told = {}
+    if session and session != head:
+        told["x-c4x-session-requested"] = session
+    if compare_kind == "session" and compare_with:
+        other = store.chat_head(compare_with)
+        if head and other == head:
+            from c4x.tabs.compare import default_arm_b
+            other = default_arm_b(head, cohort)
+        if other != compare_with:
+            told["x-c4x-compare-requested"] = compare_with
+    return head, other, (told or None)
 
 
 @api.get("/api/tab/{tab_id}")
@@ -232,10 +248,9 @@ def tab(tab_id: str,
     the parity differ compares and the surface the existing tests can be re-pointed at.
     """
     from c4x.cli import extract
-    session, compare_with, requested = _resolve_selection(session, compare_with, compare_kind)
-    # A HEADER, not a payload field: the payload is cached under the head and shared with every
+    # HEADERS, not payload fields: the payload is cached under the head and shared with every
     # request that resolves to it, and which id THIS caller asked with is not part of the answer.
-    told = {"x-c4x-session-requested": requested} if requested else None
+    session, compare_with, told = _resolve_selection(session, compare_with, compare_kind, cohort)
 
     def build():
         payload = extract.describe(
@@ -568,8 +583,7 @@ def tab_render(tab_id: str,
     Charts are returned in the order they appear in the pane, so `plotly[i]` describes the same
     figure as `figures[i]`. A frontend that pairs them by index is relying on something real.
     """
-    session, compare_with, requested = _resolve_selection(session, compare_with, compare_kind)
-    told = {"x-c4x-session-requested": requested} if requested else None
+    session, compare_with, told = _resolve_selection(session, compare_with, compare_kind, cohort)
 
     def build():
         pane = _pane(tab_id, session, scope, cohort, compare_with, compare_kind)

@@ -25,7 +25,7 @@ import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, appendF
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { join, dirname } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { rootFrom, resolveDb, ensureStoreDir, posix } from './paths.mjs';
@@ -33,6 +33,7 @@ import { classifyResult, TOOL_OUTCOME } from './outcomes.mjs';
 import { homedir } from 'node:os';
 
 const ROOT = rootFrom(import.meta.url);
+const SELF_PATH = fileURLToPath(import.meta.url);
 const PROJECTS = join(homedir(), '.claude', 'projects');
 // Store path, overridable so a run can target a copy instead of the live store. An independent
 // reviewer had to mutate the real database to verify --backfill-survivors, because there was no
@@ -57,6 +58,12 @@ CREATE TABLE IF NOT EXISTS files (
   -- on the filesystem.
   first_ts TEXT
 );
+-- cwd is the directory the session LIVES in: the first cwd in its transcript whose slug is the
+-- directory the file sits in (a session can change directory; its transcript does not move), or
+-- the latest cwd seen until one matches. project_slug is that directory's name and
+-- transcript_path the session's own top-level file, never a subagent file that names it. All
+-- three are enforced by the putSession upsert and repaired by the chains pass and by
+-- --backfill-chains for rows written under older rules.
 CREATE TABLE IF NOT EXISTS sessions (
   session_id TEXT PRIMARY KEY, project_slug TEXT, cwd TEXT, git_branch TEXT,
   version TEXT, entrypoint TEXT, first_ts TEXT, last_ts TEXT, transcript_path TEXT
@@ -239,7 +246,15 @@ CREATE TABLE IF NOT EXISTS session_titles (
 -- overlap of message uuids is the only evidence and it is complete: measured on a five-session
 -- chat the successive transcripts share 808 of 823, 1296 of 1304, 1349 of 1418 and 1680 of 1800
 -- uuids, and the rule "A is a prefix of B when B is larger and holds at least 90 percent of A"
--- reproduces the app's own priorCliSessionIds order exactly.
+-- reproduces the app's own priorCliSessionIds order exactly. A resume taken after a compaction
+-- copies only the tail, so a second shape is accepted: B's first records all sit inside A.
+--
+-- WHOSE COPY IT IS decides between a resume and a fork. A resume rewrites every copied line to its
+-- own sessionId; a fork copies them verbatim, the parent's sessionId included. So B succeeds A
+-- only when B holds A's records under B's own id (deriveLinks, NATIVE_SHARE), only when B is the
+-- later transcript (transcriptOrder, so no chain loops), and not when B descends from a fork of A
+-- whose own first transcript still names A. Measured on 17 links: 13 resumes native 100 percent,
+-- 4 forks native 0 percent.
 --
 -- A session WITH a desktop record is a chat in its own right and never appears as session_id
 -- here: a fork copies history too and the app shows it as a separate chat. Only record-less
@@ -1025,6 +1040,10 @@ const TRANSCRIPT_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 // superset of what it continues, but its first records are all inside it.
 const FIRST_UUIDS = 20;
 const CONTINUATION_MIN = 5;
+// The share of a candidate's copy that must carry ITS OWN sessionId for it to be a resume rather
+// than a fork. Measured 1.0 on every resume and 0.0 on every fork (17 links); 0.9 leaves room for
+// a stray line without letting a fork through.
+const NATIVE_SHARE = 0.9;
 
 // Every record uuid and tool_use id in each transcript DIRECTLY inside one project directory,
 // with which of them the file wrote ITSELF, the first few in file order, the working directory,
@@ -1042,34 +1061,47 @@ const CONTINUATION_MIN = 5;
 export async function transcriptIndex(dir, { excludedCwds = null } = {}) {
   let entries = [];
   try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+  const slug = dir.split(/[\\/]/).filter(Boolean).pop() ?? '';
   const out = [];
   for (const e of entries) {
     if (!e.isFile() || !TRANSCRIPT_NAME.test(e.name)) continue;
     const id = e.name.slice(0, -6).toLowerCase();
     const path = join(dir, e.name);
     const uuids = new Set(), toolIds = new Set(), native = new Set(), nativeTools = new Set();
+    // The session another file's line names for a record that is not this file's own: a fork
+    // copies its parent's lines verbatim, so these say which session the copy came from.
+    const foreign = new Map(), foreignTools = new Map(), foreignFrom = new Set();
     const firstUuids = [];
-    let firstTs = null, cwd = null, excluded = false;
+    let firstTs = null, cwd = null, homeCwd = null, lastCwd = null, excluded = false;
     const rl = createInterface({ input: createReadStream(path, { highWaterMark: 1 << 20 }), crlfDelay: Infinity });
     for await (const line of rl) {
       const wanted = line.includes('"uuid":"') || line.includes('"toolu_')
         || (firstTs === null && line.includes('"timestamp":"'))
-        || (cwd === null && line.includes('"cwd":"'));
+        || (homeCwd === null && line.includes('"cwd":"'));
       if (!wanted) continue;
       let d;
       try { d = JSON.parse(line); } catch { continue; }
       if (!d || typeof d !== 'object') continue;
-      if (cwd === null && typeof d.cwd === 'string' && d.cwd) {
-        cwd = d.cwd;
-        // A project the user asked to stop capturing is not read past its first cwd record, and
-        // contributes nothing: no link, no owner. Same rule as Harvest.file.
-        if (excludedCwds && excludedCwds.has(cwd)) { excluded = true; rl.close(); break; }
+      if (typeof d.cwd === 'string' && d.cwd) {
+        if (cwd === null) {
+          cwd = d.cwd;
+          // A project the user asked to stop capturing is not read past its first cwd record,
+          // and contributes nothing: no link, no owner. Same rule as Harvest.file.
+          if (excludedCwds && excludedCwds.has(cwd)) { excluded = true; rl.close(); break; }
+        }
+        lastCwd = d.cwd;
+        // The directory the file LIVES in: the first cwd whose slug is this directory's name.
+        // A session that changed directory keeps its home; a fork of a parent that had changed
+        // directory begins with the parent's old lines and finds its home further down.
+        if (homeCwd === null && slugOf(d.cwd) === slug) homeCwd = d.cwd;
       }
       if (firstTs === null && typeof d.timestamp === 'string') firstTs = d.timestamp;
-      const own = typeof d.sessionId === 'string' && d.sessionId.toLowerCase() === id;
+      const said = typeof d.sessionId === 'string' ? d.sessionId.toLowerCase() : null;
+      const own = said === id;
       if (typeof d.uuid === 'string') {
         uuids.add(d.uuid);
         if (own) native.add(d.uuid);
+        else if (said) { foreign.set(d.uuid, said); foreignFrom.add(said); }
         if (firstUuids.length < FIRST_UUIDS) firstUuids.push(d.uuid);
       }
       const content = d.message?.content;
@@ -1078,14 +1110,44 @@ export async function transcriptIndex(dir, { excludedCwds = null } = {}) {
           if (b?.type === 'tool_use' && typeof b.id === 'string') {
             toolIds.add(b.id);
             if (own) nativeTools.add(b.id);
+            else if (said) foreignTools.set(b.id, said);
           }
         }
       }
     }
     if (excluded) continue;
-    out.push({ id, path, cwd, uuids, toolIds, native, nativeTools, firstUuids, firstTs: firstTs ?? '9999' });
+    out.push({ id, path, slug, cwd: homeCwd ?? lastCwd, firstCwd: cwd, uuids, toolIds, native, nativeTools,
+               foreign, foreignTools, foreignFrom, firstUuids, firstTs: firstTs ?? '9999' });
   }
   return out;
+}
+
+// The directory name Claude Code gives a working directory under ~/.claude/projects: every
+// character that is not a letter or a digit becomes a hyphen. The same rule as c4x/appstate.py
+// slug_for, and pinned against it by tests/test_appstate.py::TestTheSlug's inputs below.
+export function slugOf(cwd) {
+  return cwd == null ? null : String(cwd).replace(/[^A-Za-z0-9]/g, '-');
+}
+
+// SQL functions the upserts use. Registering twice on one connection is harmless in node:sqlite,
+// and every Harvest registers on its own connection, so the self-test's scratch stores get them too.
+export function registerFunctions(db) {
+  db.function('slug_of', { deterministic: true }, slugOf);
+}
+
+// A strict total order over transcripts, so a link can only point from an earlier session to a
+// later one and no chain can ever loop: the first timestamp, then the size, then the id. A resume
+// starts later than what it resumed (its head records are new); a fork copies its parent's first
+// line, timestamp included, and is larger.
+function transcriptOrder(f) {
+  return [f.firstTs, f.uuids.size, f.id];
+}
+
+// How many of `ids` are in `inside`, stopping at `cap` once that many are found.
+function countIn(ids, inside, cap = Infinity) {
+  let n = 0;
+  for (const u of ids) { if (inside.has(u) && ++n >= cap) break; }
+  return n;
 }
 
 // How many of `firstUuids`, in file order, sit inside `inside` before the first one that does not.
@@ -1108,39 +1170,97 @@ function keyCompare(a, b) {
 // PURE. Which record-less sessions were superseded by which, and what each chain's head is.
 //
 // Two shapes of successor. A COPY: B is larger and holds at least `threshold` of A's uuids, which
-// is what an ordinary resume produces. A CONTINUATION: B started later and its first records are
-// all inside A, which is what a resume taken after a compaction produces, since it copies only
-// the post-compaction tail and is never a superset of what it continues. Both are only accepted
-// between sessions of one working directory, so a chain can never span two projects.
+// is what an ordinary resume produces. A CONTINUATION: B's first records are all inside A, which
+// is what a resume taken after a compaction produces, since it copies only the post-compaction
+// tail and is never a superset of what it continues. Both are only accepted between sessions of
+// one working directory, so a chain can never span two projects, and only from an earlier
+// transcript to a later one (`transcriptOrder`), so a chain can never loop: a small resume that
+// did little of its own used to be "contained" by the session it resumed, and linked backwards.
+//
+// THE COPY MUST BE THE RESUME'S OWN. A resume rewrites every copied line to its own sessionId; a
+// desktop fork copies the parent verbatim, sessionId and all. Measured over the 17 links on one
+// store: every true resume held its predecessor's records natively, 100 of 100 percent, and every
+// fork held them natively 0 of 100 percent. So a candidate whose copy is not native is a fork of
+// A, another chat, and never A's successor, whatever its overlap. The first rule had no such test
+// and folded a parent chat's history into its fork whenever the parent's own successor was a
+// post-compaction resume (a continuation, which copies before continuations outranked).
+//
+// AND IT MUST NOT COME THROUGH A FORK. Resume the fork and the rewrite launders the parent's
+// lines: the fork's resume holds them natively too. The fork's own first transcript is the
+// evidence, record by record: it holds the parent's lines verbatim, so a record that A and B share
+// and that some fork's first transcript holds verbatim, where B holds that fork's OWN records and
+// A does not, reached B through the fork. Five such records refuse the candidate. A fork that did
+// no work of its own before it was resumed leaves no such evidence; then the rank below (a chat's
+// own record holder before a fork's) is what decides, and a parent chat with no record holder
+// among the candidates can still lose its earlier sessions to the fork's resume. Stated rather
+// than hidden.
+//
+// AND IT MUST HOLD SOMETHING A WROTE ITSELF. A fork's first session shares its parent's history
+// with every later session of the parent chat, and one of those, taken after a compaction, can
+// hold more of that history than the fork's own resume holds of the fork. The parent's session
+// holds none of the fork's own records; the fork's resume holds its latest ones (a resume copies
+// from the last compaction to the end, and the summary written there is the fork's own). So a
+// candidate holding none of A's native records is refused whenever A has any.
 //
 // Among a session's candidates: copies before continuations; then the HIGHEST overlap, because a
 // fork's own first session is contained whole in its resume and only nearly in the parent chat it
 // was forked from, and "nearly" must lose; then the kind, a record holder that is not a fork, then
-// a record-less session, then a fork as a container of last resort; then the smallest. A session
-// with a record of its own never links: it is a chat, and a fork copies history too. Time and
-// size both increase along a chain, so the head is reached by following next until a session
-// with no link, and the seen set below is belt and braces.
+// a record-less session, then a fork's record holder; then the smallest. A session with a record
+// of its own never links: it is a chat, and a fork copies history too. The head is reached by
+// following next until a session with no link, and the seen set below is belt and braces.
 export function deriveLinks(index, records, threshold = 0.9) {
   const kindOf = (id) => {
     const r = records.get(id);
     return r ? (r.fork ? 'fork' : 'record') : 'none';
   };
   const rank = { record: 0, none: 1, fork: 2 };
+  // Which fork transcripts hold each record verbatim, and whether a transcript descends from a
+  // fork (holds the fork's own first records). Both are what the lineage rule reads.
+  const forkFiles = index.filter((f) => f.foreign.size > 0);
+  const heldByForks = new Map();
+  for (const f of forkFiles) {
+    for (const u of f.foreign.keys()) {
+      if (!heldByForks.has(u)) heldByForks.set(u, []);
+      heldByForks.get(u).push(f);
+    }
+  }
+  const descendsMemo = new Map();
+  const descends = (x, f0) => {
+    const key = x.id + '|' + f0.id;
+    if (!descendsMemo.has(key)) {
+      const need = Math.min(CONTINUATION_MIN, f0.native.size);
+      descendsMemo.set(key, need > 0 && countIn(f0.native, x.uuids, need) >= need);
+    }
+    return descendsMemo.get(key);
+  };
   const next = new Map();
-  const stats = { anchors_kept: 0, candidates_considered: 0, continuations: 0 };
+  const stats = { anchors_kept: 0, candidates_considered: 0, continuations: 0,
+                  refused_foreign: 0, refused_lineage: 0, refused_cousin: 0 };
   for (const a of index) {
     if (a.uuids.size === 0) continue;
     let best = null;
     for (const b of index) {
       if (b === a) continue;
       if (a.cwd && b.cwd && a.cwd !== b.cwd) continue;
-      let shared = 0;
-      for (const u of a.uuids) if (b.uuids.has(u)) shared++;
+      if (keyCompare(transcriptOrder(b), transcriptOrder(a)) <= 0) continue;
+      let shared = 0, sharedNative = 0, sharedOwn = 0, viaFork = 0;
+      for (const u of a.uuids) {
+        if (!b.uuids.has(u)) continue;
+        shared++;
+        if (b.native.has(u)) sharedNative++;
+        if (a.native.has(u)) sharedOwn++;
+        const forks = heldByForks.get(u);
+        if (forks && forks.some((f0) => f0 !== a && f0 !== b && descends(b, f0) && !descends(a, f0))) viaFork++;
+      }
+      if (!shared) continue;
       const overlap = shared / a.uuids.size;
       let how = null;
       if (b.uuids.size > a.uuids.size && overlap >= threshold) how = 'copy';
-      else if (b.firstTs > a.firstTs && leadingRun(b.firstUuids, a.uuids) >= CONTINUATION_MIN) how = 'continuation';
+      else if (leadingRun(b.firstUuids, a.uuids) >= CONTINUATION_MIN) how = 'continuation';
       if (!how) continue;
+      if (sharedNative < Math.ceil(shared * NATIVE_SHARE)) { stats.refused_foreign++; continue; }
+      if (viaFork >= CONTINUATION_MIN) { stats.refused_lineage++; continue; }
+      if (a.native.size > 0 && sharedOwn === 0) { stats.refused_cousin++; continue; }
       stats.candidates_considered++;
       const kind = kindOf(b.id);
       const cand = { b, shared, overlap, how, kind,
@@ -1158,6 +1278,9 @@ export function deriveLinks(index, records, threshold = 0.9) {
     let head = n.b.id;
     const seen = new Set([id]);
     while (next.has(head) && !seen.has(head)) { seen.add(head); head = next.get(head).b.id; }
+    // Unreachable under the order above, and the schema's CHECK would refuse the row anyway;
+    // kept so a future change to the order cannot write a session as its own head.
+    if (head === id) continue;
     rows.push({
       session_id: id, head_id: head, next_id: n.b.id, head_kind: n.kind, overlap: n.overlap,
       prefix_uuids: byId.get(id).uuids.size, next_uuids: n.b.uuids.size, shared_uuids: n.shared,
@@ -1180,27 +1303,45 @@ export function deriveLinks(index, records, threshold = 0.9) {
 // land in a session that started later; a smaller transcript breaks a tie before the path does,
 // because a strict prefix is the older one. Ids that appear in exactly one transcript are not
 // returned: nothing about them can be wrong.
+//
+// A PRODUCER WHOSE TRANSCRIPT IS GONE STILL OWNS ITS RECORDS. A fork's copy names it, so when the
+// copies name one session that is not among the files here, that session produced them: the store
+// already holds them under it, from when its transcript existed, and no file here is a better
+// claimant, not even a resume of the fork that has since rewritten them. The first rule handed
+// them to the earliest file present, which for two forks of a deleted parent moved every one of
+// the parent's rows into a fork. Copies that name two absent sessions cannot be settled from
+// here, and those records are left where they are.
 export function deriveOwners(index) {
   const ordered = [...index].sort((a, b) => (
     a.firstTs < b.firstTs ? -1 : a.firstTs > b.firstTs ? 1
       : a.uuids.size !== b.uuids.size ? a.uuids.size - b.uuids.size
         : a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  const claim = (idsOf, nativeOf) => {
-    const first = new Map(), firstNative = new Map(), shared = new Set();
+  const here = new Set(index.map((f) => f.id));
+  const claim = (idsOf, nativeOf, foreignOf) => {
+    const first = new Map(), firstNative = new Map(), shared = new Set(), named = new Map();
     for (const f of ordered) {
-      const mine = nativeOf(f);
+      const mine = nativeOf(f), theirs = foreignOf(f);
       for (const u of idsOf(f)) {
         if (first.has(u)) shared.add(u); else first.set(u, f.id);
         if (mine.has(u) && !firstNative.has(u)) firstNative.set(u, f.id);
+        const s = theirs.get(u);
+        if (s && !here.has(s)) {
+          if (!named.has(u)) named.set(u, new Set());
+          named.get(u).add(s);
+        }
       }
     }
     const owner = new Map();
-    for (const u of shared) owner.set(u, firstNative.get(u) ?? first.get(u));
+    for (const u of shared) {
+      const absent = named.get(u);
+      if (absent && absent.size === 1) owner.set(u, [...absent][0]);
+      else if (!absent) owner.set(u, firstNative.get(u) ?? first.get(u));
+    }
     return owner;
   };
   return {
-    owner: claim((f) => f.uuids, (f) => f.native),
-    toolOwner: claim((f) => f.toolIds, (f) => f.nativeTools),
+    owner: claim((f) => f.uuids, (f) => f.native, (f) => f.foreign),
+    toolOwner: claim((f) => f.toolIds, (f) => f.nativeTools, (f) => f.foreignTools),
   };
 }
 
@@ -1213,13 +1354,28 @@ export async function reconcileDirectory(db, dir, records, { write = true, thres
                                                             excludedCwds = null } = {}) {
   const index = await transcriptIndex(dir, { excludedCwds });
   const result = { dir, files: index.length, links: 0, anchors_kept: 0, rows: [],
-                   moved: { turns: 0, messages: 0, compactions: 0, tool_calls: 0 } };
+                   moved: { turns: 0, messages: 0, compactions: 0, tool_calls: 0 },
+                   repaired: { cwd: 0, project_slug: 0, transcript_path: 0 } };
   if (!index.length) return result;
   const { rows, stats } = deriveLinks(index, records, threshold);
   const { owner, toolOwner } = deriveOwners(index);
   result.anchors_kept = stats.anchors_kept;
   result.rows = rows;
   result.links = rows.length;
+  // THE SESSION ROW'S IDENTITY, from its own transcript: the directory it lives in (`cwd` by the
+  // same rule the upsert applies, `project_slug` the directory's name) and its own top-level
+  // path. Rows written before those rules exist, and rows a subagent file reached first, are
+  // put right here, in the same pass that puts the links right.
+  const identity = db.prepare('SELECT cwd, project_slug, transcript_path FROM sessions WHERE session_id = ?');
+  const fixes = [];
+  for (const f of index) {
+    const cur = identity.get(f.id);
+    if (!cur) continue;
+    const want = { cwd: f.cwd ?? cur.cwd, project_slug: f.slug, transcript_path: f.path };
+    for (const col of Object.keys(want)) {
+      if (want[col] != null && cur[col] !== want[col]) { result.repaired[col]++; fixes.push([col, want[col], f.id]); }
+    }
+  }
   if (!write) {
     const count = (table, key, map) => {
       const stmt = db.prepare(`SELECT session_id FROM ${table} WHERE ${key} = ?`);
@@ -1232,6 +1388,9 @@ export async function reconcileDirectory(db, dir, records, { write = true, thres
     result.moved.compactions = count('compactions', 'uuid', owner);
     result.moved.tool_calls = count('tool_calls', 'tool_use_id', toolOwner);
     return result;
+  }
+  for (const [col, value, id] of fixes) {
+    db.prepare(`UPDATE sessions SET ${col} = ? WHERE session_id = ?`).run(value, id);
   }
   // By session AND by head, so a link left behind by a transcript that has since gone from disk
   // (its session no longer in the index, its head still here) is removed too. Links never cross a
@@ -1294,6 +1453,8 @@ export async function backfillChains(dbPath = DB_PATH, { quiet = false, write = 
     directories: dirs.length, files_scanned: 0, anchors_kept: 0, links_written: 0,
     chains: 0, longest_chain: 0, by_head_kind: {},
     rows_moved: { turns: 0, messages: 0, compactions: 0, tool_calls: 0 },
+    // Session rows whose directory, slug or transcript path did not match their own transcript.
+    rows_repaired: { cwd: 0, project_slug: 0, transcript_path: 0 },
   };
   const heads = new Map();
   let i = 0;
@@ -1313,6 +1474,7 @@ export async function backfillChains(dbPath = DB_PATH, { quiet = false, write = 
     report.links_written += r.links;
     report.anchors_kept += r.anchors_kept;
     for (const k of Object.keys(report.rows_moved)) report.rows_moved[k] += r.moved[k];
+    for (const k of Object.keys(report.rows_repaired)) report.rows_repaired[k] += r.repaired[k];
     for (const row of r.rows) {
       heads.set(row.head_id, (heads.get(row.head_id) ?? 0) + 1);
       report.by_head_kind[row.head_kind] = (report.by_head_kind[row.head_kind] ?? 0) + 1;
@@ -1561,6 +1723,7 @@ const KNOWN_TYPES = new Set([
 class Harvest {
   constructor(db, opts = {}) {
     this.db = db;
+    registerFunctions(db);
     // INJECTABLE, so the self-test stops writing into the user's capture directory. It wrote three
     // synthetic `zzz-brand-new-type` rows into the live data/raw/unknown-records.ndjson on every
     // run; 1,037 of them had accumulated here, making the fixture the single most common "unknown
@@ -1590,7 +1753,20 @@ class Harvest {
         -- 3,624 records the whole time.
         version=COALESCE(excluded.version, sessions.version),
         entrypoint=COALESCE(excluded.entrypoint, sessions.entrypoint),
-        cwd=COALESCE(excluded.cwd, sessions.cwd),
+        -- THE DIRECTORY THE SESSION LIVES IN, NOT THE LAST ONE IT VISITED. A session that changes
+        -- directory keeps writing to the transcript it started, under the slug of the directory it
+        -- started in, and that slug is what export, delete, memory and the trust entry are keyed
+        -- by. "Last non-null wins" filed 56 of 1,050 sessions on one machine under a subdirectory
+        -- their files are not in, so their transcripts were never carried and never purged. The
+        -- first cwd whose slug IS the file's directory sticks; until one is seen, the latest.
+        cwd=CASE WHEN slug_of(sessions.cwd) = sessions.project_slug THEN sessions.cwd
+                 WHEN slug_of(excluded.cwd) = excluded.project_slug THEN excluded.cwd
+                 ELSE COALESCE(excluded.cwd, sessions.cwd) END,
+        -- The session's OWN top-level transcript wins over any other file naming it: a subagent
+        -- file under <session>/ carries the parent's sessionId and used to be inserted first, in
+        -- directory order, leaving 69 of 1,426 rows here pointing at a subagent file.
+        project_slug=CASE WHEN ?10 THEN excluded.project_slug ELSE sessions.project_slug END,
+        transcript_path=CASE WHEN ?10 THEN excluded.transcript_path ELSE sessions.transcript_path END,
         git_branch=COALESCE(excluded.git_branch, sessions.git_branch)`),
       // A ROW IS NEVER MOVED TO ANOTHER SESSION BY INGEST. These were INSERT OR REPLACE, and a
       // resumed or forked transcript is a COPY of its predecessor with the same uuids under a new
@@ -1829,7 +2005,13 @@ class Harvest {
     }
 
     this.stats.filesRead++;
-    const projectSlug = path.split(/[\\/]/).slice(-2)[0];
+    // The PROJECT directory, whatever depth the file sits at. `slice(-2)[0]` named the parent
+    // directory, which for a subagent transcript under <session>/subagents/ is "subagents", a slug
+    // that maps to 30 different working directories on one store (see store.project_label).
+    const parts = path.split(/[\\/]/);
+    const under = parts.lastIndexOf('projects');
+    const projectSlug = under >= 0 && under + 1 < parts.length ? parts[under + 1] : parts.slice(-2)[0];
+    const fileStem = parts[parts.length - 1].toLowerCase();
     let pendingBoundary = null;
     let consumed = start;
 
@@ -1865,8 +2047,13 @@ class Harvest {
       }
 
       if (d.sessionId) {
+        // 1 when this file IS the session's own top-level transcript, which is what decides
+        // project_slug and transcript_path in the upsert; a line in a subagent file, or a
+        // parent's line copied verbatim into a fork, never re-homes the row it names.
+        const ownTop = String(d.sessionId).toLowerCase() + '.jsonl' === fileStem ? 1 : 0;
         this.stmt.putSession.run(d.sessionId, projectSlug, d.cwd ?? null, d.gitBranch ?? null,
-          d.version ?? null, d.entrypoint ?? null, d.timestamp ?? null, d.timestamp ?? null, path);
+          d.version ?? null, d.entrypoint ?? null, d.timestamp ?? null, d.timestamp ?? null, path,
+          ownTop);
       }
 
       this.scanBlocks(d, path, lineNo);
@@ -2075,7 +2262,8 @@ async function run({ full, recordsRoots = null }) {
   // directory is what folds it into its chat on the next render without anyone running anything.
   // Bounded by the directory, which is why it is affordable on every hook-driven harvest.
   const chains = { directories: touched.size, links: 0, failed: [],
-                   rows_moved: { turns: 0, messages: 0, compactions: 0, tool_calls: 0 } };
+                   rows_moved: { turns: 0, messages: 0, compactions: 0, tool_calls: 0 },
+                   rows_repaired: { cwd: 0, project_slug: 0, transcript_path: 0 } };
   if (touched.size) {
     // ONE TRANSACTION PER DIRECTORY, AND A FAILURE IS REPORTED, NOT RAISED. The ingest above is
     // already committed and must stay so; a directory whose pass throws (a sibling transcript
@@ -2098,6 +2286,7 @@ async function run({ full, recordsRoots = null }) {
           db.exec('COMMIT');
           chains.links += r.links;
           for (const k of Object.keys(chains.rows_moved)) chains.rows_moved[k] += r.moved[k];
+          for (const k of Object.keys(chains.rows_repaired)) chains.rows_repaired[k] += r.repaired[k];
         } catch (e) {
           try { db.exec('ROLLBACK'); } catch { /* nothing left to roll back */ }
           const error = String(e && e.message ? e.message : e);
@@ -2326,6 +2515,16 @@ async function selfTest() {
   // is used only where the behaviour is genuinely out of reach.
   const src = readFileSync(new URL(import.meta.url), 'utf8');
   checks.push(['CLI: --backfill-chains is dispatched', src.includes("argv.includes('--backfill-chains')")]);
+  // The refusal runs in a child process, because it is the entry-point dispatch under test and
+  // this process was entered with --self-test.
+  {
+    const probe = (args) => spawnSync(process.execPath, [SELF_PATH, ...args], { encoding: 'utf8' });
+    const help = probe(['--help']);
+    checks.push(['CLI: --help prints the usage and harvests nothing', help.status === 0 && help.stdout.includes('--backfill-chains')]);
+    const bad = probe(['--hlep']);
+    checks.push(['CLI: an unknown flag is refused rather than run as a harvest (gate can fail)',
+      bad.status === 2 && bad.stderr.includes('unknown flag --hlep'), `status ${bad.status}`]);
+  }
   const turn = db.prepare('SELECT * FROM turns WHERE uuid = ?').get('u1');
   checks.push(['turn captured', !!turn]);
   checks.push(['total_resident = input + cache_write + cache_read', turn?.total_resident === 1003]);
@@ -2905,7 +3104,7 @@ async function selfTest() {
       !row(S.AN) && !row(S.C) && !row(S.F) && stats.anchors_kept === 2, String(stats.anchors_kept)]);
     checks.push(['chains: a session with nothing above it gets no row',
       !row(S.X) && !row(S.AN2) && !row(S.NEAR2) && !row(S.FAR2)]);
-    checks.push(['chains: a fork is a container of last resort',
+    checks.push(['chains: a fork record holder contains its own line, which resumed into it natively',
       row(S.G)?.head_id === S.H && row(S.G)?.head_kind === 'fork']);
     checks.push(['chains: every head is a session with no link of its own', rows.every((r) => !row(r.head_id))]);
     checks.push(['chains: four links and nothing else', rows.length === 4, String(rows.length)]);
@@ -3085,6 +3284,156 @@ async function selfTest() {
       try { resolveRecordsRoots(['--records', join(tmp, 'no-such-records')]); return false; } catch { return true; }
     })()]);
     cdb2.close();
+  }
+
+  // Chains, third directory: the shapes a second adversarial review found. A verbatim fork that
+  // outranks the parent's post-compaction resume; the fork resumed, so the parent's lines are
+  // rewritten under the fork's line; a tail resume so small its predecessor "contains" it; two
+  // forks of a parent whose transcript is gone; two resumes taken from the same compaction; a
+  // session that changed directory; a subagent file harvested before the session's own.
+  {
+    const cdir3 = join(tmp, 'chains3');
+    const pdir3 = join(cdir3, 'projects', 'C--home');
+    const rdir3 = join(cdir3, 'records', 'acct', 'org');
+    mkdirSync(pdir3, { recursive: true });
+    mkdirSync(rdir3, { recursive: true });
+    const sid = (tag) => `${tag}-0000-4000-8000-000000000003`;
+    const PA = sid('aaaa0001'), PA2 = sid('aaaa0002');                        // parent, its post-compaction resume
+    const FK = sid('bbbb0001'), FKH = sid('bbbb0002');                        // verbatim fork of PA, then resumed
+    const TA = sid('cccc0001'), TB = sid('cccc0002');                         // a tiny tail resume
+    const GONE = sid('dddd0000'), G1 = sid('dddd0001'), G2 = sid('dddd0002'); // forks of a deleted parent
+    const SP = sid('eeee0001'), SB1 = sid('eeee0002'), SB2 = sid('eeee0003'); // two resumes from one compaction
+    const MV = sid('ffff0001');                                               // changed directory mid-session
+    const ids = (p, n) => Array.from({ length: n }, (_, i) => `${p}${i + 1}`);
+    const day = (d) => `2026-03-${String(d).padStart(2, '0')}T00:00:00.000Z`;
+    const line = (s, u, ts, cwd = 'C:/home') => JSON.stringify({
+      type: 'assistant', uuid: u, sessionId: s, timestamp: ts, cwd,
+      message: { model: 'm', usage: { input_tokens: 1, cache_creation_input_tokens: 0,
+                                      cache_read_input_tokens: 0, output_tokens: 1 },
+                 content: [{ type: 'text', text: 'y ' + u }] } });
+    const head = (s, ts) => JSON.stringify({ type: 'queue-operation', operation: 'enqueue',
+                                             timestamp: ts, sessionId: s, content: 'continue', cwd: 'C:/home' });
+    const fileOf = (s) => join(pdir3, s + '.jsonl');
+    const write = (s, lines) => writeFileSync(fileOf(s), lines.join('\n') + '\n');
+    // 1. PA did 100 records. FK is PA copied verbatim (PA's sessionId, PA's timestamps) plus 10 of
+    //    its own; FKH resumed FK and rewrote everything to itself, plus 5 more; the fork's record
+    //    now names FKH. PA2 resumed PA after a compaction: PA's last 20 rewritten, plus 30 own.
+    const pa = ids('pa', 100);
+    const paLines = pa.map((u) => line(PA, u, day(1)));
+    write(PA, paLines);
+    write(FK, paLines.concat(ids('fk', 10).map((u) => line(FK, u, day(2)))));
+    write(FKH, [head(FKH, day(3))].concat(pa.map((u) => line(FKH, u, day(1))),
+                                          ids('fk', 10).map((u) => line(FKH, u, day(2))),
+                                          ids('fh', 5).map((u) => line(FKH, u, day(3)))));
+    write(PA2, [head(PA2, day(4))].concat(pa.slice(80).map((u) => line(PA2, u, day(1))),
+                                          ids('pb', 30).map((u) => line(PA2, u, day(4)))));
+    // 2. TB resumed TA after a compaction and did two records: TA "contains" 25 of TB's 27.
+    const ta = ids('ta', 30);
+    write(TA, ta.map((u) => line(TA, u, day(5))));
+    write(TB, [head(TB, day(6))].concat(ta.slice(5).map((u) => line(TB, u, day(5))),
+                                        ids('tb', 2).map((u) => line(TB, u, day(6)))));
+    // 3. G1 and G2 are verbatim forks of GONE, whose own transcript was deleted.
+    const gone = ids('go', 20);
+    const goneLines = gone.map((u) => line(GONE, u, day(7)));
+    write(G1, goneLines.concat(ids('g1', 5).map((u) => line(G1, u, day(8)))));
+    write(G2, goneLines.concat(ids('g2', 5).map((u) => line(G2, u, day(9)))));
+    // 4. SB1 and SB2 both resumed SP from the same compaction; SB1 did 3 records and was
+    //    abandoned, SB2 did 10 and holds the record.
+    const sp = ids('sp', 40);
+    write(SP, sp.map((u) => line(SP, u, day(10))));
+    write(SB1, [head(SB1, day(11))].concat(sp.slice(30).map((u) => line(SB1, u, day(10))),
+                                           ids('s1', 3).map((u) => line(SB1, u, day(11)))));
+    write(SB2, [head(SB2, day(12))].concat(sp.slice(30).map((u) => line(SB2, u, day(10))),
+                                           ids('s2', 10).map((u) => line(SB2, u, day(12)))));
+    // 5. MV started in C:/home and moved to C:/home/sub for its last records.
+    write(MV, ids('mv', 10).map((u, i) => line(MV, u, day(13), i < 6 ? 'C:/home' : 'C:/home/sub')));
+    // 7. CP resumed PA2 after another compaction (20 of PA2's own records, then 40 more) and holds
+    //    the parent's record now. FZ is a second verbatim fork of PA, resumed after a compaction
+    //    into FZC (FZ's last 5 own records, then 2 more), which holds the fork's record. For FZ,
+    //    PA2 holds 20 of its 110 records natively and FZC only 5, and PA2 is the cousin: it holds
+    //    nothing FZ wrote itself.
+    const CP = sid('aaaa0003'), FZ = sid('bbbb0003'), FZC = sid('bbbb0004');
+    write(CP, [head(CP, day(14))].concat(ids('pb', 30).slice(10).map((u) => line(CP, u, day(4))),
+                                         ids('pc', 40).map((u) => line(CP, u, day(14)))));
+    write(FZ, paLines.concat(ids('fz', 10).map((u) => line(FZ, u, day(16)))));
+    write(FZC, [head(FZC, day(17))].concat(ids('fz', 10).slice(5).map((u) => line(FZC, u, day(16))),
+                                           ids('fc', 2).map((u) => line(FZC, u, day(17)))));
+    // 6. A subagent transcript naming MV, in the place Claude Code writes them.
+    mkdirSync(join(pdir3, MV, 'subagents'), { recursive: true });
+    const subPath = join(pdir3, MV, 'subagents', 'agent-x.jsonl');
+    writeFileSync(subPath, [line(MV, 'sub1', day(13), 'C:/home/sub'), line(MV, 'sub2', day(13), 'C:/home/sub')].join('\n') + '\n');
+    const rec = (name, body) => writeFileSync(join(rdir3, name), JSON.stringify(body));
+    rec('local_pa.json', { cliSessionId: CP, title: 'Parent' });
+    rec('local_fk.json', { cliSessionId: FKH, title: 'Parent (fork)', forkedFromSessionId: 'local_pa' });
+    rec('local_fz.json', { cliSessionId: FZC, title: 'Parent (fork 2)', forkedFromSessionId: 'local_pa' });
+    rec('local_tb.json', { cliSessionId: TB, title: 'Tiny' });
+    rec('local_g1.json', { cliSessionId: G1, title: 'Gone (fork)', forkedFromSessionId: 'local_gone' });
+    rec('local_g2.json', { cliSessionId: G2, title: 'Gone (fork)', forkedFromSessionId: 'local_gone' });
+    rec('local_sb.json', { cliSessionId: SB2, title: 'Siblings' });
+
+    const index4 = await transcriptIndex(pdir3);
+    const records4 = readDesktopRecords([join(cdir3, 'records')]);
+    const by4 = Object.fromEntries(index4.map((f) => [f.id, f]));
+    checks.push(['index: only top-level transcripts are indexed, a subagent file is not',
+      index4.length === 15 && !index4.some((f) => f.path === subPath), String(index4.length)]);
+    checks.push(['index: a verbatim fork names the session its copy came from',
+      by4[FK].foreignFrom.has(PA) && by4[FK].foreign.get('pa1') === PA && by4[FKH].foreignFrom.size === 0]);
+    checks.push(['index: a session that changed directory keeps the directory its file lives in (gate can fail)',
+      by4[MV].cwd === 'C:/home' && by4[MV].slug === 'C--home', String(by4[MV].cwd)]);
+    const { rows: rows4, stats: stats4 } = deriveLinks(index4, records4);
+    const row4 = (s) => rows4.find((r) => r.session_id === s);
+    checks.push(['links: a parent resumed after a compaction follows its resume, not its verbatim fork (gate can fail)',
+      row4(PA)?.next_id === PA2 && row4(PA)?.head_id === CP, String(row4(PA)?.next_id?.slice(0, 8))]);
+    checks.push(['links: the fork\'s resume, which rewrote the parent\'s lines, is refused by the fork\'s own evidence',
+      stats4.refused_lineage >= 1 && stats4.refused_foreign >= 1, JSON.stringify(stats4)]);
+    checks.push(['links: the fork\'s first session folds into the fork\'s resume',
+      row4(FK)?.head_id === FKH && row4(FK)?.head_kind === 'fork']);
+    checks.push(['links: a parent-chat session holding more of a fork than the fork\'s own resume is still not its successor (gate can fail)',
+      row4(FZ)?.head_id === FZC && row4(FZ)?.head_kind === 'fork' && stats4.refused_cousin >= 1
+      && rows4.every((r) => (r.next_id !== PA2 && r.next_id !== CP) || r.session_id === PA || r.session_id === PA2),
+      JSON.stringify([row4(FZ)?.next_id?.slice(0, 8), stats4.refused_cousin])]);
+    checks.push(['links: the parent\'s later resumes chain to the parent\'s record',
+      row4(PA2)?.head_id === CP && row4(PA2)?.head_kind === 'record']);
+    checks.push(['links: a tiny tail resume is linked from its predecessor and never backwards (gate can fail)',
+      row4(TA)?.head_id === TB && !row4(TB)]);
+    checks.push(['links: two resumes from one compaction are one chat',
+      row4(SP)?.head_id === SB2 && row4(SB1)?.head_id === SB2]);
+    checks.push(['links: forks of a deleted parent do not link to each other', !row4(G1) && !row4(G2)]);
+    checks.push(['links: no row names its own session as head', rows4.every((r) => r.head_id !== r.session_id)]);
+    const { owner: owner4 } = deriveOwners(index4);
+    checks.push(['owners: a deleted parent still owns what its forks copied (gate can fail)',
+      gone.every((u) => owner4.get(u) === GONE), String(owner4.get('go1')?.slice(0, 8))]);
+    checks.push(['owners: the fork\'s resume does not take the parent\'s records',
+      pa.every((u) => owner4.get(u) === PA) && owner4.get('fk1') === FK]);
+
+    // Ingest, subagent file first, then the session's own; then the store is repaired in place.
+    const cdb4 = new DatabaseSync(':memory:');
+    cdb4.exec(SCHEMA);
+    const ch4 = new Harvest(cdb4);
+    await ch4.file(subPath, true);
+    const srow = () => cdb4.prepare('SELECT cwd, project_slug, transcript_path FROM sessions WHERE session_id = ?').get(MV);
+    checks.push(['ingest: a subagent file names the project directory, not "subagents"', srow()?.project_slug === 'C--home']);
+    await ch4.file(fileOf(MV), true);
+    checks.push(['ingest: the session\'s own transcript wins the path and the directory it lives in (gate can fail)',
+      srow()?.transcript_path === fileOf(MV) && srow()?.cwd === 'C:/home', JSON.stringify(srow())]);
+    await ch4.file(subPath, true);
+    checks.push(['ingest: a later subagent line does not move them back', srow()?.transcript_path === fileOf(MV) && srow()?.cwd === 'C:/home']);
+    cdb4.prepare('UPDATE sessions SET cwd = ?, transcript_path = ?, project_slug = ? WHERE session_id = ?')
+      .run('C:/home/sub', subPath, 'subagents', MV);
+    const goneRows = cdb4.prepare('INSERT INTO turns (uuid, session_id, ts) VALUES (?,?,?)');
+    for (const u of gone) goneRows.run(u, GONE, day(7));
+    const dry4 = await reconcileDirectory(cdb4, pdir3, records4, { write: false });
+    checks.push(['reconcile: --dry-run counts the identity repairs it would make',
+      dry4.repaired.cwd === 1 && dry4.repaired.transcript_path === 1 && dry4.repaired.project_slug === 1
+      && cdb4.prepare('SELECT cwd FROM sessions WHERE session_id = ?').get(MV).cwd === 'C:/home/sub']);
+    const rc4 = await reconcileDirectory(cdb4, pdir3, records4, { write: true });
+    checks.push(['reconcile: a row filed under the directory it moved to is put back where its file is (gate can fail)',
+      rc4.repaired.cwd === 1 && srow()?.cwd === 'C:/home' && srow()?.transcript_path === fileOf(MV) && srow()?.project_slug === 'C--home',
+      JSON.stringify(srow())]);
+    checks.push(['reconcile: a deleted parent keeps its rows when its forks are the only files (gate can fail)',
+      cdb4.prepare('SELECT COUNT(*) n FROM turns WHERE session_id = ?').get(GONE).n === 20 && rc4.moved.turns === 0,
+      `moved ${rc4.moved.turns}`]);
+    cdb4.close();
   }
 
   // The two flags that stand between a bare invocation and a 10 GB re-read or a silent write.
@@ -3505,9 +3854,29 @@ const IS_ENTRY = (() => {
   } catch { return false; }
 })();
 
+// EVERY FLAG THIS TOOL KNOWS. Anything else that looks like a flag is refused with the usage,
+// because the fallthrough below is a harvest of the live store: `--help`, typed by a careful
+// reader, ran one.
+const USAGE = `harvest.mjs
+  node harvest.mjs                 harvest incrementally
+  node harvest.mjs --dry-run       say what an incremental run would read; write nothing
+  node harvest.mjs --full --yes    ignore stored offsets, re-read everything
+  node harvest.mjs --self-test     prove the parser detects what it claims to detect
+  node harvest.mjs --stats         print store contents, harvest nothing
+  node harvest.mjs --backfill-chains [--dry-run] [--records <dir>]
+  node harvest.mjs --backfill-survivors | --backfill-titles | --backfill-agents
+                   | --backfill-tool-outcomes | --backfill-message-source
+  any of the above with --db <path> to name the store`;
+const KNOWN_FLAGS = new Set(['--full', '--yes', '--dry-run', '--self-test', '--stats', '--db', '--records',
+  '--backfill-chains', '--backfill-survivors', '--backfill-titles', '--backfill-agents',
+  '--backfill-tool-outcomes', '--backfill-message-source', '--help', '-h']);
+
 const argv = process.argv.slice(2);
 let code = 0;
+const unknownFlags = argv.filter((a) => a.startsWith('-') && !KNOWN_FLAGS.has(a));
 if (!IS_ENTRY) { /* imported for its exports: do nothing */ }
+else if (argv.includes('--help') || argv.includes('-h')) console.log(USAGE);
+else if (unknownFlags.length) { console.error(`unknown flag ${unknownFlags.join(' ')}\n${USAGE}`); code = 2; }
 else if (argv.includes('--self-test')) code = await selfTest();
 else if (argv.includes('--stats')) code = stats();
 else if (argv.includes('--backfill-survivors')) code = backfillSurvivors(DB_PATH) ? 0 : 1;

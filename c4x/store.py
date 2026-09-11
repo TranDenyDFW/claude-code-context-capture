@@ -573,7 +573,11 @@ def _read_links() -> tuple[dict, dict]:
     df = q("SELECT session_id, head_id, prefix_uuids FROM session_links")
     if df.empty:
         return {}, {}
-    raw = dict(zip(df["session_id"], df["head_id"], strict=True))
+    # A row naming itself as its own head is not a link; the schema forbids it and a reader that
+    # followed it would loop. Dropped rather than trusted.
+    raw = {s: h for s, h in zip(df["session_id"], df["head_id"], strict=True) if s != h}
+    if not raw:
+        return {}, {}
 
     # FLATTENED HERE, whatever the rows say. Harvest writes head_id already resolved, but a row can
     # outlive the pass that wrote it (a prefix's transcript deleted from disk, a directory whose
@@ -632,18 +636,27 @@ def chat_members(session_id) -> list:
     return list(members_of.get(head, [head]))
 
 
-def chat_members_sql(column: str) -> str:
-    """A subquery naming every session of the chat that `column` belongs to, for an `IN (...)`.
+def chat_members_sql(column: str) -> tuple[str, tuple]:
+    """A subquery naming every session of the chat that `column` belongs to, and its parameters.
 
     The SQL twin of `chat_members`, for queries that start from a ROW rather than from a selected
     id: a compaction's owner session, say, whose chat's earlier members hold the messages it
-    replaced. On a store without the table the chat is the session itself.
+    replaced. With no links the chat is the session itself and there are no parameters.
+
+    THE SAME MAP EVERY OTHER READER USES, bound as a VALUES list, rather than a second reading of
+    the table. The first version re-derived the chat in SQL and resolved `head_id` one hop, while
+    `_read_links` follows a chain to its end, so on a store holding `B -> A` and `A -> Z` (rows
+    outlive the pass that wrote them) the compaction readers counted over a different chat from the
+    list the reader arrived from. One map, flattened once, means one answer.
     """
-    if not tables_present("session_links"):
-        return f"SELECT {column}"
-    head = f"COALESCE((SELECT l.head_id FROM session_links l WHERE l.session_id = {column}), {column})"
-    return (f"SELECT m.session_id FROM session_links m WHERE m.head_id = {head} "
-            f"UNION SELECT {head}")
+    head_of, _members = chat_links()
+    if not head_of:
+        return f"SELECT {column}", ()
+    values = ",".join("(?,?)" for _ in head_of)
+    params = tuple(x for pair in head_of.items() for x in pair)
+    head = f"COALESCE((SELECT h FROM chat WHERE s = {column}), {column})"
+    return (f"WITH chat(s, h) AS (VALUES {values}) "
+            f"SELECT s FROM chat WHERE h = {head} UNION SELECT {head}", params)
 
 
 def chain_where(session_id, column: str = "session_id") -> tuple[str, tuple]:
@@ -1183,9 +1196,10 @@ def _collapse_chains(df, head_of, members_of) -> pd.DataFrame:
             named = by_recency[[isinstance(t, str) and bool(t.strip()) for t in by_recency["title"]]]
             if not named.empty:
                 r["title"], r["title_kind"] = named.iloc[0]["title"], named.iloc[0]["title_kind"]
-        # The members with a turns row, plus the head itself when it has none: a chat resumed and
-        # closed without an API call still spans that session.
-        r["cli_sessions"] = int(len(g)) + (1 if own.empty else 0)
+        # Every session the chat spans, from the map, not the rows in hand: a member with no turns
+        # row (resumed and closed without an API call, or one whose turns sit under the session
+        # that produced them) is still a session the chat ran as. Counting `g` missed it.
+        r["cli_sessions"] = len(members_of.get(head, [head]))
         rows.append(r)
     out = pd.DataFrame(rows).drop(columns=["_head"])
     if orphan_heads:
@@ -1692,7 +1706,7 @@ def all_compactions(session_id=None, cohort=None) -> pd.DataFrame:
     where, args = scoped(session_id, "all", alias="c", cohort=cohort)
     # The model in force at the boundary is the newest turn BEFORE it, which for a compaction that
     # happened just after a resume sits in the chat's previous session.
-    members = chat_members_sql("c.session_id")
+    members, member_args = chat_members_sql("c.session_id")
     return q(f"""
         SELECT c.uuid, c.ts, c.trigger, c.version,
                COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project,
@@ -1706,7 +1720,7 @@ def all_compactions(session_id=None, cohort=None) -> pd.DataFrame:
         FROM compactions c LEFT JOIN sessions s ON s.session_id = c.session_id
         WHERE c.pre_tokens IS NOT NULL {where}
         ORDER BY c.pre_tokens DESC
-    """, args)
+    """, member_args + tuple(args))
 
 
 def compaction_summary_text(compaction_uuid: str) -> pd.DataFrame:
@@ -1734,7 +1748,7 @@ def compaction_dropped(compaction_uuid: str, limit: int = 300) -> pd.DataFrame:
     """
     # OVER THE WHOLE CHAT. A compaction just after a resume replaced messages the chat's earlier
     # sessions hold, and the store attributes each message to the session that produced it.
-    members = chat_members_sql("c.session_id")
+    members, member_args = chat_members_sql("c.session_id")
     return q(
         f"""
         SELECT m.uuid, m.ts, m.role, m.type, m.chars,
@@ -1747,7 +1761,7 @@ def compaction_dropped(compaction_uuid: str, limit: int = 300) -> pd.DataFrame:
         ORDER BY m.chars DESC
         LIMIT ?
         """,
-        (compaction_uuid, limit),
+        member_args + (compaction_uuid, limit),
     )
 
 
@@ -1842,7 +1856,7 @@ def compaction_dropped_count(compaction_uuid: str) -> int:
     compaction_dropped() caps its result, and reporting the capped length as the count states the
     limit as though it were a finding.
     """
-    members = chat_members_sql("c.session_id")
+    members, member_args = chat_members_sql("c.session_id")
     df = q(
         f"""
         SELECT COUNT(*) AS n
@@ -1852,7 +1866,7 @@ def compaction_dropped_count(compaction_uuid: str) -> int:
           AND m.uuid NOT IN (SELECT uuid FROM compaction_survivors WHERE compaction_uuid = c.uuid)
           AND m.uuid <> COALESCE(c.summary_uuid, '')
         """,
-        (compaction_uuid,),
+        member_args + (compaction_uuid,),
     )
     return int(df.iloc[0]["n"]) if not df.empty else 0
 

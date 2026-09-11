@@ -22,6 +22,13 @@ removed and nothing here said so.
   table row or Compare's arm B, resolves to the chat server-side; the API says so in an
   `x-c4x-session-requested` header rather than in the cached payload. A session with a desktop
   record of its own is never folded: a fork copies history too, and the app shows it separately.
+  For every other session the copied lines decide: a resume rewrites them to its own id, a fork
+  copies them verbatim, so a session succeeds another only when it holds the other's records
+  under its own id, is the later transcript, holds something the other wrote itself, and did not
+  reach those records through a fork. Measured over 17 links on the author's store, every resume
+  was native 100 percent and every fork 0 percent. Before that rule a parent chat's history
+  folded into its fork whenever the parent's own successor was a post-compaction resume: one
+  fork showed 8,076 turns of which 7,598 were the parent's.
 - **Copied rows now belong to the session that produced them.** `turns`, `messages`,
   `compactions` and `tool_calls` were written with `INSERT OR REPLACE` on their uuid, so a copied
   row went to whichever transcript was harvested last, in directory order: one session that
@@ -31,8 +38,20 @@ removed and nothing here said so.
   gains a transcript, so by the time the backfill ran on a copy of the author's store the
   directories worked in that day were already right and it reported 16,179 turns, 14,268 messages,
   21 compactions and 7,580 tool calls still to move, most of them under one fork.
-  `attachments` and `record_types` are per-session counters and still count a copy twice; that is
-  stated here rather than fixed.
+  A producer whose transcript is gone still owns its rows: two forks of a deleted parent name it
+  on every copied line, and the first rule moved all of the parent's rows into whichever fork
+  sorted first. `attachments` and `record_types` are per-session counters and still count a copy
+  twice; that is stated here rather than fixed.
+- **A session row now says where its transcript actually is.** `sessions.cwd` was the last cwd a
+  transcript named, and a session that changed directory was filed under a subdirectory its file
+  is not in: export walked the wrong slug directory and carried no transcript, delete left the
+  file and excluded the wrong directory, and a resumed chat could span two "projects" and refuse
+  to delete. It is now the first cwd whose slug is the file's directory (1,050 of 1,050 top-level
+  transcripts on the author's store, against 994 for the old rule; it matched the app's own
+  record for 47 of 47 record holders against 43). `transcript_path` is the session's own
+  top-level file, where 69 rows pointed at a subagent file that directory order had reached
+  first, and `project_slug` is the project directory, not `subagents`. The chains pass and
+  `--backfill-chains` repair older rows and report `rows_repaired`.
 - **An HTTP API and a React frontend.** `python -m c4x.api` serves `/api/tab/{id}` and a built
   bundle from `frontend/dist`, which is tracked on purpose so the documented install pulls nothing
   from npm. A suite check now compares the bundle's commit time against its source, because the
@@ -133,6 +152,20 @@ removed and nothing here said so.
 
 ### Fixed
 
+- **An export from a store harvested before `session_links` existed no longer fails.** The row
+  copy skipped the missing table and the manifest's count loop then raised `no such table` on
+  the same file, so `delete`, whose backup is an export, refused too. Every loop over the
+  per-session tables now reads the store's own table list; a preview, an export, a delete and an
+  import of such a store carry what it has.
+- **The compaction pages count over the same chat as the list they were reached from.** The SQL
+  twin of the member map resolved `head_id` one hop while every other reader followed a chain to
+  its end, so on rows that outlived the pass that wrote them (`B -> A` beside `A -> Z`) a
+  compaction's dropped-message count covered a different set of sessions. One flattened map is
+  now bound into those queries. `cli sessions` also counts a member with no turns row of its own,
+  and an arm B that resolves into arm A's own chat falls back to the default arm and is reported
+  in an `x-c4x-compare-requested` header rather than rendering the chat against itself.
+- **`node tools/harvest.mjs --help` printed nothing and ran a harvest.** Any flag the tool does
+  not know is now refused with the usage; `--help` prints it.
 - **An import no longer writes the EXPORTER's path into your `~/.claude.json`.** The destination
   was resolved with `mapping.get(row["cwd"], row["cwd"])`, exact string equality on a value that
   arrives from three places: `sessions.cwd` for a transcript, the raw config KEY for a config
