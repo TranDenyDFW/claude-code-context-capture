@@ -1413,10 +1413,13 @@ async def project_import(file: UploadFile = File(...), into: str = Form(default=
 
 @api.post("/api/project/delete")
 def project_delete(body: dict):
-    """Export, verify, remove, then stop capturing. It stops at the first thing that fails.
+    """Export, verify, remove every layer, then stop capturing. First failure stops it.
 
     `confirm` must be the project path exactly. A boolean cannot tell the wrong project from the
     right one, and that is the entire risk here.
+
+    `purge_snapshots` reaches the one thing the backup does not carry, so it defaults to false and
+    the report names the count and the bytes either way.
     """
     from c4x import projects
     _require_writes()
@@ -1424,11 +1427,22 @@ def project_delete(body: dict):
     try:
         return projects.delete(project,
                                confirm=str(body.get("confirm", "")),
-                               keep_capturing=bool(body.get("keep_capturing")))
+                               keep_capturing=bool(body.get("keep_capturing")),
+                               # LITERAL true, NOT truthy. This is the one flag whose
+                               # effect the backup cannot undo, and `bool()` accepted the
+                               # string "false", 0.1, [0] and any non-empty string from a
+                               # hand-written request.
+                               purge_snapshots=body.get("purge_snapshots") is True)
     except ValueError as exc:
         # 409, not 400: the request was well formed and the server refused it. A wrong confirmation
         # string is the guard working, and it should read differently from a malformed cohort.
         raise HTTPException(status_code=409,
+                            detail={"error": str(exc), "project": project}) from exc
+    except RuntimeError as exc:
+        # A FAILURE AFTER THE BACKUP EXISTS, and its path is inside the message by construction.
+        # Unhandled, this was a 500 with an empty body, so the one thing the user needed, where
+        # the undo is, never reached the page.
+        raise HTTPException(status_code=500,
                             detail={"error": str(exc), "project": project}) from exc
 
 

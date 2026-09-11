@@ -300,7 +300,9 @@ export interface MirrorResult {
   /**
    * The export carried rows only, so there was nothing to compare and `ok` answers no question.
    *
-   * `delete` writes its backup this way, which makes every undo of a delete a rows-only import.
+   * NO LONGER TRUE OF `delete`, which carries the files as of this branch: its backup is
+   * written with app_state on, so an undo restores the transcripts and the trust entry too.
+   * A rows-only export is what `export(app_state=False)` still writes.
    * Reading `ok` alone painted that correct restore red and named nothing, because `missing` and
    * `differs` are both empty when nothing was carried.
    */
@@ -350,6 +352,57 @@ export interface DeleteReport {
   backup: string
   removed: Record<string, number>
   excluded: boolean
+  excluded_cwds: string[]
+  /** Directories still harvested, because sessions this delete did not take live in them. */
+  still_captured: string[]
+  removed_files: number
+  removed_bytes: number
+  /** On disk still, with the reason. A file that changed since the backup is not the backup's. */
+  kept_files: { path: string; kind: string; why: string }[]
+  /** Named, never removed. `kind` is the layer the row belongs to: transcript, memory, tasks,
+   * config or desktop. A directory walk that refuses has its own channel, `prune_refused`. */
+  refused_files: { relpath: string; kind: string; why: string }[]
+  config_keys_removed: string[]
+  config_keys_kept: { key: string; why: string }[]
+  /** Memory and trust settings left alone, because they belong to the working directory. */
+  shared_with_surviving_sessions: { relpath: string; kind: string }[]
+  surviving_sessions: string[]
+  /** Sessions in the same slug directory under a different working directory string. */
+  sessions_sharing_slug: string[]
+  /**
+   * What the EXPORT could not carry. These are still on disk and the backup does not hold them,
+   * so they are the one thing "removes exactly what the backup contains" does not account for.
+   */
+  not_carried: { path: string; files: number; why: string }[]
+  /** `path`, not `relpath`: this is what `_write_app_state` actually appends. */
+  too_large: { path: string; bytes: number }[]
+  /** A file the export could not READ. Same class: on disk, and not in the backup. */
+  skipped: { path: string; why: string }[]
+  /** A directory walk the prune refused because it could not prove where to stop. */
+  prune_refused: { path: string; why: string }[]
+  /**
+   * Transcript files this project shared with another working directory. The harvester abandons a
+   * FILE, not a session, so these are why a directory can be left capturing.
+   */
+  shared_transcripts: { cwd: string; with_cwd: string; transcript: string }[]
+  /**
+   * Files for a deleted session that arrived AFTER the backup was taken. Left on disk on purpose,
+   * because the backup cannot restore what it never held, and named so that is a decision.
+   */
+  appeared_files: { path: string; cwd: string }[]
+  /** No session under this label had a working directory, so no files were purged at all. */
+  unlocated: boolean
+  snapshots: { files: number; removed: number; bytes: number }
+  /**
+   * THE ACCEPTANCE TEST. A delete removes exactly what the backup contains, and nothing else, so
+   * anything named here is a delete that did not finish. Empty is the only good answer.
+   */
+  /**
+   * `path` is null for a row the purge REFUSED: it could not resolve where the file is, which is
+   * "I cannot tell", not "it is gone". The `why` says which.
+   */
+  still_here: { path: string | null; kind: string; relpath?: string; why?: string }[]
+  appeared_since_backup: string[]
 }
 
 export class ApiError extends Error {
@@ -472,12 +525,18 @@ export const api = {
       return post<ImportReport>('/api/project/import', body)
     },
 
-    /** `confirm` must be the project path exactly. The server checks it; this does not. */
-    delete: (cohort: string, confirm: string, keepCapturing = false) =>
+    /**
+     * `confirm` must be the project path exactly. The server checks it; this does not.
+     *
+     * `purgeSnapshots` reaches the pre-compaction snapshots, which the backup does NOT carry, so
+     * it is the one part of a delete that importing the backup cannot undo.
+     */
+    delete: (cohort: string, confirm: string, keepCapturing = false, purgeSnapshots = false) =>
       post<DeleteReport>('/api/project/delete', {
         cohort,
         confirm,
         keep_capturing: keepCapturing,
+        purge_snapshots: purgeSnapshots,
       }),
 
     include: (project: string) =>

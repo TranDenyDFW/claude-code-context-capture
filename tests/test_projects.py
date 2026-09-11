@@ -171,8 +171,7 @@ def forget_cached_rows():
     direction of leak makes a test depend on the order the suite happened to run in.
     """
     from c4x import store
-    store._rows_cache.update({"at": 0.0, "df": None})
-    store._archived_cache.update({"map": None, "at": 0.0, "root": None})
+    store.invalidate()
     if hasattr(store.q, "cache_clear"):
         store.q.cache_clear()
 
@@ -271,7 +270,7 @@ class TestWhichSessionsAProjectOwns:
     @staticmethod
     def mark_archived(monkeypatch, ids):
         from c4x import store
-        store._rows_cache["df"] = None
+        store.invalidate()
         monkeypatch.setattr(store, "archived_sessions", lambda: dict.fromkeys(ids, True))
 
     def test_an_archived_session_belongs_to_the_archived_project_not_the_plain_one(

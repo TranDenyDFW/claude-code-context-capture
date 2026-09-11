@@ -82,6 +82,7 @@ export function ProjectMoves({
   const [open, setOpen] = useState(false)
   const [typed, setTyped] = useState('')
   const [keepCapturing, setKeepCapturing] = useState(false)
+  const [purgeSnapshots, setPurgeSnapshots] = useState(false)
   const [busy, setBusy] = useState<'import' | 'delete' | 'include' | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [imported, setImported] = useState<ImportReport | null>(null)
@@ -98,6 +99,11 @@ export function ProjectMoves({
   const close = () => {
     setOpen(false)
     setTyped('')
+    // BOTH CHECKBOXES RESET. `purgeSnapshots` reaches the one thing the backup cannot put back,
+    // and it stayed ticked after the dialog was closed, so the next project it was opened for
+    // inherited it silently from a decision made about a different project.
+    setKeepCapturing(false)
+    setPurgeSnapshots(false)
     setError(null)
     setImported(null)
     setDeleted(null)
@@ -169,7 +175,7 @@ export function ProjectMoves({
     setBusy('delete')
     setError(null)
     try {
-      setDeleted(await api.project.delete(cohort, typed, keepCapturing))
+      setDeleted(await api.project.delete(cohort, typed, keepCapturing, purgeSnapshots))
       setTyped('')
       onChanged()
     } catch (problem) {
@@ -386,6 +392,8 @@ export function ProjectMoves({
                   // `differs` means files landed and are not what the export carries, and showing
                   // that in green is the exact claim this change exists to stop.
                   // A rows-only export carried no files, so `ok` answers no question and the two
+                  // panes below would be empty. A delete's backup is NOT one of these any more:
+                  // it carries the files, so its undo restores them.
                   // lists are empty. `delete` writes its backup that way, so reading `ok` alone
                   // painted the documented undo-a-delete path red while naming nothing.
                   <div
@@ -511,7 +519,11 @@ export function ProjectMoves({
                   <>
                     <p className="mt-0.5 text-xs text-ink-faint">
                       An export is written and read back first, so this is undoable by importing
-                      the file it leaves behind. The transcripts on disk are untouched.
+                      the file it leaves behind. It removes exactly what that backup holds and
+                      nothing else: the rows, the transcripts, the tasks, the memory files and
+                      trust entry, and the chat in the desktop app. Memory and the trust entry are
+                      kept when another session is still using this working directory, and the
+                      report below says so when that happens.
                     </p>
                     <label className="mt-2 flex items-center gap-2 text-xs text-ink-dim">
                       <input
@@ -520,6 +532,15 @@ export function ProjectMoves({
                         onChange={(event) => setKeepCapturing(event.target.checked)}
                       />
                       Keep capturing this project (it will come back on the next harvest)
+                    </label>
+                    <label className="mt-1 flex items-center gap-2 text-xs text-ink-dim">
+                      <input
+                        type="checkbox"
+                        checked={purgeSnapshots}
+                        onChange={(event) => setPurgeSnapshots(event.target.checked)}
+                      />
+                      Also remove its pre-compaction snapshots (the backup does not carry them, so
+                      this part cannot be undone)
                     </label>
                     <label className="mt-2 block text-xs text-ink-dim">
                       Type the project path to confirm:
@@ -547,28 +568,161 @@ export function ProjectMoves({
                         {busy === 'delete' ? 'Deleting…' : 'Delete'}
                       </button>
                     </div>
-                    {deleted && (
-                      <div className="mt-2 rounded-md border border-good/40 bg-good/5 px-3 py-2
-                                      text-sm">
-                        <p className="text-good">Deleted {deleted.project}</p>
-                        <p className="mt-1 text-xs">
-                          Removed: <Counts counts={deleted.removed} />
-                        </p>
-                        <p className="mt-0.5 break-all text-xs text-ink-dim">
-                          Backup: <code>{deleted.backup}</code>
-                        </p>
-                        <p className="mt-0.5 text-xs text-ink-dim">
-                          {deleted.excluded
-                            ? 'Harvest will skip it from now on. Diagnostics lists it.'
-                            : 'Still being captured, so it returns on the next harvest.'}
-                        </p>
-                      </div>
-                    )}
                   </>
                 ) : (
                   <p className="mt-0.5 text-xs text-ink-faint">
                     Choose a project under Population first.
                   </p>
+                )}
+                {deleted && (
+                  // THE VERDICT IS `still_here`, NOT THE ABSENCE OF AN EXCEPTION. A delete
+                  // removes exactly what the backup holds and nothing else, so anything left
+                  // behind is the claim failing and is painted as such.
+                  <div
+                    className={`mt-2 rounded-md border px-3 py-2 text-sm ${
+                      deleted.still_here.length > 0
+                        ? 'border-bad/40 bg-bad/5'
+                        : 'border-good/40 bg-good/5'
+                    }`}
+                  >
+                    <p className={deleted.still_here.length > 0 ? 'text-bad' : 'text-good'}>
+                      {deleted.still_here.length > 0
+                        ? `Deleted ${deleted.project}, and ${deleted.still_here.length} file(s) are still here`
+                        : `Deleted ${deleted.project}`}
+                    </p>
+                    <p className="mt-1 text-xs">
+                      Removed: <Counts counts={deleted.removed} />
+                    </p>
+                    <p className="mt-0.5 text-xs text-ink-dim">
+                      {deleted.removed_files.toLocaleString()} file(s),{' '}
+                      {(deleted.removed_bytes / 1048576).toFixed(1)} MB
+                      {deleted.config_keys_removed.length > 0 &&
+                        ', and the trust and settings entry'}
+                    </p>
+                    <p className="mt-0.5 break-all text-xs text-ink-dim">
+                      Backup: <code>{deleted.backup}</code>
+                    </p>
+                    {deleted.shared_with_surviving_sessions.length > 0 && (
+                      // TWO COUNTS AND TWO KINDS. This called every kept row a memory file and
+                      // counted only `surviving_sessions`, so it could read "shared with 0
+                      // session(s)" directly above a line naming the files it had kept: memory is
+                      // kept for a session that merely shares the slug directory, and that session
+                      // is in `sessions_sharing_slug`, not in `surviving_sessions`.
+                      <p className="mt-0.5 text-xs text-warn">
+                        Left alone:{' '}
+                        {deleted.shared_with_surviving_sessions.filter((e) => e.kind === 'memory')
+                          .length.toLocaleString()}{' '}
+                        memory file(s) and{' '}
+                        {deleted.shared_with_surviving_sessions.filter((e) => e.kind === 'config')
+                          .length.toLocaleString()}{' '}
+                        trust and settings entr(ies), because{' '}
+                        {(
+                          deleted.surviving_sessions.length +
+                          deleted.sessions_sharing_slug.length
+                        ).toLocaleString()}{' '}
+                        session(s) still live in this working directory.
+                      </p>
+                    )}
+                    {deleted.kept_files.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Kept <code>{entry.path}</code>: {entry.why}
+                      </p>
+                    ))}
+                    {deleted.refused_files.map((entry) => (
+                      <p key={entry.relpath} className="mt-0.5 break-all text-xs text-warn">
+                        Refused <code>{entry.relpath}</code>: {entry.why}
+                      </p>
+                    ))}
+                    {deleted.config_keys_kept.map((entry) => (
+                      <p key={entry.key} className="mt-0.5 break-all text-xs text-warn">
+                        Trust entry kept for <code>{entry.key}</code>: {entry.why}
+                      </p>
+                    ))}
+                    {deleted.skipped.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Left on disk, the export could not read it: <code>{entry.path}</code>{' '}
+                        {entry.why}
+                      </p>
+                    ))}
+                    {deleted.too_large.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Left on disk, too large to carry ({(entry.bytes / 1048576).toFixed(1)} MB):{' '}
+                        <code>{entry.path}</code>
+                      </p>
+                    ))}
+                    {deleted.prune_refused.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Prune refused <code>{entry.path}</code>: {entry.why}
+                      </p>
+                    ))}
+                    {deleted.not_carried.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Left on disk, the backup does not hold it:{' '}
+                        <code>{entry.path}</code> ({entry.files.toLocaleString()} file(s)){' '}
+                        {entry.why}
+                      </p>
+                    ))}
+                    {deleted.still_here.map((entry) => (
+                      // A REFUSED ROW HAS NO PATH. Rendering `entry.path` alone printed an empty
+                      // code element under a red banner that said something was still here, and
+                      // named nothing at all.
+                      <p
+                        key={entry.path ?? entry.relpath}
+                        className="mt-0.5 break-all text-xs text-bad"
+                      >
+                        Still here: <code>{entry.path ?? entry.relpath}</code>
+                        {entry.why !== undefined && ` (${entry.why})`}
+                      </p>
+                    ))}
+                    {deleted.appeared_since_backup.length > 0 && (
+                      <p className="mt-0.5 break-all text-xs text-warn">
+                        Not deleted, and not in the backup:{' '}
+                        {deleted.appeared_since_backup.length.toLocaleString()} session(s) arrived
+                        while the backup was being written.{' '}
+                        <code>{deleted.appeared_since_backup.join(', ')}</code>
+                      </p>
+                    )}
+                    {deleted.unlocated && (
+                      <p className="mt-0.5 text-xs text-warn">
+                        No working directory was recorded for any of these sessions, so no files
+                        were purged and no exclusion could be written that the harvester would
+                        ever match.
+                      </p>
+                    )}
+                    {deleted.appeared_files.map((entry) => (
+                      <p key={entry.path} className="mt-0.5 break-all text-xs text-warn">
+                        Left on disk, arrived after the backup and is not in it:{' '}
+                        <code>{entry.path}</code>
+                      </p>
+                    ))}
+                    {deleted.shared_transcripts.map((entry) => (
+                      <p key={entry.transcript} className="mt-0.5 break-all text-xs text-ink-dim">
+                        Still captured: <code>{entry.cwd}</code> shares a transcript with{' '}
+                        <code>{entry.with_cwd}</code>, and the harvester skips whole files.
+                      </p>
+                    ))}
+                    {deleted.snapshots.files > 0 && (
+                      <p className="mt-0.5 text-xs text-ink-dim">
+                        {deleted.snapshots.removed > 0
+                          ? `${deleted.snapshots.removed} pre-compaction snapshot(s) removed, `
+                          : `${deleted.snapshots.files} pre-compaction snapshot(s) kept, `}
+                        {(deleted.snapshots.bytes / 1048576).toFixed(1)} MB. The backup does
+                        not carry them.
+                      </p>
+                    )}
+                    {deleted.still_captured.map((cwd) => (
+                      <p key={cwd} className="mt-0.5 break-all text-xs text-ink-dim">
+                        Still captured: <code>{cwd}</code>. Either sessions this delete did not
+                        take are still in it, or it shares a transcript with another project and
+                        the harvester skips whole files. Any line above says which.
+                      </p>
+                    ))}
+                    <p className="mt-0.5 text-xs text-ink-dim">
+                      {deleted.excluded
+                        ? 'Harvest will skip it from now on. Diagnostics lists it.'
+                        : 'Still being captured, so it returns on the next harvest.'}
+                    </p>
+                  </div>
                 )}
               </section>
 

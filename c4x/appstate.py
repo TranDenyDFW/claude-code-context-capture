@@ -780,6 +780,406 @@ def _merge_config(config_rows, mapping):
 
 
 # ---------------------------------------------------------------------------
+# Purge, which is restore run backwards
+# ---------------------------------------------------------------------------
+def _is_within(path, ancestor):
+    """True when `ancestor` is `path` itself or one of its parents. Case insensitive, as NTFS is."""
+    a = [part.casefold() for part in Path(ancestor).parts]
+    b = [part.casefold() for part in Path(path).parts]
+    return len(a) <= len(b) and b[:len(a)] == a
+
+
+def _prune_floor(kind, dest_cwd, sessions_root=None, path=None):
+    """The directory a prune walks up to and never past.
+
+    `~/.claude/projects` and `~/.claude/tasks` belong to the machine and hold every other project,
+    so they are the floor rather than a candidate. What sits directly beneath them, the slug
+    directory and `tasks/<session id>`, IS this project's and goes when it is empty.
+
+    A DESKTOP RECORD'S FLOOR IS ITS OWN DIRECTORY, so nothing is pruned for that kind. Its account
+    and organisation directories are the machine's, measured in `docs/desktop-records.md`, and this
+    returned `desktop_dir(sessions_root)` instead: the pair the app writes to NOW. `purge_paths`
+    deliberately answers the opposite question, "where IS this record", so the two disagree exactly
+    when the record was filed under a pair that is no longer current. The floor was then not an
+    ancestor of the directory being walked at all, the equality test below could never become true,
+    and the walk climbed through the org directory, the account directory and `claude-code-sessions`
+    itself, removing every level that happened to be empty. Reproduced on this repo's own `machine`
+    fixture, which files the record under a foreign account on purpose: the test passed and the
+    sessions root was gone.
+    """
+    if kind in (TRANSCRIPT, MEMORY):
+        return project_dir(dest_cwd).parent
+    if kind == TASKS:
+        return tasks_dir()
+    if kind == DESKTOP:
+        return Path(path).parent if path is not None else None
+    return None
+
+
+def purge_paths(row, dest_cwd, root=None):
+    """Every path on this machine this row names, or the reason it names none.
+
+    A DESKTOP RECORD IS NOT WHERE `destination` PUTS IT. That function answers the import's
+    question, "where does this record go so that the app on this machine sees it", and the answer
+    is the account and organisation pair this machine is signed in to NOW. A delete asks the
+    opposite question, "where IS it", and the two differ whenever the record was filed under a pair
+    that is no longer current, which is exactly the case `tests/test_mirror.py` builds because it is
+    the case that decides whether an import is visible at all.
+
+    `capture` found it by globbing `*/*/local_*.json`, so a purge looks the same way. The filename
+    carries a uuid and is unique, and every path the glob returns is under the root by
+    construction, so this stays exact rather than becoming a search.
+    """
+    if row["kind"] != DESKTOP:
+        path, refusal = destination(row, dest_cwd, root)
+        return ([] if refusal or path is None else [path]), refusal
+    parts, why = _safe_parts(row["relpath"])
+    if why or parts is None:
+        return [], f"{row['relpath']!r}: {why}"
+    if len(parts) != 1:
+        return [], f"{row['relpath']!r}: a desktop record is carried as a filename alone"
+    base = Path(root or sessions_root())
+    if not base.is_dir():
+        # NO PATHS AND NO REFUSAL. This machine keeps no desktop records at all, so there is
+        # nothing of this one to remove and nothing unresolved about it: `purge` files that under
+        # `absent`, which is what it is. It used to be a refusal, and because it was, every caller
+        # had to skip refusals to avoid a false alarm on a machine with no desktop app. That skip
+        # is what made a genuinely unresolved row invisible to the acceptance check.
+        return [], None
+    found = sorted(base.glob(f"*/*/{parts[0]}"))
+    # ONE ROW, ONE FILE. The filename carries a uuid so a second match is not expected, but the
+    # glob spans every account and organisation pair on the machine and `purge` would remove both.
+    # The backup holds one row, which cannot say which of two files it describes, and removing a
+    # file the backup does not separately hold breaks the one rule this delete is built on.
+    if len(found) > 1:
+        return [], ("this machine keeps more than one record under that name and the backup's "
+                    "single row does not say which: " + ", ".join(str(p) for p in found))
+    return found, None
+
+
+def _config_would_refuse(row):
+    """Why `_drop_config` would keep this key, or None when it would drop it.
+
+    One decision, one place, so the dry run and the run cannot disagree about the config the way
+    they had already been made not to disagree about files.
+    """
+    try:
+        projects = read_config().get("projects")
+    except (OSError, ValueError) as exc:
+        return f"the config could not be read: {exc}"
+    if not isinstance(projects, dict) or row["cwd"] not in projects:
+        return "this machine's config has no such key"
+    if sha256_bytes(canonical_json(projects[row["cwd"]])) != row["sha256"]:
+        return "the entry under this key is not the one the backup holds"
+    return None
+
+
+def _would_refuse(row, path):
+    """Why a purge would keep this file, or None when it would remove it.
+
+    Pulled out so the dry run and the run cannot drift: they were two copies of one decision and
+    only one of them had the hash test in it.
+    """
+    if not path.exists():
+        return None
+    try:
+        landed = path.read_bytes()
+    except OSError as exc:
+        return f"unreadable: {exc.strerror or exc}"
+    if row["kind"] == DESKTOP:
+        actual = sha256_bytes(rebase_marked(landed, DESKTOP_CWD_FIELDS) or landed)
+        wanted = row["rebased_sha256"]
+    else:
+        actual = sha256_bytes(landed)
+        wanted = row["sha256"]
+    if actual != wanted:
+        return ("changed since the backup was written, so the backup does not hold "
+                "what is here now")
+    return None
+
+
+def purge(rows, cwds, sessions_root=None, dry_run=False):
+    """Remove exactly what these rows carry, from this machine, and nothing else.
+
+    THE MIRROR IMAGE OF `restore`, IN THE SAME ORDER, because the order was the defect last time.
+    Types, then containment, then collision, then the removal, and each of those decided before
+    anything is opened.
+
+    `cwds` is a LIST of this machine's working directories and never a project label, so it goes
+    through the same `_cwds` guard, as an identity mapping: a delete happens where the project
+    already lives, so the source and the destination are the same directory, and `destination_cwd`
+    still does the work of deciding that `P:/Proj` and `P:\\Proj` are one directory.
+
+    WHAT IS REMOVED IS WHAT THE BACKUP HOLDS, byte for byte. A file whose bytes no longer hash to
+    what the row carries is KEPT and named, because the backup does not hold what is on the disk
+    now and removing it would lose the difference. That is the whole acceptance rule of a delete,
+    stated as code: the backup is the undo, so anything the backup cannot restore is not this
+    function's to take.
+
+    Empty directories are pruned, never a directory with anything left in it, and never past the
+    floor `_prune_floor` names.
+    """
+    mapping = {cwd: cwd for cwd in _cwds(cwds)}
+    report: dict[str, Any] = {
+        "removed": [], "kept": [], "absent": [], "refused": [], "config_keys": [],
+        "config_kept": [], "pruned": [], "prune_refused": [], "bytes": 0,
+        "dry_run": bool(dry_run)}
+
+    # 1. TYPES, before anything is opened. A purge decides what to remove by comparing the hash in
+    # the row against the bytes on the disk, so a row carrying no hash would compare unequal, keep
+    # every file, and report a delete that removed nothing as a delete that ran.
+    #
+    # THE BLOB IS DELIBERATELY NOT REQUIRED, which is why this check is not `restore`'s. A backup
+    # of this repo's own project carries 694.5 MB, and reading all of it into memory to decide
+    # whether to delete the files it was read from is a way to run a machine out of memory while
+    # doing nothing with the bytes. `projects.app_state_rows(path, with_blobs=False)` leaves them
+    # in the file. What they are is already proven: `export` recomputes the digest over that table
+    # and raises rather than handing back a backup it could not read back.
+    for row in rows:
+        if row.get("kind") not in KINDS:
+            raise ValueError(f"{row.get('relpath')!r}: unknown kind {row.get('kind')!r}")
+        for field in ("sha256", "rebased_sha256"):
+            if not isinstance(row.get(field), str) or not row[field]:
+                raise TypeError(
+                    f"{row.get('relpath')!r}: {field} is {type(row.get(field)).__name__}, and a "
+                    "purge removes a file only when the bytes on the disk hash to what the backup "
+                    "holds")
+
+    # THE CONFIG IS READ NOW AND NOT WHEN IT IS WRITTEN. `read_config` raises on a file it cannot
+    # parse, and discovering that after the transcripts are gone leaves a half-done delete whose
+    # backup no longer matches either side.
+    if any(row["kind"] == CONFIG for row in rows):
+        read_config()
+
+    # 2. CONTAINMENT, and 3. COLLISION, both decided before a single file is removed.
+    planned: list = []
+    seen: dict[str, str] = {}
+    for row in rows:
+        dest_cwd = destination_cwd(row["cwd"], mapping)
+        if row["kind"] == CONFIG:
+            planned.append((row, [CONFIG_PATH], dest_cwd))
+            continue
+        paths, refusal = purge_paths(row, dest_cwd, sessions_root)
+        if refusal:
+            report["refused"].append({"relpath": row["relpath"], "kind": row["kind"],
+                                      "why": refusal})
+            continue
+        for path in paths:
+            key = str(path).casefold()
+            if key in seen:
+                raise ValueError(
+                    f"two rows resolve to one file on this machine: {seen[key]!r} and "
+                    f"{row['relpath']!r} both name {path}")
+            seen[key] = row["relpath"]
+        planned.append((row, paths, dest_cwd))
+
+    if dry_run:
+        for row, paths, _dest_cwd in planned:
+            if row["kind"] == CONFIG:
+                # THE SAME ENTRY TEST `_drop_config` MAKES. This appended every carried key
+                # unconditionally, so a dry run promised to remove a key the run keeps because the
+                # entry under it is no longer the one the backup holds, and a key this machine does
+                # not have at all.
+                why = _config_would_refuse(row)
+                if why is None:
+                    report["config_keys"].append(row["cwd"])
+                else:
+                    report["config_kept"].append({"key": row["cwd"], "why": why})
+                continue
+            if not paths:
+                report["absent"].append({"relpath": row["relpath"], "kind": row["kind"],
+                                         "path": None})
+            for path in paths:
+                entry = {"relpath": row["relpath"], "kind": row["kind"], "path": str(path),
+                         "exists": path.exists()}
+                if not path.exists():
+                    # THE RUN FILES THIS UNDER `absent`, so the dry run must too. It listed it as
+                    # a removal, which is the same drift the hash test below was added to close.
+                    report["absent"].append(entry)
+                    continue
+                # THE SAME HASH TEST THE REAL RUN MAKES. Listing every resolved path as `removed`
+                # promised removals the real run would refuse, so a dry run answered "this is what
+                # will go" with files that were never going to go. A dry run whose answer differs
+                # from the run is worse than no dry run.
+                why = _would_refuse(row, path)
+                if why is None:
+                    report["removed"].append(entry)
+                else:
+                    report["kept"].append({**entry, "why": why})
+        return report
+
+    # 4. REMOVE, then CONFIRM IT IS GONE. `removed: N` is a coverage number and coverage numbers
+    # reward fabrication; what makes the claim checkable is that the path no longer exists.
+    config_rows = []
+    touched: dict[str, Path] = {}
+    floors: dict[str, Path] = {}
+    for row, paths, dest_cwd in planned:
+        if row["kind"] == CONFIG:
+            config_rows.append((row, dest_cwd))
+            continue
+        if not paths:
+            report["absent"].append({"relpath": row["relpath"], "kind": row["kind"], "path": None})
+            continue
+        for path in paths:
+            entry = {"relpath": row["relpath"], "kind": row["kind"], "path": str(path)}
+            if not path.exists():
+                report["absent"].append(entry)
+                continue
+            try:
+                landed = path.read_bytes()
+            except OSError as exc:
+                report["kept"].append({**entry, "why": f"unreadable: {exc.strerror or exc}"})
+                continue
+            if row["kind"] == DESKTOP:
+                actual = sha256_bytes(rebase_marked(landed, DESKTOP_CWD_FIELDS) or landed)
+                wanted = row["rebased_sha256"]
+            else:
+                actual = sha256_bytes(landed)
+                wanted = row["sha256"]
+            if actual != wanted:
+                report["kept"].append({
+                    **entry, "expected": wanted, "found": actual,
+                    "why": "changed since the backup was written, so the backup does not hold "
+                           "what is here now"})
+                continue
+            try:
+                path.unlink()
+            except OSError as exc:
+                report["kept"].append({**entry,
+                                       "why": f"could not be removed: {exc.strerror or exc}"})
+                continue
+            if path.exists():
+                raise RuntimeError(f"{path} was removed and is still there")
+            report["removed"].append(entry)
+            report["bytes"] += len(landed)
+            floor = _prune_floor(row["kind"], dest_cwd, sessions_root, path)
+            if floor is not None:
+                touched[str(path.parent).casefold()] = path.parent
+                floors[str(path.parent).casefold()] = Path(floor)
+
+    # 5. PRUNE EMPTY DIRECTORIES ONLY. Deepest first, so a directory whose only content was
+    # another directory this delete emptied is itself reachable.
+    for key in sorted(touched, key=len, reverse=True):
+        current = touched[key]
+        floor = floors.get(key)
+        # THE FLOOR MUST BE AN ANCESTOR, AND THAT IS CHECKED RATHER THAN ASSUMED. The loop below
+        # stops on equality, so a floor that is not on this directory's path upward is not a floor
+        # at all: the test never fires and the only thing left between an `rmdir` walk and the
+        # drive root is whichever parent happens to be non-empty. That is not a hypothetical, it is
+        # the defect this guard was written for, and the shape recurs whenever the function that
+        # FINDS a path and the function that BOUNDS it resolve it differently. Refused and named,
+        # because a prune that cannot say where it must stop has no business walking.
+        if floor is not None and not _is_within(current, floor):
+            report["prune_refused"].append({
+                "path": str(current),
+                "why": f"{floor} is not a parent of {current}, so there is no floor to stop at"})
+            continue
+        while floor is not None and str(current).casefold() != str(floor).casefold():
+            try:
+                if not current.is_dir() or any(current.iterdir()):
+                    break
+                parent = current.parent
+                current.rmdir()
+            except OSError:
+                break
+            report["pruned"].append(str(current))
+            current = parent
+
+    if config_rows:
+        report["config_keys"], report["config_kept"] = _drop_config(config_rows)
+    return report
+
+
+def still_present(rows, cwds, sessions_root=None):
+    """Which of these rows still name something on this machine. The inverse of `compare`.
+
+    `compare` asks whether this machine HOLDS what an export carries, and its `missing` list is
+    this answer turned inside out, so a delete could be checked with it. It is not, for one
+    measured reason: `compare` reads and hashes every carried blob, which for a backup of this
+    repo's own project is 694.5 MB read back in order to hash files that are supposed to be gone.
+    After a delete the question is only whether the path exists, and existence is the whole claim.
+    """
+    mapping = {cwd: cwd for cwd in _cwds(cwds)}
+    out = []
+    config = None
+    for row in rows:
+        if row["kind"] == CONFIG:
+            if config is None:
+                try:
+                    config = (read_config().get("projects") or {})
+                except (OSError, ValueError):
+                    config = {}
+            if row["cwd"] in config:
+                out.append({"relpath": row["cwd"], "kind": CONFIG, "path": str(CONFIG_PATH)})
+            continue
+        paths, refusal = purge_paths(row, destination_cwd(row["cwd"], mapping), sessions_root)
+        if refusal:
+            # A REFUSAL IS "I CANNOT TELL", WHICH IS NOT "IT IS GONE". This skipped, so a carried
+            # file that `purge` refused to touch left `still_here` empty, the CLI exited 0 and the
+            # panel painted green over a delete that had not removed it.
+            out.append({"relpath": row["relpath"], "kind": row["kind"], "path": None,
+                        "why": refusal})
+            continue
+        for path in paths:
+            if path.exists():
+                out.append({"relpath": row["relpath"], "kind": row["kind"], "path": str(path)})
+    return out
+
+
+def _drop_config(config_rows):
+    """Remove each carried `~/.claude.json` key, touching nothing else in the file.
+
+    The same read, change one key, write beside it and replace that `_merge_config` does, and for
+    the same reason: the file holds this machine's credentials and every other project's settings,
+    so it is never rewritten from anything but its own current contents. A key whose entry is no
+    longer the one the backup holds is KEPT and named, because dropping it would lose a change the
+    backup cannot put back.
+    """
+    # READ INSIDE THE GUARD. `read_config` raises on a file it cannot parse, this runs after every
+    # other layer is already gone, and the config can stop parsing between `purge`'s check at the
+    # top and this call. Uncaught, that killed the delete and the caller never saw the report
+    # naming what had been removed. A config that cannot be read is a config that was KEPT.
+    try:
+        config = read_config()
+    except (OSError, ValueError) as exc:
+        return [], [{"key": row["cwd"], "why": f"the config could not be read: {exc}"}
+                    for row, _dest_cwd in config_rows]
+    projects = config.get("projects")
+    dropped: list[str] = []
+    kept: list[dict] = []
+    if not isinstance(projects, dict):
+        return dropped, kept
+    for row, _dest_cwd in config_rows:
+        key = row["cwd"]
+        if key not in projects:
+            kept.append({"key": key, "why": "this machine's config has no such key"})
+            continue
+        if sha256_bytes(canonical_json(projects[key])) != row["sha256"]:
+            kept.append({"key": key,
+                         "why": "the entry under this key is not the one the backup holds"})
+            continue
+        del projects[key]
+        dropped.append(key)
+    if not dropped:
+        return dropped, kept
+    # THE ONE UNCAUGHT WRITE, AND IT RUNS LAST. Every other layer is already gone by the time
+    # this executes, so raising here aborts the delete after the transcripts, the tasks and the
+    # desktop record have been removed, and the caller never gets the report naming them. A failure
+    # to edit the config is a config that was KEPT, which is a thing this function already knows
+    # how to say.
+    try:
+        if CONFIG_PATH.exists():
+            shutil.copy2(CONFIG_PATH, CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-before"))
+        temporary = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".c4x-delete")
+        temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        os.replace(temporary, CONFIG_PATH)
+    except (OSError, ValueError) as exc:
+        return [], kept + [{"key": key, "why": f"the config could not be written: {exc}"}
+                           for key in sorted(dropped)]
+    return sorted(dropped), kept
+
+
+# ---------------------------------------------------------------------------
 # The proof
 # ---------------------------------------------------------------------------
 def compare(rows, mapping, sessions_root=None):

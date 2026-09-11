@@ -215,6 +215,85 @@ class TestExclusions:
         assert client.get("/api/project/excluded").json()["excluded"] == []
 
 
+class TestTheOneIrreversibleFlag:
+    """`purge_snapshots` reaches what the backup does not carry, so it takes literal true only.
+
+    `bool(body.get(...))` accepted the STRING "false", 0.1, [0] and any non-empty string, which is
+    exactly the shape a hand-written or mis-serialised request arrives in. Every other flag here is
+    undoable by importing the backup; this one is not.
+    """
+
+    def test_the_string_false_does_not_purge_snapshots(self, client, monkeypatch):
+        from c4x import projects
+        seen = {}
+
+        def record(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots=False):
+            seen["purge_snapshots"] = purge_snapshots
+            return {"project": project, "backup": "x", "removed": {}, "still_here": []}
+
+        monkeypatch.setattr(projects, "delete", record)
+
+        client.post("/api/project/delete", json={
+            "cohort": f"project::{ALPHA}", "confirm": ALPHA, "purge_snapshots": "false"})
+
+        assert seen["purge_snapshots"] is False
+
+    def test_literal_true_still_purges(self, client, monkeypatch):
+        from c4x import projects
+        seen = {}
+
+        def record(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots=False):
+            seen["purge_snapshots"] = purge_snapshots
+            return {"project": project, "backup": "x", "removed": {}, "still_here": []}
+
+        monkeypatch.setattr(projects, "delete", record)
+
+        client.post("/api/project/delete", json={
+            "cohort": f"project::{ALPHA}", "confirm": ALPHA, "purge_snapshots": True})
+
+        assert seen["purge_snapshots"] is True
+
+
+class TestAHalfFinishedDeleteOverHttp:
+    """A failure after the rows are committed must not answer like a refusal.
+
+    409 says "the request was well formed and the server refused it", which is what a wrong
+    confirmation string gets. A delete that removed every row and then failed is the opposite of a
+    refusal, and answering it the same way told the user nothing had happened.
+    """
+
+    def test_a_post_commit_failure_is_500_and_names_the_backup(self, client, monkeypatch):
+        from c4x import projects
+
+        def half_finished(*_args, **_kwargs):
+            raise projects.AfterTheRowsWereRemoved(
+                "the file half failed. THE ROWS ARE ALREADY GONE: the backup at tmp/x.db is the "
+                "only copy of it and importing that file puts it back.")
+
+        monkeypatch.setattr(projects, "delete", half_finished)
+
+        response = client.post("/api/project/delete", json={
+            "cohort": f"project::{ALPHA}", "confirm": ALPHA})
+
+        assert response.status_code == 500
+        body = response.json()["detail"]
+        assert "THE ROWS ARE ALREADY GONE" in body["error"]
+        assert "tmp/x.db" in body["error"], "the backup path is the one thing the user needs"
+
+    def test_a_refusal_is_still_409(self, client, monkeypatch):
+        from c4x import projects
+
+        def refuse(*_args, **_kwargs):
+            raise ValueError("confirmation does not match the project path; nothing was deleted")
+
+        monkeypatch.setattr(projects, "delete", refuse)
+
+        response = client.post("/api/project/delete", json={
+            "cohort": f"project::{ALPHA}", "confirm": "wrong"})
+
+        assert response.status_code == 409
+
+
 class TestTheWriteSwitch:
     """`--no-writes` must turn these off WITHOUT claiming the server harvests.
 

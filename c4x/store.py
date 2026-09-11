@@ -128,6 +128,13 @@ def write():
     con = sqlite3.connect(str(DB_PATH))
     try:
         con.execute("PRAGMA foreign_keys = ON")
+        # BEGIN IMMEDIATE, so a READ inside this block is inside the transaction too. Python's
+        # sqlite3 defers the BEGIN until the first statement that changes something, so every
+        # SELECT a writer makes first ran in autocommit: a caller that checked the store and then
+        # deleted on the strength of that check had an open window between the two, and this store
+        # has three writers by design. Taking the write lock up front closes it, at the cost of
+        # making two concurrent writers serialise, which is what they should do.
+        con.execute("BEGIN IMMEDIATE")
         yield con
         con.commit()
     except Exception:
@@ -478,6 +485,14 @@ class _RowsCache(TypedDict):
 
 _rows_cache: _RowsCache = {"at": 0.0, "df": None}
 
+# BUMPED BY `invalidate`, AND CHECKED BY EVERY CACHED READER BEFORE IT INSTALLS WHAT IT READ. A
+# clear alone is not enough: a reader that started before the delete finishes after it, and writes
+# the answer it computed from the pre-delete store into the slot the delete just emptied. The
+# window is the whole length of the uncached read, which for the session frame is an aggregate
+# over every turn in the store. Three processes write this store by design, so the race is
+# reachable rather than theoretical.
+_generation = {"n": 0}
+
 
 def session_rows(ttl: float = 45.0) -> pd.DataFrame:
     """Cached wrapper. The uncached query is a GROUP BY over every turn in the store.
@@ -489,10 +504,39 @@ def session_rows(ttl: float = 45.0) -> pd.DataFrame:
     now = _time.time()
     if _rows_cache["df"] is not None and now - _rows_cache["at"] < ttl:
         return _rows_cache["df"]
+    seen = _generation["n"]
     df = _session_rows_uncached()
-    _rows_cache["at"] = now
-    _rows_cache["df"] = df
+    if seen == _generation["n"]:
+        _rows_cache["at"] = now
+        _rows_cache["df"] = df
     return df
+
+
+def invalidate():
+    """Forget every cached read of the store and of this machine's Claude directory.
+
+    A REMOVAL THAT DOES NOT CALL THIS LEAVES THE ROW ON THE PAGE. Four caches in this module hold a
+    45 second answer and nothing cleared any of them, so a project deleted from the page stayed
+    drawn until the ttl expired. That reads as "the delete did not work" and invites a second one.
+
+    `_transcript_cache` is the one that is worse than cosmetic. It answers "does this session still
+    have a transcript", and `classify` turns that into the label a session is filed under, so a set
+    scanned before a removal keeps sessions in the wrong section of the page. It is also the
+    predicate any future prune would delete on, which is why it is cleared rather than left to
+    expire, but nothing on this branch deletes from it.
+
+    Clearing all four rather than the one that changed, because working out which cache a given
+    removal invalidated is exactly the reasoning that gets a cache wrong. The refills are not all
+    equally cheap: `_rows_cache` costs one aggregate over `turns`, `_transcript_cache` and
+    `_archived_cache` one directory scan each, and `_window_cache` spawns node per session, which
+    is why it is cached at all. A removal is rare enough to pay for all four, and a page that draws
+    a project the user just deleted costs more than a subprocess does.
+    """
+    _generation["n"] += 1
+    _rows_cache.update({"at": 0.0, "df": None})
+    _archived_cache.update({"map": None, "at": 0.0, "root": None})
+    _transcript_cache.update({"ids": None, "at": 0.0})
+    _window_cache.clear()
 
 
 ARCHIVED_SUFFIX = "archived"
@@ -631,12 +675,14 @@ def archived_sessions(root=None, ttl: float = 45.0) -> dict:
     if (_archived_cache["map"] is not None and _archived_cache["root"] == root
             and now - _archived_cache["at"] < ttl):
         return _archived_cache["map"]
+    seen = _generation["n"]
     found = {}
     for path in glob.glob(os.path.join(root, "*", "*", "*.json")):
         row = read_archived_record(path)
         if row is not None:
             found[row[0]] = row[1]
-    _archived_cache.update({"map": found, "at": now, "root": root})
+    if seen == _generation["n"]:
+        _archived_cache.update({"map": found, "at": now, "root": root})
     return found
 
 
@@ -664,6 +710,7 @@ def transcript_ids(ttl: float = 45.0):
     now = _time.time()
     if _transcript_cache["ids"] is not None and now - _transcript_cache["at"] < ttl:
         return _transcript_cache["ids"]
+    seen = _generation["n"]
     ids = set()
     root = os.path.join(HOME, ".claude", "projects")
     try:
@@ -679,8 +726,9 @@ def transcript_ids(ttl: float = 45.0):
                     ids.add(entry.name[: -len(".jsonl")])
         except OSError:
             continue          # a directory that vanished between the two scans is simply absent
-    _transcript_cache["ids"] = ids
-    _transcript_cache["at"] = now
+    if seen == _generation["n"]:
+        _transcript_cache["ids"] = ids
+        _transcript_cache["at"] = now
     return ids
 
 
@@ -1443,6 +1491,7 @@ def session_window(session_id: str, ttl: float = 60.0):
     tools/segments.mjs already performs that reasoning, so it is asked rather than reimplemented -
     once per session per ttl, to keep a node spawn off the per-tick path.
     """
+    seen = _generation["n"]
     hit = _window_cache.get(session_id)
     now = _time.time()
     if hit and now - hit[0] < ttl:
@@ -1456,7 +1505,11 @@ def session_window(session_id: str, ttl: float = 60.0):
             confidence = segs[-1].get("confidence") or "segment"
     except Exception:                               # noqa: BLE001 - unresolved is a valid answer
         pass
-    _window_cache[session_id] = (now, window, confidence)
+    # THE FOURTH CACHE, AND THE ONE THAT WAS MISSED. `invalidate` clears it, but a resolution
+    # already in flight re-installed its answer afterwards, exactly as the other three did before
+    # they were guarded. This one spawns node to refill, so the window is the longest of the four.
+    if seen == _generation["n"]:
+        _window_cache[session_id] = (now, window, confidence)
     return window, confidence
 
 
