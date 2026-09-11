@@ -27,7 +27,10 @@ removed and nothing here said so.
   row went to whichever transcript was harvested last, in directory order: one session that
   produced 388 turns was left holding 3. Ingest now reads transcripts in first-timestamp order
   and refuses to move a row to another session; `--backfill-chains` returns the rows written
-  under the old rule to their producer (25,729 turns and 21,612 messages on the author's store).
+  under the old rule to their producer. The ordinary harvest does the same for any directory that
+  gains a transcript, so by the time the backfill ran on a copy of the author's store the
+  directories worked in that day were already right and it reported 16,179 turns, 14,268 messages,
+  21 compactions and 7,580 tool calls still to move, most of them under one fork.
   `attachments` and `record_types` are per-session counters and still count a copy twice; that is
   stated here rather than fixed.
 - **An HTTP API and a React frontend.** `python -m c4x.api` serves `/api/tab/{id}` and a built
