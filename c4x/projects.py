@@ -40,6 +40,8 @@ from pathlib import Path
 
 from c4x.frames import records
 
+BACKSLASH = chr(92)
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -322,6 +324,23 @@ def snapshots_dir():
     return store.DB_PATH.parent / "snapshots"
 
 
+def transcript_key(path):
+    """The session-id-shaped head of a transcript file name, on any platform.
+
+    `Path(...).stem` IS PLATFORM AWARE AND THESE PATHS ARE NOT THIS PLATFORM'S. A stored
+    `transcript_path` is whatever the capturing machine wrote, so a store can hold Windows paths
+    while c4x runs on Linux, which is exactly what CI does. On POSIX a Windows path is ONE
+    component, so the stem of a backslash path is the whole path minus its extension and matches
+    nothing. Measured: `\\t\\s0-0.jsonl` gives `s0-0` on Windows and the entire path on Linux, which
+    turned the shared-snapshot guard below into a no-op wherever the separators disagreed.
+
+    Both separators are handled here rather than by the running platform's rules, and the rule
+    matches what the compaction hook writes: the name up to its first dot.
+    """
+    name = str(path).replace(BACKSLASH, "/").rsplit("/", 1)[-1]
+    return name.split(".", 1)[0]
+
+
 def snapshot_files(ids, shared_stems=()):
     """The pre-compaction snapshots these sessions own outright.
 
@@ -345,8 +364,8 @@ def snapshot_files(ids, shared_stems=()):
     wanted = {str(s) for s in ids}
     shared = {str(s) for s in shared_stems}
     return sorted(p for p in base.iterdir()
-                  if p.is_file() and p.name.split(".", 1)[0] in wanted
-                  and p.name.split(".", 1)[0] not in shared)
+                  if p.is_file() and transcript_key(p.name) in wanted
+                  and transcript_key(p.name) not in shared)
 
 
 def primary_cwd(con, ids):
@@ -1497,7 +1516,7 @@ def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots
 
     # The stems of transcripts a surviving session is also in. A snapshot of one of those files
     # holds that session's history too, and the backup does not carry snapshots.
-    shared_stems = {Path(entry["transcript"]).stem for entry in shared_transcripts}
+    shared_stems = {transcript_key(entry["transcript"]) for entry in shared_transcripts}
     # WHAT ARRIVED AFTER THE CAPTURE. `appeared_since_backup` names sessions; this names FILES.
     # A transcript or tool-output directory written for one of these sessions between the app-state
     # capture and the purge is not in the backup, so the purge leaves it, correctly, and nothing

@@ -487,6 +487,36 @@ class TestTheDesktopRecord:
         assert source.exists() and (twin / DESKTOP_FILE).exists()
 
 
+class TestAStoredPathIsNotThisPlatformsPath:
+    """`transcript_path` is whatever the CAPTURING machine wrote, which need not be this one.
+
+    This store holds 193 sessions captured on another host, and CI runs on Linux while the app runs
+    on Windows. `Path(...).stem` answers with the RUNNING platform's rules, so on POSIX a Windows
+    path is one component and its stem is the whole path: the shared-snapshot guard matched nothing
+    and silently purged a snapshot it had just promised to keep. The assertions below hold on every
+    platform, which is the point of them.
+    """
+
+    def test_the_key_is_the_same_whichever_separator_the_path_carries(self):
+        assert projects.transcript_key(r"C:\\t\\s0-0.jsonl") == "s0-0"
+        assert projects.transcript_key("/home/u/.claude/projects/x/s0-0.jsonl") == "s0-0"
+        assert projects.transcript_key("s0-0.20260101-000000.pre-compact.jsonl") == "s0-0"
+        assert projects.transcript_key(r"C:\\t\\s0-0.20260101.pre-compact.jsonl") == "s0-0"
+
+    def test_pathlib_would_have_answered_differently_on_linux(self):
+        """The measurement this exists for, pinned so the reason cannot be lost.
+
+        `PurePosixPath` is how the same call behaves on the machine CI uses.
+        """
+        from pathlib import PurePosixPath, PureWindowsPath
+        stored = r"C:\\t\\s0-0.jsonl"
+
+        assert PureWindowsPath(stored).stem == "s0-0"
+        assert PurePosixPath(stored).stem != "s0-0", (
+            "this is the difference that made the guard a no-op on Linux")
+        assert projects.transcript_key(stored) == "s0-0", "and this is what it answers instead"
+
+
 class TestTheBackupHoldsEveryRowTheDeleteRemoves:
     def test_rows_written_while_the_backup_was_being_taken_stop_the_delete(
             self, store_at, machine, tmp_path, monkeypatch):
@@ -915,14 +945,19 @@ class TestALabelThatNamesTwoProjects:
     exclusion. `check_destination` already refuses this on the import side. Nothing consulted it
     here.
 
-    Every path below is built with `Path` rather than a literal, because the suffix begins with a
-    character that an ordinary Python string turns into a bell.
+    The separator is a LITERAL backslash, matching `archive_only`, and not a `Path` join.
+    `Path` renders the running platform's separator, so a join here made the collision exist
+    on Windows and not on Linux: the suite was green locally and red on CI.
     """
 
     @staticmethod
     def nested_cwd():
         from c4x import store
-        return str(Path(ALPHA) / store.ARCHIVED_SUFFIX)
+        # A LITERAL SEPARATOR, NOT `Path`. Building it with `Path` renders the platform's own
+        # separator, so this produced `P:\Alpha/archived` on Linux while `archive_only`
+        # builds the label with a backslash. The two then did not collide, the label was
+        # unambiguous, and the guard correctly did not fire: green on Windows, red on CI.
+        return ALPHA + "\\" + store.ARCHIVED_SUFFIX
 
     def a_real_project_named_archived(self, store_path):
         con = sqlite3.connect(str(store_path))
