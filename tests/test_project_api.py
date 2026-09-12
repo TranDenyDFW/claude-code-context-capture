@@ -327,3 +327,43 @@ class TestTheWriteSwitch:
         r = client.get("/api/project/excluded")
         assert r.status_code == 200
         assert r.json()["writes_enabled"] is False
+
+
+class TestTheAccountSwitch:
+    """Sharing one chat list between the accounts on this machine, over HTTP.
+
+    The logic lives in `c4x.accounts` and is tested there. What these check is the route: that it
+    refuses a mode it does not understand, that it refuses at all on a server started with
+    `--no-writes`, and that the one refusal a user can act on arrives as a 409 with the sentence
+    that says what to do, rather than as a 500 with an empty body.
+    """
+
+    def test_the_state_is_readable_without_writes(self, client, monkeypatch):
+        monkeypatch.setenv("C4X_NO_WRITES", "1")
+        answer = client.get("/api/accounts")
+        assert answer.status_code == 200
+        body = answer.json()
+        assert set(body) >= {"supported", "mode", "intended", "pairs", "app_running"}
+
+    def test_an_unknown_mode_is_refused_before_anything_moves(self, client):
+        answer = client.post("/api/accounts/sharing", json={"mode": "both"})
+        assert answer.status_code == 400
+        assert "mode" in str(answer.json()["detail"])
+
+    def test_a_server_with_no_writes_refuses_to_move_directories(self, client, monkeypatch):
+        monkeypatch.setenv("C4X_NO_WRITES", "1")
+        answer = client.post("/api/accounts/sharing", json={"mode": "all"})
+        assert answer.status_code in (403, 409, 503), answer.status_code
+
+    def test_the_app_being_open_is_a_409_that_says_what_to_do(self, client, monkeypatch):
+        from c4x import accounts
+        monkeypatch.setattr(accounts, "supported", lambda: (True, ""))
+        monkeypatch.setattr(accounts, "app_running", lambda: True)
+        answer = client.post("/api/accounts/sharing", json={"mode": "all"})
+        assert answer.status_code == 409
+        assert "Quit Claude" in str(answer.json()["detail"]["error"])
+
+    def test_verify_answers_on_a_machine_that_never_shared(self, client):
+        answer = client.get("/api/accounts/verify")
+        assert answer.status_code == 200
+        assert answer.json()["intended"] == "current"

@@ -9,6 +9,7 @@ import { compactionUrl, figureUrl, readState, tableUrl, writeState, type ViewSta
 import { Palette, type Choice } from '@/components/Palette'
 import { CompareArms } from '@/components/CompareArms'
 import { ProjectMoves } from '@/components/ProjectMoves'
+import { AccountSharing } from '@/components/AccountSharing'
 import { Sidebar, useCollapsed } from '@/components/Sidebar'
 
 /**
@@ -398,6 +399,16 @@ export default function App() {
                 { value: '', label: 'No restriction' },
                 ...(cohorts.data ?? []).map((c) => ({ value: c.value, label: c.label })),
               ]}
+            />
+            <AccountSharing
+              // The same switch as the routes beside it: `writes_enabled` is whether the server
+              // answers a write at all, and this one moves directories on the machine.
+              writesEnabled={health.data?.writes_enabled ?? false}
+              // Sharing changes which chats exist as far as the desktop app is concerned, and the
+              // store's own view of them is read from those same directories.
+              onChanged={() => {
+                void client.invalidateQueries()
+              }}
             />
             <ProjectMoves
               cohort={selection.cohort ?? null}

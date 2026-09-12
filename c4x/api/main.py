@@ -1509,6 +1509,45 @@ def project_delete(body: dict):
                             detail={"error": str(exc), "project": project}) from exc
 
 
+@api.get("/api/accounts")
+def accounts_state():
+    """Which account directories this machine keeps records in, and whether they share one list.
+
+    Read only and cheap: it lists directories and counts records, which is what the desktop app
+    itself does to build its session list.
+    """
+    from c4x import accounts
+    return accounts.state()
+
+
+@api.post("/api/accounts/sharing")
+def accounts_sharing(body: dict):
+    """`{"mode": "all"}` to show every account's chats to whichever account is signed in.
+
+    409, NOT 400 or 500, when Claude is open. The request is well formed and the server is
+    refusing it for a reason the user can act on: a directory the app holds cannot be moved, and a
+    half-moved pair leaves an account pointing at nothing. The page turns that into the one
+    instruction that resolves it.
+    """
+    from c4x import accounts
+    _require_writes()
+    mode = (body or {}).get("mode")
+    if mode not in (accounts.ALL, accounts.CURRENT):
+        raise HTTPException(status_code=400,
+                            detail={"error": "mode is 'all' or 'current'", "mode": mode})
+    try:
+        return accounts.share_all() if mode == accounts.ALL else accounts.share_current()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc), "mode": mode}) from exc
+
+
+@api.get("/api/accounts/verify")
+def accounts_verify():
+    """Is the sharing still in place? An app update can migrate these directories away."""
+    from c4x import accounts
+    return accounts.verify()
+
+
 @api.post("/api/project/include")
 def project_include(body: dict):
     """Lift an exclusion so harvest picks the project up again."""

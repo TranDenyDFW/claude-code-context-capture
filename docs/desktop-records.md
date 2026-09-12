@@ -135,3 +135,43 @@ records in the container, 1 under `%APPDATA%`.
 
 The store table is `session_links`; its schema comment in `tools/harvest.mjs` carries the same
 facts beside the code that uses them.
+
+## 6. One machine, several accounts, and how to make them share
+
+Signing into a second account does not hide anything. It points the app at a different directory,
+because `<account uuid>/<org uuid>` is the whole of the separation and the listing is the list.
+Measured on the author's machine: four account directories, nine account and organisation pairs,
+171 records under one pair and 16 under another, and seven pairs empty.
+
+The CLI side is not separated at all. All 518 transcript directories under `~/.claude/projects`
+are named for a working directory and none for an account, `~/.claude.json` holds one
+`oauthAccount` and one `userID`, and `CLAUDE.md`, the skills, the hooks and the 31 `memory/`
+folders are one set per Windows user. So the conversations already sit in one pile on disk; only
+the app's own list is cut into slices. The other per-account stores beside the records are
+`local-agent-mode-sessions`, `scratch-workspaces` and `spaces-present`, each keyed the same way.
+
+`c4x/accounts.py` makes every pair on a records root resolve to ONE of them with a Windows
+junction, so whichever account is signed in reads the same chats, and puts it back on request.
+`python -m c4x.accounts [--state | --all | --current | --verify]`, or the Account switch in the
+page's header.
+
+**What was measured before it was written**, because the app defends itself against link tricks
+and most of those defences would have made this impossible. Its own reader refuses a file that is
+a symlink, and refuses one whose link count is above one at 11 of its 17 call sites, which rules
+out both symlinks and hard links for the record files. A junction is a reparse point on the
+DIRECTORY, so a record reached through one is still a regular file with a link count of one, and
+clears both. Node's `lstat` reports the junction itself as a symbolic link and NOT a directory,
+while `stat` reports a directory, so the arrangement rests on the app resolving that path rather
+than filtering directory entries by type. On the test laptop it resolved it: 17 records listed
+under an account that owned one of them, and three records rewritten through the link.
+
+**Three costs, none of them hidden.** One directory holds one `scheduled-tasks.json` and one
+`archived-sessions.idx`, so the copies belonging to the pairs that become links are moved into the
+backup rather than merged. Either account can rewrite or delete the other's chats. And the app
+must be closed while the directories move, then started again.
+
+**It can be undone from the outside.** `claude-code-sessions` is named in the app's own migration
+list, and this machine already holds two records roots because that migration has run. A migration
+that replaces a junction with a real directory ends the sharing silently, which is why the intended
+mode is recorded beside the store and `--verify` compares the two rather than reading the disk
+alone.
