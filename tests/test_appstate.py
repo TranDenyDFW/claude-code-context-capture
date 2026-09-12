@@ -656,6 +656,111 @@ class TestCompare:
         assert any(d["kind"] == appstate.CONFIG for d in result["differs"])
 
 
+# ---------------------------------------------------------------------------
+# Every records root, because the page reads every records root
+# ---------------------------------------------------------------------------
+class TestTheSecondRecordsRoot:
+    """A packaged install can keep records under a second root, and both are the app's.
+
+    Measured on the test laptop: 16 records under the MSIX container's root and 1 under
+    `%APPDATA%`. `store` has walked both since the Sessions list began mirroring the app; this
+    module read and removed from ONE, so an export carried a chat without the file that names it
+    and a delete left the deleted chat listed, still named, on a page that reads both.
+    """
+
+    @staticmethod
+    def two_roots(machine, monkeypatch):
+        """A second root, with the store agreeing about which one is written to.
+
+        Both halves are needed: `appstate.sessions_roots` trusts the store's list only when the
+        two modules agree about the write root, which is what keeps a patched fake machine from
+        reading the developer's real records.
+        """
+        from c4x import store
+        other = machine.appdata.parent / "OtherClaude" / "claude-code-sessions"
+        other.mkdir(parents=True)
+        monkeypatch.setattr(store, "sessions_root", lambda: str(machine.sessions))
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(machine.sessions), str(other)])
+        return other
+
+    @staticmethod
+    def record_under(root, cli_session_id, uuid=DESKTOP_UUID, title="a chat"):
+        folder = root / ACCOUNT / ORG
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"local_{uuid}.json"
+        path.write_text(json.dumps(
+            {"cliSessionId": cli_session_id, "sessionId": f"local_{uuid}", "cwd": SOURCE_CWD,
+             "originCwd": SOURCE_CWD, "isArchived": False, "title": title, "completedTurns": 3},
+            indent=1), encoding="utf-8")
+        return path
+
+    def test_a_record_kept_only_under_the_second_root_is_carried(self, populated, monkeypatch):
+        other = self.two_roots(populated, monkeypatch)
+        (populated.sessions / SOURCE_ACCOUNT / SOURCE_ORG / f"local_{DESKTOP_UUID}.json").unlink()
+        self.record_under(other, SID)
+        rows, report = appstate.capture([SOURCE_CWD], [SID])
+        assert kinds(rows, appstate.DESKTOP) == [f"local_{DESKTOP_UUID}.json"], (
+            "the chat travelled without the file that names it")
+        assert report["by_kind"]["desktop"] == 1
+
+    def test_the_same_record_under_two_roots_travels_once_and_the_other_is_named(
+            self, populated, monkeypatch):
+        """One row, one destination. A second row would land on the same file."""
+        other = self.two_roots(populated, monkeypatch)
+        second = self.record_under(other, SID, title="the stale copy")
+        rows, report = appstate.capture([SOURCE_CWD], [SID])
+        carried = [r for r in rows if r["kind"] == appstate.DESKTOP]
+        assert len(carried) == 1
+        assert b"the stale copy" not in bytes(carried[0]["blob"]), (
+            "the copy under the second root outranked the one the app writes to")
+        assert any(str(second) == skip["path"] for skip in report["skipped"]), (
+            "the copy that did not travel is not named anywhere")
+
+    def test_a_purge_removes_the_copy_under_every_root(self, populated, monkeypatch):
+        other = self.two_roots(populated, monkeypatch)
+        first = populated.sessions / SOURCE_ACCOUNT / SOURCE_ORG / f"local_{DESKTOP_UUID}.json"
+        second = self.record_under(other, SID)
+        second.write_bytes(first.read_bytes())
+        rows, _report = appstate.capture([SOURCE_CWD], [SID])
+        appstate.purge([r for r in rows if r["kind"] == appstate.DESKTOP], [SOURCE_CWD])
+        assert not first.exists() and not second.exists(), (
+            "a copy left behind keeps the deleted chat listed and named")
+
+    def test_a_copy_whose_bytes_differ_is_kept_and_named(self, populated, monkeypatch):
+        """The hash decides each copy on its own, which is why the two-copies case is not refused.
+
+        A record that is not what the backup holds cannot be put back by importing the backup, so
+        it is not this function's to remove.
+        """
+        other = self.two_roots(populated, monkeypatch)
+        first = populated.sessions / SOURCE_ACCOUNT / SOURCE_ORG / f"local_{DESKTOP_UUID}.json"
+        second = self.record_under(other, SID, title="a different chat entirely")
+        rows, _report = appstate.capture([SOURCE_CWD], [SID])
+        report = appstate.purge([r for r in rows if r["kind"] == appstate.DESKTOP], [SOURCE_CWD])
+        assert not first.exists(), "the copy the backup holds was not removed"
+        assert second.exists(), "a copy the backup cannot restore was removed anyway"
+        assert any(str(second) in kept["path"] for kept in report["kept"]), report["kept"]
+
+    def test_the_acceptance_check_sees_a_copy_the_purge_left(self, populated, monkeypatch):
+        other = self.two_roots(populated, monkeypatch)
+        self.record_under(other, SID, title="a different chat entirely")
+        rows, _report = appstate.capture([SOURCE_CWD], [SID])
+        desktop = [r for r in rows if r["kind"] == appstate.DESKTOP]
+        appstate.purge(desktop, [SOURCE_CWD])
+        left = appstate.still_present(desktop, [SOURCE_CWD])
+        assert [entry["kind"] for entry in left] == [appstate.DESKTOP], (
+            "a delete that left a record behind reported nothing still here")
+
+    def test_a_fake_machine_never_reaches_the_real_roots(self, populated):
+        """The isolation seam, asserted rather than trusted.
+
+        The suite points THIS module at a fake machine by patching `sessions_root` alone. A second
+        accessor that went straight to the store would read the developer's own records from inside
+        every capture and purge in the suite.
+        """
+        assert appstate.sessions_roots() == [str(populated.sessions)]
+
+
 def test_the_module_self_test_passes():
     assert appstate.self_test() == 0
 

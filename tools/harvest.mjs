@@ -1116,7 +1116,12 @@ export async function transcriptIndex(dir, { excludedCwds = null } = {}) {
       }
     }
     if (excluded) continue;
-    out.push({ id, path, slug, cwd: homeCwd ?? lastCwd, firstCwd: cwd, uuids, toolIds, native, nativeTools,
+    // `homeCwd` SEPARATELY, and not only folded into `cwd`. A transcript that an import moved to
+    // another machine's directory still names the source directory on every line, so it HAS no home
+    // cwd here and `cwd` falls back to the last one seen, which is the source. The identity repair
+    // and the link gate both need to tell "the transcript proves where it lives" from "this is a
+    // guess", because acting on the guess moves an imported project back to the exporter's path.
+    out.push({ id, path, slug, cwd: homeCwd ?? lastCwd, homeCwd, firstCwd: cwd, uuids, toolIds, native, nativeTools,
                foreign, foreignTools, foreignFrom, firstUuids, firstTs: firstTs ?? '9999' });
   }
   return out;
@@ -1208,7 +1213,13 @@ function keyCompare(a, b) {
 // a record-less session, then a fork's record holder; then the smallest. A session with a record
 // of its own never links: it is a chat, and a fork copies history too. The head is reached by
 // following next until a session with no link, and the seen set below is belt and braces.
-export function deriveLinks(index, records, threshold = 0.9) {
+export function deriveLinks(index, records, threshold = 0.9, storedCwds = null) {
+  // WHICH DIRECTORY A TRANSCRIPT BELONGS TO, for the same-directory gate below. The transcript's
+  // own home cwd when it has one, else what the store already holds for that session, else the last
+  // cwd the file names. The middle term is what an import writes: its transcript still names the
+  // source machine's directory, so without it a chat resumed after a move never links to the
+  // session it resumed, and the chat stays two rows on the page for good.
+  const cwdOf = (f) => f.homeCwd ?? (storedCwds && storedCwds.get(f.id)) ?? f.cwd;
   const kindOf = (id) => {
     const r = records.get(id);
     return r ? (r.fork ? 'fork' : 'record') : 'none';
@@ -1239,9 +1250,11 @@ export function deriveLinks(index, records, threshold = 0.9) {
   for (const a of index) {
     if (a.uuids.size === 0) continue;
     let best = null;
+    const aCwd = cwdOf(a);
     for (const b of index) {
       if (b === a) continue;
-      if (a.cwd && b.cwd && a.cwd !== b.cwd) continue;
+      const bCwd = cwdOf(b);
+      if (aCwd && bCwd && aCwd !== bCwd) continue;
       if (keyCompare(transcriptOrder(b), transcriptOrder(a)) <= 0) continue;
       let shared = 0, sharedNative = 0, sharedOwn = 0, viaFork = 0;
       for (const u of a.uuids) {
@@ -1357,7 +1370,18 @@ export async function reconcileDirectory(db, dir, records, { write = true, thres
                    moved: { turns: 0, messages: 0, compactions: 0, tool_calls: 0 },
                    repaired: { cwd: 0, project_slug: 0, transcript_path: 0 } };
   if (!index.length) return result;
-  const { rows, stats: linkStats } = deriveLinks(index, records, threshold);
+  // WHAT THE STORE ALREADY HOLDS, read once and used twice: by the link gate, and by the repair
+  // below. An import writes the destination directory into the session row and cannot rewrite the
+  // transcript, whose lines still name the source; the row is the only evidence of the move.
+  const identity = db.prepare('SELECT cwd, project_slug, transcript_path FROM sessions WHERE session_id = ?');
+  const stored = new Map();
+  for (const f of index) {
+    const cur = identity.get(f.id);
+    if (cur) stored.set(f.id, cur);
+  }
+  const storedCwds = new Map();
+  for (const [id, cur] of stored) if (cur.cwd) storedCwds.set(id, cur.cwd);
+  const { rows, stats: linkStats } = deriveLinks(index, records, threshold, storedCwds);
   const { owner, toolOwner } = deriveOwners(index);
   result.anchors_kept = linkStats.anchors_kept;
   result.rows = rows;
@@ -1366,12 +1390,19 @@ export async function reconcileDirectory(db, dir, records, { write = true, thres
   // same rule the upsert applies, `project_slug` the directory's name) and its own top-level
   // path. Rows written before those rules exist, and rows a subagent file reached first, are
   // put right here, in the same pass that puts the links right.
-  const identity = db.prepare('SELECT cwd, project_slug, transcript_path FROM sessions WHERE session_id = ?');
   const fixes = [];
   for (const f of index) {
-    const cur = identity.get(f.id);
+    const cur = stored.get(f.id);
     if (!cur) continue;
-    const want = { cwd: f.cwd ?? cur.cwd, project_slug: f.slug, transcript_path: f.path };
+    // THE CWD IS REPAIRED FROM THE TRANSCRIPT'S OWN HOME, AND FROM NOTHING ELSE. With no home cwd
+    // the file cannot say where it lives, and the stored value is kept whenever it agrees with the
+    // directory the file is in, which is the same precedence the putSession upsert applies. This
+    // read `f.cwd`, which falls back to the last cwd the file names: after an import that is the
+    // EXPORTING machine's path, so the first harvest pass over the destination moved the project
+    // back and the page showed a directory that does not exist here.
+    const keepStored = cur.cwd && slugOf(cur.cwd) === f.slug;
+    const wantCwd = f.homeCwd ?? (keepStored ? cur.cwd : (f.cwd ?? cur.cwd));
+    const want = { cwd: wantCwd, project_slug: f.slug, transcript_path: f.path };
     for (const col of Object.keys(want)) {
       if (want[col] != null && cur[col] !== want[col]) { result.repaired[col]++; fixes.push([col, want[col], f.id]); }
     }
@@ -3434,6 +3465,64 @@ async function selfTest() {
       cdb4.prepare('SELECT COUNT(*) n FROM turns WHERE session_id = ?').get(GONE).n === 20 && rc4.moved.turns === 0,
       `moved ${rc4.moved.turns}`]);
     cdb4.close();
+  }
+
+  // Chains, fourth directory: a project this machine IMPORTED. The transcript is byte identical to
+  // the one on the machine it came from, so every line still names THAT directory, and the session
+  // row is the only place the move is recorded. Two things must hold: a harvest pass leaves the row
+  // where the import put it, and a chat resumed here folds into the imported session rather than
+  // standing beside it as a second row for the same conversation.
+  {
+    const cdir5 = join(tmp, 'imported');
+    const pdir5 = join(cdir5, 'projects', 'D--Dest');
+    mkdirSync(pdir5, { recursive: true });
+    const sid = (tag) => `${tag}-0000-4000-8000-000000000005`;
+    const IM = sid('aaaa0005'), RS = sid('bbbb0005');
+    const ids = (p, n) => Array.from({ length: n }, (_, i) => `${p}${i + 1}`);
+    const day = (d) => `2026-04-${String(d).padStart(2, '0')}T00:00:00.000Z`;
+    const line = (s, u, ts, cwd) => JSON.stringify({
+      type: 'assistant', uuid: u, sessionId: s, timestamp: ts, cwd,
+      message: { model: 'm', usage: { input_tokens: 1, cache_creation_input_tokens: 0,
+                                      cache_read_input_tokens: 0, output_tokens: 1 },
+                 content: [{ type: 'text', text: 'y ' + u }] } });
+    const fileOf = (s) => join(pdir5, `${s}.jsonl`);
+    const write = (s, lines) => writeFileSync(fileOf(s), lines.join('\n') + '\n');
+    write(IM, ids('im', 10).map((u) => line(IM, u, day(2), 'P:/Source')));
+    // A resume rewrites the lines it copies under its own id, so these are native to RS.
+    write(RS, ids('im', 10).map((u) => line(RS, u, day(3), 'D:/Dest'))
+      .concat(ids('rs', 6).map((u) => line(RS, u, day(3), 'D:/Dest'))));
+
+    const index5 = await transcriptIndex(pdir5);
+    const by5 = Object.fromEntries(index5.map((f) => [f.id, f]));
+    checks.push(['import: a moved transcript has no home cwd of its own, and says so',
+      by5[IM].homeCwd === null && by5[IM].cwd === 'P:/Source' && by5[RS].homeCwd === 'D:/Dest',
+      JSON.stringify([by5[IM].homeCwd, by5[IM].cwd])]);
+    const bare = deriveLinks(index5, new Map()).rows;
+    checks.push(['import: on the transcripts alone the move looks like two projects (gate can fail)',
+      !bare.some((r) => r.session_id === IM), String(bare.length)]);
+
+    const db5 = new DatabaseSync(':memory:');
+    db5.exec(SCHEMA);
+    const ins5 = db5.prepare(
+      'INSERT INTO sessions (session_id, cwd, project_slug, transcript_path) VALUES (?,?,?,?)');
+    ins5.run(IM, 'D:/Dest', 'D--Dest', fileOf(IM));
+    ins5.run(RS, 'D:/Dest', 'D--Dest', fileOf(RS));
+    const row5 = (s) => db5.prepare(
+      'SELECT cwd, project_slug, transcript_path FROM sessions WHERE session_id = ?').get(s);
+    const rc5 = await reconcileDirectory(db5, pdir5, new Map(), { write: true });
+    checks.push(['import: a harvest pass leaves the imported row where the import put it (gate can fail)',
+      rc5.repaired.cwd === 0 && row5(IM).cwd === 'D:/Dest' && row5(IM).project_slug === 'D--Dest',
+      JSON.stringify(row5(IM))]);
+    checks.push(['import: a chat resumed after the move folds into the imported session (gate can fail)',
+      rc5.links === 1
+      && db5.prepare('SELECT head_id FROM session_links WHERE session_id = ?').get(IM)?.head_id === RS,
+      JSON.stringify(rc5.links)]);
+    // The repair still fires for a stored cwd that names neither this directory nor the transcript.
+    db5.prepare('UPDATE sessions SET cwd = ? WHERE session_id = ?').run('Z:/Elsewhere', IM);
+    const rc6 = await reconcileDirectory(db5, pdir5, new Map(), { write: true });
+    checks.push(['import: a stored cwd that matches neither the directory nor the file is repaired',
+      rc6.repaired.cwd === 1 && row5(IM).cwd === 'P:/Source', JSON.stringify(row5(IM))]);
+    db5.close();
   }
 
   // The two flags that stand between a bare invocation and a 10 GB re-read or a silent write.

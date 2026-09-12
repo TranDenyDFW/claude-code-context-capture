@@ -1030,6 +1030,55 @@ class TestALabelThatNamesTwoProjects:
     # removed with them, because a test that can only pass by disabling two refusals is
     # asserting something the code no longer does.
 
+class TestATranscriptASurvivingSessionIsAlsoIn:
+    """One file can hold two sessions' records, and the second one can be another project's.
+
+    The delete already computed this. `shared_transcripts` is read before the rows are removed and
+    spent on two decisions, the exclusion and the snapshots, and the file itself was purged anyway,
+    so deleting one project took a project the user had not asked about with it. Measured on the
+    author's store: 7 transcript files are claimed by more than one session row, 1 of those pairs
+    across two working directories.
+
+    The backup still held the file, so the acceptance rule was never broken. The survivor's
+    conversation was gone all the same, and only an import of the other project's backup would have
+    brought it back.
+    """
+
+    @staticmethod
+    def share(store_at):
+        """Give a session of another project the same transcript file as one of ALPHA's."""
+        con = sqlite3.connect(str(store_at))
+        con.execute("UPDATE sessions SET transcript_path = ? WHERE session_id = 's1-0'",
+                    (r"C:\t\s0-0.jsonl",))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+
+    def test_the_shared_file_is_kept_and_the_rest_go(self, store_at, machine, tmp_path):
+        self.share(store_at)
+        projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        assert (machine.base / "s0-0.jsonl").exists(), (
+            "a surviving project's conversation was deleted with this one")
+        assert not (machine.base / "s0-1.jsonl").exists(), (
+            "keeping the shared file kept everything else too")
+
+    def test_the_kept_file_is_named_in_the_report(self, store_at, machine, tmp_path):
+        self.share(store_at)
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        kept = result["shared_with_surviving_sessions"]
+        assert any(entry["relpath"] == "s0-0.jsonl" for entry in kept), kept
+        assert not result["still_here"], (
+            "a file this delete decided to keep is not a delete that did not finish")
+
+    def test_nothing_is_kept_when_the_file_is_this_projects_alone(self, store_at, machine,
+                                                                  tmp_path):
+        """The gate, with the sharing removed: otherwise it keeps every transcript for free."""
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        assert not (machine.base / "s0-0.jsonl").exists()
+        assert [entry for entry in result["shared_with_surviving_sessions"]
+                if entry["kind"] == "transcript"] == []
+
+
 class TestTheExclusionsUnitIsTheFile:
     def test_a_directory_sharing_a_transcript_keeps_being_captured(
             self, store_at, machine, tmp_path):

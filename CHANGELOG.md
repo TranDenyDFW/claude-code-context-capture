@@ -11,6 +11,15 @@ removed and nothing here said so.
 
 ### Added
 
+- **An export says how many CHATS it carries, and an import proves each one folded here.** The
+  manifest gained `chats` and `chains`, which name the sessions that have to fold into one head on
+  the far side, and `import` checks the store against them and reports any chat whose sessions
+  landed in more than one chat here. Nothing could see this before: `verify_mirror` is a
+  filesystem verdict that reads no store row, a replaced link reports zero rows inserted, and a
+  destination whose build has no `session_links` table is skipped with a note, so a chat that
+  arrived as two rows looked exactly like one that arrived as one. An export also names any chat
+  whose desktop record is not on this machine under a session it carries, which is what decides
+  whether the destination app lists the chat at all.
 - **One row per chat, the way the desktop app lists them.** The app resumes a chat by starting a
   NEW CLI session whose transcript is a copy of the old one plus what follows, so a chat resumed
   four times was five rows here under five names. Harvest now derives the chain from transcript
@@ -152,6 +161,47 @@ removed and nothing here said so.
 
 ### Fixed
 
+- **An imported project no longer moves itself back to the machine it came from.** An import
+  rewrote a session's working directory and its transcript path and left `project_slug` naming the
+  EXPORTER's slug directory, which breaks the invariant harvest repairs rows against
+  (`slug_of(cwd) = project_slug`, true for 1,438 of 1,439 rows on the author's store). The first
+  harvest pass over the destination then rebuilt `cwd` from the transcript's own lines, which an
+  import deliberately does not rewrite and which still name the source machine, and the project
+  reappeared under a directory that does not exist here. The import now writes the slug with the
+  directory, and the repair in `tools/harvest.mjs` takes a session's `cwd` only from a cwd the
+  transcript proves is its home, keeping what the store holds when that agrees with the directory
+  the file is in.
+- **A chat resumed after a move folds into the session it resumed.** Links are only derived between
+  transcripts of one working directory, read from the files themselves, so an imported transcript
+  (naming the source) and a resume taken here (naming the destination) looked like two projects and
+  the chat stayed two rows under two names for good. The link pass now reads the store's own cwd
+  for a transcript that cannot name its home.
+- **A delete no longer removes a transcript file that a surviving project's session is also in.**
+  One file can hold two sessions' records, and the delete already computed which files those were,
+  and spent the answer on the exclusion decision and the snapshots while purging the file anyway.
+  Measured on the author's store: 7 files are claimed by more than one session row, one of those
+  pairs across two working directories. The file is now kept and named in the report, the way
+  `memory/` and the trust entry already were.
+- **An export carries, and a delete removes, the harvest offset of EVERY transcript a session
+  wrote.** The app-state layer has always carried the whole `<session id>/` directory, subagent
+  transcripts and tool output included, and `files` was scoped to the session's own top-level
+  path: 7,634 of the author's 9,068 offset rows were in neither the backup nor the delete, and one
+  project's export carried 138 offsets where it should have carried 1,234. An offset left behind
+  says a file has been read to its end, so those bytes were skipped forever if the file came back.
+  The preview, the export, the delete's acceptance check and the delete itself now share one
+  scoping rule instead of four copies of it, which is also what makes `session_links` travel by its
+  head as well as by its own session, as `tools/harvest.mjs` has always deleted it.
+- **A moved transcript keeps the timestamp that orders ingest.** The offset row copied to the
+  destination path was written from a hand-typed column list that predates `files.first_ts`, so the
+  copy was not the row it claimed to be. It is read from the table now, and the offsets of the
+  subagent transcripts move with it.
+- **Every desktop records root is read and purged, not only the one this machine writes to.** A
+  packaged install can keep records under `%APPDATA%` beside its own container (the author's test
+  laptop holds 16 under one and 1 under the other), and the page has read both since the Sessions
+  list began mirroring the app. An export therefore carried chats without the file that names them,
+  and a delete left the deleted chat listed under its old name. One copy travels, the app's, and
+  the copy that does not is named; a purge removes every copy whose bytes the backup holds and
+  keeps and names any that differ.
 - **An export from a store harvested before `session_links` existed no longer fails.** The row
   copy skipped the missing table and the manifest's count loop then raised `no such table` on
   the same file, so `delete`, whose backup is an export, refused too. Every loop over the

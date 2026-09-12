@@ -354,6 +354,72 @@ class TestTheRebase:
         assert r"C:\t\s0-0.jsonl" in offsets, \
             "the ORIGINAL transcript lost its offset, so the next harvest undoes the move"
 
+    def test_the_slug_moves_with_the_working_directory(self, store_at, machine, tmp_path):
+        """`project_slug` is the NAME of the directory the transcript lives in, and it moved.
+
+        Leaving the source's slug here breaks the one invariant `tools/harvest.mjs` repairs session
+        rows against, `slug_of(cwd) = project_slug`. Measured on the author's store, 1,438 of 1,439
+        rows satisfy it, so a row that does not is exactly the signal the repair acts on: the next
+        harvest pass over this directory rebuilt `cwd` from the transcript's own lines, which still
+        name the machine the export came from, and put the project back at the exporter's path.
+        """
+        from c4x import appstate
+        export_path = tmp_path / "e.db"
+        projects.export(SOURCE, export_path)
+        wipe(machine)
+        projects.import_(export_path, into=DEST)
+        assert read_store(
+            store_at,
+            "SELECT DISTINCT project_slug FROM sessions WHERE session_id LIKE 's0-%'") == [
+                appstate.slug_for(DEST)]
+
+    def test_the_offset_keeps_the_timestamp_that_orders_ingest(self, store_at, machine, tmp_path):
+        """`files.first_ts` is what `orderedTranscripts` reads to ingest a copy after its original.
+
+        The copy at the destination path was written from a column list typed out by hand, and it
+        was typed before `files` grew this column.
+        """
+        from c4x import appstate
+        con = sqlite3.connect(str(store_at))
+        con.execute("UPDATE files SET first_ts = ? WHERE path = ?",
+                    ("2026-07-30T00:00:00Z", r"C:\t\s0-0.jsonl"))
+        con.commit()
+        con.close()
+        export_path = tmp_path / "e.db"
+        projects.export(SOURCE, export_path)
+        wipe(machine)
+        projects.import_(export_path, into=DEST)
+        landed = str(appstate.project_dir(DEST) / "s0-0.jsonl")
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            got = con.execute("SELECT first_ts FROM files WHERE path = ?", (landed,)).fetchone()
+        finally:
+            con.close()
+        assert got and got[0] == "2026-07-30T00:00:00Z", (
+            "the moved offset lost the timestamp harvest orders its ingest by")
+
+    def test_the_offset_of_a_subagent_transcript_lands_too(self, store_at, machine, tmp_path):
+        """The export carries `<session id>/**`, so those offsets have to move with them.
+
+        A restored file whose offset still names the source path is read from zero by the next
+        harvest, and on this machine the source path does not exist at all.
+        """
+        from c4x import appstate
+        con = sqlite3.connect(str(store_at))
+        con.execute("INSERT INTO files (path,size,mtime_ms,bytes_read,lines_read,rewrites,"
+                    "last_harvest_ts,first_ts) VALUES (?,?,?,?,?,?,?,?)",
+                    (r"C:\t\s0-0\subagents\one.jsonl", 8, 0, 8, 1, 0,
+                     "2026-08-02T00:00:00Z", "2026-08-01T00:00:00Z"))
+        con.commit()
+        con.close()
+        export_path = tmp_path / "e.db"
+        projects.export(SOURCE, export_path)
+        wipe(machine)
+        projects.import_(export_path, into=DEST)
+        landed = str(appstate.project_dir(DEST) / "s0-0" / "subagents" / "one.jsonl")
+        assert landed in read_store(store_at, "SELECT path FROM files")
+        assert (appstate.project_dir(DEST) / "s0-0" / "subagents" / "one.jsonl").exists()
+
     def test_another_project_in_the_store_is_left_alone(self, store_at, machine, tmp_path):
         """The rebase is scoped to the sessions the export carries, and nothing else."""
         export_path = tmp_path / "e.db"

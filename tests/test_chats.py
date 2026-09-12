@@ -398,6 +398,75 @@ class TestExportAndDelete:
         assert HEAD not in set(frame(store)["session_id"])
 
 
+class TestImportBringsTheChatBack:
+    """The other half of the move, which had no test at all.
+
+    Export and delete were gated with chains; import was not, so nothing proved that a chat still
+    folds into one row after it lands. The insert counts cannot answer it: a link that was replaced
+    reports zero inserted, and a store whose build has no `session_links` table is skipped with a
+    note, so both failures look exactly like success.
+    """
+
+    def test_the_manifest_names_the_chat_and_the_sessions_it_folds(self, chain_store, store,
+                                                                   tmp_path):
+        from c4x import projects
+        out = tmp_path / "alpha.db"
+        manifest = projects.export(ALPHA, out)
+        assert manifest["sessions"] == 3, "three CLI sessions"
+        assert manifest["chats"] == 1, "one chat, which is what the page shows"
+        assert manifest["chains"] == {HEAD: sorted(CHAIN)}
+
+    def test_the_chat_is_one_row_again_after_a_delete_and_an_import(self, chain_store, store,
+                                                                    tmp_path):
+        from c4x import projects
+        out = tmp_path / "alpha.db"
+        projects.export(ALPHA, out)
+        projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        assert HEAD not in set(frame(store)["session_id"])
+        report = projects.import_(out)
+        assert report["inserted"]["session_links"] == 2
+        assert report["chains"]["split"] == {}
+        assert report["chains"]["landed"][HEAD] == {"head_here": HEAD, "sessions": 3}
+        df = frame(store).set_index("session_id")
+        assert HEAD in df.index, "the chat did not come back"
+        assert MID not in df.index and OLD not in df.index, "it came back as three rows"
+        assert int(df.loc[HEAD]["cli_sessions"]) == 3
+
+    def test_a_chat_that_landed_in_two_pieces_is_reported(self, chain_store, store, tmp_path):
+        """The check, fed a known-bad store, because a check that cannot fail proves nothing."""
+        from c4x import projects
+        out = tmp_path / "alpha.db"
+        projects.export(ALPHA, out)
+        con = sqlite3.connect(str(chain_store))
+        con.execute("DELETE FROM session_links WHERE session_id = ?", (OLD,))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        result = projects.chains_landed(projects.read_manifest(out))
+        assert result["landed"] == {}
+        assert result["split"][HEAD]["heads_here"] == sorted({HEAD, OLD})
+
+    def test_a_chat_the_destination_has_resumed_further_is_not_called_split(self, chain_store,
+                                                                           store, tmp_path):
+        """Folding under a LATER head here is the chat growing, not the import failing."""
+        from c4x import projects
+        out = tmp_path / "alpha.db"
+        projects.export(ALPHA, out)
+        con = sqlite3.connect(str(chain_store))
+        con.execute("INSERT INTO sessions (session_id, cwd, project_slug, transcript_path) "
+                    "VALUES (?,?,?,?)", ("s0-new", ALPHA, "slug-0", r"C:\t\s0-new.jsonl"))
+        for member in CHAIN:
+            con.execute("UPDATE session_links SET head_id = 's0-new' WHERE session_id = ?",
+                        (member,))
+        link(con, HEAD, "s0-new", "s0-new", 51)
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        result = projects.chains_landed(projects.read_manifest(out))
+        assert result["split"] == {}
+        assert result["landed"][HEAD] == {"head_here": "s0-new", "sessions": 3}
+
+
 class TestNoLinks:
     def test_dropping_the_table_restores_one_row_per_session(self, chain_store, store):
         con = sqlite3.connect(str(chain_store))
