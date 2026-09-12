@@ -1349,7 +1349,13 @@ def _session_rows_uncached() -> pd.DataFrame:
         if isinstance(path, str) and path and not os.path.exists(path):
             # Absent because it was written on another machine, or absent because it was deleted
             # here. Those are different facts and must not share a label.
-            elsewhere = HOME_DIR.lower() not in path.replace("/", "\\").lower()
+            #
+            # BOTH SIDES ON ONE SEPARATOR. The path was folded to backslashes and HOME_DIR was
+            # not, so on Linux, where HOME_DIR holds forward slashes, it never matched and every
+            # transcript deleted on the machine read as imported from another one. CI on ubuntu
+            # is where that showed; Windows cannot see it.
+            home = HOME_DIR.replace("/", "\\").lower()
+            elsewhere = home not in path.replace("/", "\\").lower()
             return ("Imported from another machine" if elsewhere
                     else "Deleted from this machine")
         if isinstance(r.entrypoint, str) and r.entrypoint and r.entrypoint != "claude-desktop":
