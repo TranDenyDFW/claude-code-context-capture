@@ -10,8 +10,9 @@ is in its own pair and nothing else, so the same machine holds several chat hist
 meet. Measured on the author's machine: four account directories, nine pairs, 171 records under one
 pair and 16 under another.
 
-`share_all()` makes every pair on a root resolve to ONE directory, using a Windows junction, so
-whichever account is signed in reads the same records. `share_current()` puts it back.
+`share_all()` makes every pair on a root resolve to ONE directory, a junction on Windows and a
+directory symlink elsewhere, so whichever account is signed in reads the same records.
+`share_current()` puts it back.
 
 WHAT WAS MEASURED BEFORE THIS WAS WRITTEN, on the test laptop, because the app defends itself
 against link tricks and most of those defences would have made this impossible:
@@ -56,10 +57,35 @@ ALL, CURRENT, MIXED = "all", "current", "mixed"
 
 
 def supported():
-    """(bool, reason). A junction is a Windows construct and this feature is one on purpose."""
-    if platform.system() != "Windows":
-        return False, f"junctions are a Windows feature and this is {platform.system()}"
+    """(bool, reason). Whether this machine can point one records directory at another.
+
+    EVERY PLATFORM CAN, and it took a red Linux leg to make that worth saying. This refused
+    outright off Windows, which made the two guard tests below untestable there and the module a
+    thing CI could only skip: the runner counts a skip against the fixture as a fixture gap, so a
+    module that skips itself is a module nobody checks. The MECHANISM differs, a junction on
+    Windows and a directory symlink elsewhere, and the records under either are ordinary files,
+    which is the property the app's own reader cares about.
+    """
     return True, ""
+
+
+def _make_link(link, target):
+    """Point `link` at `target`, using whatever this platform calls that. Raises on failure."""
+    if platform.system() == "Windows":
+        run = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                             capture_output=True, text=True)
+        if run.returncode != 0 or link_target(link) is None:
+            raise RuntimeError((run.stderr or run.stdout).strip() or "mklink failed")
+        return
+    os.symlink(str(target), str(link), target_is_directory=True)
+
+
+def _remove_link(link):
+    """Remove the LINK and never what it points at, which is what `rmdir` does to a junction."""
+    if platform.system() == "Windows":
+        subprocess.run(["cmd", "/c", "rmdir", str(link)], capture_output=True, text=True)
+        return
+    os.unlink(link)
 
 
 def app_running():
@@ -268,12 +294,14 @@ def share_all(dry_run=False):
                     f"{here} still holds {len(rest)} entr(ies) and cannot become a link; "
                     f"nothing else was changed. The backup is at {report['backup']}.")
             here.rmdir()
-            run = subprocess.run(["cmd", "/c", "mklink", "/J", str(here), head["path"]],
-                                 capture_output=True, text=True)
-            if run.returncode != 0 or link_target(here) is None:
+            try:
+                _make_link(here, head["path"])
+            except OSError as exc:
                 raise RuntimeError(
-                    f"could not link {here}: {(run.stderr or run.stdout).strip()}. The backup is "
-                    f"at {report['backup']}.")
+                    f"could not link {here}: {exc}. The backup is at {report['backup']}.") from exc
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"could not link {here}: {exc}. The backup is at {report['backup']}.") from exc
             linked.append({"link": pair["path"], "to": head["path"]})
         report["roots"].append({"root": str(root), "canonical": head["path"],
                                 "moved": moved, "set_aside": aside, "linked": linked})
@@ -317,7 +345,7 @@ def share_current(dry_run=False):
             here = Path(pair["path"])
             shared = Path(pair["link_to"])
             if not dry_run:
-                subprocess.run(["cmd", "/c", "rmdir", str(here)], capture_output=True, text=True)
+                _remove_link(here)
                 here.mkdir(parents=True, exist_ok=True)
             for name, (was_root, account, org) in where.items():
                 if account != pair["account"] or org != pair["org"] or was_root != pair["root"]:

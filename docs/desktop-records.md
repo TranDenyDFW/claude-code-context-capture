@@ -150,8 +150,9 @@ folders are one set per Windows user. So the conversations already sit in one pi
 the app's own list is cut into slices. The other per-account stores beside the records are
 `local-agent-mode-sessions`, `scratch-workspaces` and `spaces-present`, each keyed the same way.
 
-`c4x/accounts.py` makes every pair on a records root resolve to ONE of them with a Windows
-junction, so whichever account is signed in reads the same chats, and puts it back on request.
+`c4x/accounts.py` makes every pair on a records root resolve to ONE of them, with a junction on
+Windows and a directory symlink elsewhere, so whichever account is signed in reads the same chats,
+and puts it back on request.
 `python -m c4x.accounts [--state | --all | --current | --verify]`, or the Account switch in the
 page's header.
 

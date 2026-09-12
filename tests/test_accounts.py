@@ -4,13 +4,14 @@ The desktop app separates accounts with a directory: `<account>/<org>/local_<uui
 listing is the list. `c4x.accounts` makes every pair on a root resolve to one directory with a
 Windows junction, so whichever account is signed in reads the same records.
 
-The mutating half is Windows only, because a junction is. The decisions around it are not, so the
-pure functions are tested everywhere, which is what keeps the Linux leg of CI honest about this
-module rather than skipping it whole.
+NOTHING HERE SKIPS. The first version marked the mutating half Windows only, and the runner counts
+a skip against the deterministic fixture as a fixture gap: the Linux leg went red on the guards it
+could not reach, and the Windows leg went red on the one test that skipped there. The module makes
+the link the platform's own instead, a junction on Windows and a directory symlink elsewhere, so
+every test runs on every leg.
 """
 import json
 import os
-import platform
 import sys
 from pathlib import Path
 
@@ -21,9 +22,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from c4x import accounts  # noqa: E402
-
-WINDOWS = platform.system() == "Windows"
-windows_only = pytest.mark.skipif(not WINDOWS, reason="a junction is a Windows construct")
 
 A, B = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
 ORG_A, ORG_B = "11111111-3333-4333-8333-111111111111", "22222222-4444-4444-8444-222222222222"
@@ -90,14 +88,17 @@ class TestTheGuards:
         with pytest.raises(RuntimeError, match="no backup"):
             accounts.share_current()
 
-    @pytest.mark.skipif(WINDOWS, reason="the unsupported path is what a non-Windows host takes")
-    def test_it_says_why_it_cannot_run_here(self):
+    def test_every_platform_can_point_one_directory_at_another(self):
+        """A junction on Windows, a directory symlink elsewhere, and the module says so.
+
+        This refused off Windows, which left every guard below untestable there: the runner counts
+        a skip against the deterministic fixture as a fixture gap, so a module that skips itself is
+        a module CI never checks. The Linux leg went red on exactly that.
+        """
         ok, why = accounts.supported()
-        assert not ok and "Windows" in why
+        assert ok and why == ""
 
     def test_a_dry_run_writes_nothing(self, machine):
-        if not WINDOWS:
-            pytest.skip("a dry run still resolves the layout, which needs the real thing to exist")
         before = sorted(p.name for p in (machine / B / ORG_B).iterdir())
         report = accounts.share_all(dry_run=True)
         assert report["dry_run"] and report["backup"] is None
@@ -105,7 +106,6 @@ class TestTheGuards:
         assert accounts.state()["mode"] == accounts.CURRENT
 
 
-@windows_only
 class TestSharingAndPuttingItBack:
     def test_every_account_reads_the_same_records(self, machine):
         report = accounts.share_all()

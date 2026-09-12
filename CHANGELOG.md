@@ -18,7 +18,7 @@ removed and nothing here said so.
   16 under another. The CLI side is not separated at all, so the conversations already sit in one
   pile: 518 transcript directories, none named for an account, one `oauthAccount`, one set of
   skills, hooks and memory. `c4x/accounts.py` makes every pair on a records root resolve to one of
-  them with a Windows junction, backs up both trees first, sets aside rather than merges the files
+  them, with a junction on Windows and a directory symlink elsewhere, backs up both trees first, sets aside rather than merges the files
   that are per pair, records what was asked for beside the store, and puts it all back on request.
   The app's own reader refuses a symlinked file and refuses a link count above one at 11 of its 17
   call sites, so neither symlinks nor hard links would have worked; a junction leaves the records
