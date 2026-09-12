@@ -1992,9 +1992,17 @@ def main(argv=None):
             print(f"    SKIPPED  {skip['path']}: {skip['why']}")
         for big in state["too_large"]:
             print(f"    TOO LARGE  {big['path']}: {big['bytes']:,} bytes")
-        for head in state.get("chats_without_record") or []:
-            print(f"    NO DESKTOP RECORD  {head}: the app's record for this chat is not on this "
-                  "machine under any session it carries, so the destination app will not list it")
+        # COUNTED FIRST AND NAMED A FEW. Most chats in an old project were CLI sessions the desktop
+        # app never had a record for: one export of a 125 chat project named all 125, which is a
+        # wall of ids rather than a warning. The whole list stays in the manifest.
+        missing_names = state.get("chats_without_record") or []
+        if missing_names:
+            print(f"    NO DESKTOP RECORD  {len(missing_names)} of {manifest['chats']} chat(s): "
+                  "the app has no record here for them, so the destination app will not list them")
+            for head in missing_names[:5]:
+                print(f"      {head}")
+            if len(missing_names) > 5:
+                print(f"      and {len(missing_names) - 5} more, all of them in the manifest")
         return 0
     if args.command == "import":
         report = import_(args.path, into=args.into, dry_run=args.dry_run)
