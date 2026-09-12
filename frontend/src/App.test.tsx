@@ -23,6 +23,11 @@ vi.mock('@/api', async (importOriginal) => {
     api: {
       tabs: vi.fn(), health: vi.fn(), cohorts: vi.fn(), selector: vi.fn(), tab: vi.fn(),
       sessions: vi.fn(),
+      // EVERY CALL THE HEADER MAKES, including the ones a control added later. A partial mock is
+      // not a smaller mock: `AccountSharing` asks on mount, and with `accounts` missing the whole
+      // header threw and four tests about the population chip failed for a reason none of them
+      // named.
+      accounts: { state: vi.fn(), share: vi.fn(), verify: vi.fn() },
     },
   }
 })
@@ -70,6 +75,12 @@ beforeEach(() => {
   })
   vi.mocked(api.cohorts).mockResolvedValue([])
   vi.mocked(api.selector).mockResolvedValue([])
+  // One account directory, so the Account switch renders nothing and these tests keep describing
+  // the header they were written for.
+  vi.mocked(api.accounts.state).mockResolvedValue({
+    supported: true, why_not: '', app_running: false, mode: 'current', intended: 'current',
+    roots: [], pairs: 1, linked: 0, chats_visible: 0,
+  })
   vi.mocked(api.tab).mockResolvedValue(payload())
 })
 

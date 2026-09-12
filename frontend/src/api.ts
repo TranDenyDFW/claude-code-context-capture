@@ -465,6 +465,44 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return response.json() as Promise<T>
 }
 
+/** One `<account>/<org>` records directory on this machine, and what it resolves to. */
+export interface AccountPair {
+  root: string
+  account: string
+  org: string
+  path: string
+  /** The directory this one points at, or null when it is an ordinary directory. */
+  link_to: string | null
+  records: number
+}
+
+/**
+ * What `/api/accounts` reports.
+ *
+ * `mode` is what is on disk and `intended` is what was asked for. They disagree after an app
+ * update migrates these directories, which is the one failure the arrangement has.
+ */
+export interface AccountsState {
+  supported: boolean
+  why_not: string
+  app_running: boolean
+  mode: 'all' | 'current' | 'mixed'
+  intended: 'all' | 'current'
+  roots: { root: string; pairs: AccountPair[] }[]
+  pairs: number
+  linked: number
+  chats_visible: number
+}
+
+/** What `/api/accounts/sharing` answers. `restart_required` is always true on a change. */
+export interface SharingReport {
+  mode: 'all' | 'current'
+  dry_run: boolean
+  restart_required: boolean
+  backup?: string | null
+  state: AccountsState
+}
+
 export const api = {
   tabs: () => get<TabInfo[]>('/api/tabs'),
   cohorts: () => get<Cohort[]>('/api/cohorts'),
@@ -501,6 +539,19 @@ export const api = {
    * for a read that was a wrong session count this app already shipped once, and for a delete it
    * would be the whole store. Do not take the value apart here to make it look nicer.
    */
+  /**
+   * Whether every account signed into this machine reads one chat list.
+   *
+   * The separation is a directory per account, so this moves directories: the server refuses while
+   * Claude is open, and a change that lands needs it restarted.
+   */
+  accounts: {
+    state: () => get<AccountsState>('/api/accounts'),
+    verify: () =>
+      get<{ ok: boolean; intended: string; problems: string[] }>('/api/accounts/verify'),
+    share: (mode: 'all' | 'current') => post<SharingReport>('/api/accounts/sharing', { mode }),
+  },
+
   project: {
     excluded: () =>
       get<{ excluded: Exclusion[]; writes_enabled: boolean }>('/api/project/excluded'),

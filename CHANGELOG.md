@@ -11,6 +11,21 @@ removed and nothing here said so.
 
 ### Added
 
+- **An Account switch: show every account's chats, or only the signed-in one's.** Signing into a
+  second account on the same machine hides nothing, it points the desktop app at a different
+  directory: `<account uuid>/<org uuid>` is the whole of the separation and the listing is the
+  list. Four account directories and nine pairs on the author's machine, 171 records under one and
+  16 under another. The CLI side is not separated at all, so the conversations already sit in one
+  pile: 518 transcript directories, none named for an account, one `oauthAccount`, one set of
+  skills, hooks and memory. `c4x/accounts.py` makes every pair on a records root resolve to one of
+  them, with a junction on Windows and a directory symlink elsewhere, backs up both trees first, sets aside rather than merges the files
+  that are per pair, records what was asked for beside the store, and puts it all back on request.
+  The app's own reader refuses a symlinked file and refuses a link count above one at 11 of its 17
+  call sites, so neither symlinks nor hard links would have worked; a junction leaves the records
+  as regular files with a link count of one, and the test laptop then listed 17 chats under an
+  account that owned one of them. Two things are not hidden: either account can rewrite or delete
+  the other's chats, and an app update's migration can quietly turn a link back into a directory,
+  which is what `--verify` and the page's warning exist to catch.
 - **An export says how many CHATS it carries, and an import proves each one folded here.** The
   manifest gained `chats` and `chains`, which name the sessions that have to fold into one head on
   the far side, and `import` checks the store against them and reports any chat whose sessions
