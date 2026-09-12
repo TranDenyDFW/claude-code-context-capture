@@ -86,6 +86,22 @@ NESTED = "55555555-5555-4555-8555-555555555555"
 ESCAPED = "66666666-6666-4666-8666-666666666666"
 
 
+def rewritten_later(path, text):
+    """Write `text` to `path` as a rename in the app would: seconds after the previous write.
+
+    The fingerprint is (count, newest mtime). Two writes inside one filesystem timestamp tick
+    leave the mtime where it was, and on the windows-latest CI runner that is exactly what a
+    rewrite straight after the fixture produced: (7, 1789185152875414900) before and after, so
+    the stamp could not move. A user's rename is never inside the same tick as the app's last
+    write, so the test says so explicitly rather than relying on the runner being slow enough.
+    """
+    import os
+    before = path.stat().st_mtime
+    path.write_text(text, encoding="utf-8")
+    later = max(before, path.stat().st_mtime) + 2
+    os.utime(path, (later, later))
+
+
 class TestReadingTheTitle:
     def test_a_title_in_the_prefix_is_returned(self, store, records):
         found = store.read_archived_record(str(records / "acct" / "org" / "local_titled.json"))
@@ -342,7 +358,7 @@ class TestTheCacheNoticesARename:
         path = records / "acct" / "org" / "local_titled.json"
         record = json.loads(path.read_text(encoding="utf-8"))
         record["title"] = "Renamed in the app"
-        path.write_text(json.dumps(record), encoding="utf-8")
+        rewritten_later(path, json.dumps(record))
         assert cache.stamp(str(db), store.records_fingerprint(str(records))) != before
 
     def test_a_deleted_record_moves_the_stamp(self, store, records):
@@ -386,7 +402,7 @@ class TestTheCacheNoticesARename:
         path = records / "acct" / "org" / "local_titled.json"
         record = json.loads(path.read_text(encoding="utf-8"))
         record["title"] = "Renamed in the app"
-        path.write_text(json.dumps(record), encoding="utf-8")
+        rewritten_later(path, json.dumps(record))
         again = store.desktop_titles(root=str(records), ttl=45.0)
         assert again[TITLED] == "Renamed in the app", (
             "the cached map was served even though the file on disk had changed")
@@ -445,7 +461,9 @@ class TestEveryRootIsRead:
         db = tmp_path / "not-a-real.db"
         db.write_bytes(b"x")
         before = cache.stamp(str(db), store.records_fingerprint())
-        self._write(second / "a2" / "o2", "local_two.json", PAST, "Renamed under APPDATA", False)
+        rewritten_later(second / "a2" / "o2" / "local_two.json",
+                        json.dumps({"cliSessionId": PAST, "isArchived": False,
+                                    "title": "Renamed under APPDATA"}))
         assert cache.stamp(str(db), store.records_fingerprint()) != before, (
             "a rename under the second root must move the stamp")
         assert store.records_fingerprint(str(tmp_path / "nope")) is None
