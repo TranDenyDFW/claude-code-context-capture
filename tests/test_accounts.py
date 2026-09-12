@@ -11,7 +11,6 @@ the link the platform's own instead, a junction on Windows and a directory symli
 every test runs on every leg.
 """
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -166,7 +165,10 @@ class TestSharingAndPuttingItBack:
         accounts.share_all()
         assert accounts.verify()["ok"]
         link = machine / B / ORG_B
-        os.rmdir(link)
+        # THE MODULE'S OWN REMOVER, because the two platforms disagree about what a link is:
+        # `rmdir` takes a junction on Windows and raises NotADirectoryError on a POSIX symlink,
+        # which is how the Linux leg failed while Windows was green.
+        accounts._remove_link(link)
         record(link, "b0", title="a migration recreated this")
         answer = accounts.verify()
         assert not answer["ok"]
