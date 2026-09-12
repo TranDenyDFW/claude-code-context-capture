@@ -17,7 +17,7 @@
 // Usage: node tools/run_tests.mjs [--node-only] [--strict] [--self-test]
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { winArg } from './paths.mjs';
@@ -114,6 +114,23 @@ function judgePytest(text, rel, args, opts, strict) {
 // is the standard control-sequence shape: ESC [ ... final-byte.
 const ANSI = /\u001B\[[0-9;]*[A-Za-z]/g;
 const plain = (out) => String(out || '').replace(ANSI, '');
+
+// EVERY LEG'S WHOLE OUTPUT IS KEPT, under tmp/run-tests/, numbered in run order. The report
+// below quotes a few lines of a red leg, and a reader who pipes the runner through `tail`
+// sees even less: a pytest leg once reported "1 failed, 50 passed" with the FAILED line already
+// gone, and the failing test could not be named afterwards. The log is the name. Rewritten on
+// every run, so it always describes the run the report describes.
+const LOG_DIR = join(ROOT, 'tmp', 'run-tests');
+let legNo = 0;
+function keepLog(label, text) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    legNo += 1;
+    const slug = String(label).replace(/[^A-Za-z0-9.-]+/g, '_').slice(0, 60);
+    writeFileSync(join(LOG_DIR, `${String(legNo).padStart(2, '0')}-${slug}.log`), text);
+  } catch { /* a log that cannot be written must not fail the run it describes */ }
+  return text;
+}
 
 // THE LAST TWO LINES ARE OFTEN NOT THE FAILURE. An independent reviewer hit this: a pytest entry
 // failed, and the suite report showed only `RequestsDependencyWarning: urllib3 ...` from stderr,
@@ -553,7 +570,7 @@ for (const rel of nodeTargets()) {
       // that nothing can hide, and a per-tool opt-in would put the hand-list straight back.
       // A self-test that touches no store is unaffected by the variable.
       env: suiteEnv(fixtureBuilt ? { C4X_DB: fixture } : {}) });
-  const text = plain(run.stdout) + plain(run.stderr);
+  const text = keepLog(rel, plain(run.stdout) + plain(run.stderr));
   const match = text.match(CHECKS);
   const count = match ? Number(match[1]) : 0;
 
@@ -654,7 +671,7 @@ if (NODE_ONLY) {
         : opts?.bareFixture ? pyEnv({ C4X_DB: bare })
         : pyEnv(),
     });
-    const text = plain(run.stdout) + plain(run.stderr);
+    const text = keepLog(rel, plain(run.stdout) + plain(run.stderr));
     const match = text.match(CHECKS);
     const count = match ? Number(match[1] ?? match[2]) : null;
     // EXIT 3 IS "THIS STORE CANNOT ANSWER", which is not the same as a broken check and not the
@@ -731,7 +748,7 @@ if (!NODE_ONLY) {
       ? spawnSync(['npm', ...argv].map(winArg).join(' '),
                   { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 900_000, shell: true, windowsHide: true })
       : spawnSync('npm', argv, { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 900_000, windowsHide: true });
-    const text = plain(run.stdout) + plain(run.stderr);
+    const text = keepLog(['npm', ...args].join(' '), plain(run.stdout) + plain(run.stderr));
     // NOT the shared CHECKS pattern. Vitest prints "Test Files  2 passed (2)" BEFORE
     // "Tests  22 passed (22)", and CHECKS matches "N passed" anywhere, so it took the file count
     // and the suite total silently read 20 lower than the number of checks that actually ran.
@@ -800,7 +817,7 @@ if (!NODE_ONLY && !existsSync(join(ROOT, 'node_modules', 'eslint'))) {
                 { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, shell: true, windowsHide: true })
     : spawnSync('npm', ['run', 'lint'],
                 { encoding: 'utf8', maxBuffer: MAX_OUTPUT, cwd: ROOT, timeout: 300_000, windowsHide: true });
-  const text = plain(run.stdout) + plain(run.stderr);
+  const text = keepLog('eslint .', plain(run.stdout) + plain(run.stderr));
   if (run.status !== 0 || run.signal) {
     failed++;
     results.push({ rel: 'eslint .', state: 'FAIL',
@@ -860,6 +877,7 @@ if (stuck.length) {
 
 const exempt = results.filter((r) => r.state === 'exempt').length;
 console.log('');
+console.log(`  full output of every leg: ${LOG_DIR}`);
 console.log(`  ${total} checks across ${results.filter((r) => r.state === 'pass').length} files, ` +
             `${exempt} exempt, ${skipped} skipped, ${failed} failed`);
 if (skipped) {
