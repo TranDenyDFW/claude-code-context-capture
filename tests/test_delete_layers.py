@@ -465,26 +465,57 @@ class TestTheDesktopRecord:
         assert gone == {str(record)}, (
             f"the delete removed more than the one record it carried: {sorted(gone)}")
 
-    def test_one_row_naming_two_files_is_refused_rather_than_removing_both(self, machine):
-        """The glob spans every account and organisation pair, the backup holds ONE row.
+    def test_one_row_naming_two_files_removes_the_copies_whose_bytes_it_holds(self, machine):
+        """Two files, one name, and the hash decides each of them on its own.
 
-        That row cannot say which of two files it describes, and removing a file the backup does
-        not separately hold is the one thing this delete promises never to do.
+        The glob spans every account and organisation pair, and now every records root, so two
+        matches are two paths to the SAME record: a packaged install keeping a second root, or a
+        pair the app has stopped filing under.
+
+        This refused outright, on the argument that the backup's single row cannot say which of two
+        files it describes. It does not have to. A purge removes a file only when the bytes on the
+        disk hash to that row and KEEPS and names any that do not, so the refusal protected nothing
+        and left the real record in place, which on a page that reads every root keeps the deleted
+        chat listed under its old name.
         """
         from c4x import appstate
         source = machine.sessions / FOREIGN_ACCOUNT / ORG / DESKTOP_FILE
         twin = machine.sessions / ACCOUNT / ORG
         twin.mkdir(parents=True, exist_ok=True)
         (twin / DESKTOP_FILE).write_bytes(source.read_bytes())
+        blob = source.read_bytes()
+        marked = appstate.rebase_marked(blob, appstate.DESKTOP_CWD_FIELDS) or blob
         row = {"kind": appstate.DESKTOP, "relpath": DESKTOP_FILE, "cwd": ALPHA,
-               "sha256": "x", "rebased_sha256": "x"}
+               "sha256": appstate.sha256_bytes(blob),
+               "rebased_sha256": appstate.sha256_bytes(marked)}
 
         paths, refusal = appstate.purge_paths(row, ALPHA, str(machine.sessions))
 
-        assert paths == []
-        assert "more than one record under that name" in refusal
-        assert str(source) in refusal and str(twin / DESKTOP_FILE) in refusal
-        assert source.exists() and (twin / DESKTOP_FILE).exists()
+        assert refusal is None
+        assert sorted(str(p) for p in paths) == sorted(
+            [str(source), str(twin / DESKTOP_FILE)])
+        appstate.purge([row], [ALPHA], str(machine.sessions))
+        assert not source.exists() and not (twin / DESKTOP_FILE).exists()
+
+    def test_a_second_copy_the_backup_cannot_restore_is_kept_and_named(self, machine):
+        """The other half, and the reason the refusal was never what protected anything."""
+        from c4x import appstate
+        source = machine.sessions / FOREIGN_ACCOUNT / ORG / DESKTOP_FILE
+        twin = machine.sessions / ACCOUNT / ORG
+        twin.mkdir(parents=True, exist_ok=True)
+        (twin / DESKTOP_FILE).write_bytes(b'{"cliSessionId": "s0-0", "title": "something else"}')
+        blob = source.read_bytes()
+        marked = appstate.rebase_marked(blob, appstate.DESKTOP_CWD_FIELDS) or blob
+        row = {"kind": appstate.DESKTOP, "relpath": DESKTOP_FILE, "cwd": ALPHA,
+               "sha256": appstate.sha256_bytes(blob),
+               "rebased_sha256": appstate.sha256_bytes(marked)}
+
+        report = appstate.purge([row], [ALPHA], str(machine.sessions))
+
+        assert not source.exists(), "the copy the backup holds was not removed"
+        assert (twin / DESKTOP_FILE).exists(), "a copy the backup cannot put back was removed"
+        assert any(str(twin / DESKTOP_FILE) in kept["path"] for kept in report["kept"]), (
+            report["kept"])
 
 
 class TestAStoredPathIsNotThisPlatformsPath:
