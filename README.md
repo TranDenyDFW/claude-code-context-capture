@@ -169,6 +169,12 @@ other machine. Everything is rebuilt from the destination you choose, on the imp
 paths. `--dry-run` names every destination and writes nothing; `verify-mirror` re-hashes what
 landed and exits non-zero on a difference.
 
+It moves CHATS. A chat resumed four times is five CLI sessions and one entry in the app, and the
+export says so, carries every session it spans, and names any chat whose record it could not find
+under a session it carries. The import checks the store afterwards and reports any chat whose
+sessions landed here as more than one. Records are read from, and removed from, every root the app
+uses, which on a packaged install can be two.
+
 ## Privacy
 
 **Nothing leaves the machine.** There is no network call in the capture path, and `data/` is
