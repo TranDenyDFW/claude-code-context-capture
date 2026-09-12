@@ -149,6 +149,30 @@ def sessions_root():
     return store.sessions_root()
 
 
+def sessions_roots():
+    """EVERY directory the app might keep records in, as this module sees it.
+
+    `sessions_root` is where a restore PUTS a record, which is one directory by definition. Reading
+    one and removing from one is what was wrong: a packaged install can leave records under
+    `%APPDATA%` beside its own container, the test laptop holds 16 under one root and 1 under the
+    other, and every reader in `store` has walked both since the Sessions list began mirroring the
+    app. An export that looks in one root carries a chat without the file that names it, and a
+    delete that removes from one leaves the deleted chat still listed, still named.
+
+    ONE SEAM, STILL. The suite isolates this module by patching `sessions_root` HERE and nowhere
+    else, so a second accessor that went straight to the store would read the developer's real
+    records from inside every test that captures or purges, which is the one thing `conftest`'s
+    autouse fixture exists to make impossible. So the store's list is used only when the two agree
+    about the write root: when they disagree, this module has been pointed at a fake machine and
+    the real roots are not this machine's roots at all.
+    """
+    from c4x import store
+    here = sessions_root()
+    if here != store.sessions_root():
+        return [here]
+    return [here] + [one for one in store.sessions_roots() if one != here]
+
+
 def read_config():
     """`~/.claude.json`, parsed. Raises rather than pretending an unreadable file is an empty one.
 
@@ -457,7 +481,12 @@ def capture(cwds, session_ids, sessions_root=None, sink=None):
             _walk(tasks, entry, TASKS, cwds[0] if cwds else "", rows, skipped)
 
     rows.extend(_capture_config(cwds, skipped))
-    rows.extend(_capture_desktop(id_set, sessions_root, skipped))
+    # WHICH SESSIONS A RECORD WAS FOUND FOR, reported rather than inferred. A caller that wants to
+    # know which CHATS travelled without the file that names them cannot ask the store: it would be
+    # asking a different set of roots from the one this capture just read, which under test is the
+    # developer's real machine rather than the fixture.
+    desktop_ids: set[str] = set()
+    rows.extend(_capture_desktop(id_set, sessions_root, skipped, desktop_ids))
 
     report = {
         "files": tally["files"],
@@ -467,6 +496,7 @@ def capture(cwds, session_ids, sessions_root=None, sink=None):
         "not_carried": not_carried,
         "not_carried_files": sum(n["files"] for n in not_carried),
         "desktop_pair": desktop_pair(sessions_root),
+        "desktop_ids": sorted(desktop_ids),
         "source_store": str(store.DB_PATH),
     }
     return kept, report
@@ -491,20 +521,32 @@ def _capture_config(cwds, skipped):
     return rows
 
 
-def _capture_desktop(id_set, root, skipped):
+def _capture_desktop(id_set, root, skipped, carried_ids=None):
     """The desktop app's own record for each session, keyed by cliSessionId.
 
     The relative path is the FILENAME ALONE. The account and organisation directories above it
     belong to the machine, not to the project, and are resolved again on the destination.
     """
     from c4x import store
-    root = Path(root or sessions_root())
-    if not root.is_dir():
-        return []
-    rows = []
-    for path in sorted(root.glob("*/*/local_*.json")):
+    # EVERY ROOT, the one this machine writes to first. A record under a second root is the same
+    # chat's record and is what the app would show, so an export that reads only the write root
+    # carries a chat whose name the destination cannot know. One copy travels: they are the same
+    # record under two paths, the destination has one place to put it, and a second row would land
+    # on the same file. The one not taken is NAMED, because a silent choice between two files that
+    # disagree is the shape of a bug nobody sees.
+    roots = [Path(root)] if root else _record_roots()
+    rows: list[dict] = []
+    taken: dict[str, str] = {}
+    # ROOT BY ROOT, so the write root's copy is the one seen first. Sorting across both roots at
+    # once is alphabetical, which would let whichever root happens to sort first decide.
+    for path in [p for one in roots if one.is_dir()
+                 for p in sorted(one.glob("*/*/local_*.json"))]:
         found = store.read_archived_record(str(path))
         if not found or found[0] not in id_set:
+            continue
+        if path.name in taken:
+            skipped.append({"path": str(path),
+                            "why": f"the same record is carried from {taken[path.name]}"})
             continue
         try:
             blob = path.read_bytes()
@@ -518,8 +560,24 @@ def _capture_desktop(id_set, root, skipped):
             skipped.append({"path": str(path),
                             "why": "not readable as JSON, so it cannot be rebased"})
             continue
+        # MARKED ONLY WHEN IT IS ACTUALLY CARRIED, so a copy this one could not read or parse does
+        # not stop the readable copy under the next root from travelling.
+        taken[path.name] = str(path)
+        if carried_ids is not None:
+            carried_ids.add(found[0])
         rows.append(_row(DESKTOP, cwd, path.name, mtime, blob, DESKTOP_CWD_FIELDS))
     return rows
+
+
+def _record_roots(root=None):
+    """The record directories to SEARCH, the one this machine writes to first.
+
+    Named once because three callers need the same order: the capture, the purge, and the
+    acceptance check that asks whether a purge left anything behind.
+    """
+    if root:
+        return [Path(root)]
+    return [Path(one) for one in sessions_roots()]
 
 
 # ---------------------------------------------------------------------------
@@ -826,9 +884,10 @@ def purge_paths(row, dest_cwd, root=None):
     that is no longer current, which is exactly the case `tests/test_mirror.py` builds because it is
     the case that decides whether an import is visible at all.
 
-    `capture` found it by globbing `*/*/local_*.json`, so a purge looks the same way. The filename
-    carries a uuid and is unique, and every path the glob returns is under the root by
-    construction, so this stays exact rather than becoming a search.
+    `capture` found it by globbing `*/*/local_*.json` under every records root, so a purge looks the
+    same way and in the same order. The filename carries a uuid, so every path the glob returns is
+    the same record under a different root or a different account pair, and each one is decided on
+    its own bytes below rather than by a search.
     """
     if row["kind"] != DESKTOP:
         path, refusal = destination(row, dest_cwd, root)
@@ -838,22 +897,24 @@ def purge_paths(row, dest_cwd, root=None):
         return [], f"{row['relpath']!r}: {why}"
     if len(parts) != 1:
         return [], f"{row['relpath']!r}: a desktop record is carried as a filename alone"
-    base = Path(root or sessions_root())
-    if not base.is_dir():
+    roots = [one for one in _record_roots(root) if one.is_dir()]
+    if not roots:
         # NO PATHS AND NO REFUSAL. This machine keeps no desktop records at all, so there is
         # nothing of this one to remove and nothing unresolved about it: `purge` files that under
         # `absent`, which is what it is. It used to be a refusal, and because it was, every caller
         # had to skip refusals to avoid a false alarm on a machine with no desktop app. That skip
         # is what made a genuinely unresolved row invisible to the acceptance check.
         return [], None
-    found = sorted(base.glob(f"*/*/{parts[0]}"))
-    # ONE ROW, ONE FILE. The filename carries a uuid so a second match is not expected, but the
-    # glob spans every account and organisation pair on the machine and `purge` would remove both.
-    # The backup holds one row, which cannot say which of two files it describes, and removing a
-    # file the backup does not separately hold breaks the one rule this delete is built on.
-    if len(found) > 1:
-        return [], ("this machine keeps more than one record under that name and the backup's "
-                    "single row does not say which: " + ", ".join(str(p) for p in found))
+    found = sorted(p for one in roots for p in one.glob(f"*/*/{parts[0]}"))
+    # EVERY COPY, AND THE HASH DECIDES EACH ONE. The filename carries a uuid, so two matches are
+    # two paths to the SAME record: a packaged install keeping a second root, or a pair the app
+    # has since stopped filing under. Both are the chat's identity, and a copy left behind keeps
+    # the deleted chat listed and named on a page that reads every root.
+    #
+    # This refused outright whenever it found more than one, on the argument that the backup's
+    # single row cannot say which file it describes. It does not have to: `purge` removes only a
+    # file whose bytes hash to that row and KEEPS and names any that do not (`_would_refuse`), so a
+    # second copy that differs is already safe, and refusing left the real one in place instead.
     return found, None
 
 

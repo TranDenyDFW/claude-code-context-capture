@@ -1413,6 +1413,10 @@ def project_export(cohort: str = Query(..., description="project::<the working d
         # download straight to disk can check what it got without opening it.
         headers={"X-C4X-Project": project,
                  "X-C4X-Sessions": str(manifest["sessions"]),
+                 # CHATS AND CLI SESSIONS ARE DIFFERENT NUMBERS. The page counts chats, and a
+                 # resumed chat is several sessions, so a caller checking a download against what
+                 # it saw on the page needs the number the page showed it.
+                 "X-C4X-Chats": str(manifest.get("chats") or manifest["sessions"]),
                  "X-C4X-Exported-At": str(manifest["exported_at"])})
 
 

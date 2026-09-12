@@ -407,27 +407,53 @@ def tables_in(con, tables):
     return tuple(t for t in tables if t in present)
 
 
+def where_for(table, ids, schema=""):
+    """(WHERE clause, parameters) scoping one table to these sessions. ONE RULE, FOUR CALLERS.
+
+    The preview, the export, the delete's acceptance check and the delete itself all have to agree
+    about which rows belong to a project, because the acceptance rule is that a delete removes
+    exactly what the backup contains. They were four copies of the same three clauses and two of
+    those clauses were wrong in the same way on all four.
+
+    `files` IS THE OFFSET OF EVERY TRANSCRIPT A SESSION WROTE, not only of its own top-level file.
+    `appstate.capture` carries every entry whose NAME BEGINS WITH A SESSION ID, which includes the
+    `<session id>/` directory holding subagent transcripts and tool output, and the purge removes
+    them; this scoped to `sessions.transcript_path` alone, so 7,634 of this store's 9,068 offset
+    rows were neither carried by an export nor removed by a delete. Left behind, an offset says a
+    file has been read to its end, so those bytes are skipped forever if the file ever comes back.
+
+    THE ID IS IN THE PATH, and that is the whole test. Deriving the prefix from
+    `sessions.transcript_path` instead was measurably not the same rule: one session on this store
+    has a `transcript_path` naming a SUBAGENT file, so the prefix reached that one file and missed
+    the other 18 the capture carried for it. An independent review found the export carrying 19
+    files whose offsets it did not carry, and the delete removing those 19 files and leaving their
+    19 offsets. A session id is a uuid, so a path that contains one was written for that session,
+    wherever in the path it appears.
+    """
+    marks = ",".join("?" * len(ids))
+    if table in BY_COMPACTION:
+        return (f"""WHERE compaction_uuid IN (SELECT uuid FROM {schema}compactions
+                    WHERE session_id IN ({marks}))""", list(ids))
+    if table in BY_TRANSCRIPT:
+        return (f"""WHERE EXISTS (SELECT 1 FROM {schema}sessions s
+                    WHERE s.session_id IN ({marks})
+                      AND instr(lower({table}.path), lower(s.session_id)) > 0)""",
+                list(ids))
+    return (f"WHERE session_id IN ({marks})", list(ids))
+
+
 def footprint(con, project):
     """Row counts per table for one project, so a delete can be previewed before it happens."""
     ids = session_ids(con, project)
     out = {"sessions_selected": len(ids)}
     if not ids:
         return out
-    marks = ",".join("?" * len(ids))
     # A table this store does not have yet (session_links, on a store harvested by an older
     # build) has no rows to count and is not a reason to fail the preview.
-    for table in tables_in(con, BY_SESSION):
+    for table in tables_in(con, BY_SESSION) + BY_COMPACTION + BY_TRANSCRIPT:
+        where, params = where_for(table, ids)
         out[table] = con.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE session_id IN ({marks})", ids).fetchone()[0]
-    for table in BY_COMPACTION:
-        out[table] = con.execute(
-            f"""SELECT COUNT(*) FROM {table} WHERE compaction_uuid IN
-                (SELECT uuid FROM compactions WHERE session_id IN ({marks}))""", ids).fetchone()[0]
-    for table in BY_TRANSCRIPT:
-        out[table] = con.execute(
-            f"""SELECT COUNT(*) FROM {table} WHERE path IN
-                (SELECT transcript_path FROM sessions WHERE session_id IN ({marks})
-                  AND transcript_path IS NOT NULL)""", ids).fetchone()[0]
+            f"SELECT COUNT(*) FROM {table} {where}", params).fetchone()[0]
     return out
 
 
@@ -684,6 +710,7 @@ def _write_app_state(out_path, cwds, ids):
         "skipped": report["skipped"],
         "too_large": oversized,
         "source_desktop_pair": report["desktop_pair"],
+        "desktop_ids": report.get("desktop_ids") or [],
     }
 
 
@@ -729,7 +756,6 @@ def export(project, out_path, app_state=True):
         ids = session_ids(source, project)
         if not ids:
             raise ValueError(f"no sessions with cwd {project!r}")
-        marks = ",".join("?" * len(ids))
         schema = source.execute(
             "SELECT sql FROM sqlite_master WHERE type IN ('table','view') AND sql IS NOT NULL"
         ).fetchall()
@@ -752,20 +778,10 @@ def export(project, out_path, app_state=True):
             # creates tables, so the export must read what exists. The manifest's table list is
             # built from the SAME set below, so the import side sees exactly what was carried.
             by_session = tables_in(source, BY_SESSION)
-            for table in by_session:
+            for table in by_session + BY_COMPACTION + BY_TRANSCRIPT:
+                where, params = where_for(table, ids, schema="main.")
                 source.execute(
-                    f"INSERT INTO dest.{table} SELECT * FROM main.{table} "
-                    f"WHERE session_id IN ({marks})", ids)
-            for table in BY_COMPACTION:
-                source.execute(
-                    f"""INSERT INTO dest.{table} SELECT * FROM main.{table}
-                        WHERE compaction_uuid IN (SELECT uuid FROM main.compactions
-                        WHERE session_id IN ({marks}))""", ids)
-            for table in BY_TRANSCRIPT:
-                source.execute(
-                    f"""INSERT INTO dest.{table} SELECT * FROM main.{table}
-                        WHERE path IN (SELECT transcript_path FROM main.sessions
-                        WHERE session_id IN ({marks}) AND transcript_path IS NOT NULL)""", ids)
+                    f"INSERT INTO dest.{table} SELECT * FROM main.{table} {where}", params)
             source.commit()
             source.execute("DETACH DATABASE dest")
             cwds = cwds_for(source, ids)
@@ -779,6 +795,29 @@ def export(project, out_path, app_state=True):
         carried_state = _write_app_state(out_path, cwds, ids) if app_state else \
             _empty_app_state(out_path, cwds)
 
+        # WHICH CHATS TRAVEL WITHOUT THE FILE THAT NAMES THEM, asked rather than assumed. A desktop
+        # record is matched by the session it is CURRENTLY on, and the app rewrites that id in place
+        # on every resume, ahead of any harvest. So a chat resumed since the last harvest has a
+        # record this export cannot recognise as belonging to it, and `_capture_desktop` drops it
+        # with a bare `continue`: the rows, the transcripts and the memory all arrive on the other
+        # machine and the chat is not in the app's list. Nothing said so, because a record that is
+        # not carried is not an error anywhere, and `verify` only re-hashes what IS in the file.
+        #
+        # ASKED OF THE CAPTURE, NOT OF THE STORE. This called `store.desktop_records()`, which walks
+        # the store's root list, and the suite isolates this module by patching `appstate`'s: an
+        # independent reviewer measured every export test in the suite reading the developer's own
+        # 172 records, and the check could never agree with the capture beside it because the two
+        # were reading different machines.
+        #
+        # A ROWS ONLY EXPORT CARRIES NO RECORD FOR ANY CHAT, and saying so once per chat would be
+        # noise: `carries_no_files` already says it once.
+        carried_state["chats_without_record"] = []
+        if app_state:
+            found_for = set(carried_state.get("desktop_ids") or [])
+            carried_state["chats_without_record"] = sorted(
+                head for head in {store.chat_head(s) for s in ids}
+                if not any(member in found_for for member in store.chat_members(head)))
+
         # Counted and digested from the FILE, not from what was intended to be written. The point
         # of the manifest is to describe what is actually in there.
         out = sqlite3.connect(str(out_path))
@@ -790,13 +829,24 @@ def export(project, out_path, app_state=True):
             counts = {t: out.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in carried}
             digests = {t: (app_state_digest(out) if t == APP_STATE_TABLE else digest(out, t))
                        for t in carried}
+            # THE CHATS, AS THE PAGE COUNTS THEM. A resumed chat is several CLI sessions and one
+            # entry in the desktop app, so `sessions` alone describes a 12 session chat as twelve
+            # of something the user has never seen twelve of. `chains` is what the import checks
+            # itself against: it says which sessions have to fold into which head on the far side,
+            # which is the one thing about a chat that the rows cannot prove on their own.
+            chains = {head: sorted(members) for head, members in
+                      ((h, [m for m in store.chat_members(h) if m in set(ids)])
+                       for h in {store.chat_head(s) for s in ids})
+                      if len(members) > 1}
             manifest = {
-                "format": "c4x-project-export/2",
+                "format": "c4x-project-export/3",
                 "project": project,
                 "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
                 "source_machine": platform.node(),
                 "source_store": str(store.DB_PATH),
                 "sessions": len(ids),
+                "chats": len({store.chat_head(s) for s in ids}),
+                "chains": chains,
                 "session_ids": sorted(ids),
                 # THE WORKING DIRECTORIES, WHICH ARE NOT THE PROJECT LABEL. `project` above can be
                 # `P:\\Books\\archived`, a label the desktop app's archive flag produced. These are
@@ -931,27 +981,53 @@ def _rebase_store_rows(con, ids, mapping, app_rows):
         dest_cwd = appstate.destination_cwd(source_cwd, mapping) if source_cwd else None
         if not dest_cwd or dest_cwd == source_cwd:
             continue
+        # THE SLUG MOVES WITH THE DIRECTORY. `project_slug` is the name of the directory the
+        # transcript lives in, and the transcript lands in the slug of the DESTINATION, so leaving
+        # the source's slug here breaks the one invariant harvest repairs rows against:
+        # `slug_of(cwd) = project_slug`. It did, and the cost was the whole move: the next harvest
+        # pass over that directory saw a row it could not believe, rebuilt `cwd` from the
+        # transcript's own lines, which still name the machine the export came from, and put the
+        # project back at the exporter's path. Measured before the fix: 1,438 of 1,439 rows on this
+        # store satisfy the invariant, so a row that does not is exactly the signal harvest acts on.
         moved["sessions"] += con.execute(
-            "UPDATE sessions SET cwd = ? WHERE session_id = ?", (dest_cwd, sid)).rowcount
+            "UPDATE sessions SET cwd = ?, project_slug = ? WHERE session_id = ?",
+            (dest_cwd, appstate.slug_for(dest_cwd), sid)).rowcount
         moved["hook_events"] += con.execute(
             "UPDATE hook_events SET cwd = ? WHERE session_id = ?", (dest_cwd, sid)).rowcount
 
     # The transcript moves to whatever slug directory its bytes actually landed in, and only for
     # sessions this export carried a transcript FOR. A session with no carried transcript keeps the
     # source path, which is what makes `store.classify()` still call it imported.
-    landed = {}
+    #
+    # EVERY CARRIED TRANSCRIPT, not only the session's own file. `appstate.capture` carries the
+    # whole `<session id>/` directory (subagent transcripts, tool output) and `restore` writes it
+    # under the destination slug, and `files` now carries those offsets, so they have to land on
+    # the destination path too. The source path is rebuilt from the SOURCE's own
+    # `sessions.transcript_path`, read out of the export, so nothing here depends on knowing the
+    # exporting machine's home directory.
+    source_dir = {}
+    for sid, path in con.execute(
+            f"SELECT session_id, transcript_path FROM src.sessions WHERE session_id IN ({marks})",
+            ids):
+        if path:
+            cut = max(path.rfind("\\"), path.rfind("/"))
+            source_dir[sid] = (path[:cut + 1], "\\" if path.rfind("\\") > path.rfind("/") else "/")
+    landed = []
     for row in app_rows:
-        if row["kind"] != appstate.TRANSCRIPT or "/" in row["relpath"]:
+        if row["kind"] != appstate.TRANSCRIPT:
             continue
-        if not row["relpath"].endswith(".jsonl"):
+        rel = row["relpath"]
+        first = rel.split("/", 1)[0]
+        sid = first[: -len(".jsonl")] if first.endswith(".jsonl") else first
+        base = source_dir.get(sid)
+        if not base:
             continue
-        sid = row["relpath"][: -len(".jsonl")]
         dest_cwd = appstate.destination_cwd(row["cwd"], mapping)
-        landed[sid] = str(appstate.project_dir(dest_cwd) / row["relpath"])
-    for sid, new_path in landed.items():
-        old = con.execute("SELECT transcript_path FROM sessions WHERE session_id = ?",
-                          (sid,)).fetchone()
-        if not old or old[0] == new_path:
+        new_path = str(appstate.project_dir(dest_cwd).joinpath(*rel.split("/")))
+        old_path = base[0] + rel.replace("/", base[1])
+        landed.append((old_path, new_path, sid if rel == f"{sid}.jsonl" else None))
+    for old_path, new_path, own in landed:
+        if old_path == new_path:
             continue
         # COPIED, NOT MOVED, and that is the whole of it. `tools/harvest.mjs` resumes each
         # transcript from `files.bytes_read` and treats a path with NO row as unread, so moving the
@@ -959,13 +1035,21 @@ def _rebase_store_rows(con, ids, mapping, app_rows):
         # next harvest re-read it from zero and recreated every session row at the OLD working
         # directory, silently undoing the move the user asked for. Keeping both rows means neither
         # copy is re-read: the old path keeps its offset, the new path gets the same one.
+        #
+        # THE COLUMN LIST IS READ FROM THE TABLE, not written out here. It was written out here,
+        # and it was written before `files` gained `first_ts`, so the copy this comment calls
+        # identical silently dropped the column harvest orders its ingest by. Every column but the
+        # key travels, including the next one someone adds.
+        carried_cols = [r[1] for r in con.execute("PRAGMA table_info(files)").fetchall()
+                        if r[1] != "path"]
+        listed = ",".join(f'"{c}"' for c in carried_cols)
         moved["files"] += con.execute(
-            "INSERT OR IGNORE INTO files (path, size, mtime_ms, bytes_read, lines_read, rewrites, "
-            "last_harvest_ts) SELECT ?, size, mtime_ms, bytes_read, lines_read, rewrites, "
-            "last_harvest_ts FROM files WHERE path = ?", (new_path, old[0])).rowcount
-        moved["transcripts"] += con.execute(
-            "UPDATE sessions SET transcript_path = ? WHERE session_id = ?",
-            (new_path, sid)).rowcount
+            f"INSERT OR IGNORE INTO files (path, {listed}) "
+            f"SELECT ?, {listed} FROM files WHERE path = ?", (new_path, old_path)).rowcount
+        if own:
+            moved["transcripts"] += con.execute(
+                "UPDATE sessions SET transcript_path = ? WHERE session_id = ? "
+                "AND transcript_path IS NOT ?", (new_path, own, new_path)).rowcount
     return moved
 
 
@@ -1099,9 +1183,38 @@ def import_(path, into=None, dry_run=False):
     from c4x import store as _s
     _s.invalidate()
 
+    # AFTER THE CACHES ARE CLEARED, because this asks the store what it now holds and the link map
+    # is cached for 45 seconds like everything else.
+    report["chains"] = chains_landed(manifest)
+
     report["app_state"] = restore_app_state(path, mapping)
     report["mirror"] = verify_mirror(path, mapping=mapping)
     return report
+
+
+def chains_landed(manifest):
+    """Did each chat the export carries fold into ONE chat on this machine?
+
+    THE ROW SIDE OF THE MIRROR, which had no check at all. `verify_mirror` compares files on disk
+    and reads not one store row, and the per-table insert counts cannot answer this: a link that
+    was replaced reports zero inserted, and a store whose build has no `session_links` table at all
+    is skipped with a note. So an import could leave a resumed chat as two rows on the page, under
+    two names, and every report said the import was complete.
+
+    A chat that folds under a DIFFERENT head here is not a failure: the destination may hold a
+    later resume of the same conversation, which is the chat growing rather than splitting. The
+    failure is the carried members disagreeing with each other, which is the one shape no true
+    answer has.
+    """
+    from c4x import store
+    landed, split = {}, {}
+    for head, members in (manifest.get("chains") or {}).items():
+        heads_here = {store.chat_head(m) for m in members}
+        if len(heads_here) == 1:
+            landed[head] = {"head_here": next(iter(heads_here)), "sessions": len(members)}
+        else:
+            split[head] = {"carried": sorted(members), "heads_here": sorted(heads_here)}
+    return {"landed": landed, "split": split}
 
 
 def restore_app_state(path, mapping):
@@ -1359,7 +1472,6 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
                        AND a.transcript_path IS NOT NULL""",
                 ids + ids).fetchall()]
         shares_a_file = {entry["cwd"] for entry in shared_transcripts}
-        marks = ",".join("?" * len(ids))
 
         # THE ROW LAYER HAD NO ACCEPTANCE CHECK. `appeared` closes the export/delete race at
         # SESSION granularity, and the DELETEs below run at delete time against a backup taken at
@@ -1415,15 +1527,8 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
         # is neither compared nor deleted: the export above carried nothing for it, so there is
         # nothing in the backup for it to match.
         by_session = tables_in(con, BY_SESSION)
-        for table in by_session:
-            _moved(table, f"WHERE session_id IN ({marks})", ids)
-        for table in BY_COMPACTION:
-            _moved(table, f"""WHERE compaction_uuid IN
-                    (SELECT uuid FROM compactions WHERE session_id IN ({marks}))""", ids)
-        for table in BY_TRANSCRIPT:
-            _moved(table, f"""WHERE path IN
-                    (SELECT transcript_path FROM sessions WHERE session_id IN ({marks})
-                      AND transcript_path IS NOT NULL)""", ids)
+        for table in by_session + BY_COMPACTION + BY_TRANSCRIPT:
+            _moved(table, *where_for(table, ids))
         if moved:
             raise ValueError(
                 "the store changed while the backup was being written, so the backup no longer "
@@ -1436,20 +1541,37 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
         removed = {}
         # Survivors before compactions, and everything before sessions: no foreign keys means
         # nothing cleans up after a half-finished delete, so the order is the safety.
-        for table in BY_COMPACTION:
-            removed[table] = con.execute(
-                f"""DELETE FROM {table} WHERE compaction_uuid IN
-                    (SELECT uuid FROM compactions WHERE session_id IN ({marks}))""", ids).rowcount
-        for table in BY_TRANSCRIPT:
-            # The offset row goes too. Left behind, the transcript is skipped forever even after
-            # the exclusion is lifted, which would make "include" quietly do nothing.
-            removed[table] = con.execute(
-                f"""DELETE FROM {table} WHERE path IN
-                    (SELECT transcript_path FROM sessions WHERE session_id IN ({marks})
-                      AND transcript_path IS NOT NULL)""", ids).rowcount
-        for table in by_session:
-            removed[table] = con.execute(
-                f"DELETE FROM {table} WHERE session_id IN ({marks})", ids).rowcount
+        #
+        # THE TRANSCRIPT OFFSETS GO BEFORE THE SESSION ROWS, and now that they are found through
+        # the session rows they HAVE to: `where_for` reads `sessions` to know which ids to look for
+        # in a path, so deleting the session rows first would leave every offset behind. Left
+        # behind, the transcript is skipped forever even after the exclusion is lifted, which would
+        # make "include" quietly do nothing.
+        #
+        # AND THE OFFSET OF A FILE THIS DELETE KEEPS STAYS, which is the same rule read the other
+        # way. A transcript a surviving session is also in is kept on disk, and the directory it
+        # sits in is left capturing precisely because it holds that file, so removing its offset
+        # hands the next harvest a file it has never seen: it re-reads it from byte zero and puts
+        # every session the delete just removed back. Measured by an independent reviewer on a copy
+        # of this store, deleting one project and running one harvest pass twice, once with this
+        # clause and once without: with it the pass read 0 bytes and restored nothing, without it
+        # the same pass re-read 9,108 lines and restored 2 sessions, 4,140 turns, 2,943 messages
+        # and 1,574 tool calls. The kept offsets are listed in the report beside the file they
+        # belong to, and read back from the store rather than assumed.
+        kept_paths = sorted({entry["transcript"] for entry in shared_transcripts
+                             if entry.get("transcript")})
+        for table in BY_COMPACTION + BY_TRANSCRIPT + by_session:
+            where, params = where_for(table, ids)
+            if table in BY_TRANSCRIPT and kept_paths:
+                where += f" AND path NOT IN ({','.join('?' * len(kept_paths))})"
+                params = list(params) + kept_paths
+            removed[table] = con.execute(f"DELETE FROM {table} {where}", params).rowcount
+        # READ BACK, NOT ASSUMED. This was built from `shared_transcripts`, so it said what the
+        # delete MEANT to keep: an independent reviewer disabled the clause above and got a report
+        # naming a kept offset that had just been deleted. A report of intent is worth nothing on
+        # the one line a user would check.
+        kept_offsets = [path for path in kept_paths
+                        if con.execute("SELECT 1 FROM files WHERE path = ?", (path,)).fetchone()]
         # WHAT STILL LIVES IN THIS DIRECTORY, asked AFTER the rows are gone, so the answer is
         # about survivors rather than about the set being deleted. It decides both of the
         # working-directory clauses in this function's docstring.
@@ -1514,7 +1636,7 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
         return _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots,
                                  ids, cwds, unlocated, survivors, slug_survivors, surviving_norm,
                                  surviving_slug_set, removed, excluded_cwds, still_captured,
-                                 shared_transcripts, appeared)
+                                 shared_transcripts, appeared, kept_offsets)
     except Exception as exc:
         raise AfterTheRowsWereRemoved(
             f"{exc}. THE ROWS ARE ALREADY GONE: the store transaction committed before this ran, "
@@ -1525,7 +1647,7 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
 def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots,
                       ids, cwds, unlocated, survivors, slug_survivors, surviving_norm,
                       surviving_slug_set, removed, excluded_cwds, still_captured,
-                      shared_transcripts, appeared):
+                      shared_transcripts, appeared, kept_offsets=()):
     """The half that runs after the rows are committed. Separate so its failures are labelled."""
     from c4x import appstate
 
@@ -1533,6 +1655,10 @@ def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots
     # files still there, which one import of the backup puts back; the other order leaves rows
     # pointing at transcripts that are not there any more.
     rows = app_state_rows(backup, with_blobs=False)
+    # The stems of transcripts a surviving session is also in. A snapshot of one of those files
+    # holds that session's history too, and the backup does not carry snapshots. READ BEFORE THE
+    # PREDICATE BELOW, which now decides the file itself on the same evidence.
+    shared_stems = {transcript_key(entry["transcript"]) for entry in shared_transcripts}
 
     def _belongs_to_a_survivor(row):
         """Per ROW, and each kind by the key it is actually filed under.
@@ -1555,6 +1681,19 @@ def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots
                 return appstate.normalised(row["cwd"]) in surviving_norm
             except (TypeError, ValueError):
                 return False
+        if row["kind"] == appstate.TRANSCRIPT:
+            # A TRANSCRIPT FILE A SURVIVING SESSION IS ALSO IN. One file can hold two sessions'
+            # records, and when the second one belongs to a project this delete is not touching,
+            # removing the file takes that project's conversation with it. Measured on this store:
+            # 7 files are claimed by more than one session row and 1 of those pairs spans two
+            # working directories.
+            #
+            # The delete already KNEW this. `shared_transcripts` is computed before the rows are
+            # removed and spent on two other decisions, the exclusion (a directory that shares a
+            # file keeps being captured) and the snapshots (a shared stem's snapshots are left
+            # alone), and the file itself was purged anyway. The backup still holds it, so the
+            # acceptance rule was never broken; the survivor's conversation was gone all the same.
+            return transcript_key(row["relpath"]) in shared_stems
         return False
 
     shared_kept = [{"relpath": row["relpath"], "kind": row["kind"]}
@@ -1562,9 +1701,6 @@ def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots
     rows = [row for row in rows if not _belongs_to_a_survivor(row)]
     purged = appstate.purge(rows, cwds)
 
-    # The stems of transcripts a surviving session is also in. A snapshot of one of those files
-    # holds that session's history too, and the backup does not carry snapshots.
-    shared_stems = {transcript_key(entry["transcript"]) for entry in shared_transcripts}
     # WHAT ARRIVED AFTER THE CAPTURE. `appeared_since_backup` names sessions; this names FILES.
     # A transcript or tool-output directory written for one of these sessions between the app-state
     # capture and the purge is not in the backup, so the purge leaves it, correctly, and nothing
@@ -1619,6 +1755,11 @@ def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots
             # Transcript files this project shared with another working directory. The harvester
             # abandons a file, not a session, so these are why a directory can be left capturing.
             "shared_transcripts": shared_transcripts,
+            # And the offsets kept with them, READ BACK FROM THE STORE after the removal rather
+            # than inferred from the intention: these are the rows a delete did not remove, because
+            # the file they describe is still on disk and a file with no offset is one harvest
+            # reads again from the beginning.
+            "kept_offsets": sorted(kept_offsets),
             "exported_sessions": manifest["sessions"],
             "removed_files": len(purged["removed"]), "removed_bytes": purged["bytes"],
             "kept_files": purged["kept"], "refused_files": purged["refused"],
@@ -1842,7 +1983,8 @@ def main(argv=None):
     if args.command == "export":
         manifest = export(args.project, args.out)
         print(f"  wrote {args.out}")
-        print(f"  {manifest['sessions']} session(s), verified")
+        print(f"  {manifest.get('chats', manifest['sessions'])} chat(s) over "
+              f"{manifest['sessions']} CLI session(s), verified")
         for cwd in manifest["cwds"]:
             print(f"    working directory  {cwd}")
         for table, n in manifest["counts"].items():
@@ -1858,6 +2000,18 @@ def main(argv=None):
             print(f"    SKIPPED  {skip['path']}: {skip['why']}")
         for big in state["too_large"]:
             print(f"    TOO LARGE  {big['path']}: {big['bytes']:,} bytes")
+        # COUNTED FIRST AND NAMED A FEW. Most chats in an old project were CLI sessions the desktop
+        # app never had a record for: one export of a 125 chat project named all 125, which is a
+        # wall of ids rather than a warning. The whole list stays in the manifest.
+        missing_names = state.get("chats_without_record") or []
+        if missing_names:
+            print(f"    NO DESKTOP RECORD  {len(missing_names)} of "
+                  f"{manifest.get('chats', manifest['sessions'])} chat(s): "
+                  "the app has no record here for them, so the destination app will not list them")
+            for head in missing_names[:5]:
+                print(f"      {head}")
+            if len(missing_names) > 5:
+                print(f"      and {len(missing_names) - 5} more, all of them in the manifest")
         return 0
     if args.command == "import":
         report = import_(args.path, into=args.into, dry_run=args.dry_run)
@@ -1903,6 +2057,13 @@ def main(argv=None):
             print(f"    REFUSED  {refused['relpath']}: {refused['why']}")
         for record in state.get("desktop") or []:
             print(f"    desktop record  {record['path']}")
+        chains = report.get("chains") or {}
+        for head, landed in sorted((chains.get("landed") or {}).items()):
+            here = "" if landed["head_here"] == head else f", now under {landed['head_here']}"
+            print(f"    chat {head} folds {landed['sessions']} session(s) here{here}")
+        for head, split in sorted((chains.get("split") or {}).items()):
+            print(f"    CHAT SPLIT  {head}: its sessions are in {len(split['heads_here'])} chats "
+                  "here, so the page will show it more than once")
         return _print_mirror(report.get("mirror") or {})
     if args.command == "verify-mirror":
         return _print_mirror(verify_mirror(args.path, into=args.into))
@@ -1953,6 +2114,9 @@ def main(argv=None):
         for entry in result.get("shared_transcripts") or []:
             print(f"    shares {entry['transcript']} with {entry['with_cwd']}, "
                   "and the harvester skips whole files")
+        for path in result.get("kept_offsets") or []:
+            print(f"    KEPT  {path}, and its harvest offset with it, because a session this "
+                  "delete did not touch is in that file")
         if result.get("unlocated"):
             print("  NO WORKING DIRECTORY RECORDED for any of these sessions, so no files were "
                   "purged and no exclusion could be written that harvest would ever match")

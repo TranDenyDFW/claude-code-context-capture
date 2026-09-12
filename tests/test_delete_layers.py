@@ -465,26 +465,57 @@ class TestTheDesktopRecord:
         assert gone == {str(record)}, (
             f"the delete removed more than the one record it carried: {sorted(gone)}")
 
-    def test_one_row_naming_two_files_is_refused_rather_than_removing_both(self, machine):
-        """The glob spans every account and organisation pair, the backup holds ONE row.
+    def test_one_row_naming_two_files_removes_the_copies_whose_bytes_it_holds(self, machine):
+        """Two files, one name, and the hash decides each of them on its own.
 
-        That row cannot say which of two files it describes, and removing a file the backup does
-        not separately hold is the one thing this delete promises never to do.
+        The glob spans every account and organisation pair, and now every records root, so two
+        matches are two paths to the SAME record: a packaged install keeping a second root, or a
+        pair the app has stopped filing under.
+
+        This refused outright, on the argument that the backup's single row cannot say which of two
+        files it describes. It does not have to. A purge removes a file only when the bytes on the
+        disk hash to that row and KEEPS and names any that do not, so the refusal protected nothing
+        and left the real record in place, which on a page that reads every root keeps the deleted
+        chat listed under its old name.
         """
         from c4x import appstate
         source = machine.sessions / FOREIGN_ACCOUNT / ORG / DESKTOP_FILE
         twin = machine.sessions / ACCOUNT / ORG
         twin.mkdir(parents=True, exist_ok=True)
         (twin / DESKTOP_FILE).write_bytes(source.read_bytes())
+        blob = source.read_bytes()
+        marked = appstate.rebase_marked(blob, appstate.DESKTOP_CWD_FIELDS) or blob
         row = {"kind": appstate.DESKTOP, "relpath": DESKTOP_FILE, "cwd": ALPHA,
-               "sha256": "x", "rebased_sha256": "x"}
+               "sha256": appstate.sha256_bytes(blob),
+               "rebased_sha256": appstate.sha256_bytes(marked)}
 
         paths, refusal = appstate.purge_paths(row, ALPHA, str(machine.sessions))
 
-        assert paths == []
-        assert "more than one record under that name" in refusal
-        assert str(source) in refusal and str(twin / DESKTOP_FILE) in refusal
-        assert source.exists() and (twin / DESKTOP_FILE).exists()
+        assert refusal is None
+        assert sorted(str(p) for p in paths) == sorted(
+            [str(source), str(twin / DESKTOP_FILE)])
+        appstate.purge([row], [ALPHA], str(machine.sessions))
+        assert not source.exists() and not (twin / DESKTOP_FILE).exists()
+
+    def test_a_second_copy_the_backup_cannot_restore_is_kept_and_named(self, machine):
+        """The other half, and the reason the refusal was never what protected anything."""
+        from c4x import appstate
+        source = machine.sessions / FOREIGN_ACCOUNT / ORG / DESKTOP_FILE
+        twin = machine.sessions / ACCOUNT / ORG
+        twin.mkdir(parents=True, exist_ok=True)
+        (twin / DESKTOP_FILE).write_bytes(b'{"cliSessionId": "s0-0", "title": "something else"}')
+        blob = source.read_bytes()
+        marked = appstate.rebase_marked(blob, appstate.DESKTOP_CWD_FIELDS) or blob
+        row = {"kind": appstate.DESKTOP, "relpath": DESKTOP_FILE, "cwd": ALPHA,
+               "sha256": appstate.sha256_bytes(blob),
+               "rebased_sha256": appstate.sha256_bytes(marked)}
+
+        report = appstate.purge([row], [ALPHA], str(machine.sessions))
+
+        assert not source.exists(), "the copy the backup holds was not removed"
+        assert (twin / DESKTOP_FILE).exists(), "a copy the backup cannot put back was removed"
+        assert any(str(twin / DESKTOP_FILE) in kept["path"] for kept in report["kept"]), (
+            report["kept"])
 
 
 class TestAStoredPathIsNotThisPlatformsPath:
@@ -1029,6 +1060,100 @@ class TestALabelThatNamesTwoProjects:
     # rather than as live behaviour, and the test that reached it by defeating the guards was
     # removed with them, because a test that can only pass by disabling two refusals is
     # asserting something the code no longer does.
+
+class TestATranscriptASurvivingSessionIsAlsoIn:
+    """One file can hold two sessions' records, and the second one can be another project's.
+
+    The delete already computed this. `shared_transcripts` is read before the rows are removed and
+    spent on two decisions, the exclusion and the snapshots, and the file itself was purged anyway,
+    so deleting one project took a project the user had not asked about with it. Measured on the
+    author's store: 7 transcript files are claimed by more than one session row, 1 of those pairs
+    across two working directories.
+
+    The backup still held the file, so the acceptance rule was never broken. The survivor's
+    conversation was gone all the same, and only an import of the other project's backup would have
+    brought it back.
+    """
+
+    @staticmethod
+    def share(store_at):
+        """Give a session of another project the same transcript file as one of ALPHA's."""
+        con = sqlite3.connect(str(store_at))
+        con.execute("UPDATE sessions SET transcript_path = ? WHERE session_id = 's1-0'",
+                    (r"C:\t\s0-0.jsonl",))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+
+    def test_the_shared_file_is_kept_and_the_rest_go(self, store_at, machine, tmp_path):
+        self.share(store_at)
+        projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        assert (machine.base / "s0-0.jsonl").exists(), (
+            "a surviving project's conversation was deleted with this one")
+        assert not (machine.base / "s0-1.jsonl").exists(), (
+            "keeping the shared file kept everything else too")
+
+    def test_the_kept_file_is_named_in_the_report(self, store_at, machine, tmp_path):
+        self.share(store_at)
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        kept = result["shared_with_surviving_sessions"]
+        assert any(entry["relpath"] == "s0-0.jsonl" for entry in kept), kept
+        assert not result["still_here"], (
+            "a file this delete decided to keep is not a delete that did not finish")
+
+    def test_the_kept_file_keeps_its_offset_so_the_delete_is_not_undone(self, store_at, machine,
+                                                                        tmp_path):
+        """Otherwise one harvest pass puts the whole deleted project back.
+
+        A directory that shares a transcript file is left CAPTURING on purpose, and harvest reads a
+        path with no `files` row from byte zero. So a delete that keeps the file and removes its
+        offset hands the next pass a file it has never seen. An independent reviewer ran exactly
+        that on a copy of the author's store: 1,030 turns and 291,628 messages came back under a
+        session the delete had removed, one pass later.
+        """
+        self.share(store_at)
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            kept = con.execute("SELECT COUNT(*) FROM files WHERE path = ?",
+                               (r"C:\t\s0-0.jsonl",)).fetchone()[0]
+            others = con.execute("SELECT COUNT(*) FROM files WHERE path LIKE ?",
+                                 (r"C:\t\s0-1%",)).fetchone()[0]
+        finally:
+            con.close()
+        assert kept == 1, "the offset of a file this delete kept was removed anyway"
+        assert others == 0, "and the offsets of the files it did remove are gone"
+        assert result["kept_offsets"] == [r"C:\t\s0-0.jsonl"], result["kept_offsets"]
+
+    def test_the_report_names_an_offset_that_is_there_and_not_one_it_meant_to_keep(
+            self, store_at, machine, tmp_path):
+        """A report of intent is worth nothing on the one line a user would check.
+
+        This was built from the shared transcripts, so it said what the delete MEANT to keep. An
+        independent reviewer disabled the clause that keeps them and still got a report naming a
+        kept offset that had just been deleted. Here the row is missing before the delete runs, so
+        a report built from intent names it and a report read back from the store does not.
+        """
+        self.share(store_at)
+        con = sqlite3.connect(str(store_at))
+        con.execute("DELETE FROM files WHERE path = ?", (r"C:\t\s0-0.jsonl",))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        assert result["kept_offsets"] == [], (
+            "the report named an offset this store does not hold")
+        assert result["shared_with_surviving_sessions"], (
+            "and the file itself is still kept and named")
+
+    def test_nothing_is_kept_when_the_file_is_this_projects_alone(self, store_at, machine,
+                                                                  tmp_path):
+        """The gate, with the sharing removed: otherwise it keeps every transcript for free."""
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        assert not (machine.base / "s0-0.jsonl").exists()
+        assert [entry for entry in result["shared_with_surviving_sessions"]
+                if entry["kind"] == "transcript"] == []
+
 
 class TestTheExclusionsUnitIsTheFile:
     def test_a_directory_sharing_a_transcript_keeps_being_captured(
