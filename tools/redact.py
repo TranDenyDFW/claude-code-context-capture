@@ -17,6 +17,15 @@ way, which is the whole argument.
     C4X_DB=tmp/demo-store.db python -m c4x.api   # the dashboard, over the copy
     python tools/screenshots.py                  # photograph it
 
+AND ONE THING ON THE PAGE IS NOT IN THE STORE. A session's title is now read from the desktop app's
+own record files at render time, so it is not in the database this tool rewrites and the gate below
+cannot see it: rendered on the machine those records live on, the real chat names would come back
+over the redacted ones with every check still green. The fix keeps the argument above rather than
+breaking it, because the fact goes INSIDE the artifact: every copy is stamped with a
+`redacted_store`
+table, `c4x/store.py` suppresses the overlay whenever it sees one, and the pass below refuses to
+report success on a copy that lost the stamp. Nothing has to be remembered at screenshot time.
+
 The mapping is DETERMINISTIC and rank-ordered, so the same store always produces the same names and
 the charts keep their shape: the biggest project is always `project-a`. Regenerating the images
 after a UI change therefore produces images that differ only where the UI changed.
@@ -331,6 +340,34 @@ def stable_id(value: str) -> str:
                % 100000)
 
 
+# The store package reads this table name and skips any render-time overlay when it is present.
+# Keep the two in step: c4x/store.py REDACTION_MARK.
+REDACTION_MARK = "redacted_store"
+
+
+def stamp_as_redacted(db):
+    """Mark the copy as redacted, inside the copy.
+
+    NOT EVERYTHING ON THE PAGE COMES FROM THE STORE, which is what this closes. The session title
+    is read from the desktop app's own record files at render time, so it is not in the database
+    this tool rewrites and the gate below cannot see it: point the dashboard at this copy on the
+    machine the records live on and the real chat names come back, with every check still green.
+
+    The docstring at the top of this file rules out the obvious fix in as many words, and it is
+    right to: a render-time switch is "applied wherever a path becomes display text ... and missing
+    one leaks". So the copy says what it is, and the reader decides. Nothing has to be remembered
+    at screenshot time, and a copy handed to someone else carries the fact with it.
+    """
+    db.execute(f"DROP TABLE IF EXISTS {REDACTION_MARK}")
+    db.execute(f"CREATE TABLE {REDACTION_MARK} (tool TEXT NOT NULL, note TEXT NOT NULL)")
+    db.execute(
+        f"INSERT INTO {REDACTION_MARK} (tool, note) VALUES (?, ?)",
+        ("tools/redact.py",
+         "This store is a redacted copy. c4x/store.py suppresses render-time overlays that read "
+         "this machine's files, because those are not in this file and cannot be redacted by "
+         "rewriting it."))
+
+
 def leaks(db, needles):
     """Every place a real fragment survived. This is the gate, not a courtesy check.
 
@@ -400,6 +437,7 @@ def main(argv=None):
 
     maps = build_maps(target)
     touched = apply(target, maps)
+    stamp_as_redacted(target)
     target.commit()
 
     # What must not survive: every real project path, every drive letter seen in one, the user
@@ -422,7 +460,17 @@ def main(argv=None):
     needles |= {n.strip() for n in args.needles.split(",") if n.strip()}
 
     surviving = leaks(target, sorted(needles))
+    # Part of the gate, not a courtesy check. Without the mark the copy is scrubbed but still
+    # picks up this machine's live chat titles the moment it is rendered here, which is the
+    # failure this whole pass exists to prevent.
+    marked = bool(target.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (REDACTION_MARK,)).fetchone())
     target.close()
+    if not marked:
+        print(f"REFUSING: the copy carries no {REDACTION_MARK} table, so a render on this machine "
+              f"would show real session titles over the redacted ones")
+        return 3
 
     for name, n in sorted(touched.items()):
         if n:

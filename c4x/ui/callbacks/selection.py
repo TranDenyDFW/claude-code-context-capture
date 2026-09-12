@@ -11,6 +11,7 @@ from dash import Input, Output, State, callback, html, no_update
 from dash.exceptions import PreventUpdate
 
 from c4x.store import (
+    chat_head,
     cohort_options,
 )
 from c4x.theme import (
@@ -75,7 +76,10 @@ def _finding_clicked(active_cell, rows):
     from c4x.ui.layout import TAB_IDS
     if target not in TAB_IDS:
         raise PreventUpdate
-    return (session_id or no_update), TAB_IDS.index(target)
+    # A finding's row carries the CLI session that wrote it, which for a resumed chat can be a
+    # superseded one. The dropdown clears a value that is in none of its options, so the head is
+    # what gets selected; it is also the row the reader can find in the list.
+    return (chat_head(session_id) or no_update), TAB_IDS.index(target)
 
 
 @callback(
@@ -91,7 +95,7 @@ def _pick_from_table(selected_rows, table_data):
     i = selected_rows[0]
     if not (0 <= i < len(table_data)):
         raise PreventUpdate
-    return table_data[i].get("session_id")
+    return chat_head(table_data[i].get("session_id"))
 
 @callback(
     Output("live-context", "children"),

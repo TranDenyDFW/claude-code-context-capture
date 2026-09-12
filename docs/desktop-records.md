@@ -65,3 +65,73 @@ the only two an import rewrites. Everything else is carried byte for byte.
 `enabledMcpjsonServers`, `disabledMcpjsonServers`, `mcpContextUris`. No value inside is a
 filesystem path, so only the KEY is rebased. `hasTrustDialogAccepted` is why an imported project
 otherwise asks to be trusted again on first open.
+
+## 5. One chat is several sessions, and only the transcripts say which
+
+Everything below was measured on 2026-09-11, on a test laptop with 73 sessions and 16 records and
+on the author's machine with 1,110 transcripts and 170 records. The commands are named in
+`.md/20260911-chat-grouping-scope.md` and the plan that superseded it.
+
+**The record filename is the chat.** `local_<uuid>.json` is stable across resumes; `cliSessionId`
+inside it is only the chat's CURRENT session and is overwritten in place. One record was seen
+rewritten across five different session ids while keeping its name. `priorCliSessionIds`, the
+field that would list the earlier ones, was present on 1 record in 16 and 1 in 185.
+
+**A resume copies the transcript.** Claude Code starts a new session and writes a new transcript
+holding the previous one's records with the SAME message uuids and the new `sessionId`, then
+appends. Successive transcripts of one chat shared 808 of 823, 1296 of 1304, 1349 of 1418 and 1680
+of 1800 uuids. So the earlier sessions are prefixes of the newest, and the chain is reconstructible
+from overlap alone: A is a prefix of B when B is larger and holds at least 90 percent of A's uuids.
+That rule reproduced the record's own `priorCliSessionIds` order exactly.
+
+**Nothing else links them.** Transcripts carry no parent-session field: every occurrence of an
+earlier session id in a later transcript was content (shell commands, tool output). The
+transcript's `bridge-session` record carries a `cse_...` id; the record's `bridgeSessionIds` are
+`session_...` ids; the two never match. The app's IndexedDB and LevelDB name record files, not
+session ids.
+
+**Forks copy too, and are separate chats.** A fork has its own record with `forkedFromSessionId`
+naming the parent RECORD. Overlap with the parent ranged from 0.0 to 1.0 across 23 forks, so
+overlap cannot tell a resume from a fork. The record can, for the fork's CURRENT session: a
+session with a record is a chat and is never folded. For everything else the copied lines can:
+**a resume rewrites every copied line's `sessionId` to its own; a fork copies them verbatim,
+the parent's `sessionId` included.** Measured over 17 links on one store, every resume held its
+predecessor's records under its own id (100 percent) and every fork held them under the
+parent's (0 percent). So a session succeeds another only when it holds the other's records
+natively, only when it is the later transcript (first timestamp, then size, then id, so no chain
+can loop), only when it holds something the other wrote itself (a parent-chat session shares a
+fork's copied history but none of the fork's own work), and not when it reached those records
+through a fork (the fork's first transcript still names the parent for them, and the candidate
+holds that fork's own records). Rank among what is left: copies before continuations, the highest
+overlap, a non-fork record holder, then a record-less session, then a fork's record holder.
+
+**Which session produced a copied row.** The session the line names when the copies agree and
+that session's transcript is gone (two forks of a deleted parent still say who wrote the parent's
+lines); else the one transcript that holds it natively; else the earliest-starting transcript
+that holds it, since a copy can only land in a session that started later, and this is also
+right for a fork taken early from a parent that kept growing, where "the smaller transcript"
+would hand the parent's rows to the fork. Harvest reads transcripts in first-timestamp order and
+refuses to move a row between sessions; `--backfill-chains` repairs stores written before that
+rule.
+
+**Where a session lives.** A session can change directory; its transcript does not move, and
+the slug directory it sits in is what export, delete, `memory/` and the trust entry are keyed
+by. So `sessions.cwd` is the first cwd in the transcript whose slug IS the file's directory (a
+fork of a parent that had changed directory begins with the parent's old lines and finds its
+home further down), `project_slug` is that directory's name, and `transcript_path` is the
+session's own top-level file, never a subagent file under `<session>/` that names it. Measured
+on 1,050 top-level transcripts: the rule locates the directory for 1,050, "the last cwd seen"
+for 994; it matched the app's own record cwd for 47 of 47 record holders against 43 of 47. The
+same pass that writes links repairs these three columns on older rows (59 directories and 73
+paths on the author's store).
+
+**Two roots, both read.** A Microsoft Store install keeps its state under
+`%LOCALAPPDATA%\Packages\Claude_<publisher>\LocalCache\Roaming\Claude` and can leave older
+records under `%APPDATA%\Claude`; on most machines the two names are one directory. Harvest and
+the page both read every distinct root (`claude_appdata_roots()`), so a record is a record
+wherever the app left it; imports and purges use the root the app writes to (`claude_appdata()`,
+chosen by `config.json`, record count and newest mtime). Measured on the test laptop: 16
+records in the container, 1 under `%APPDATA%`.
+
+The store table is `session_links`; its schema comment in `tools/harvest.mjs` carries the same
+facts beside the code that uses them.

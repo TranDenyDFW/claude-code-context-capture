@@ -94,7 +94,10 @@ def render_tab(tab_id, session=None, scope="main", cohort=None):
     if _via == API:
         return _get(f"/api/tab/{tab_id}",
                     {"session": session, "scope": scope, "cohort": cohort})
+    from c4x import store
     from c4x.cli import extract
+    # The same resolution the API applies, so both backends name the chat in `session`.
+    session = store.chat_head(session)
     pane = _app()._render_tab(ids.index(tab_id), session, scope, cohort)
     payload = extract.describe(pane)
     payload.update({"tab": tab_id, "session": session, "scope": scope, "cohort": cohort})
@@ -112,7 +115,11 @@ def render_compare(kind, target, session=None, cohort=None, scope="main"):
                        {"session": session, "scope": scope, "cohort": cohort,
                         "compare_with": target, "compare_kind": kind})
     else:
+        from c4x import store
         from c4x.cli import extract
+        session = store.chat_head(session)
+        if kind == "session":
+            target = store.chat_head(target)
         payload = extract.describe(_app()._cmp_render(kind, target, session, cohort, scope))
     payload.update({"tab": "tab-compare", "kind": kind, "target": target, "session": session,
                     "scope": scope, "cohort": cohort})

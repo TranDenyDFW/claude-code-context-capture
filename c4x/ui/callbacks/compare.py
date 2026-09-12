@@ -11,6 +11,7 @@ from c4x.panels import (
     selection_metrics,
 )
 from c4x.store import (
+    chat_head,
     cohort_options,
     population_label,
     session_name,
@@ -44,6 +45,11 @@ def _cmp_render(kind, target, session_id, cohort, scope):
     if not target:
         return html.Div("Pick something to compare against.", style=SECTION_NOTE)
     scope = scope or "main"
+    # Each arm names a CHAT. A superseded session id, arriving from a stale picker value or a
+    # bookmarked comparison, resolves to its chain head so the arm measures the whole chat.
+    session_id = chat_head(session_id)
+    if kind != "cohort":
+        target = chat_head(target)
     # NAMED, not just counted, and only on this tab.
     #
     # Both arms said "1 session, main thread only", which is true of either one and identifies

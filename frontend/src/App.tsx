@@ -128,6 +128,23 @@ export default function App() {
     // already visited is instant; only a tab being seen for the first time shows the skeleton.
   })
 
+  // A SELECTION NAMES A CHAT. The desktop app resumes a chat by starting a new CLI session, and
+  // the server folds the older ones into the newest; a superseded id can still arrive here from a
+  // bookmarked URL or from a row in a table that carries the id that wrote it. The server answers
+  // with the chat it resolved to in `session`, so adopt it: the header chip and the URL then name
+  // the row the reader can find in the list, instead of an id that appears nowhere. Only when the
+  // two differ, which is what keeps this from re-running itself.
+  // Both in the dependency list. A second click on a row carrying an old id finds the resolved
+  // pane already cached, so `pane.data.session` does not change and only the selection does; the
+  // guard above keeps a matching pair from re-running this.
+  useEffect(() => {
+    const resolved = pane.data?.session
+    if (typeof resolved !== 'string' || !resolved) return
+    if (!selection.session || resolved === selection.session) return
+    setSelection((was) => ({ ...was, session: resolved }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pane.data?.session, selection.session])
+
   /**
    * Clicking a row that identifies a session selects it, everywhere.
    *

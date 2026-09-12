@@ -4,7 +4,7 @@ Two selections measured by the same function, so a difference cannot be an artef
 """
 from dash import dcc, html
 
-from c4x.store import cohort_named, cohort_sessions, q
+from c4x.store import chat_head, chat_members, cohort_named, cohort_sessions, q
 from c4x.theme import FIELD, MUTED, SECTION_NOTE
 from c4x.ui.header import selector_options
 
@@ -24,11 +24,14 @@ def default_arm_b(session_id=None, cohort=None):
         # Asked for and unresolvable: an empty arm, not the whole store. See store.cohort_named.
         where += " AND 1 = 0"
     if session_id:
-        where += " AND session_id <> ?"
-        args.append(session_id)
+        # Every session of arm A's chat, not just the id in hand: a resumed chat's older sessions
+        # would otherwise be offered as "the other arm" and compare a chat with its own prefix.
+        members = chat_members(session_id)
+        where += f" AND session_id NOT IN ({','.join('?' * len(members))})"
+        args.extend(members)
     df = q(f"""SELECT session_id FROM turns WHERE 1=1 {where}
                 GROUP BY session_id ORDER BY MAX(ts) DESC LIMIT 1""", tuple(args))
-    return None if df.empty else df.iloc[0]["session_id"]
+    return None if df.empty else chat_head(df.iloc[0]["session_id"])
 
 
 def compare_layout(session_id=None, scope="main", cohort=None):

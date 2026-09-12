@@ -36,6 +36,16 @@ So an entry is served when EITHER the store has not moved since it was built, OR
 MAX_AGE_S. The second clause is the one that does the work here, and it is a real trade, stated
 exactly: a reader can see a pane up to five seconds behind the store.
 
+AND A HIT IS NO LONGER QUITE FREE, which this paragraph exists to stop anyone claiming. The version
+is built BEFORE the lookup, so a hit pays for it too, and the version now includes a fingerprint of
+the desktop app's record files because two columns of the session frame are read from there rather
+than from the database. Measured on this machine: the bare stamp is 0.019 ms and the stamp with the
+fingerprint is 1.78 ms. That is the price of a renamed chat showing its new name instead of its old
+one, it is paid once per request rather than once per pane, and it is about a thousandth of the
+1,581 ms build it avoids. It was 12.6 ms in the first draft, because resolving the records root
+globbed every candidate directory on every call; that is fixed at `store.claude_appdata`, and if
+this number ever climbs back, look there first.
+
 Five, because that is the dashboard's own refresh interval, so the page beside it is already up to
 five seconds behind; and because `store.py` caches `session_rows()` for FORTY-FIVE seconds, which
 means this app has always been willing to show data an order of magnitude older than this. Nothing
@@ -67,12 +77,25 @@ _misses = 0
 _evictions = 0
 
 
-def stamp(db_path):
+def stamp(db_path, extra=None):
     """A value that changes whenever the store does. Microseconds, no query, no connection.
 
     Both the database and its write-ahead log are read: in WAL mode a fresh turn lands in the -wal
     file and the main database's mtime does not move for some time afterwards, so watching only the
     database would serve stale panes for exactly as long as the harvester was busy.
+
+    NOT EVERY INPUT TO A PANE IS IN THE DATABASE, which is what `extra` is for. Two columns of the
+    session frame are read from the desktop app's record files rather than from the store: the
+    `\\archived` marker and the chat's title. A rename in the app rewrites one JSON file and writes
+    no database, so it moved nothing this function watched, and since `get` serves an entry whose
+    version MATCHES regardless of age, on a quiet store the old name could be served indefinitely
+    rather than for the five seconds promised above.
+
+    `extra` is a precomputed value rather than a path this function would walk itself, and that is
+    deliberate: the walk belongs to `store.records_fingerprint`, which needs the same answer for
+    its own cache, and computing it in one place means one walk per request rather than two. It
+    defaults to None, so every existing caller and every test that stamps a bare database keeps
+    the value it had.
     """
     # The None is deliberate and documented below, so the type says so rather than the reader
     # having to reach the except clause to find out.
@@ -86,6 +109,8 @@ def stamp(db_path):
             # is not this function's business to raise about it: the caller is about to fail more
             # informatively than "cache could not stat a file".
             parts.append(None)
+    if extra is not None:
+        parts.append(extra)
     return tuple(parts)
 
 

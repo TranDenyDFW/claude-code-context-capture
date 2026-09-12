@@ -442,6 +442,30 @@ class TestExport:
         ok, problems = projects.verify(out)
         assert ok, problems
 
+    def test_a_store_harvested_before_session_links_existed_still_exports(self, store_at, tmp_path):
+        """The Python package never creates a table, so an older store lacks session_links; the
+        export must carry what the store has. An independent review ran this and got
+        `no such table: session_links` from the manifest's count loop."""
+        con = sqlite3.connect(str(store_at))
+        con.execute("DROP TABLE session_links")
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        out = tmp_path / "older.db"
+        manifest = projects.export(r"P:\Alpha", out)
+        assert "session_links" not in manifest["tables"]
+        assert "session_links" not in manifest["digests"]
+        assert "session_links" not in manifest["counts"]
+        assert projects.verify(out)[0]
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        preview = projects.footprint(con, r"P:\Alpha")
+        con.close()
+        assert preview["sessions"] == 3 and "session_links" not in preview
+        removed = projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)["removed"]
+        assert removed["sessions"] == 3 and "session_links" not in removed
+        back = projects.import_(out)
+        assert back["inserted"]["sessions"] == 3 and "session_links" not in back["inserted"]
+
     def test_a_tampered_export_stops_verifying(self, store_at, tmp_path):
         """One byte, and the file must stop passing. Otherwise verify is decoration."""
         out = tmp_path / "out.db"

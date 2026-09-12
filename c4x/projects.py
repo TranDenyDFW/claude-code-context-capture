@@ -64,6 +64,10 @@ if str(ROOT) not in sys.path:
 # unaffected.
 BY_SESSION = ("hook_events", "attachments", "tool_calls", "messages", "turns",
               "session_titles", "compactions", "cost_state", "cost_state_models",
+              # A link points at a session (its own id, and its head's), so it goes before the
+              # session rows do. Keyed on the PREFIX session's id: a chat's links travel and die
+              # with the chat's own sessions, which are in the same project by construction.
+              "session_links",
               "sessions")
 
 # Reached another way, and named so nothing depends on remembering it.
@@ -114,7 +118,11 @@ def projects():
     if not seen.empty:
         for label, n in seen["project"].value_counts().items():
             counts[str(label)] = int(n)
-    visible = set(seen["session_id"]) if not seen.empty else set()
+    # A listed row is a CHAT, and every session it spans is visible through it. Without the
+    # expansion a resumed chat's older sessions would be counted a second time below, as sessions
+    # the page cannot see, under their own cwd.
+    visible = ({m for h in seen["session_id"] for m in store.chat_members(h)}
+               if not seen.empty else set())
     rest = store.q("SELECT session_id, cwd FROM sessions WHERE cwd IS NOT NULL AND cwd <> ''")
     for row in rest.itertuples(index=False):
         if row.session_id not in visible:
@@ -149,6 +157,11 @@ def session_ids(con, project):
     So the test is "not in session_rows AT ALL", not "has no turns". A session the page cannot see
     under any label cannot have been attributed to another project by the archived rule, so its own
     cwd is the only evidence there is and it is safe to use.
+
+    A CHAT'S OLDER SESSIONS ARRIVE THROUGH THE FIRST HALF, not the second. `cohort_sessions`
+    returns every member of every chat in the cohort, head first, so a resumed chat's superseded
+    sessions are named here on purpose rather than swept up by the cwd fallback by accident. The
+    fallback is a fallback again, for sessions under the floor, which is what it was written for.
     """
     from c4x import store
     # ONE uncached read, not two. `ttl=0` here refreshes the shared cache, so the `session_rows()`
@@ -158,7 +171,8 @@ def session_ids(con, project):
     ids = list(store.cohort_sessions(f"project::{project}", ttl=0))
     known = set(ids)
     seen = store.session_rows()
-    visible = set(seen["session_id"]) if not seen.empty else set()
+    visible = ({m for h in seen["session_id"] for m in store.chat_members(h)}
+               if not seen.empty else set())
     unseen = con.execute("SELECT session_id FROM sessions WHERE cwd = ?", (project,)).fetchall()
     ids.extend(r[0] for r in unseen if r[0] not in known and r[0] not in visible)
     return ids
@@ -379,6 +393,20 @@ def primary_cwd(con, ids):
     return found[0] if found else None
 
 
+def tables_in(con, tables):
+    """The names in `tables` that exist on this connection's main database, in the given order.
+
+    The Python package never creates a table, so a store harvested by an older build lacks any
+    table a newer harvest added (`session_links` is the first). Every loop over BY_SESSION that
+    reads or writes the store goes through this, so that store is carried as what it has rather
+    than failing on what it lacks: the first version guarded the row copy alone and the manifest
+    count loop then raised `no such table` on the same export.
+    """
+    present = {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    return tuple(t for t in tables if t in present)
+
+
 def footprint(con, project):
     """Row counts per table for one project, so a delete can be previewed before it happens."""
     ids = session_ids(con, project)
@@ -386,7 +414,9 @@ def footprint(con, project):
     if not ids:
         return out
     marks = ",".join("?" * len(ids))
-    for table in BY_SESSION:
+    # A table this store does not have yet (session_links, on a store harvested by an older
+    # build) has no rows to count and is not a reason to fail the preview.
+    for table in tables_in(con, BY_SESSION):
         out[table] = con.execute(
             f"SELECT COUNT(*) FROM {table} WHERE session_id IN ({marks})", ids).fetchone()[0]
     for table in BY_COMPACTION:
@@ -717,7 +747,12 @@ def export(project, out_path, app_state=True):
 
             source.execute("ATTACH DATABASE ? AS dest", (str(out_path),))
             counts = {}
-            for table in BY_SESSION:
+            # A table this store does not have yet is carried as nothing, not as an error: a store
+            # harvested by an older build has no session_links, and the Python package never
+            # creates tables, so the export must read what exists. The manifest's table list is
+            # built from the SAME set below, so the import side sees exactly what was carried.
+            by_session = tables_in(source, BY_SESSION)
+            for table in by_session:
                 source.execute(
                     f"INSERT INTO dest.{table} SELECT * FROM main.{table} "
                     f"WHERE session_id IN ({marks})", ids)
@@ -748,7 +783,10 @@ def export(project, out_path, app_state=True):
         # of the manifest is to describe what is actually in there.
         out = sqlite3.connect(str(out_path))
         try:
-            carried = BY_SESSION + BY_COMPACTION + BY_TRANSCRIPT + (APP_STATE_TABLE,)
+            # THE TABLES THE FILE HOLDS, which is the source's set: the schema was copied from it.
+            # An independent review ran an export from a store without session_links and got
+            # `no such table` from this very loop, under a comment promising the opposite.
+            carried = by_session + BY_COMPACTION + BY_TRANSCRIPT + (APP_STATE_TABLE,)
             counts = {t: out.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in carried}
             digests = {t: (app_state_digest(out) if t == APP_STATE_TABLE else digest(out, t))
                        for t in carried}
@@ -1011,7 +1049,13 @@ def import_(path, into=None, dry_run=False):
                     report["dropped_columns"][table] = missing
                 before = con.execute(f"SELECT COUNT(*) FROM main.{table}").fetchone()[0]
                 listed = ",".join(f'"{c}"' for c in shared)
-                con.execute(f"INSERT OR IGNORE INTO main.{table} ({listed}) "
+                # A LINK IS REPLACED, everything else is kept. A chain that was resumed on the
+                # source after an earlier import now points every member at a newer head, and the
+                # rows this store holds for those members are the stale ones: keeping them would
+                # split one chat into two rows here. Every other table is keyed on identities that
+                # do not change meaning between exports.
+                verb = "INSERT OR REPLACE" if table == "session_links" else "INSERT OR IGNORE"
+                con.execute(f"{verb} INTO main.{table} ({listed}) "
                             f"SELECT {listed} FROM src.{table}")
                 after = con.execute(f"SELECT COUNT(*) FROM main.{table}").fetchone()[0]
                 offered = con.execute(f"SELECT COUNT(*) FROM src.{table}").fetchone()[0]
@@ -1367,7 +1411,11 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
                     "live_rows": con.execute(
                         f"SELECT COUNT(*) FROM {table} {where}", params).fetchone()[0]}
 
-        for table in BY_SESSION:
+        # A table this store does not have (session_links on a store harvested by an older build)
+        # is neither compared nor deleted: the export above carried nothing for it, so there is
+        # nothing in the backup for it to match.
+        by_session = tables_in(con, BY_SESSION)
+        for table in by_session:
             _moved(table, f"WHERE session_id IN ({marks})", ids)
         for table in BY_COMPACTION:
             _moved(table, f"""WHERE compaction_uuid IN
@@ -1399,7 +1447,7 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
                 f"""DELETE FROM {table} WHERE path IN
                     (SELECT transcript_path FROM sessions WHERE session_id IN ({marks})
                       AND transcript_path IS NOT NULL)""", ids).rowcount
-        for table in BY_SESSION:
+        for table in by_session:
             removed[table] = con.execute(
                 f"DELETE FROM {table} WHERE session_id IN ({marks})", ids).rowcount
         # WHAT STILL LIVES IN THIS DIRECTORY, asked AFTER the rows are gone, so the answer is

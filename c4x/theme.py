@@ -387,14 +387,20 @@ COLUMN_HELP = {
                 "high-water mark; the gap between them is what a compaction took out."),
     "peak": "The highest resident total this session ever reached, not where it sits now.",
     "compactions": "How many times this session's context window was compacted.",
+    "cli sessions": ("How many CLI sessions this chat spans. The desktop app resumes a chat by "
+                     "starting a new session that copies the old one; those are folded into one "
+                     "row here, named by the newest, with turns, peak and compactions counted over "
+                     "all of them. 1 for a chat that was never resumed."),
     "section": ("Read from disk, not stored: the working directory, the entrypoint, and whether "
                 "the transcript file still exists on this machine."),
     "project": ("The working directory. A path ending in \\archived is a chat the desktop app "
                 "has archived. An unmarked path means NOT KNOWN to be archived: the flag is only "
                 "readable for chats the app kept a record of, which is a minority of these."),
     "last active": "The last recorded activity, not when the session was created.",
-    "title": ("Read from the transcript. Imported sessions carry a generated Imported_YYYYMMDD "
-              "name instead, because the only titler there is walks this machine's transcripts."),
+    "title": ("The name the desktop app shows, when it has a record of the chat. Otherwise it is "
+              "read from the transcript: a title typed into the chat, then one Claude generated, "
+              "then the opening prompt as a last resort. Imported sessions carry a generated "
+              "Imported_YYYYMMDD name, because neither source is on this machine for them."),
 
     # Breakdown and the probe detail
     "percent": "Share of the whole context window, not of the resident total.",

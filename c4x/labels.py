@@ -118,8 +118,10 @@ def titled_path(path, titles, keep=2):
     what the chat was. Every other project's path is its own name and needs no help.
 
     `titles` is a mapping of kind to text for this session. The order is deliberate and the fallback
-    is the risky one: a `custom` title was typed by a person, an `ai` one was written to be a title,
-    and a `last-prompt` is merely whatever was said first. Measured on this store, all three
+    is the risky one: a `desktop` title is what the app is calling the chat right now, a `custom`
+    title was typed by a person into a transcript that has since stopped changing, an `ai` one was
+    written to be a title, and a `last-prompt` is merely whatever was said first. Measured on
+    this store, all three
     folder-less chats have ONLY a last-prompt, so the fallback is not the rare path, it is the
     normal one, and it is cut hard and marked so it cannot be mistaken for a name someone chose.
     """
@@ -130,7 +132,10 @@ def titled_path(path, titles, keep=2):
     # the part that does carry meaning, the chat's own name, off the end of the label. The final
     # segment already carries a date and a random suffix, so it stays unique on its own.
     short = short_path(path, 1)
-    for kind in ("custom", "ai", "last-prompt"):
+    # `desktop` leads: it is the name the app is showing the user right now, and unlike the three
+    # below it is read live from the record rather than recovered from a transcript, so it is the
+    # only one that follows a rename. The rest keep the order they had.
+    for kind in ("desktop", "custom", "ai", "last-prompt"):
         text = (titles or {}).get(kind)
         if not text:
             continue

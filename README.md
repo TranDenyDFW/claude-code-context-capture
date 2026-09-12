@@ -116,7 +116,7 @@ parallel implementation of it.
 | Tab | What it answers | Dump it |
 |---|---|---|
 | Summary | what is worth doing about this store | `python -m c4x.cli dump --tab tab-summary` |
-| All sessions | every session as a point and a row | `--tab tab-sessions` |
+| All sessions | every chat as a point and a row, with a resumed chat's sessions folded into its newest one | `--tab tab-sessions` |
 | Session | where one session's window went | `--tab tab-session --session <id>` |
 | Compactions | what each compaction discarded | `--tab tab-compactions` |
 | Window | what is in the window right now | `--tab tab-window --session <id>` |

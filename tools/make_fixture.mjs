@@ -133,6 +133,20 @@ const SESSIONS = [
   // flagged calls are genuinely unknowable, not errors, and this is the only session where
   // `unclassified` is the truthful answer rather than an arbitrary label.
   { id: 'fixture-session-0009', turns: 10, overshoots: [], version: '2.1.121' },
+  // A chat the desktop app resumed twice, in its own project. The two prefixes carry links to
+  // the head (inserted after the loop), so the Sessions list has something to collapse and the
+  // collapse code is not dead in CI. prefix-2 sits BELOW the 5-turn floor on purpose, so a test
+  // can prove the floor is applied to the chat and not to its members. The fork carries no link:
+  // the app shows a fork as its own chat. `plain`, so turn ROWS equal `turns` and the sums a test
+  // recomputes are exact.
+  { id: 'fixture-chat-head', turns: 30, overshoots: [], plain: true,
+    cwd: 'C:\\fixture\\chat', slug: 'C--fixture-chat' },
+  { id: 'fixture-chat-prefix-1', turns: 12, overshoots: [], plain: true,
+    cwd: 'C:\\fixture\\chat', slug: 'C--fixture-chat' },
+  { id: 'fixture-chat-prefix-2', turns: 3, overshoots: [], plain: true,
+    cwd: 'C:\\fixture\\chat', slug: 'C--fixture-chat' },
+  { id: 'fixture-chat-fork', turns: 10, overshoots: [], plain: true,
+    cwd: 'C:\\fixture\\chat', slug: 'C--fixture-chat' },
 ];
 // Forty-two projects, each with one listed session of six turns. More than 40 distinct projects
 // is what the Summary tab needs before it ranks any out (test_api:559); more than 20 sessions with
@@ -455,6 +469,16 @@ for (const [type, n] of [['assistant', 168], ['user', 84], ['system', 21], ['sum
   insertRecordType.run(type, n);
 }
 
+// The chain, as --backfill-chains would derive it from transcript overlap: prefix-2 was resumed
+// into prefix-1, which was resumed into the head. Written directly, because the fixture has no
+// transcripts to derive from; the harvest self-test covers the derivation itself.
+const insertLink = db.prepare(`
+  INSERT INTO session_links (session_id, head_id, next_id, head_kind, overlap, prefix_uuids,
+                             next_uuids, shared_uuids, method, linked_at)
+  VALUES (?, 'fixture-chat-head', ?, ?, ?, ?, ?, ?, 'fixture', ?)`);
+insertLink.run('fixture-chat-prefix-2', 'fixture-chat-prefix-1', 'none', 1.0, 3, 15, 3, iso(1));
+insertLink.run('fixture-chat-prefix-1', 'fixture-chat-head', 'record', 0.93, 15, 45, 14, iso(1));
+
 // Probes. probes_layout reads all three of these, and with them empty the tab raises and renders
 // an exception panel instead of content, which the table audit reports as a failed tab.
 const insertProbe = db.prepare(`
@@ -542,7 +566,8 @@ db.prepare(`
 const counts = {};
 for (const table of ['sessions', 'turns', 'messages', 'compactions', 'compaction_survivors',
                      'tool_calls', 'context_baselines', 'probes', 'probe_categories',
-                     'probe_details', 'attachments', 'hook_events', 'record_types']) {
+                     'probe_details', 'attachments', 'hook_events', 'record_types',
+                     'session_links']) {
   counts[table] = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
 }
 const apiCalls = db.prepare('SELECT COUNT(*) AS n FROM api_calls').get().n;
@@ -613,6 +638,13 @@ const bashWithTarget = db.prepare(`
   SELECT COUNT(*) n FROM tool_calls WHERE tool_name = 'Bash' AND target IS NOT NULL`).get().n;
 
 const longMessages = db.prepare('SELECT COUNT(*) n FROM messages WHERE chars > 220').get().n;
+// The resumed chat: its links, the member below the floor, and the fork that must have none.
+const chainHead = db.prepare(
+  "SELECT head_id FROM session_links WHERE session_id = 'fixture-chat-prefix-2'").get()?.head_id;
+const prefixTurns = db.prepare(
+  "SELECT COUNT(*) n FROM turns WHERE session_id = 'fixture-chat-prefix-2'").get().n;
+const forkLinks = db.prepare(`SELECT COUNT(*) n FROM session_links
+  WHERE session_id = 'fixture-chat-fork' OR head_id = 'fixture-chat-fork'`).get().n;
 
 // --no-optional: the shape the DOCUMENTED INSTALL PATH actually produces.
 //
@@ -714,6 +746,12 @@ if (!SELF_TEST) {
     ['a Bash group with a BLANK target in the rendered top 200 (test_repeated_inputs:101)',
      repeatBlankTarget > 0],
     ['and no Bash call carries a target, since Bash has none', bashWithTarget === 0],
+    // The resumed chat (test_chats). Without it the collapse in session_rows is dead in CI.
+    ['a linked chain exists, so the Sessions table has something to collapse (test_chats)',
+     counts.session_links === 2 && chainHead === 'fixture-chat-head'],
+    ['a linked member sits below the floor, so the floor is provably applied to the chat',
+     prefixTurns < 5],
+    ['a fork session carries no link', forkLinks === 0],
   ];
   let failed = 0;
   for (const [what, ok] of checks) {

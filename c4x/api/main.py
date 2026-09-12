@@ -79,7 +79,7 @@ def _jsonable(payload):
     return jsonable(payload)
 
 
-def _cached(key, build):
+def _cached(key, build, headers=None):
     """Serve `key` from the cache, or build it, serialise it once, and keep it.
 
     The endpoint returns raw bytes rather than a dict, which is not a micro-optimisation: FastAPI
@@ -91,16 +91,37 @@ def _cached(key, build):
     there is nothing to remember.
     """
     from c4x import store
-    version = cache.stamp(str(store.DB_PATH))
+    # The records directory is part of the version because two columns of the session frame are
+    # read from it rather than from the database: the archived marker and the chat's title. Without
+    # it, renaming a chat in the desktop app changes nothing this cache can see.
+    #
+    # This runs before `get`, so a cache HIT pays it too, which is why it has to stay cheap: the
+    # fingerprint is a 1.6 ms scandir, and `sessions_root` no longer globs every candidate root to
+    # score between them when the identity collapse has already left one.
+    version = cache.stamp(str(store.DB_PATH), store.records_fingerprint())
     found = cache.get(key, version)
+    # `headers` are PER REQUEST and never enter the cache: two requests can share one entry (a
+    # superseded session id and the chat it resolves to do), and anything that describes the
+    # request rather than the answer would then be served to the wrong caller.
     if found is not None:
         return Response(content=found, media_type="application/json",
-                        headers={"x-c4x-cache": "hit"})
+                        headers={"x-c4x-cache": "hit", **(headers or {})})
     import json
     payload = json.dumps(build()).encode("utf-8")
     cache.put(key, version, payload)
     return Response(content=payload, media_type="application/json",
-                    headers={"x-c4x-cache": "miss"})
+                    headers={"x-c4x-cache": "miss", **(headers or {})})
+
+
+def _fresh(build, headers=None):
+    """`build()` serialised exactly as `_cached` would serialise it, and not kept.
+
+    NO `x-c4x-cache` HEADER, which is the contract `no_cache=1` has always had: the bench and a
+    reader who suspects the cache read its absence as proof the cache was bypassed.
+    """
+    import json
+    return Response(content=json.dumps(build()).encode("utf-8"), media_type="application/json",
+                    headers=dict(headers or {}))
 
 
 def _app():
@@ -182,6 +203,37 @@ def tabs():
              "help": tab_help(t[0])} for t in _app().TABS]
 
 
+def _resolve_selection(session, compare_with, compare_kind, cohort=None):
+    """The head of each selected chat, plus the headers saying what was asked for when it differs.
+
+    A session id that has been superseded by a resume can still arrive here: from a bookmarked
+    URL, from any table's hidden session_id column, or as Compare's arm B. Resolved HERE, before
+    the cache key is built, so `?session=<prefix>` and `?session=<head>` are one cache entry and
+    the payload names the chat the page is actually describing.
+
+    ARM B RESOLVING INTO ARM A'S OWN CHAT IS NOT A COMPARISON. A superseded id of the selected
+    chat can arrive as `compare_with` the same three ways, and resolving it silently rendered the
+    chat against itself: a page of 1.0 ratios with nothing saying why. That arm falls back to the
+    default the tab would have chosen with no arm named, and the header says which id was let go.
+    Returns (session, compare_with, headers) with a header per resolution that happened, so a
+    caller can tell; `None` headers when nothing was resolved.
+    """
+    from c4x import store
+    head = store.chat_head(session)
+    other = compare_with
+    told = {}
+    if session and session != head:
+        told["x-c4x-session-requested"] = session
+    if compare_kind == "session" and compare_with:
+        other = store.chat_head(compare_with)
+        if head and other == head:
+            from c4x.tabs.compare import default_arm_b
+            other = default_arm_b(head, cohort)
+        if other != compare_with:
+            told["x-c4x-compare-requested"] = compare_with
+    return head, other, (told or None)
+
+
 @api.get("/api/tab/{tab_id}")
 def tab(tab_id: str,
         session: str | None = Query(None),
@@ -196,6 +248,9 @@ def tab(tab_id: str,
     the parity differ compares and the surface the existing tests can be re-pointed at.
     """
     from c4x.cli import extract
+    # HEADERS, not payload fields: the payload is cached under the head and shared with every
+    # request that resolves to it, and which id THIS caller asked with is not part of the answer.
+    session, compare_with, told = _resolve_selection(session, compare_with, compare_kind, cohort)
 
     def build():
         payload = extract.describe(
@@ -204,8 +259,9 @@ def tab(tab_id: str,
         return _jsonable(payload)
 
     if no_cache:
-        return build()
-    return _cached(("verify", tab_id, session, scope, cohort, compare_with, compare_kind), build)
+        return _fresh(build, told)
+    return _cached(("verify", tab_id, session, scope, cohort, compare_with, compare_kind),
+                   build, told)
 
 
 def _figure_meta(node, count):
@@ -527,6 +583,8 @@ def tab_render(tab_id: str,
     Charts are returned in the order they appear in the pane, so `plotly[i]` describes the same
     figure as `figures[i]`. A frontend that pairs them by index is relying on something real.
     """
+    session, compare_with, told = _resolve_selection(session, compare_with, compare_kind, cohort)
+
     def build():
         pane = _pane(tab_id, session, scope, cohort, compare_with, compare_kind)
         payload = _render_payload(pane)
@@ -535,8 +593,9 @@ def tab_render(tab_id: str,
         payload["scoped"] = tab_id in SELECTION_SCOPED
         return _jsonable(payload)
     if no_cache:
-        return build()
-    return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind), build)
+        return _fresh(build, told)
+    return _cached(("render", tab_id, session, scope, cohort, compare_with, compare_kind),
+                   build, told)
 
 
 def _population(node):
