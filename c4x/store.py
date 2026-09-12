@@ -759,8 +759,8 @@ class _ArchivedCache(TypedDict):
 
     map: dict[str, tuple[bool, str | None]] | None
     at: float
-    root: str | None
-    sig: tuple[int, int] | None
+    root: tuple[str, ...] | None
+    sig: tuple | None
 
 
 _archived_cache: _ArchivedCache = {"map": None, "at": 0.0, "root": None, "sig": None}
@@ -799,8 +799,32 @@ def _identity(path):
     return (info.st_dev, info.st_ino)
 
 
+def claude_appdata_roots():
+    """Every distinct directory the desktop app keeps state in on this machine, one name each.
+
+    The candidates collapsed by identity, so a redirected install counts once. This is what the
+    READERS walk: a record is a record wherever the app left it, and `tools/harvest.mjs` reads
+    the same union when it decides which sessions are chats. The page used to read only the root
+    `claude_appdata` picks, so on a machine with two real roots (the test laptop: 16 records in the
+    package container, 1 left under `%APPDATA%`) the odd one out was named by its transcript and
+    never marked archived, while harvest had already treated it as a chat.
+    """
+    seen, candidates = set(), []
+    for path in _claude_appdata_candidates():
+        key = _identity(path)
+        if key is not None and key in seen:
+            continue                    # the same directory under its other name
+        if key is not None:
+            seen.add(key)
+        candidates.append(path)
+    return candidates
+
+
 def claude_appdata():
     """The directory the desktop app is ACTUALLY using, chosen from evidence rather than assumed.
+
+    This is what the WRITERS use: an imported record lands where the app looks for new ones, and
+    a purge reads back from there. Readers walk `claude_appdata_roots()`.
 
     `C4X_SESSIONS_ROOT` overrides it outright, for a layout neither candidate covers.
 
@@ -812,14 +836,7 @@ def claude_appdata():
     override = os.environ.get("C4X_SESSIONS_ROOT")
     if override:
         return os.path.dirname(override.rstrip("\\/")) or override
-    seen, candidates = set(), []
-    for path in _claude_appdata_candidates():
-        key = _identity(path)
-        if key is not None and key in seen:
-            continue                    # the same directory under its other name
-        if key is not None:
-            seen.add(key)
-        candidates.append(path)
+    candidates = claude_appdata_roots()
     if len(candidates) == 1:
         # NOTHING TO CHOOSE BETWEEN, so do not pay to choose. The scoring below globs every record
         # under every candidate, which is 11 ms on this machine, and it used to run even when the
@@ -847,11 +864,23 @@ def claude_appdata():
 
 
 def sessions_root():
-    """Where the desktop app keeps its per-chat records."""
+    """Where the desktop app keeps its per-chat records: the root it WRITES to."""
     override = os.environ.get("C4X_SESSIONS_ROOT")
     if override:
         return override
     return os.path.join(claude_appdata(), "claude-code-sessions")
+
+
+def sessions_roots() -> list:
+    """Every records directory on this machine, the one the app writes to first.
+
+    The readers' root list. A test that points `sessions_root` at a fixture must point this here
+    too, or the page would read the fixture AND the machine's own records.
+    """
+    override = os.environ.get("C4X_SESSIONS_ROOT")
+    if override:
+        return [override]
+    return [os.path.join(root, "claude-code-sessions") for root in claude_appdata_roots()]
 
 
 def records_fingerprint(root=None):
@@ -868,10 +897,17 @@ def records_fingerprint(root=None):
 
     `os.scandir` rather than `glob`, measured on the 194 records here: the walk costs 1.6 ms and
     the equivalent glob costs 10.5 ms.
+
+    With no `root` named, every records directory on the machine is walked and the answer is the
+    sum of the counts and the newest of the mtimes, so a record changed under either root moves
+    the stamp.
     """
-    root = root or sessions_root()
     if not root:
-        return None
+        parts = [records_fingerprint(one) for one in sessions_roots()]
+        parts = [p for p in parts if p is not None]
+        if not parts:
+            return None
+        return (sum(p[0] for p in parts), max(p[1] for p in parts))
     newest = count = 0
     try:
         with os.scandir(root) as accounts:
@@ -958,7 +994,10 @@ def desktop_records(root=None, ttl: float = 45.0) -> dict:
     ONE SCAN, TWO ANSWERS. `archived_sessions` and `desktop_titles` are both views over this, so a
     render that wants the archived marker and the chat's name reads the directory once.
     """
-    root = root or sessions_root()
+    # EVERY ROOT, unless one is named. See claude_appdata_roots for why a record under the root the
+    # app is not writing to is still a record.
+    roots = [root] if root else sessions_roots()
+    root = tuple(roots)
     now = _time.time()
     # A FINGERPRINT, NOT A TIMER, and the difference is user-visible. A 45 second timer meant a
     # chat renamed in the desktop app kept its old name here until the timer happened to lapse,
@@ -966,16 +1005,19 @@ def desktop_records(root=None, ttl: float = 45.0) -> dict:
     # and leaving it here would move the delay rather than remove it. The fingerprint costs 1.6 ms
     # against a rescan that costs 47 ms, so asking every time is affordable and the answer is
     # always current. `ttl=0` still forces a rescan, which is what the tests use.
-    sig = records_fingerprint(root) if ttl else None
+    sig = (tuple(records_fingerprint(one) for one in roots) if ttl else None)
     if (ttl and _archived_cache["map"] is not None and _archived_cache["root"] == root
             and _archived_cache["sig"] == sig):
         return _archived_cache["map"]
     seen = _generation["n"]
     found = {}
-    for path in glob.glob(os.path.join(root, "*", "*", "*.json")):
-        row = read_archived_record(path)
-        if row is not None:
-            found[row[0]] = (row[1], row[2])
+    # The root the app writes to comes first, so on the odd machine where one session id has a
+    # record under both roots the one the app maintains is the one that lands last and wins.
+    for one in reversed(roots):
+        for path in glob.glob(os.path.join(one, "*", "*", "*.json")):
+            row = read_archived_record(path)
+            if row is not None:
+                found[row[0]] = (row[1], row[2])
     if seen == _generation["n"]:
         _archived_cache.update({"map": found, "at": now, "root": root, "sig": sig})
     return found

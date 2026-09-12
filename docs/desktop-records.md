@@ -125,5 +125,13 @@ for 994; it matched the app's own record cwd for 47 of 47 record holders against
 same pass that writes links repairs these three columns on older rows (59 directories and 73
 paths on the author's store).
 
+**Two roots, both read.** A Microsoft Store install keeps its state under
+`%LOCALAPPDATA%\Packages\Claude_<publisher>\LocalCache\Roaming\Claude` and can leave older
+records under `%APPDATA%\Claude`; on most machines the two names are one directory. Harvest and
+the page both read every distinct root (`claude_appdata_roots()`), so a record is a record
+wherever the app left it; imports and purges use the root the app writes to (`claude_appdata()`,
+chosen by `config.json`, record count and newest mtime). Measured on the test laptop: 16
+records in the container, 1 under `%APPDATA%`.
+
 The store table is `session_links`; its schema comment in `tools/harvest.mjs` carries the same
 facts beside the code that uses them.

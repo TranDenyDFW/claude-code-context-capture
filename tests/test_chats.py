@@ -64,6 +64,7 @@ def chain_store(tmp_path, monkeypatch):
     (records / "acct" / "org").mkdir(parents=True)
     monkeypatch.setattr(store, "DB_PATH", path)
     monkeypatch.setattr(store, "sessions_root", lambda: str(records))
+    monkeypatch.setattr(store, "sessions_roots", lambda: [str(records)])
     forget_cached_rows()
     yield path
     forget_cached_rows()

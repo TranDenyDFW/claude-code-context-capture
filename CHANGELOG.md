@@ -166,6 +166,12 @@ removed and nothing here said so.
   in an `x-c4x-compare-requested` header rather than rendering the chat against itself.
 - **`node tools/harvest.mjs --help` printed nothing and ran a harvest.** Any flag the tool does
   not know is now refused with the usage; `--help` prints it.
+- **The page reads every desktop record root, as harvest already did.** A packaged install keeps
+  its records in its own container and can leave older ones under `%APPDATA%`; the page read
+  only the root the app writes to, so a record under the other one named its chat by the
+  transcript and never marked it archived while harvest had treated it as a chat. Readers now
+  walk `claude_appdata_roots()`; writers (import, purge) keep using the app's own root. Found by
+  an independent check against the test laptop's records, where it was one record of seventeen.
 - **An import no longer writes the EXPORTER's path into your `~/.claude.json`.** The destination
   was resolved with `mapping.get(row["cwd"], row["cwd"])`, exact string equality on a value that
   arrives from three places: `sessions.cwd` for a transcript, the raw config KEY for a config

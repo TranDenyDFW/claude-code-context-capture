@@ -173,6 +173,7 @@ class TestWhichNameWins:
         previousTitles, so the person had renamed the chat and the transcript kept the old name.
         """
         monkeypatch.setattr(store, "sessions_root", lambda: str(records))
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(records)])
         # SELECTIVE, and it has to be. A blanket `lambda: True` also answers the redaction probe,
         # which correctly suppresses the overlay and makes this test fail for the wrong reason.
         monkeypatch.setattr(store, "tables_present", lambda *names: "session_titles" in names)
@@ -194,6 +195,7 @@ class TestWhichNameWins:
     def test_a_session_with_no_record_keeps_its_stored_title(self, store, records, monkeypatch):
         """The negative control: the overlay must not invent or blank a name."""
         monkeypatch.setattr(store, "sessions_root", lambda: str(records))
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(records)])
         monkeypatch.setattr(store, "tables_present", lambda *names: "session_titles" in names)
         monkeypatch.setattr(store, "q", lambda *a, **k: _frame([
             {"session_id": "no-record-here", "kind": "custom", "title": "Only in the store"},
@@ -401,3 +403,51 @@ class TestTheCacheNoticesARename:
         store.desktop_titles(root=str(records), ttl=45.0)
         assert reads == [], "the directory was rescanned even though nothing changed"
         store.invalidate()
+
+
+class TestEveryRootIsRead:
+    """A packaged install can leave records under two roots; a record is a record under either."""
+
+    @staticmethod
+    def _write(folder, name, sid, title, archived):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(json.dumps({"cliSessionId": sid, "isArchived": archived,
+                                               "title": title}), encoding="utf-8")
+
+    def test_records_under_a_second_root_are_read(self, store, tmp_path, monkeypatch):
+        first, second = tmp_path / "container", tmp_path / "roaming"
+        self._write(first / "a1" / "o1", "local_one.json", TITLED, "In the container", False)
+        self._write(second / "a2" / "o2", "local_two.json", PAST, "Left under APPDATA", True)
+        monkeypatch.setattr(store, "sessions_root", lambda: str(first))
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(first), str(second)])
+        found = store.desktop_records(ttl=0)
+        assert found[TITLED] == (False, "In the container")
+        assert found[PAST] == (True, "Left under APPDATA"), (
+            "a record under the root the app is not writing to is still a record")
+        assert store.archived_sessions(ttl=0)[PAST] is True
+        assert store.desktop_titles(ttl=0)[PAST] == "Left under APPDATA"
+
+    def test_the_root_the_app_writes_to_wins_a_duplicate(self, store, tmp_path, monkeypatch):
+        first, second = tmp_path / "container", tmp_path / "roaming"
+        self._write(first / "a1" / "o1", "local_one.json", TITLED, "Current name", False)
+        self._write(second / "a2" / "o2", "local_old.json", TITLED, "Stale name", True)
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(first), str(second)])
+        assert store.desktop_records(ttl=0)[TITLED] == (False, "Current name")
+
+    def test_the_stamp_covers_both_roots(self, store, tmp_path, monkeypatch):
+        from c4x.api import cache
+        first, second = tmp_path / "container", tmp_path / "roaming"
+        self._write(first / "a1" / "o1", "local_one.json", TITLED, "One", False)
+        self._write(second / "a2" / "o2", "local_two.json", PAST, "Two", False)
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(first), str(second)])
+        count, _newest = store.records_fingerprint()
+        assert count == 2, "the count is the sum over the roots"
+        db = tmp_path / "not-a-real.db"
+        db.write_bytes(b"x")
+        before = cache.stamp(str(db), store.records_fingerprint())
+        self._write(second / "a2" / "o2", "local_two.json", PAST, "Renamed under APPDATA", False)
+        assert cache.stamp(str(db), store.records_fingerprint()) != before, (
+            "a rename under the second root must move the stamp")
+        assert store.records_fingerprint(str(tmp_path / "nope")) is None
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(tmp_path / "nope")])
+        assert store.records_fingerprint() is None
