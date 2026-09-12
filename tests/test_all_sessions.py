@@ -183,13 +183,19 @@ def test_the_turns_column_really_does_include_subagent_rows(table, q):
     if with_side.empty:
         pytest.fail("no session with sidechain rows, so this could not be exercised")
     sid = with_side.iloc[0]["session_id"]
-    row = next((r for r in table["rows"] if r["session_id"] == sid), None)
+    # The row is the CHAT that session belongs to, and its figure is over every member: a session
+    # resumed into another has no row of its own, and the head's row counts the whole chain.
+    from c4x import store
+    members = store.chat_members(sid)
+    marks = ",".join("?" * len(members))
+    row = next((r for r in table["rows"] if r["session_id"] == store.chat_head(sid)), None)
     if row is None:
         pytest.skip("that session is below the 5-turn floor this table draws")
-    both = int(q("SELECT COUNT(*) AS n FROM turns WHERE session_id = ?", (sid,)).iloc[0]["n"])
-    main_only = int(q("""SELECT COUNT(*) AS n FROM turns
-                          WHERE session_id = ? AND COALESCE(is_sidechain,0) = 0""",
-                      (sid,)).iloc[0]["n"])
+    both = int(q(f"SELECT COUNT(*) AS n FROM turns WHERE session_id IN ({marks})",
+                 tuple(members)).iloc[0]["n"])
+    main_only = int(q(f"""SELECT COUNT(*) AS n FROM turns
+                           WHERE session_id IN ({marks}) AND COALESCE(is_sidechain,0) = 0""",
+                      tuple(members)).iloc[0]["n"])
     assert row["turns"] == both
     assert row["turns"] != main_only, "this session cannot distinguish the two counts"
 

@@ -39,20 +39,30 @@ def arm_truth(q, session_id):
     """Every figure for one arm, from SQL written here.
 
     Main thread only, matching the scope the tab reports, and off api_calls rather than turns.
+
+    OVER THE CHAT, not the session. An arm is a chat, and a resumed chat's earlier CLI sessions
+    hold the rows the store attributes to them, so the page sums over `chat_members`. On a store
+    with links this recompute was per session and read 1,133 API calls for an arm the page
+    correctly showed as 1,743 over its two sessions; on a store without links the two are one.
     """
-    calls = q("""SELECT COUNT(*) AS n,
-                        SUM(cache_read_input_tokens) AS cache_read,
-                        MAX(total_resident) AS peak,
-                        AVG(total_resident) AS mean_resident,
-                        SUM(output_tokens) AS output,
-                        SUM(thinking_tokens) AS thinking
-                   FROM api_calls
-                  WHERE session_id = ? AND COALESCE(is_sidechain,0) = 0""", (session_id,)).iloc[0]
-    comps = q("SELECT COUNT(*) AS n FROM compactions WHERE session_id = ?",
-              (session_id,)).iloc[0]["n"]
-    tools = q("""SELECT COUNT(*) AS n, SUM(COALESCE(result_bytes,0)) AS result_bytes
-                   FROM tool_calls WHERE session_id = ? AND COALESCE(is_sidechain,0) = 0""",
-              (session_id,)).iloc[0]
+    from c4x import store
+    members = store.chat_members(session_id)
+    marks = ",".join("?" * len(members))
+    calls = q(f"""SELECT COUNT(*) AS n,
+                         SUM(cache_read_input_tokens) AS cache_read,
+                         MAX(total_resident) AS peak,
+                         AVG(total_resident) AS mean_resident,
+                         SUM(output_tokens) AS output,
+                         SUM(thinking_tokens) AS thinking
+                    FROM api_calls
+                   WHERE session_id IN ({marks}) AND COALESCE(is_sidechain,0) = 0""",
+              tuple(members)).iloc[0]
+    comps = q(f"SELECT COUNT(*) AS n FROM compactions WHERE session_id IN ({marks})",
+              tuple(members)).iloc[0]["n"]
+    tools = q(f"""SELECT COUNT(*) AS n, SUM(COALESCE(result_bytes,0)) AS result_bytes
+                    FROM tool_calls
+                   WHERE session_id IN ({marks}) AND COALESCE(is_sidechain,0) = 0""",
+              tuple(members)).iloc[0]
     return {
         "API calls": int(calls["n"] or 0),
         "cache re-reads": int(calls["cache_read"] or 0),
