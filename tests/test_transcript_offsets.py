@@ -87,6 +87,47 @@ class TestTheExportCarriesThem:
             "the preview and the export disagree about how many offsets a delete would remove")
 
 
+CROOKED = r"C:\t\s0-2\subagents\agent-x.jsonl"
+
+
+class TestASessionWhoseOwnPathNamesASubagentFile:
+    """The one row on the author's store that breaks `slug_of(cwd) = project_slug`.
+
+    Its `transcript_path` names a file under `<session id>/subagents/`, because a subagent file was
+    harvested before the session's own and the identity rules that stop that are newer than the row.
+    A scope derived from `transcript_path` reaches that one file and misses everything else the
+    session wrote: an independent reviewer measured the export carrying 19 files whose offsets it
+    did not carry, and the delete removing those 19 files while leaving their 19 offsets behind.
+    The rule is the session ID in the path, which is what `appstate.capture` matches on.
+    """
+
+    @staticmethod
+    def crooked(store_at):
+        con = sqlite3.connect(str(store_at))
+        con.execute("UPDATE sessions SET transcript_path = ?, project_slug = 'subagents' "
+                    "WHERE session_id = 's0-2'", (CROOKED,))
+        offsets(con, CROOKED)
+        con.commit()
+        con.close()
+        forget_cached_rows()
+
+    def test_the_export_carries_the_rest_of_what_that_session_wrote(self, store_at, tmp_path):
+        self.crooked(store_at)
+        out = tmp_path / "out.db"
+        projects.export(ALPHA, out)
+        carried = paths_in(out)
+        assert CROOKED in carried
+        assert r"C:\t\s0-2.jsonl" in carried, (
+            "the session's own transcript is not reachable from a path that names a subagent file")
+
+    def test_the_delete_leaves_none_of_them_behind(self, store_at, tmp_path):
+        self.crooked(store_at)
+        projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        left = paths_in(store_at)
+        assert not [path for path in left if "s0-" in path], sorted(left)
+        assert OTHER in left, "the delete took another project's offset"
+
+
 class TestTheDeleteRemovesThem:
     def test_no_offset_survives_for_a_file_the_delete_removed(self, store_at, tmp_path):
         report = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
@@ -97,20 +138,27 @@ class TestTheDeleteRemovesThem:
         assert report["removed"]["files"] == 5
 
     def test_the_backup_holds_exactly_what_the_delete_removed(self, store_at, tmp_path):
-        """The acceptance rule, applied to the table this was wrong in."""
+        """The acceptance rule, applied to the table this was wrong in.
+
+        Symmetric by construction, since the backup and the delete share `where_for`, so it cannot
+        tell one scoping rule from another. It is here as an acceptance check and not as a gate.
+        """
         before = paths_in(store_at)
         report = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
         after = paths_in(store_at)
-        assert before - after == paths_in(Path(report["backup"]))
+        assert before - after == paths_in(Path(report["backup"])) - set(report["kept_offsets"])
 
 
 class TestAnImportPutsThemBack:
     def test_every_offset_comes_back_with_its_first_timestamp(self, store_at, tmp_path):
-        """`first_ts` is what orders ingest, so a copy that drops it is not the same row.
+        """Round trip only: the export carries the column and the import loads it.
 
-        The rebased copy was written from a column list typed out by hand, and it was typed before
-        `files` grew this column: harvest then head-scans the file to find what the row already
-        knew.
+        NOT A GATE FOR THE REBASE, and it used to say it was. With no `into` the destination cwd is
+        the source cwd, `_rebase_store_rows` hits its `continue`, and the hand-typed column list
+        this docstring blamed never runs at all: an independent reviewer reverted that fix and
+        watched this file stay green. The gate for it is
+        `tests/test_mirror.py::TestTheRebase::test_the_offset_keeps_the_timestamp_that_orders_ingest`,
+        which moves the project and does go red.
         """
         out = tmp_path / "out.db"
         projects.export(ALPHA, out)

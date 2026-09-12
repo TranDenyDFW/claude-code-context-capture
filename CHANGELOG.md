@@ -176,21 +176,28 @@ removed and nothing here said so.
   (naming the source) and a resume taken here (naming the destination) looked like two projects and
   the chat stayed two rows under two names for good. The link pass now reads the store's own cwd
   for a transcript that cannot name its home.
-- **A delete no longer removes a transcript file that a surviving project's session is also in.**
+- **A delete no longer removes a transcript file that a session it did not touch is also in.**
   One file can hold two sessions' records, and the delete already computed which files those were,
   and spent the answer on the exclusion decision and the snapshots while purging the file anyway.
-  Measured on the author's store: 7 files are claimed by more than one session row, one of those
-  pairs across two working directories. The file is now kept and named in the report, the way
-  `memory/` and the trust entry already were.
+  Measured on the author's store: 7 files are claimed by more than one session row, and in one of
+  them the second session is not in the project being deleted. The file is kept and named in the
+  report, the way `memory/` and the trust entry already were, AND SO IS ITS HARVEST OFFSET. That
+  second half was found by an independent reviewer: a directory that shares a file is left
+  capturing on purpose, harvest reads a path with no offset row from byte zero, and a delete that
+  kept the file while removing its offset was undone by the next pass. Measured on a copy of the
+  author's store: 1,030 turns and 291,628 messages returned under a session the delete had removed,
+  one pass later.
 - **An export carries, and a delete removes, the harvest offset of EVERY transcript a session
   wrote.** The app-state layer has always carried the whole `<session id>/` directory, subagent
   transcripts and tool output included, and `files` was scoped to the session's own top-level
-  path: 7,634 of the author's 9,068 offset rows were in neither the backup nor the delete, and one
-  project's export carried 138 offsets where it should have carried 1,234. An offset left behind
-  says a file has been read to its end, so those bytes were skipped forever if the file came back.
-  The preview, the export, the delete's acceptance check and the delete itself now share one
-  scoping rule instead of four copies of it, which is also what makes `session_links` travel by its
-  head as well as by its own session, as `tools/harvest.mjs` has always deleted it.
+  path: only 1,436 of the author's 9,094 offset rows were reachable that way, and one project's
+  export carried 138 offsets where it should have carried 1,253. An offset left behind says a file
+  has been read to its end, so those bytes were skipped forever if the file came back. The rule is
+  now the session id in the path, which is what the capture matches on; deriving a prefix from
+  `sessions.transcript_path` instead still missed 19 of that project's offsets, because one session
+  on this store has a `transcript_path` naming a subagent file. The preview, the export, the
+  delete's acceptance check and the delete itself share one scoping rule instead of four copies
+  of it.
 - **A moved transcript keeps the timestamp that orders ingest.** The offset row copied to the
   destination path was written from a hand-typed column list that predates `files.first_ts`, so the
   copy was not the row it claimed to be. It is read from the table now, and the offsets of the

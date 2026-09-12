@@ -461,6 +461,50 @@ class TestTheRebase:
             [SOURCE], "a dry run changed the store"
 
 
+class TestWhichChatsTravelWithoutTheirName:
+    """A record is matched by the session it is CURRENTLY on, and the app moves that id on resume.
+
+    So an export can carry every row, every transcript and every byte of memory for a chat and
+    still leave behind the one file that makes the destination app list it. Nothing said so: a
+    record that is not carried is not an error anywhere, and `verify` only re-hashes what IS in the
+    file.
+
+    Asked of the capture rather than of the store, because the two read different root lists under
+    test: an independent reviewer measured the store-based version reading the developer's own 172
+    records from inside the suite, where it could never agree with the capture beside it.
+    """
+
+    def test_a_chat_whose_record_is_here_is_not_named(self, store_at, machine, tmp_path):
+        export_path = tmp_path / "e.db"
+        manifest = projects.export(SOURCE, export_path)
+        without = manifest["app_state"]["chats_without_record"]
+        assert "s0-0" not in without, (
+            "the fixture files a record for s0-0 and the export did not see it")
+
+    def test_a_chat_with_no_record_on_this_machine_is_named(self, store_at, machine, tmp_path):
+        export_path = tmp_path / "e.db"
+        manifest = projects.export(SOURCE, export_path)
+        assert sorted(manifest["app_state"]["chats_without_record"]) == ["s0-1", "s0-2"], (
+            manifest["app_state"]["chats_without_record"])
+
+    def test_a_record_the_store_has_not_caught_up_with_is_named(self, store_at, machine, tmp_path):
+        """The case this exists for: the app moved the record on, and harvest has not run since."""
+        record = machine.sessions / FOREIGN_ACCOUNT / ORG / DESKTOP_FILE
+        body = json.loads(record.read_text(encoding="utf-8"))
+        body["cliSessionId"] = "a-session-this-store-has-never-seen"
+        record.write_text(json.dumps(body), encoding="utf-8")
+        export_path = tmp_path / "e.db"
+        manifest = projects.export(SOURCE, export_path)
+        assert "s0-0" in manifest["app_state"]["chats_without_record"], (
+            "the chat travelled without the file that names it and the manifest did not say so")
+
+    def test_a_rows_only_export_names_no_chat(self, store_at, machine, tmp_path):
+        """It carries no file for any chat, and `carries_no_files` already says that once."""
+        export_path = tmp_path / "e.db"
+        manifest = projects.export(SOURCE, export_path, app_state=False)
+        assert manifest["app_state"]["chats_without_record"] == []
+
+
 class TestTheProofCanSayNo:
     """A check that cannot fail is worse than no check: it certifies whatever it is pointed at."""
 

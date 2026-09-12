@@ -481,7 +481,12 @@ def capture(cwds, session_ids, sessions_root=None, sink=None):
             _walk(tasks, entry, TASKS, cwds[0] if cwds else "", rows, skipped)
 
     rows.extend(_capture_config(cwds, skipped))
-    rows.extend(_capture_desktop(id_set, sessions_root, skipped))
+    # WHICH SESSIONS A RECORD WAS FOUND FOR, reported rather than inferred. A caller that wants to
+    # know which CHATS travelled without the file that names them cannot ask the store: it would be
+    # asking a different set of roots from the one this capture just read, which under test is the
+    # developer's real machine rather than the fixture.
+    desktop_ids: set[str] = set()
+    rows.extend(_capture_desktop(id_set, sessions_root, skipped, desktop_ids))
 
     report = {
         "files": tally["files"],
@@ -491,6 +496,7 @@ def capture(cwds, session_ids, sessions_root=None, sink=None):
         "not_carried": not_carried,
         "not_carried_files": sum(n["files"] for n in not_carried),
         "desktop_pair": desktop_pair(sessions_root),
+        "desktop_ids": sorted(desktop_ids),
         "source_store": str(store.DB_PATH),
     }
     return kept, report
@@ -515,7 +521,7 @@ def _capture_config(cwds, skipped):
     return rows
 
 
-def _capture_desktop(id_set, root, skipped):
+def _capture_desktop(id_set, root, skipped, carried_ids=None):
     """The desktop app's own record for each session, keyed by cliSessionId.
 
     The relative path is the FILENAME ALONE. The account and organisation directories above it
@@ -557,6 +563,8 @@ def _capture_desktop(id_set, root, skipped):
         # MARKED ONLY WHEN IT IS ACTUALLY CARRIED, so a copy this one could not read or parse does
         # not stop the readable copy under the next root from travelling.
         taken[path.name] = str(path)
+        if carried_ids is not None:
+            carried_ids.add(found[0])
         rows.append(_row(DESKTOP, cwd, path.name, mtime, blob, DESKTOP_CWD_FIELDS))
     return rows
 

@@ -1101,6 +1101,30 @@ class TestATranscriptASurvivingSessionIsAlsoIn:
         assert not result["still_here"], (
             "a file this delete decided to keep is not a delete that did not finish")
 
+    def test_the_kept_file_keeps_its_offset_so_the_delete_is_not_undone(self, store_at, machine,
+                                                                        tmp_path):
+        """Otherwise one harvest pass puts the whole deleted project back.
+
+        A directory that shares a transcript file is left CAPTURING on purpose, and harvest reads a
+        path with no `files` row from byte zero. So a delete that keeps the file and removes its
+        offset hands the next pass a file it has never seen. An independent reviewer ran exactly
+        that on a copy of the author's store: 1,030 turns and 291,628 messages came back under a
+        session the delete had removed, one pass later.
+        """
+        self.share(store_at)
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        try:
+            kept = con.execute("SELECT COUNT(*) FROM files WHERE path = ?",
+                               (r"C:\t\s0-0.jsonl",)).fetchone()[0]
+            others = con.execute("SELECT COUNT(*) FROM files WHERE path LIKE ?",
+                                 (r"C:\t\s0-1%",)).fetchone()[0]
+        finally:
+            con.close()
+        assert kept == 1, "the offset of a file this delete kept was removed anyway"
+        assert others == 0, "and the offsets of the files it did remove are gone"
+        assert result["kept_offsets"] == [r"C:\t\s0-0.jsonl"], result["kept_offsets"]
+
     def test_nothing_is_kept_when_the_file_is_this_projects_alone(self, store_at, machine,
                                                                   tmp_path):
         """The gate, with the sharing removed: otherwise it keeps every transcript for free."""

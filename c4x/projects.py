@@ -415,33 +415,30 @@ def where_for(table, ids, schema=""):
     exactly what the backup contains. They were four copies of the same three clauses and two of
     those clauses were wrong in the same way on all four.
 
-    `session_links` IS ALSO REACHED BY ITS HEAD. A link names two sessions, its own and the chat's
-    head, and `tools/harvest.mjs` deletes a directory's links by `session_id OR head_id` for the
-    same reason: a row left behind names a head that no longer exists, and a reader cannot tell that
-    from a chat.
-
     `files` IS THE OFFSET OF EVERY TRANSCRIPT A SESSION WROTE, not only of its own top-level file.
-    `appstate.capture` carries every entry whose name begins with a session id, which includes the
+    `appstate.capture` carries every entry whose NAME BEGINS WITH A SESSION ID, which includes the
     `<session id>/` directory holding subagent transcripts and tool output, and the purge removes
     them; this scoped to `sessions.transcript_path` alone, so 7,634 of this store's 9,068 offset
     rows were neither carried by an export nor removed by a delete. Left behind, an offset says a
     file has been read to its end, so those bytes are skipped forever if the file ever comes back.
-    The stem is the store's own `transcript_path` minus `.jsonl`, so no path is rebuilt in Python
-    and no slug or letter case has to match; a fixed length session id cannot be the prefix of
-    another one.
+
+    THE ID IS IN THE PATH, and that is the whole test. Deriving the prefix from
+    `sessions.transcript_path` instead was measurably not the same rule: one session on this store
+    has a `transcript_path` naming a SUBAGENT file, so the prefix reached that one file and missed
+    the other 18 the capture carried for it. An independent review found the export carrying 19
+    files whose offsets it did not carry, and the delete removing those 19 files and leaving their
+    19 offsets. A session id is a uuid, so a path that contains one was written for that session,
+    wherever in the path it appears.
     """
     marks = ",".join("?" * len(ids))
     if table in BY_COMPACTION:
         return (f"""WHERE compaction_uuid IN (SELECT uuid FROM {schema}compactions
                     WHERE session_id IN ({marks}))""", list(ids))
     if table in BY_TRANSCRIPT:
-        stem = "substr(s.transcript_path, 1, length(s.transcript_path) - 6)"
         return (f"""WHERE EXISTS (SELECT 1 FROM {schema}sessions s
-                    WHERE s.session_id IN ({marks}) AND s.transcript_path IS NOT NULL
-                      AND instr({table}.path, {stem}) = 1)""",
+                    WHERE s.session_id IN ({marks})
+                      AND instr(lower({table}.path), lower(s.session_id)) > 0)""",
                 list(ids))
-    if table == "session_links":
-        return (f"WHERE session_id IN ({marks}) OR head_id IN ({marks})", list(ids) + list(ids))
     return (f"WHERE session_id IN ({marks})", list(ids))
 
 
@@ -713,6 +710,7 @@ def _write_app_state(out_path, cwds, ids):
         "skipped": report["skipped"],
         "too_large": oversized,
         "source_desktop_pair": report["desktop_pair"],
+        "desktop_ids": report.get("desktop_ids") or [],
     }
 
 
@@ -804,11 +802,21 @@ def export(project, out_path, app_state=True):
         # with a bare `continue`: the rows, the transcripts and the memory all arrive on the other
         # machine and the chat is not in the app's list. Nothing said so, because a record that is
         # not carried is not an error anywhere, and `verify` only re-hashes what IS in the file.
-        heads = {store.chat_head(s) for s in ids}
-        seen_records = store.desktop_records()
-        carried_state["chats_without_record"] = sorted(
-            head for head in heads
-            if not any(member in seen_records for member in store.chat_members(head)))
+        #
+        # ASKED OF THE CAPTURE, NOT OF THE STORE. This called `store.desktop_records()`, which walks
+        # the store's root list, and the suite isolates this module by patching `appstate`'s: an
+        # independent reviewer measured every export test in the suite reading the developer's own
+        # 172 records, and the check could never agree with the capture beside it because the two
+        # were reading different machines.
+        #
+        # A ROWS ONLY EXPORT CARRIES NO RECORD FOR ANY CHAT, and saying so once per chat would be
+        # noise: `carries_no_files` already says it once.
+        carried_state["chats_without_record"] = []
+        if app_state:
+            found_for = set(carried_state.get("desktop_ids") or [])
+            carried_state["chats_without_record"] = sorted(
+                head for head in {store.chat_head(s) for s in ids}
+                if not any(member in found_for for member in store.chat_members(head)))
 
         # Counted and digested from the FILE, not from what was intended to be written. The point
         # of the manifest is to describe what is actually in there.
@@ -1534,13 +1542,27 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
         # Survivors before compactions, and everything before sessions: no foreign keys means
         # nothing cleans up after a half-finished delete, so the order is the safety.
         #
-        # THE TRANSCRIPT OFFSETS GO BEFORE THE SESSION ROWS, and now that they are scoped by the
-        # session's own transcript path they HAVE to: `where_for` reads `sessions.transcript_path`
-        # to find them, so deleting the session rows first would leave every offset behind. Left
+        # THE TRANSCRIPT OFFSETS GO BEFORE THE SESSION ROWS, and now that they are found through
+        # the session rows they HAVE to: `where_for` reads `sessions` to know which ids to look for
+        # in a path, so deleting the session rows first would leave every offset behind. Left
         # behind, the transcript is skipped forever even after the exclusion is lifted, which would
         # make "include" quietly do nothing.
+        #
+        # AND THE OFFSET OF A FILE THIS DELETE KEEPS STAYS, which is the same rule read the other
+        # way. A transcript a surviving session is also in is kept on disk, and the directory it
+        # sits in is left capturing precisely because it holds that file, so removing its offset
+        # hands the next harvest a file it has never seen: it re-reads it from byte zero and puts
+        # every session the delete just removed back. Demonstrated by an independent reviewer on a
+        # copy of this store, deleting one project and running one pass: 1,030 turns and 291,628
+        # messages returned under the session that had been deleted. The kept offsets are listed in
+        # the report beside the file they belong to.
+        kept_paths = sorted({entry["transcript"] for entry in shared_transcripts
+                             if entry.get("transcript")})
         for table in BY_COMPACTION + BY_TRANSCRIPT + by_session:
             where, params = where_for(table, ids)
+            if table in BY_TRANSCRIPT and kept_paths:
+                where += f" AND path NOT IN ({','.join('?' * len(kept_paths))})"
+                params = list(params) + kept_paths
             removed[table] = con.execute(f"DELETE FROM {table} {where}", params).rowcount
         # WHAT STILL LIVES IN THIS DIRECTORY, asked AFTER the rows are gone, so the answer is
         # about survivors rather than about the set being deleted. It decides both of the
@@ -1725,6 +1747,11 @@ def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots
             # Transcript files this project shared with another working directory. The harvester
             # abandons a file, not a session, so these are why a directory can be left capturing.
             "shared_transcripts": shared_transcripts,
+            # And the offsets kept with them, named rather than left to be inferred: these are the
+            # rows a delete deliberately does not remove, because the file they describe is still
+            # on disk and a file with no offset is one harvest reads again from the beginning.
+            "kept_offsets": sorted({entry["transcript"] for entry in shared_transcripts
+                                    if entry.get("transcript")}),
             "exported_sessions": manifest["sessions"],
             "removed_files": len(purged["removed"]), "removed_bytes": purged["bytes"],
             "kept_files": purged["kept"], "refused_files": purged["refused"],
@@ -2070,6 +2097,9 @@ def main(argv=None):
         for entry in result.get("shared_transcripts") or []:
             print(f"    shares {entry['transcript']} with {entry['with_cwd']}, "
                   "and the harvester skips whole files")
+        for path in result.get("kept_offsets") or []:
+            print(f"    KEPT  {path}, and its harvest offset with it, because a session this "
+                  "delete did not touch is in that file")
         if result.get("unlocated"):
             print("  NO WORKING DIRECTORY RECORDED for any of these sessions, so no files were "
                   "purged and no exclusion could be written that harvest would ever match")
