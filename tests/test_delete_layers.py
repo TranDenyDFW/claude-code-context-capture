@@ -1125,6 +1125,27 @@ class TestATranscriptASurvivingSessionIsAlsoIn:
         assert others == 0, "and the offsets of the files it did remove are gone"
         assert result["kept_offsets"] == [r"C:\t\s0-0.jsonl"], result["kept_offsets"]
 
+    def test_the_report_names_an_offset_that_is_there_and_not_one_it_meant_to_keep(
+            self, store_at, machine, tmp_path):
+        """A report of intent is worth nothing on the one line a user would check.
+
+        This was built from the shared transcripts, so it said what the delete MEANT to keep. An
+        independent reviewer disabled the clause that keeps them and still got a report naming a
+        kept offset that had just been deleted. Here the row is missing before the delete runs, so
+        a report built from intent names it and a report read back from the store does not.
+        """
+        self.share(store_at)
+        con = sqlite3.connect(str(store_at))
+        con.execute("DELETE FROM files WHERE path = ?", (r"C:\t\s0-0.jsonl",))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
+        assert result["kept_offsets"] == [], (
+            "the report named an offset this store does not hold")
+        assert result["shared_with_surviving_sessions"], (
+            "and the file itself is still kept and named")
+
     def test_nothing_is_kept_when_the_file_is_this_projects_alone(self, store_at, machine,
                                                                   tmp_path):
         """The gate, with the sharing removed: otherwise it keeps every transcript for free."""

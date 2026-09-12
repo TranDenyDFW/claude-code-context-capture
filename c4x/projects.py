@@ -1552,10 +1552,12 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
         # way. A transcript a surviving session is also in is kept on disk, and the directory it
         # sits in is left capturing precisely because it holds that file, so removing its offset
         # hands the next harvest a file it has never seen: it re-reads it from byte zero and puts
-        # every session the delete just removed back. Demonstrated by an independent reviewer on a
-        # copy of this store, deleting one project and running one pass: 1,030 turns and 291,628
-        # messages returned under the session that had been deleted. The kept offsets are listed in
-        # the report beside the file they belong to.
+        # every session the delete just removed back. Measured by an independent reviewer on a copy
+        # of this store, deleting one project and running one harvest pass twice, once with this
+        # clause and once without: with it the pass read 0 bytes and restored nothing, without it
+        # the same pass re-read 9,108 lines and restored 2 sessions, 4,140 turns, 2,943 messages
+        # and 1,574 tool calls. The kept offsets are listed in the report beside the file they
+        # belong to, and read back from the store rather than assumed.
         kept_paths = sorted({entry["transcript"] for entry in shared_transcripts
                              if entry.get("transcript")})
         for table in BY_COMPACTION + BY_TRANSCRIPT + by_session:
@@ -1564,6 +1566,12 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
                 where += f" AND path NOT IN ({','.join('?' * len(kept_paths))})"
                 params = list(params) + kept_paths
             removed[table] = con.execute(f"DELETE FROM {table} {where}", params).rowcount
+        # READ BACK, NOT ASSUMED. This was built from `shared_transcripts`, so it said what the
+        # delete MEANT to keep: an independent reviewer disabled the clause above and got a report
+        # naming a kept offset that had just been deleted. A report of intent is worth nothing on
+        # the one line a user would check.
+        kept_offsets = [path for path in kept_paths
+                        if con.execute("SELECT 1 FROM files WHERE path = ?", (path,)).fetchone()]
         # WHAT STILL LIVES IN THIS DIRECTORY, asked AFTER the rows are gone, so the answer is
         # about survivors rather than about the set being deleted. It decides both of the
         # working-directory clauses in this function's docstring.
@@ -1628,7 +1636,7 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
         return _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots,
                                  ids, cwds, unlocated, survivors, slug_survivors, surviving_norm,
                                  surviving_slug_set, removed, excluded_cwds, still_captured,
-                                 shared_transcripts, appeared)
+                                 shared_transcripts, appeared, kept_offsets)
     except Exception as exc:
         raise AfterTheRowsWereRemoved(
             f"{exc}. THE ROWS ARE ALREADY GONE: the store transaction committed before this ran, "
@@ -1639,7 +1647,7 @@ def _delete_with(project, manifest, backup, out_dir, keep_capturing, purge_snaps
 def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots,
                       ids, cwds, unlocated, survivors, slug_survivors, surviving_norm,
                       surviving_slug_set, removed, excluded_cwds, still_captured,
-                      shared_transcripts, appeared):
+                      shared_transcripts, appeared, kept_offsets=()):
     """The half that runs after the rows are committed. Separate so its failures are labelled."""
     from c4x import appstate
 
@@ -1747,11 +1755,11 @@ def _remove_the_files(project, manifest, backup, keep_capturing, purge_snapshots
             # Transcript files this project shared with another working directory. The harvester
             # abandons a file, not a session, so these are why a directory can be left capturing.
             "shared_transcripts": shared_transcripts,
-            # And the offsets kept with them, named rather than left to be inferred: these are the
-            # rows a delete deliberately does not remove, because the file they describe is still
-            # on disk and a file with no offset is one harvest reads again from the beginning.
-            "kept_offsets": sorted({entry["transcript"] for entry in shared_transcripts
-                                    if entry.get("transcript")}),
+            # And the offsets kept with them, READ BACK FROM THE STORE after the removal rather
+            # than inferred from the intention: these are the rows a delete did not remove, because
+            # the file they describe is still on disk and a file with no offset is one harvest
+            # reads again from the beginning.
+            "kept_offsets": sorted(kept_offsets),
             "exported_sessions": manifest["sessions"],
             "removed_files": len(purged["removed"]), "removed_bytes": purged["bytes"],
             "kept_files": purged["kept"], "refused_files": purged["refused"],
@@ -1997,7 +2005,8 @@ def main(argv=None):
         # wall of ids rather than a warning. The whole list stays in the manifest.
         missing_names = state.get("chats_without_record") or []
         if missing_names:
-            print(f"    NO DESKTOP RECORD  {len(missing_names)} of {manifest['chats']} chat(s): "
+            print(f"    NO DESKTOP RECORD  {len(missing_names)} of "
+                  f"{manifest.get('chats', manifest['sessions'])} chat(s): "
                   "the app has no record here for them, so the destination app will not list them")
             for head in missing_names[:5]:
                 print(f"      {head}")

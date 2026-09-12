@@ -185,8 +185,9 @@ removed and nothing here said so.
   second half was found by an independent reviewer: a directory that shares a file is left
   capturing on purpose, harvest reads a path with no offset row from byte zero, and a delete that
   kept the file while removing its offset was undone by the next pass. Measured on a copy of the
-  author's store: 1,030 turns and 291,628 messages returned under a session the delete had removed,
-  one pass later.
+  author's store, one harvest pass run twice over the same delete: with the offset kept the pass
+  read nothing, and without it the pass re-read 9,108 lines and put back 2 sessions, 4,140 turns,
+  2,943 messages and 1,574 tool calls.
 - **An export carries, and a delete removes, the harvest offset of EVERY transcript a session
   wrote.** The app-state layer has always carried the whole `<session id>/` directory, subagent
   transcripts and tool output included, and `files` was scoped to the session's own top-level
