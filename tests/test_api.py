@@ -347,7 +347,10 @@ def a_narrowing_cohort():
     for option in store.cohort_options():
         if option["value"] == "__all__":
             continue
-        held = len(store.cohort_sessions(option["value"]))
+        # CHATS, not sessions. `cohort_sessions` names every member of every chat in the cohort so
+        # that delete, export and Compare see whole chains; the picker and the table show one row
+        # per chat. Counted raw, a cohort holding 260 chats over 274 sessions read as 274.
+        held = len({store.chat_head(s) for s in store.cohort_sessions(option["value"])})
         if 0 < held < total:
             return option["value"], held
     return None, 0
