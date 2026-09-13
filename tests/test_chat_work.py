@@ -24,6 +24,13 @@ from tests.test_projects import build_store, forget_cached_rows  # noqa: E402
 HEAD, OLD = "s0-0", "s0-1"
 AGENT_FILE = r"C:\t\s0-0\subagents\agent-a1.jsonl"
 
+# LONGER THAN THE PREVIEW, AND ON MORE THAN ONE LINE, because both of those are rules and a short
+# single-line plan gates neither. A reviewer made `/api/plan` truncate its answer to 400 characters
+# and the test named for that rule still passed, since the fixture plan was 15 characters and a cut
+# of it is the same string. Measured on the author's store: all 280 plans exceed 400 characters,
+# the shortest is 1,493 and the longest 80,428, so a short one is not the shape being modelled.
+NEWEST = "the newest plan\nand a second line so the flattening is visible " + "x" * 600
+
 
 def link(con, session_id, head_id):
     con.execute(
@@ -42,8 +49,8 @@ def work_store(tmp_path, monkeypatch):
     link(con, OLD, HEAD)
     con.execute("""INSERT INTO plans (tool_use_id, session_id, turn_uuid, ts, plan_text,
                      plan_chars, plan_file_path, is_sidechain, file_path, line_no)
-                   VALUES ('tp-1', ?, 's0-0-t0', '2026-08-02T10:00:00Z', 'the newest plan', 15,
-                           'C:\\plans\\one.md', 0, 'f', 1)""", (HEAD,))
+                   VALUES ('tp-1', ?, 's0-0-t0', '2026-08-02T10:00:00Z', ?, ?,
+                           'C:\\plans\\one.md', 0, 'f', 1)""", (HEAD, NEWEST, len(NEWEST)))
     # ON A SUPERSEDED SESSION. The chat wrote it before its last resume, and a reader scoped to the
     # newest session alone would report that this chat never planned anything.
     con.execute("""INSERT INTO plans (tool_use_id, session_id, turn_uuid, ts, plan_text,
@@ -59,9 +66,14 @@ def work_store(tmp_path, monkeypatch):
     # A CALL IN THIS CHAT, A DIRECTORY IN ANOTHER. This is the ONLY row reachable through the
     # calling session alone, and without it the OR in `chat_agent_runs` is ungated: an independent
     # reviewer deleted the caller-side clause and the whole file stayed green, because every other
-    # run here sits under this chat's own directory. Measured shape, not invented: history is
-    # bridged between sessions, so a run the chat asked for can be stored under another chat's
-    # directory, and dropping this reach loses it while the header count still counts it.
+    # run here sits under this chat's own directory.
+    #
+    # NOT YET SEEN ON THIS MACHINE, and the honest version of that sentence matters. Of 7,433 agent
+    # runs, 761 join a tool call that carries a session id and NONE of those differ from
+    # `dir_session_id`; the same holds for all 208 workflow runs. The schema keeps both columns
+    # because they answer different questions, and the reader is written for the day they differ:
+    # history is bridged between sessions, so a run a chat asked for can end up stored under
+    # another chat's directory. This row is that day, written down.
     con.execute("""INSERT INTO tool_calls (tool_use_id, session_id, turn_uuid, ts, tool_name,
                      subagent_type, file_path, line_no)
                    VALUES ('tc-elsewhere', ?, 's0-0-t0', '2026-08-02T11:30:00Z', 'Agent',
@@ -131,11 +143,19 @@ class TestThePlans:
         assert rows.loc["tp-0"]["denial_kind"] == "permission-rule"
 
     def test_the_preview_is_one_line_and_the_whole_text_is_elsewhere(self, work_store, store):
-        rows = store.chat_plans(HEAD).set_index("tool_use_id")
-        assert rows.loc["tp-1"]["preview"] == "the newest plan"
+        """Two rules, and the plan is long enough for either to break.
+
+        The list carries 400 characters with the newlines flattened, so it fits a table cell; the
+        whole document is a second fetch. A short plan gates neither, because a cut of it and a
+        flattening of it are both the original string.
+        """
+        preview = store.chat_plans(HEAD).set_index("tool_use_id").loc["tp-1"]["preview"]
+        assert len(preview) == 400, "the list carries 400 characters, not the document"
+        assert preview == NEWEST[:400].replace(chr(10), " "), "flattened for a table cell"
+        assert chr(10) not in preview
         whole = store.plan_text("tp-1")
-        assert whole.iloc[0]["plan_text"] == "the newest plan"
-        assert int(whole.iloc[0]["plan_chars"]) == 15
+        assert whole.iloc[0]["plan_text"] == NEWEST
+        assert int(whole.iloc[0]["plan_chars"]) == len(NEWEST) > 400
 
     def test_an_unknown_plan_is_an_empty_frame_rather_than_a_raise(self, work_store, store):
         assert store.plan_text("nope").empty
@@ -282,8 +302,9 @@ class TestTheRoutes:
 
     def test_the_plan_route_answers_the_whole_text_not_a_preview(self, api_client):
         body = api_client.get("/api/plan/tp-1").json()
-        assert body["text"] == "the newest plan"
-        assert body["chars"] == 15
+        assert body["text"] == NEWEST
+        assert len(body["text"]) > 400, "a route that truncated would pass on a short plan"
+        assert body["chars"] == len(NEWEST)
         assert body["outcome"] is None or isinstance(body["outcome"], str)
         # A PATH IS NOT A FILE. The row names one that was never created here.
         assert body["plan_file_path"].endswith("one.md")
