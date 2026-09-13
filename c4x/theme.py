@@ -391,6 +391,10 @@ COLUMN_HELP = {
                      "starting a new session that copies the old one; those are folded into one "
                      "row here, named by the newest, with turns, peak and compactions counted over "
                      "all of them. 1 for a chat that was never resumed."),
+    "work": ("Which kinds of background work this chat holds: plans it wrote, subagents it ran, "
+             "workflow runs it launched, and task notifications it was told about, counted over "
+             "the whole chat. Empty for most chats, which ran none of it. The web app's Sessions "
+             "list opens a panel per row with the detail."),
     "section": ("Read from disk, not stored: the working directory, the entrypoint, and whether "
                 "the transcript file still exists on this machine."),
     "project": ("The working directory. A path ending in \\archived is a chat the desktop app "

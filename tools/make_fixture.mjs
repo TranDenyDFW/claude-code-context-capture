@@ -479,6 +479,100 @@ const insertLink = db.prepare(`
 insertLink.run('fixture-chat-prefix-2', 'fixture-chat-prefix-1', 'none', 1.0, 3, 15, 3, iso(1));
 insertLink.run('fixture-chat-prefix-1', 'fixture-chat-head', 'record', 0.93, 15, 45, 14, iso(1));
 
+// What a chat PLANNED and what it RAN, which is what the panel beside the Sessions list shows.
+// Every shape the readers have to tell apart is here, because a skip against this fixture counts
+// as a fixture gap rather than as data: a plan that was accepted and one that was refused, an agent
+// run reached through the call that spawned it and one reached only through the directory it sits
+// in, a workflow run with its agents, and a task notification that resolves beside one that does
+// not.
+const insertPlan = db.prepare(`
+  INSERT INTO plans (tool_use_id, session_id, turn_uuid, ts, plan_text, plan_chars,
+                     plan_file_path, allowed_prompts_json, is_sidechain, file_path, line_no)
+  VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 'fixture://transcript.jsonl', ?)`);
+const planOne = '# Plan: fold the chat into one row' + '\n'.repeat(2) + 'x'.repeat(900);
+insertPlan.run('fixture-plan-ok', 'fixture-chat-head', 'fixture-chat-head-t1', iso(20),
+               planOne, planOne.length, 'C:\\plans\\fixture-accepted.md', 10);
+insertPlan.run('fixture-plan-refused', 'fixture-chat-prefix-1', 'fixture-chat-prefix-1-t1',
+               iso(10), 'a proposal that was turned down', 31, null, 11);
+// The calls they rode in on, so the readers can join an outcome that the plan table deliberately
+// does not carry.
+insertToolOutcome.run('fixture-plan-ok', 'fixture-chat-head', 'fixture-chat-head-t1', iso(20),
+                      'ExitPlanMode', null, null, 'sha-plan-ok', 940, 12, 0,
+                      'fixture://transcript.jsonl', 10, 'ok', null);
+insertToolOutcome.run('fixture-plan-refused', 'fixture-chat-prefix-1', 'fixture-chat-prefix-1-t1',
+                      iso(10), 'ExitPlanMode', null, null, 'sha-plan-no', 60, 8, 1,
+                      'fixture://transcript.jsonl', 11, 'refused', 'permission-rule');
+
+// The Agent call that asked for a subagent, and the run it produced.
+insertTool.run('fixture-agent-call', 'fixture-chat-head', 'fixture-chat-head-t2', iso(21),
+               'Agent', null, null, 'sha-agent', 300, 4000,
+               'fixture://transcript.jsonl', 12, 'general-purpose');
+const insertAgentRun = db.prepare(`
+  INSERT INTO agent_runs (agent_id, dir_session_id, tool_use_id, workflow_run_id, agent_type, name,
+                          description, spawn_depth, model, parent_agent_id, stopped_by_user,
+                          meta_json, transcript_path, meta_path, meta_size, meta_mtime_ms)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, 0)`);
+insertAgentRun.run('a1111111111111111', 'fixture-chat-head', 'fixture-agent-call', null,
+                   'general-purpose', 'scout', 'Investigate the fixture', 1, 'claude-sonnet-5',
+                   '{"agentType":"general-purpose","toolUseId":"fixture-agent-call"}',
+                   'fixture://agents/a1111111111111111.jsonl',
+                   'fixture://agents/a1111111111111111.meta.json', 120);
+// NO CALL TO JOIN TO. Measured on the author's machine: 35 of 796 plain runs and all 6,636 workflow
+// agents carry no toolUseId, so a reader that only reached runs through tool_calls would hold a
+// tenth of them.
+insertAgentRun.run('a2222222222222222', 'fixture-chat-head', null, null,
+                   'Explore', null, 'A run with no call to join to', 1, null,
+                   '{"agentType":"Explore"}', 'fixture://agents/a2222222222222222.jsonl',
+                   'fixture://agents/a2222222222222222.meta.json', 60);
+insertAgentRun.run('a3333333333333333', 'fixture-chat-head', null, 'wf_fixture-001',
+                   'workflow-subagent', 'review:bugs', 'One agent of the workflow', 1, 'claude-opus-5',
+                   '{"agentType":"workflow-subagent"}', 'fixture://agents/a3333333333333333.jsonl',
+                   'fixture://agents/a3333333333333333.meta.json', 80);
+
+const insertWorkflow = db.prepare(`
+  INSERT INTO workflow_runs (run_id, task_id, dir_session_id, tool_use_id, turn_uuid, session_id,
+                             workflow_name, status, started_at, ts, duration_ms, agent_count,
+                             total_tokens, total_tool_calls, default_model, summary, result_text,
+                             phases_json, progress_json, error, script_path, transcript_dir,
+                             file_path, file_size, file_mtime_ms)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, ?, ?, 0)`);
+insertWorkflow.run('wf_fixture-001', 'wfixture1', 'fixture-chat-head', 'fixture-workflow-call',
+                   'fixture-chat-head-t3', 'fixture-chat-head', 'review-changes', 'completed',
+                   iso(22), iso(22), 927840, 3, 2559916, 429, 'claude-opus-5',
+                   'Two findings, both confirmed', '[{"title":"Find"}]',
+                   'fixture://workflows/wf_fixture-001.json', 4096);
+insertToolOutcome.run('fixture-workflow-call', 'fixture-chat-head', 'fixture-chat-head-t3',
+                      iso(22), 'Workflow', null, null, 'sha-wf', 700, 200, 0,
+                      'fixture://transcript.jsonl', 13, 'ok', null);
+// A run this chat holds the files for and never called: agent_count says three, and only one of
+// their transcripts is here. Two numbers, and the reader shows both.
+insertWorkflow.run('wf_fixture-002', 'wfixture2', 'fixture-chat-head', null, null, null,
+                   'audit-tables', 'running', iso(23), iso(23), null, 4, null, null, null,
+                   null, null, 'fixture://workflows/wf_fixture-002.json', 2048);
+
+const insertTaskEvent = db.prepare(`
+  INSERT INTO task_events (uuid, session_id, ts, parent_uuid, task_id, task_type, status,
+                           description, delta_summary, output_file_path, file_path, line_no)
+  VALUES (?, ?, ?, ?, ?, 'local_agent', ?, ?, ?, ?, 'fixture://transcript.jsonl', ?)`);
+insertTaskEvent.run('fixture-task-1', 'fixture-chat-head', iso(24), 'fixture-chat-head-t2',
+                    'a1111111111111111', 'completed', 'Investigate the fixture',
+                    'found two things', 'fixture://tasks/a1111111111111111.txt', 14);
+// UNRESOLVED ON PURPOSE. 4 of 22 task ids on the author's store resolve to no run at all, and a
+// panel that dropped those rows would describe a tidier machine than the one it runs on.
+insertTaskEvent.run('fixture-task-2', 'fixture-chat-head', iso(25), 'fixture-chat-head-t2',
+                    'a9999999999999999', 'running', 'A task whose run is not here', null, null, 15);
+
+// TWO KINDS IN ONE TABLE, which is the whole reason `files.kind` exists. A transcript's offset and
+// a sidecar's offset live side by side, and the Summary card headed "transcripts" counts one of
+// them. With no rows here at all that card read 0 on the fixture and any check on it was vacuous.
+const insertFileRow = db.prepare(`
+  INSERT INTO files (path, size, mtime_ms, bytes_read, lines_read, rewrites, last_harvest_ts,
+                     first_ts, kind)
+  VALUES (?, ?, 0, ?, ?, 0, ?, ?, ?)`);
+insertFileRow.run('fixture://p/fixture-chat-head.jsonl', 4096, 4096, 40, iso(26), iso(0), null);
+insertFileRow.run('fixture://p/fixture-chat-head/subagents/agent-a1111111111111111.meta.json',
+                  120, 120, 1, iso(26), null, 'sidecar');
+
 // Probes. probes_layout reads all three of these, and with them empty the tab raises and renders
 // an exception panel instead of content, which the table audit reports as a failed tab.
 const insertProbe = db.prepare(`
@@ -567,9 +661,12 @@ const counts = {};
 for (const table of ['sessions', 'turns', 'messages', 'compactions', 'compaction_survivors',
                      'tool_calls', 'context_baselines', 'probes', 'probe_categories',
                      'probe_details', 'attachments', 'hook_events', 'record_types',
-                     'session_links']) {
+                     'session_links', 'plans', 'agent_runs', 'workflow_runs',
+                     'task_events', 'files']) {
   counts[table] = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
 }
+const transcriptFiles = db.prepare(
+  'SELECT COUNT(*) AS n FROM files WHERE kind IS NULL').get().n;
 const apiCalls = db.prepare('SELECT COUNT(*) AS n FROM api_calls').get().n;
 const smallWindowCompactions = db.prepare(
   'SELECT COUNT(*) AS n FROM compactions WHERE pre_tokens < 500000').get().n;
@@ -643,6 +740,14 @@ const chainHead = db.prepare(
   "SELECT head_id FROM session_links WHERE session_id = 'fixture-chat-prefix-2'").get()?.head_id;
 const prefixTurns = db.prepare(
   "SELECT COUNT(*) n FROM turns WHERE session_id = 'fixture-chat-prefix-2'").get().n;
+// The chat's work, counted while the database is still open: the checks array below is built
+// after it closes, which is why every figure in it is a const rather than a query.
+const runsWithACall = db.prepare(
+  'SELECT COUNT(*) n FROM agent_runs a JOIN tool_calls t ON t.tool_use_id = a.tool_use_id').get().n;
+const runsWithNoCall = db.prepare(
+  'SELECT COUNT(*) n FROM agent_runs WHERE tool_use_id IS NULL').get().n;
+const tasksResolved = db.prepare(
+  'SELECT COUNT(*) n FROM task_events e JOIN agent_runs a ON a.agent_id = e.task_id').get().n;
 const forkLinks = db.prepare(`SELECT COUNT(*) n FROM session_links
   WHERE session_id = 'fixture-chat-fork' OR head_id = 'fixture-chat-fork'`).get().n;
 
@@ -749,9 +854,26 @@ if (!SELF_TEST) {
     // The resumed chat (test_chats). Without it the collapse in session_rows is dead in CI.
     ['a linked chain exists, so the Sessions table has something to collapse (test_chats)',
      counts.session_links === 2 && chainHead === 'fixture-chat-head'],
+    // The chat's own work, the four kinds the panel shows. Each count is the shape a reader has to
+    // tell from another: two plans, one accepted and one refused; three agent runs, one reached
+    // through its call and two reachable only through the directory; two workflow runs, one
+    // launched by a call here and one this chat only holds the files for; two task notifications,
+    // one resolving to a run and one to nothing.
+    ['the fixture carries the plans, agent runs, workflows and task notifications of a chat',
+     counts.plans === 2 && counts.agent_runs === 3 && counts.workflow_runs === 2
+       && counts.task_events === 2,
+     JSON.stringify([counts.plans, counts.agent_runs, counts.workflow_runs, counts.task_events])],
+    ['and one agent run joins the call that spawned it while another has no call at all',
+     runsWithACall === 1 && runsWithNoCall === 2, JSON.stringify([runsWithACall, runsWithNoCall])],
+    ['and one task notification resolves to a run while the other resolves to nothing',
+     tasksResolved === 1, String(tasksResolved)],
     ['a linked member sits below the floor, so the floor is provably applied to the chat',
      prefixTurns < 5],
     ['a fork session carries no link', forkLinks === 0],
+    // ONE OF EACH KIND. A census that means transcripts has to be able to get this wrong.
+    ['the files table carries a transcript offset and a sidecar offset, so kind is testable',
+     counts.files === 2 && transcriptFiles === 1,
+     JSON.stringify([counts.files, transcriptFiles])],
   ];
   let failed = 0;
   for (const [what, ok] of checks) {

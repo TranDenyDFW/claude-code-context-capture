@@ -3,7 +3,7 @@
  * same state; a string nobody wrote is read as the defaults, never as a crash or a half-state.
  */
 import { describe, expect, it } from 'vitest'
-import { EMPTY, fromSearch, tableUrl, toSearch, type ViewState } from './state'
+import { EMPTY, chatWorkUrl, fromSearch, tableUrl, toSearch, type ViewState } from './state'
 
 const full: ViewState = {
   tab: 'tab-cost',
@@ -12,6 +12,7 @@ const full: ViewState = {
   table: 3,
   figure: null,
   compaction: null,
+  chatWork: null,
   query: 'categories.json',
   filter: { key: 'session_id', value: 's-1' },
 }
@@ -73,5 +74,21 @@ describe('the view state round-trips through the query string', () => {
     const state = fromSearch('?tab=tab-cost&q=x&key=k&val=v')
     expect(state).toMatchObject({ view: 'dashboard', table: null, query: '', filter: null })
     expect(toSearch(state)).toBe('?tab=tab-cost')
+  })
+
+  it('needs a session id for the chat-work view, and keeps it only there', () => {
+    expect(fromSearch('?view=chatwork').view).toBe('dashboard')
+    expect(fromSearch('?view=chatwork&chatwork=s-9'))
+      .toMatchObject({ view: 'chatwork', chatWork: 's-9' })
+    // Named without its view it is not a place, so the address does not carry it either.
+    expect(toSearch({ ...EMPTY, chatWork: 's-9' })).toBe('')
+  })
+
+  it('builds an absolute link to one chat, carrying the selection and nothing else', () => {
+    const from = { ...EMPTY, tab: 'tab-sessions', view: 'table' as const, table: 2, query: 'x' }
+    const url = chatWorkUrl(from, 's-9')
+    expect(fromSearch(new URL(url).search)).toMatchObject({
+      tab: 'tab-sessions', view: 'chatwork', chatWork: 's-9', table: null, query: '',
+    })
   })
 })

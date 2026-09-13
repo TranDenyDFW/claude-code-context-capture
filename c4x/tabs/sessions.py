@@ -9,6 +9,7 @@ from c4x.dash_compat import DataTable
 from c4x.labels import is_folderless, titled_path
 from c4x.store import (
     SESSION_TURN_FLOOR,
+    chat_work_totals,
     restrict_to_cohort,
     session_rows,
     titles_for,
@@ -35,6 +36,30 @@ from c4x.theme import (
 # across renders. Taken from the palette rather than from a Plotly default, which would ignore the
 # page theme and put a light-mode qualitative scale on a dark background.
 SECTION_COLORS = (ACCENT, GOOD, VIOLET, WARN, "#e8590c", MUTED)
+
+
+#: What the `work` column says, one label per kind, in the order the panel lists them.
+WORK_KINDS = (("plans", "plan", "plans"),
+              ("agent_runs", "agent", "agents"),
+              ("workflow_runs", "workflow", "workflows"),
+              ("task_events", "task", "tasks"))
+
+
+def work_summary(counts) -> str:
+    """`{'plans': 2, 'agent_runs': 3}` becomes `2 plans, 3 agents`, and nothing becomes ``.
+
+    WORDS, NOT FOUR NUMERIC COLUMNS. Four counts of four different things read as a row of
+    quantities to compare, and they are not comparable: one plan and one workflow run are a
+    sentence and an hour of machine time. The column exists to say WHICH KINDS a chat has, so the
+    reader knows whether the panel beside it is worth opening, and the panel holds the detail.
+
+    An empty string rather than `0` or `-`: most chats have none of this, and a column of zeroes
+    would claim the store measured something for every row when what it has is nothing to say.
+    """
+    if not counts:
+        return ""
+    return ", ".join(f"{counts[key]:,} {one if counts[key] == 1 else many}"
+                     for key, one, many in WORK_KINDS if counts.get(key))
 
 
 def archived_counts(df):
@@ -105,6 +130,10 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
     # about it. Looked up only for the folder-less rows, so an ordinary store pays nothing.
     _folderless = [r.session_id for r in df.itertuples() if is_folderless(r.project)]
     _titles = titles_for(_folderless) if _folderless else {}
+    # WHAT THIS CHAT PLANNED AND RAN, one dict for the whole store rather than four queries a row.
+    # Absent for most chats: only 82 of 1,135 sessions on this machine have any of it, so the
+    # column is empty far more often than not and says nothing rather than "0".
+    _work = chat_work_totals()
 
     rows = []
     for r in df.itertuples():
@@ -122,6 +151,7 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             # How many CLI sessions this chat spans. 1 for most; a resumed chat is folded into
             # one row and this is the only visible trace of the fold.
             "cli sessions": int(r.cli_sessions or 1),
+            "work": work_summary(_work.get(r.session_id)),
         })
     marked, known_not, unknown = archived_counts(df)
     return html.Div([
@@ -186,7 +216,7 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             # where an undeclared hidden column made every row click a silent no-op.
             columns=(_cols := numeric_columns(
                 ["section", "title", "project", "last active", "turns", "current", "peak",
-                 "compactions", "cli sessions"],
+                 "compactions", "cli sessions", "work"],
                 {"turns", "current", "peak", "compactions", "cli sessions"}) + [
                 {"name": "session_id", "id": "session_id"}]),
             tooltip_header=header_help(_cols),

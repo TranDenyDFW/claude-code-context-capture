@@ -68,7 +68,25 @@ BY_SESSION = ("hook_events", "attachments", "tool_calls", "messages", "turns",
               # session rows do. Keyed on the PREFIX session's id: a chat's links travel and die
               # with the chat's own sessions, which are in the same project by construction.
               "session_links",
+              # WHAT A CHAT PLANNED AND RAN. Four tables harvest writes beside the transcripts, and
+              # they belong to a project for the same reason the offsets do: the runs sit inside
+              # the session directory this delete is about to remove, and an export that left them
+              # behind would restore a project whose panel had lost its plans. Two of them are not
+              # keyed on `session_id`, which is what `SESSION_COLUMN` below is for.
+              "plans", "task_events", "agent_runs", "workflow_runs",
               "sessions")
+
+# THE COLUMN THAT NAMES THE SESSION, where it is not called `session_id`.
+#
+# An agent run is filed under the session whose DIRECTORY holds its transcript, which is the thing
+# a delete removes and an export carries; the call that spawned it may sit in another chat, and
+# that reference is not ownership. A workflow run carries both, and either can be NULL: the JSON
+# beside the transcript fills `dir_session_id` and the launch record in the transcript fills
+# `session_id`, and a store can hold one half without the other.
+SESSION_COLUMN = {
+    "agent_runs": "dir_session_id",
+    "workflow_runs": "COALESCE(dir_session_id, session_id)",
+}
 
 # Reached another way, and named so nothing depends on remembering it.
 BY_COMPACTION = ("compaction_survivors",)
@@ -431,6 +449,8 @@ def where_for(table, ids, schema=""):
     wherever in the path it appears.
     """
     marks = ",".join("?" * len(ids))
+    if table in SESSION_COLUMN:
+        return (f"WHERE {SESSION_COLUMN[table]} IN ({marks})", list(ids))
     if table in BY_COMPACTION:
         return (f"""WHERE compaction_uuid IN (SELECT uuid FROM {schema}compactions
                     WHERE session_id IN ({marks}))""", list(ids))

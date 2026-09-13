@@ -424,13 +424,19 @@ def overview_stats() -> dict:
     The api_calls figures come from ONE pass. Each subquery against that view is a full GROUP BY
     over every turn, so asking it five separate questions would have cost five scans.
     """
-    small = q("""
+    # TRANSCRIPTS, WHICH IS WHAT THE CARD IS LABELLED. `files` gained a `kind` column when harvest
+    # started recording the JSON files beside each transcript: 7,640 of them on this machine, which
+    # is nearly as many again. Counted without the filter, a card headed "transcripts" would have
+    # read 24,386 over a store holding 8,775, and its GB caption would have counted bytes that are
+    # not transcript bytes. A number under the wrong word is a wrong number.
+    kind = "WHERE kind IS NULL" if column_present("files", "kind") else ""
+    small = q(f"""
         SELECT (SELECT COUNT(*) FROM sessions)                     AS sessions,
                (SELECT COUNT(*) FROM turns)                        AS turn_rows,
                (SELECT COUNT(*) FROM compactions)                  AS compactions,
                (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
-               (SELECT COUNT(*) FROM files)                        AS files,
-               (SELECT SUM(bytes_read) FROM files)                 AS bytes
+               (SELECT COUNT(*) FROM files {kind})                 AS files,
+               (SELECT SUM(bytes_read) FROM files {kind})          AS bytes
     """).iloc[0].to_dict()
     # How many of those the picker and All sessions actually LIST. Shown beside the total because
     # the page shows both numbers and called them both "sessions", leaving a reader to reconcile
@@ -540,6 +546,9 @@ def invalidate():
     # The chain map, which a delete or an import can change: a removed prefix must stop folding
     # into its head, and an imported chain must start to.
     _links_cache.update({"at": 0.0, "head_of": None, "members_of": None})
+    # Derived from that map and from four tables harvest writes, so it is stale for both reasons a
+    # removal makes the map stale, and cleared beside it rather than left to its own ttl.
+    _work_cache.update({"at": 0.0, "totals": None})
     # A fifth, and unlike the four above it is not a 45 second answer: whether the open store is a
     # redacted copy is a property of the file and changes only if the file is replaced. It is
     # cleared here anyway, because the cost is one `sqlite_master` read and the alternative is a
@@ -560,6 +569,9 @@ ARCHIVED_SUFFIX = "archived"
 # into that chain's HEAD everywhere a session is listed, named or selected, so that what the page
 # shows is what the app shows.
 _links_cache: dict = {"at": 0.0, "head_of": None, "members_of": None}
+# Every chat's work counts in one dict, for the Sessions column. Keyed on the chain map above, so
+# it is cleared by the same `invalidate`: a delete that re-heads a chat moves these counts with it.
+_work_cache: dict = {"at": 0.0, "totals": None}
 
 
 def _read_links() -> tuple[dict, dict]:
@@ -1869,6 +1881,295 @@ def compaction_kept_count(compaction_uuid: str) -> int:
         (compaction_uuid,),
     )
     return int(df.iloc[0]["n"]) if not df.empty else 0
+
+
+# ---------------------------------------------------------------------------
+# What a chat PLANNED and what it RAN
+# ---------------------------------------------------------------------------
+# The desktop app shows two panes this tool had no answer for: the plan a chat wrote, and the
+# background work it started. Both were on disk the whole time and neither was modelled: a plan was
+# the first 500 characters of a tool input, and a subagent run was a transcript nobody could tie to
+# the call that asked for it.
+#
+# EVERY ONE OF THESE IS GUARDED, because this package never writes and cannot create a table. A
+# store harvested by an older build has none of these, and the honest answer there is an empty frame
+# rather than an exception in a panel.
+
+
+def chat_plans(session_id: str, limit: int = 100) -> pd.DataFrame:
+    """Every plan this chat wrote, newest first, with what became of the call that proposed it.
+
+    THE OUTCOME IS JOINED, NEVER COPIED. An accepted plan and a refused one are the same document,
+    and only the tool call knows which: `plans` holds the text, `tool_calls` holds the verdict.
+    """
+    if not tables_present("plans"):
+        return pd.DataFrame()
+    where, params = chain_where(session_id, "p.session_id")
+    return q(
+        f"""
+        SELECT p.tool_use_id, p.ts, p.plan_chars, p.plan_file_path, p.is_sidechain,
+               SUBSTR(REPLACE(REPLACE(p.plan_text, CHAR(13), ' '), CHAR(10), ' '), 1, 400)
+                 AS preview,
+               t.outcome, t.denial_kind
+        FROM plans p LEFT JOIN tool_calls t ON t.tool_use_id = p.tool_use_id
+        WHERE {where}
+        ORDER BY p.ts DESC LIMIT ?
+        """,
+        (*params, int(limit)),
+    )
+
+
+def plan_text(tool_use_id: str) -> pd.DataFrame:
+    """One plan, whole. The drawer shows a preview; this is what the page shows."""
+    if not tables_present("plans"):
+        return pd.DataFrame()
+    return q(
+        """
+        SELECT p.plan_text, p.plan_chars, p.ts, p.plan_file_path, p.session_id,
+               t.outcome, t.denial_kind
+        FROM plans p LEFT JOIN tool_calls t ON t.tool_use_id = p.tool_use_id
+        WHERE p.tool_use_id = ?
+        """,
+        (tool_use_id,),
+    )
+
+
+def chat_agent_runs(session_id: str, limit: int = 500) -> pd.DataFrame:
+    """The subagents this chat ran, whether it called them or merely holds their files.
+
+    TWO SCOPES, OR'D, and that is the whole point. `dir_session_id` is the chat whose directory the
+    run was written under; `tool_calls.session_id` is the chat that asked for it. History is bridged
+    between sessions, so those differ, and a run reachable from only one of them is a run the page
+    would lose.
+
+    The timings and the token total are DERIVED from the run's own transcript rather than stored: a
+    running agent is still appending, and a copy taken at harvest time would be wrong by the time it
+    was read. Tokens are summed over request groups the way `api_calls` does, never over raw turns,
+    because a retried request repeats its counts.
+    """
+    if not tables_present("agent_runs"):
+        return pd.DataFrame()
+    by_dir, dir_params = chain_where(session_id, "a.dir_session_id")
+    by_call, call_params = chain_where(session_id, "t.session_id")
+    # GROUPED ONCE PER TABLE, NEVER ONCE PER RUN, and the LIMIT is why that matters rather than
+    # being an optimisation. This was four correlated subqueries in the SELECT list, and the ORDER
+    # BY reads one of them, so SQLite has to evaluate all four for EVERY matching row before it can
+    # order and cut: `limit=1` cost exactly as much as `limit=500`. On the busiest chat in this
+    # store that is 1,335 runs times four scans of 363,151 messages and 475,805 turns, and a
+    # measured call for a single row did not return in ten minutes. As two grouped CTEs it is one
+    # pass over each table whatever the limit is.
+    #
+    # The CTEs cover every MATCHING run rather than the limited set, because the limit cannot be
+    # applied before `first_ts` exists; that keeps the ordering identical to the version this
+    # replaces.
+    return q(
+        f"""
+        WITH runs AS (
+          SELECT a.agent_id, a.agent_type, a.name, a.description, a.spawn_depth,
+                 a.workflow_run_id, a.tool_use_id, a.dir_session_id, a.transcript_path,
+                 t.session_id AS called_from, t.turn_uuid, t.ts AS spawned_at, t.outcome
+          FROM agent_runs a LEFT JOIN tool_calls t ON t.tool_use_id = a.tool_use_id
+          WHERE ({by_dir}) OR ({by_call})
+        ),
+        seen AS (
+          SELECT file_path, MIN(ts) AS first_ts, MAX(ts) AS last_ts, COUNT(*) AS records
+          FROM messages WHERE file_path IN (SELECT transcript_path FROM runs)
+          GROUP BY file_path
+        ),
+        spent AS (
+          -- Summed over request groups, never over raw turn rows: a retried request repeats its
+          -- counts, and those tokens were never spent.
+          SELECT file_path, SUM(o) AS output_tokens FROM (
+            SELECT file_path, request_id, MAX(output_tokens) AS o FROM turns
+            WHERE file_path IN (SELECT transcript_path FROM runs) AND request_id IS NOT NULL
+            GROUP BY file_path, request_id)
+          GROUP BY file_path
+        )
+        SELECT runs.agent_id, runs.agent_type, runs.name, runs.description, runs.spawn_depth,
+               runs.workflow_run_id, runs.tool_use_id, runs.dir_session_id,
+               runs.called_from, runs.turn_uuid, runs.spawned_at, runs.outcome,
+               seen.first_ts, seen.last_ts, COALESCE(seen.records, 0) AS records,
+               spent.output_tokens
+        FROM runs
+        LEFT JOIN seen ON seen.file_path = runs.transcript_path
+        LEFT JOIN spent ON spent.file_path = runs.transcript_path
+        ORDER BY COALESCE(runs.spawned_at, seen.first_ts) DESC LIMIT ?
+        """,
+        (*dir_params, *call_params, int(limit)),
+    )
+
+
+def chat_workflow_runs(session_id: str, limit: int = 200) -> pd.DataFrame:
+    """The workflow runs this chat launched, with what each one cost.
+
+    `agent_count` is what the run itself reported and `agents_on_disk` is how many of their
+    transcripts this store holds. TWO NUMBERS, because they disagree: a run whose directory was
+    never written has agents it can name and none anyone can read, and printing one of them under
+    the other's name would be a wrong number rather than a rounded one.
+    """
+    if not tables_present("workflow_runs"):
+        return pd.DataFrame()
+    by_dir, dir_params = chain_where(session_id, "w.dir_session_id")
+    by_call, call_params = chain_where(session_id, "w.session_id")
+    agents = ("(SELECT COUNT(*) FROM agent_runs r WHERE r.workflow_run_id = w.run_id)"
+              if tables_present("agent_runs") else "NULL")
+    return q(
+        f"""
+        SELECT w.run_id, w.task_id, w.workflow_name, w.status, w.started_at, w.duration_ms,
+               w.agent_count, {agents} AS agents_on_disk,
+               w.total_tokens, w.total_tool_calls, w.default_model, w.summary,
+               w.tool_use_id, w.turn_uuid, w.session_id AS called_from, w.dir_session_id
+        FROM workflow_runs w
+        WHERE ({by_dir}) OR ({by_call})
+        ORDER BY COALESCE(w.started_at, w.ts) DESC LIMIT ?
+        """,
+        (*dir_params, *call_params, int(limit)),
+    )
+
+
+def chat_task_events(session_id: str, limit: int = 200) -> pd.DataFrame:
+    """The task notifications inside this chat, and what each one resolves to.
+
+    THREE ANSWERS, NOT TWO. Measured on the author's store, of 22 task ids seen in transcripts 14
+    resolve to a run under their own chat's directory, 4 to one under another chat's, and 4 to
+    nothing at all. `resolved_to` says which, and `ran_under` names the directory, so the page can
+    report the unresolved case instead of printing a blank row.
+    """
+    if not tables_present("task_events"):
+        return pd.DataFrame()
+    where, params = chain_where(session_id, "e.session_id")
+    has_agents = tables_present("agent_runs")
+    has_workflows = tables_present("workflow_runs")
+    agent_join = ("LEFT JOIN agent_runs a ON a.agent_id = e.task_id" if has_agents else "")
+    workflow_join = ("LEFT JOIN workflow_runs w ON w.task_id = e.task_id" if has_workflows else "")
+    resolved = []
+    if has_agents:
+        resolved.append("WHEN a.agent_id IS NOT NULL THEN 'agent'")
+    if has_workflows:
+        resolved.append("WHEN w.run_id IS NOT NULL THEN 'workflow'")
+    resolved_sql = ("CASE " + " ".join(resolved) + " ELSE NULL END") if resolved else "NULL"
+    ran_under = "a.dir_session_id" if has_agents else "NULL"
+    agent_type = "a.agent_type" if has_agents else "NULL"
+    return q(
+        f"""
+        SELECT e.uuid, e.ts, e.task_id, e.task_type, e.status, e.description, e.delta_summary,
+               e.output_file_path, e.parent_uuid, e.session_id,
+               {resolved_sql} AS resolved_to, {ran_under} AS ran_under, {agent_type} AS agent_type
+        FROM task_events e {agent_join} {workflow_join}
+        WHERE {where}
+        ORDER BY e.ts DESC LIMIT ?
+        """,
+        (*params, int(limit)),
+    )
+
+
+def chat_work_counts(session_id: str) -> dict:
+    """How much of each kind this chat has, for a column and for the panel's header.
+
+    Cheap by construction: four counts over indexed columns, no text read. `harvested` says which
+    tables this store actually has, so an empty answer can be told from an unharvested one.
+    """
+    out: dict[str, Any] = {"plans": 0, "agent_runs": 0, "workflow_runs": 0, "task_events": 0,
+           "harvested": {"plans": tables_present("plans"),
+                         "agent_runs": tables_present("agent_runs"),
+                         "workflow_runs": tables_present("workflow_runs"),
+                         "task_events": tables_present("task_events")}}
+    if out["harvested"]["plans"]:
+        where, params = chain_where(session_id, "session_id")
+        out["plans"] = int(q(f"SELECT COUNT(*) n FROM plans WHERE {where}", params)["n"].iloc[0])
+    if out["harvested"]["agent_runs"]:
+        by_dir, dir_params = chain_where(session_id, "a.dir_session_id")
+        by_call, call_params = chain_where(session_id, "t.session_id")
+        out["agent_runs"] = int(q(
+            f"""SELECT COUNT(*) n FROM agent_runs a
+                LEFT JOIN tool_calls t ON t.tool_use_id = a.tool_use_id
+                WHERE ({by_dir}) OR ({by_call})""",
+            (*dir_params, *call_params))["n"].iloc[0])
+    if out["harvested"]["workflow_runs"]:
+        by_dir, dir_params = chain_where(session_id, "dir_session_id")
+        by_call, call_params = chain_where(session_id, "session_id")
+        out["workflow_runs"] = int(q(
+            f"SELECT COUNT(*) n FROM workflow_runs WHERE ({by_dir}) OR ({by_call})",
+            (*dir_params, *call_params))["n"].iloc[0])
+    if out["harvested"]["task_events"]:
+        where, params = chain_where(session_id, "session_id")
+        out["task_events"] = int(q(
+            f"SELECT COUNT(*) n FROM task_events WHERE {where}", params)["n"].iloc[0])
+    return out
+
+
+def chat_work_totals(ttl: float = 45.0) -> dict:
+    """Every chat's four counts at once, keyed by the head session of the chat.
+
+    FOUR GROUPED QUERIES FOR THE WHOLE STORE, never one per row. The Sessions tab draws 1,323 rows
+    and a per-row call would be 5,292 queries to fill one column; grouped, it is four, and the
+    folding from CLI session to chat happens once in the map every other reader already shares.
+
+    A session with no work is simply absent from the dict, so a caller reads it with `.get`.
+    """
+    now = _time.time()
+    if _work_cache["totals"] is not None and now - _work_cache["at"] < ttl:
+        return _work_cache["totals"]
+    seen = _generation["n"]
+    head_of, _members = chat_links()
+    totals: dict[str, dict[str, int]] = {}
+
+    def add(kind, sid, n):
+        # A STRING OR NOTHING. pandas reads a SQL NULL as float('nan'), and bool(nan) is True, so a
+        # falsiness test let one through: the LEFT JOIN below produces a NULL caller for every run
+        # with no matching tool call, and this dict grew a nan key holding 6,671 agent runs and 207
+        # workflow runs. Every one of those was also counted under its real owner, so no number was
+        # wrong; the key was simply not a session and had no business being offered to a caller.
+        if not isinstance(sid, str) or not sid:
+            return
+        head = head_of.get(sid, sid)
+        row = totals.setdefault(head, {})
+        row[kind] = row.get(kind, 0) + int(n)
+
+    def add_either(kind, rows):
+        """BOTH REACHES, the way `chat_agent_runs` lists them and `chat_work_counts` counts them.
+
+        A run is reachable from the chat whose directory holds it and from the chat whose call
+        spawned it. Those are usually one chat and are not always, and summing under COALESCE of
+        the two would have made this column disagree with the panel it summarises on exactly the
+        rows worth looking at.
+        """
+        for owner, caller, n in rows:
+            heads = {head_of.get(x, x) for x in (owner, caller) if isinstance(x, str) and x}
+            for head in heads:
+                add(kind, head, n)
+
+    if tables_present("plans"):
+        rows = q("SELECT session_id s, COUNT(*) n FROM plans GROUP BY session_id")
+        for sid, n in rows.itertuples(index=False, name=None):
+            add("plans", sid, n)
+    if tables_present("agent_runs"):
+        add_either("agent_runs", q(
+            """SELECT a.dir_session_id d, t.session_id c, COUNT(*) n FROM agent_runs a
+               LEFT JOIN tool_calls t ON t.tool_use_id = a.tool_use_id
+               GROUP BY 1, 2""").itertuples(index=False, name=None))
+    if tables_present("workflow_runs"):
+        add_either("workflow_runs", q(
+            "SELECT dir_session_id d, session_id c, COUNT(*) n FROM workflow_runs GROUP BY 1, 2")
+            .itertuples(index=False, name=None))
+    if tables_present("task_events"):
+        rows = q("SELECT session_id s, COUNT(*) n FROM task_events GROUP BY session_id")
+        for sid, n in rows.itertuples(index=False, name=None):
+            add("task_events", sid, n)
+    if seen == _generation["n"]:
+        _work_cache.update({"at": now, "totals": totals})
+    return totals
+
+
+def chat_exists(session_id: str) -> bool:
+    """Whether this store holds that session at all, which is what the route's 404 turns on.
+
+    NOT whether it has any work to show. A chat that ran nothing is a real chat and a valid empty
+    answer; collapsing the two would delete the only surface that says so.
+    """
+    if not session_id:
+        return False
+    return not q("SELECT 1 FROM sessions WHERE session_id = ? LIMIT 1", (session_id,)).empty
 
 
 def compaction_exists(compaction_uuid: str) -> bool:

@@ -2,10 +2,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type Selection } from '@/api'
 import { Pane } from '@/components/Pane'
+import { ChatWorkPage } from '@/components/ChatWorkPage'
 import { CompactionPage } from '@/components/CompactionPage'
 import { FigurePage } from '@/components/FigurePage'
 import { TablePage } from '@/components/TablePage'
-import { compactionUrl, figureUrl, readState, tableUrl, writeState, type ViewState } from '@/state'
+import { chatWorkUrl, compactionUrl, figureUrl, readState, tableUrl, writeState, type ViewState } from '@/state'
 import { Palette, type Choice } from '@/components/Palette'
 import { CompareArms } from '@/components/CompareArms'
 import { ProjectMoves } from '@/components/ProjectMoves'
@@ -30,6 +31,7 @@ export default function App() {
   const [tableIndex, setTableIndex] = useState<number | null>(initial.table)
   const [figureIndex, setFigureIndex] = useState<number | null>(initial.figure)
   const [compactionId, setCompactionId] = useState<string | null>(initial.compaction)
+  const [chatWorkId, setChatWorkId] = useState<string | null>(initial.chatWork)
   const [tableQuery, setTableQuery] = useState(initial.query)
   const [tableFilter, setTableFilter] = useState(initial.filter)
   const [live, setLive] = useState(false)
@@ -54,12 +56,13 @@ export default function App() {
 
   const state: ViewState = {
     tab, selection, view, table: tableIndex, figure: figureIndex, compaction: compactionId,
+    chatWork: chatWorkId,
     query: tableQuery, filter: tableFilter,
   }
   // The deps are `state`'s own fields, listed rather than the object, which is rebuilt every
   // render and would make this run every render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { writeState(state) }, [tab, selection, view, tableIndex, figureIndex, compactionId, tableQuery, tableFilter])
+  useEffect(() => { writeState(state) }, [tab, selection, view, tableIndex, figureIndex, compactionId, chatWorkId, tableQuery, tableFilter])
 
   // replaceState writes no history entry, so this page pushes none of its own and Back leaves the
   // app rather than stepping through it. The handler is still right for the cases that DO fire: a
@@ -76,6 +79,7 @@ export default function App() {
       // the previous screen under the new address, which is the exact bug this effect exists for.
       setFigureIndex(next.figure)
       setCompactionId(next.compaction)
+      setChatWorkId(next.chatWork)
       setTableQuery(next.query)
       setTableFilter(next.filter)
     }
@@ -92,6 +96,10 @@ export default function App() {
   }
   const openCompaction = (id: string) => {
     window.open(compactionUrl(state, id), '_blank', 'noopener')
+  }
+  /** One chat's plans and background work, in a window, reached from the drawer beside its row. */
+  const openChatWork = (id: string) => {
+    window.open(chatWorkUrl(state, id), '_blank', 'noopener')
   }
 
   const openTable = (
@@ -209,6 +217,20 @@ export default function App() {
     return (
       <div className="flex min-h-full flex-col" data-view="compaction">
         <CompactionPage uuid={compactionId} onBack={back} />
+      </div>
+    )
+  }
+
+  // ONE CHAT'S WORK, IN A WINDOW. The drawer says whether there is anything here and shows the
+  // newest plan; this holds every plan's text and all four lists up to the route's own ceiling.
+  if (view === 'chatwork' && chatWorkId) {
+    const back = () => {
+      setView('dashboard')
+      setChatWorkId(null)
+    }
+    return (
+      <div className="flex min-h-full flex-col" data-view="chatwork">
+        <ChatWorkPage session={chatWorkId} onBack={back} />
       </div>
     )
   }
@@ -490,6 +512,7 @@ export default function App() {
           >
             <Pane payload={pane.data} onRowClick={selectFromRow} onOpenTable={openTable}
                   onOpenCompaction={openCompaction}
+                  onOpenChatWork={openChatWork}
                   onOpenFigure={openFigure} />
           </div>
         )}

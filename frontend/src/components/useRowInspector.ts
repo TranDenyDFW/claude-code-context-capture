@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react'
-import type { TabPayload } from '@/api'
+import type { ChatWork, TabPayload } from '@/api'
 import { hydrate } from './exporters'
 import type { InspectorContent } from './Inspector'
 import { shown } from './inspect'
+import { chatWorkContent } from './chatWork'
 
 /**
  * What the drawer is showing, and the fetch that fills it in.
@@ -24,6 +25,14 @@ export function useRowInspector(
   onSelectSession?: (row: Record<string, unknown>) => void,
   /** Open the whole of what a row points at, when the drawer can only show part of it. */
   onOpenDetail?: (key: string) => void,
+  /**
+   * The same, for a chat's plans and background work.
+   *
+   * A SECOND CALLBACK, not a reuse of the one above. Both branches open "the whole of this in a
+   * window", and the windows are two different pages; one handler would have had to guess which,
+   * from state the hook does not hold.
+   */
+  onOpenChatWork?: (sessionId: string) => void,
 ) {
   const [content, setContent] = useState<InspectorContent | null>(null)
   const token = useRef(0)
@@ -78,6 +87,33 @@ export function useRowInspector(
     // counts of a boundary; what the boundary REPLACED is a 14,000-character summary the store has
     // always held and this page could not reach. The table's own note has said "click a row to
     // read the summary it produced" since the tab existed, over a click that did nothing.
+    // WHAT THIS CHAT PLANNED AND RAN. A row of the Sessions list names a chat, and the chat has
+    // four lists of its own behind it: the plans it wrote, the subagents it ran, the workflows it
+    // launched and the tasks it was told about. `row_detail` is deliberately not `detail`: the
+    // click on this table still selects the session, and the control beside the row opens this.
+    const work = meta?.row_detail
+    if (work) {
+      const key = row[work.key]
+      if (typeof key === 'string' && key) {
+        setContent({
+          ...base,
+          title: 'Work in this chat',
+          text: null,
+          onOpenDetail: onOpenChatWork ? () => onOpenChatWork(key) : null,
+        })
+        const write = (patch: Partial<InspectorContent>) => {
+          if (token.current === mine) setContent((was) => (was ? { ...was, ...patch } : was))
+        }
+        fetch(`${work.url}/${encodeURIComponent(key)}`)
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+          .then((body: ChatWork) => write(chatWorkContent(body)))
+          .catch(() => write({
+            text: null,
+            textProblem: 'the plans and background work of this chat could not be fetched',
+          }))
+        return
+      }
+    }
     const detail = meta?.detail
     if (detail) {
       const key = row[detail.key]
