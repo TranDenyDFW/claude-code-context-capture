@@ -546,7 +546,7 @@ def invalidate():
     # The chain map, which a delete or an import can change: a removed prefix must stop folding
     # into its head, and an imported chain must start to.
     _links_cache.update({"at": 0.0, "head_of": None, "members_of": None})
-    # Derived from that map and from four tables harvest writes, so it is stale for both reasons a
+    # Derived from that map and from five tables harvest writes, so it is stale for both reasons a
     # removal makes the map stale, and cleared beside it rather than left to its own ttl.
     _work_cache.update({"at": 0.0, "totals": None})
     # A fifth, and unlike the four above it is not a 45 second answer: whether the open store is a
@@ -2063,17 +2063,92 @@ def chat_task_events(session_id: str, limit: int = 200) -> pd.DataFrame:
     )
 
 
+def chat_changed_files(session_id: str, limit: int = 200) -> pd.DataFrame:
+    """One row per file this chat changed, most recently edited first: the desktop pane's shape.
+
+    SUMMED ONLY WHERE RECORDED. `additions` and `deletions` exist for the edits whose result
+    carried a patch, which here is 11,683 of 11,761 main-line edits and no subagent edit at all, so
+    a file edited six times by a subagent and once directly sums one edit. `patched` says how many
+    of the file's edits the sums cover, and the page prints both numbers rather than letting 40
+    added over 1 of 6 read as the file's whole history. NULL sums mean nothing was recorded.
+
+    Grouped, because the busiest chat on this store wrote 11,216 distinct files in 11,367 edits and
+    the median chat touched one: a flat list would be right for the median and useless for the
+    chat anyone would actually look at.
+    """
+    if not tables_present("changes"):
+        return pd.DataFrame()
+    where, params = chain_where(session_id, "c.session_id")
+    return q(
+        f"""
+        SELECT c.file, COUNT(*) AS edits,
+               SUM(CASE WHEN t.outcome = 'ok' THEN 1 ELSE 0 END) AS ok_edits,
+               SUM(c.additions) AS additions, SUM(c.deletions) AS deletions,
+               SUM(c.patch_json IS NOT NULL) AS patched,
+               SUM(COALESCE(c.is_sidechain, 0)) AS by_subagents,
+               MIN(c.ts) AS first_ts, MAX(c.ts) AS last_ts,
+               GROUP_CONCAT(DISTINCT c.kind) AS kinds
+        FROM changes c LEFT JOIN tool_calls t ON t.tool_use_id = c.tool_use_id
+        WHERE ({where}) AND c.file IS NOT NULL
+        GROUP BY c.file
+        ORDER BY last_ts DESC LIMIT ?
+        """,
+        (*params, int(limit)),
+    )
+
+
+def chat_changes(session_id: str, limit: int = 500, file: str | None = None) -> pd.DataFrame:
+    """Every edit this chat made, newest first, with its verdict and whether a patch was recorded.
+
+    `has_patch` is the difference between the two grades the transcript holds: an edit Claude made
+    directly carries unified-diff hunks, an edit a subagent made carries its old and new text and
+    nothing else. The page draws them differently and says which it is drawing.
+    """
+    if not tables_present("changes"):
+        return pd.DataFrame()
+    where, params = chain_where(session_id, "c.session_id")
+    by_file = " AND c.file = ?" if file is not None else ""
+    return q(
+        f"""
+        SELECT c.tool_use_id, c.ts, c.turn_uuid, c.tool_name, c.file, c.kind,
+               c.old_lines, c.new_lines, c.additions, c.deletions,
+               (c.patch_json IS NOT NULL) AS has_patch, c.is_sidechain, c.user_modified,
+               t.outcome, t.denial_kind
+        FROM changes c LEFT JOIN tool_calls t ON t.tool_use_id = c.tool_use_id
+        WHERE ({where}){by_file}
+        ORDER BY c.ts DESC LIMIT ?
+        """,
+        (*params, *([file] if file is not None else []), int(limit)),
+    )
+
+
+def change_detail(tool_use_id: str) -> pd.DataFrame:
+    """One change whole: the text the call carried and the patch the result carried, if any."""
+    if not tables_present("changes"):
+        return pd.DataFrame()
+    return q(
+        """
+        SELECT c.*, t.outcome, t.denial_kind
+        FROM changes c LEFT JOIN tool_calls t ON t.tool_use_id = c.tool_use_id
+        WHERE c.tool_use_id = ?
+        """,
+        (tool_use_id,),
+    )
+
+
 def chat_work_counts(session_id: str) -> dict:
     """How much of each kind this chat has, for a column and for the panel's header.
 
-    Cheap by construction: four counts over indexed columns, no text read. `harvested` says which
+    Cheap by construction: a few counts over indexed columns, no text read. `harvested` says which
     tables this store actually has, so an empty answer can be told from an unharvested one.
     """
     out: dict[str, Any] = {"plans": 0, "agent_runs": 0, "workflow_runs": 0, "task_events": 0,
+           "changes": 0, "changed_files": 0,
            "harvested": {"plans": tables_present("plans"),
                          "agent_runs": tables_present("agent_runs"),
                          "workflow_runs": tables_present("workflow_runs"),
-                         "task_events": tables_present("task_events")}}
+                         "task_events": tables_present("task_events"),
+                         "changes": tables_present("changes")}}
     if out["harvested"]["plans"]:
         where, params = chain_where(session_id, "session_id")
         out["plans"] = int(q(f"SELECT COUNT(*) n FROM plans WHERE {where}", params)["n"].iloc[0])
@@ -2095,14 +2170,20 @@ def chat_work_counts(session_id: str) -> dict:
         where, params = chain_where(session_id, "session_id")
         out["task_events"] = int(q(
             f"SELECT COUNT(*) n FROM task_events WHERE {where}", params)["n"].iloc[0])
+    if out["harvested"]["changes"]:
+        where, params = chain_where(session_id, "session_id")
+        row = q(f"SELECT COUNT(*) n, COUNT(DISTINCT file) f FROM changes WHERE {where}",
+                params).iloc[0]
+        out["changes"] = int(row["n"])
+        out["changed_files"] = int(row["f"])
     return out
 
 
 def chat_work_totals(ttl: float = 45.0) -> dict:
-    """Every chat's four counts at once, keyed by the head session of the chat.
+    """Every chat's five counts at once, keyed by the head session of the chat.
 
-    FOUR GROUPED QUERIES FOR THE WHOLE STORE, never one per row. The Sessions tab draws 1,323 rows
-    and a per-row call would be 5,292 queries to fill one column; grouped, it is four, and the
+    FIVE GROUPED QUERIES FOR THE WHOLE STORE, never one per row. The Sessions tab draws 1,323 rows
+    and a per-row call would be 6,615 queries to fill one column; grouped, it is five, and the
     folding from CLI session to chat happens once in the map every other reader already shares.
 
     A session with no work is simply absent from the dict, so a caller reads it with `.get`.
@@ -2156,6 +2237,10 @@ def chat_work_totals(ttl: float = 45.0) -> dict:
         rows = q("SELECT session_id s, COUNT(*) n FROM task_events GROUP BY session_id")
         for sid, n in rows.itertuples(index=False, name=None):
             add("task_events", sid, n)
+    if tables_present("changes"):
+        rows = q("SELECT session_id s, COUNT(*) n FROM changes GROUP BY session_id")
+        for sid, n in rows.itertuples(index=False, name=None):
+            add("changes", sid, n)
     if seen == _generation["n"]:
         _work_cache.update({"at": now, "totals": totals})
     return totals

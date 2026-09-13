@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ChatWork } from '@/api'
+import type { ChangeDetail, ChatChange, ChatWork, DiffHunk } from '@/api'
 import { readableMs } from './chatWork'
 
 /** One plan as `/api/plan/<call>` answers it: the document, not its opening. */
@@ -39,8 +39,67 @@ export function csv(body: ChatWork): string {
       w.status, `${w.agent_count ?? ''} agents ${readableMs(w.duration_ms)} ${w.summary ?? ''}`]),
     ...body.task_events.map((t) => ['task_event', t.task_id, t.ts, t.description, t.status,
       t.resolved_to ?? 'unresolved']),
+    ...body.changed_files.map((f) => ['changed_file', f.file, f.last_ts, `${f.edits} edits`, f.kinds,
+      f.additions === null ? 'no patch recorded'
+        : `+${f.additions} -${f.deletions} over ${f.patched ?? 0} of ${f.edits} edits`]),
   ]
   return [head.join(','), ...rows.map((r) => r.map(cell).join(','))].join('\n')
+}
+
+const LINE_CLASS: Record<string, string> = {
+  added: 'text-good', removed: 'text-warn', context: 'text-ink-faint',
+}
+
+/**
+ * A recorded patch, drawn line by line. `+` reads as added, `-` as removed, the rest as context,
+ * and each hunk announces where in the file it sits, since a reader holding the file has nothing
+ * else to place it by.
+ */
+function Diff({ hunks }: { hunks: DiffHunk[] }) {
+  return (
+    <div className="mt-1 overflow-auto rounded bg-page font-mono text-2xs leading-relaxed">
+      {hunks.map((h, i) => (
+        <div key={i} data-hunk={i}>
+          <div className="px-2 py-0.5 text-ink-faint">
+            @@ -{h.oldStart},{h.oldLines} +{h.newStart},{h.newLines} @@
+          </div>
+          {h.lines.map((line, j) => {
+            const kind = line[0] === '+' ? 'added' : line[0] === '-' ? 'removed' : 'context'
+            return (
+              <div key={j} data-line={kind} className={`whitespace-pre px-2 ${LINE_CLASS[kind]}`}>
+                {line}
+              </div>
+            )
+          })}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Before and after, for a change with no recorded patch. No context lines exist for it and none
+ * are invented: the old text is drawn as removed, the new as added, under a line saying why that
+ * is all there is.
+ */
+function BeforeAfter({ oldText, newText, why }: {
+  oldText: string | null
+  newText: string | null
+  why: string
+}) {
+  const rows = (text: string | null, prefix: string, kind: 'removed' | 'added') =>
+    (text === null || text === '' ? [] : text.split('\n')).map((l, i) => (
+      <div key={`${kind}-${i}`} data-line={kind} className={`whitespace-pre px-2 ${LINE_CLASS[kind]}`}>
+        {prefix}{l}
+      </div>
+    ))
+  return (
+    <div className="mt-1 overflow-auto rounded bg-page font-mono text-2xs leading-relaxed">
+      <div className="px-2 py-0.5 text-ink-faint">{why}</div>
+      {rows(oldText, '-', 'removed')}
+      {rows(newText, '+', 'added')}
+    </div>
+  )
 }
 
 function Row({ children }: { children: React.ReactNode }) {
@@ -95,6 +154,25 @@ export function ChatWorkPage({ session, onBack }: { session: string; onBack: () 
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((got: PlanText) => setWhole((was) => ({ ...was, [id]: got })))
       .catch(() => setWhole((was) => ({ ...was, [id]: 'failed' })))
+  }
+
+  /** Per file, its edits once asked for: the busiest chat here has 11,367 and the list is per file. */
+  const [edits, setEdits] = useState<Record<string, ChatChange[] | 'fetching' | 'failed'>>({})
+  const readEdits = (file: string) => {
+    setEdits((was) => ({ ...was, [file]: 'fetching' }))
+    fetch(`/api/chat/${encodeURIComponent(session)}/changes?file=${encodeURIComponent(file)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((got: { changes: ChatChange[] }) => setEdits((was) => ({ ...was, [file]: got.changes })))
+      .catch(() => setEdits((was) => ({ ...was, [file]: 'failed' })))
+  }
+  /** Per edit, the patch, or the before and after when no result recorded one. */
+  const [diffs, setDiffs] = useState<Record<string, ChangeDetail | 'fetching' | 'failed'>>({})
+  const readChange = (id: string) => {
+    setDiffs((was) => ({ ...was, [id]: 'fetching' }))
+    fetch(`/api/change/${encodeURIComponent(id)}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((got: ChangeDetail) => setDiffs((was) => ({ ...was, [id]: got })))
+      .catch(() => setDiffs((was) => ({ ...was, [id]: 'failed' })))
   }
 
   useEffect(() => {
@@ -296,6 +374,103 @@ export function ChatWorkPage({ session, onBack }: { session: string; onBack: () 
                 <p className="mt-0.5 text-2xs text-ink-dim">{t.description}</p>
               </Row>
             ))}
+          </Section>
+
+          <Section title="Changes" count={body.changed_files_total} shown={body.changed_files.length}>
+            {body.changed_files.map((f) => {
+              const got = edits[f.file]
+              const list = Array.isArray(got) ? got : null
+              return (
+                <Row key={f.file}>
+                  <Meta>
+                    <span className="font-mono font-semibold text-ink-dim">{f.file}</span>
+                    <span className="tabular-nums">
+                      {f.edits.toLocaleString()} {f.edits === 1 ? 'edit' : 'edits'}
+                    </span>
+                    {f.additions !== null && f.deletions !== null ? (
+                      <span className="tabular-nums">
+                        <span className="text-good">+{f.additions.toLocaleString()}</span>{' '}
+                        <span className="text-warn">-{f.deletions.toLocaleString()}</span>
+                        {/* HOW MUCH OF THE FILE'S HISTORY THE COUNTS COVER. A subagent edit records
+                            no patch, so a file it touched six times and Claude touched once sums one
+                            edit, and the sums alone would present that edit as the whole history. */}
+                        {f.patched !== f.edits && ` over ${f.patched ?? 0} of ${f.edits} edits`}
+                      </span>
+                    ) : (
+                      <span>no patch recorded for any edit</span>
+                    )}
+                    {(f.by_subagents ?? 0) > 0 && <span>{f.by_subagents} by subagents</span>}
+                    <span className="ml-auto tabular-nums">{String(f.last_ts ?? '').slice(0, 19)}</span>
+                  </Meta>
+                  {!list && got !== 'failed' && (
+                    <button
+                      onClick={() => readEdits(f.file)}
+                      disabled={got === 'fetching'}
+                      className="mt-1 rounded border border-edge px-2 py-0.5 text-2xs text-ink-dim
+                                 hover:text-ink disabled:text-ink-faint"
+                    >
+                      {got === 'fetching' ? 'Fetching the edits' : 'Show the edits'}
+                    </button>
+                  )}
+                  {got === 'failed' && (
+                    <p role="alert" className="mt-1 text-2xs text-warn">
+                      The edits of this file could not be fetched.
+                    </p>
+                  )}
+                  {list && list.map((e) => {
+                    const d = diffs[e.tool_use_id]
+                    const whole = d && d !== 'fetching' && d !== 'failed' ? d : null
+                    return (
+                      <div key={e.tool_use_id} className="mt-1 border-l-2 border-edge pl-2">
+                        <Meta>
+                          <span className={e.outcome === 'refused' ? 'font-semibold text-warn' : 'text-ink-dim'}>
+                            {e.outcome ?? 'outcome not recorded'}
+                          </span>
+                          <span>{e.tool_name}{e.kind ? ` (${e.kind})` : ''}</span>
+                          {e.additions !== null && e.deletions !== null ? (
+                            <span className="tabular-nums">
+                              <span className="text-good">+{e.additions}</span>{' '}
+                              <span className="text-warn">-{e.deletions}</span>
+                            </span>
+                          ) : (
+                            <span>{e.old_lines ?? 0} lines to {e.new_lines ?? 0}, no patch recorded</span>
+                          )}
+                          {e.is_sidechain ? <span>by a subagent</span> : null}
+                          <span className="ml-auto tabular-nums">{String(e.ts ?? '').slice(0, 19)}</span>
+                        </Meta>
+                        {/* THREE STATES. A list of hunks is a recorded patch; an empty list is a
+                            created file whose whole content is new; null is an edit whose result
+                            was never recorded, which is every subagent edit on the author's store. */}
+                        {whole && (
+                          whole.hunks && whole.hunks.length
+                            ? <Diff hunks={whole.hunks} />
+                            : whole.hunks
+                              ? <BeforeAfter oldText={null} newText={whole.new_text}
+                                  why="A created file: every line of it is new." />
+                              : <BeforeAfter oldText={whole.old_text} newText={whole.new_text}
+                                  why="Before and after only. No result was recorded for this edit, which is so for every edit a subagent makes, so there are no context lines." />
+                        )}
+                        {d === 'failed' && (
+                          <p role="alert" className="mt-1 text-2xs text-warn">
+                            This change could not be fetched.
+                          </p>
+                        )}
+                        {!whole && d !== 'failed' && (
+                          <button
+                            onClick={() => readChange(e.tool_use_id)}
+                            disabled={d === 'fetching'}
+                            className="mt-1 rounded border border-edge px-2 py-0.5 text-2xs text-ink-dim
+                                       hover:text-ink disabled:text-ink-faint"
+                          >
+                            {d === 'fetching' ? 'Fetching the diff' : 'Show the diff'}
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </Row>
+              )
+            })}
           </Section>
         </>
       )}

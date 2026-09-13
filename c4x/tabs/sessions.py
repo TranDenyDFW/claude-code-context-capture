@@ -42,13 +42,14 @@ SECTION_COLORS = (ACCENT, GOOD, VIOLET, WARN, "#e8590c", MUTED)
 WORK_KINDS = (("plans", "plan", "plans"),
               ("agent_runs", "agent", "agents"),
               ("workflow_runs", "workflow", "workflows"),
-              ("task_events", "task", "tasks"))
+              ("task_events", "task", "tasks"),
+              ("changes", "change", "changes"))
 
 
 def work_summary(counts) -> str:
     """`{'plans': 2, 'agent_runs': 3}` becomes `2 plans, 3 agents`, and nothing becomes ``.
 
-    WORDS, NOT FOUR NUMERIC COLUMNS. Four counts of four different things read as a row of
+    WORDS, NOT FIVE NUMERIC COLUMNS. Five counts of five different things read as a row of
     quantities to compare, and they are not comparable: one plan and one workflow run are a
     sentence and an hour of machine time. The column exists to say WHICH KINDS a chat has, so the
     reader knows whether the panel beside it is worth opening, and the panel holds the detail.

@@ -5,10 +5,10 @@ import type { InspectorContent } from './Inspector'
  * What `/api/chat/<session>` answers, turned into what the drawer draws.
  *
  * Its own file, and a pure function, because it is the one piece of this panel worth testing on
- * its own: the counts, the four lists and the sentence shown when there are none are decisions
+ * its own: the counts, the five lists and the sentence shown when there are none are decisions
  * about what a reader is told, not plumbing.
  *
- * FOUR LISTS, NOT ONE JOINED TABLE. They answer different questions and carry different columns,
+ * FIVE LISTS, NOT ONE JOINED TABLE. They answer different questions and carry different columns,
  * and a single table would have to drop most of both. A subagent run and a workflow run are not
  * rows of one kind.
  */
@@ -87,12 +87,28 @@ export function chatWorkContent(body: ChatWork): Partial<InspectorContent> {
       meta: meta('chat-task-events', 'Task notifications'),
     })
   }
+  if (body.changed_files.length) {
+    groups.push({
+      name: 'Changes',
+      table: table('chat-changes', body.changed_files.map((f) => ({
+        file: f.file, edits: f.edits, added: f.additions, removed: f.deletions,
+        // HOW MUCH OF THE FILE'S HISTORY THE TWO COUNTS COVER. A subagent edit records no patch,
+        // so a file it touched six times and Claude touched once sums one edit, and a row that
+        // showed the sums alone would present one edit as the file's whole history.
+        counted: f.patched === f.edits ? 'every edit' : `${f.patched ?? 0} of ${f.edits} edits`,
+        last: f.last_ts,
+      })), ['file', 'edits', 'added', 'removed', 'counted', 'last']),
+      meta: meta('chat-changes', 'Changes'),
+    })
+  }
 
   const fields: [string, string][] = [
     ['Plans', String(body.plans_total)],
     ['Subagent runs', String(body.agent_runs_total)],
     ['Workflow runs', String(body.workflow_runs_total)],
     ['Task notifications', String(body.task_events_total)],
+    ['Files changed', String(body.changed_files_total)],
+    ['Edits', String(body.changes_total)],
   ]
   if (body.chat.length > 1) {
     fields.push(['CLI sessions in this chat', String(body.chat.length)])
@@ -109,7 +125,7 @@ export function chatWorkContent(body: ChatWork): Partial<InspectorContent> {
     : missing.length
       ? `This store has not harvested ${missing.join(', ')} yet. Run node tools/harvest.mjs, `
         + 'or node tools/harvest.mjs --backfill-sidecars for work that is already on disk.'
-      : 'This chat wrote no plan and ran no background work.'
+      : 'This chat wrote no plan, ran no background work and changed no file.'
 
   const newest = body.plans[0]
   return {
