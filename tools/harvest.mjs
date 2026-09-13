@@ -2377,6 +2377,12 @@ class Harvest {
     if (typeof toolUseId !== 'string' || !input || typeof input.plan !== 'string') return 0;
     this.stmt.putPlan.run(
       toolUseId, d.sessionId ?? null, d.uuid ?? null, d.timestamp ?? null,
+      // UTF-16 CODE UNITS, which is what JavaScript's .length counts, not characters. On the
+      // author's store 6 of 280 plans disagree with Python's len() by 2 to 11, and in every case
+      // the difference is exactly the number of characters above the BMP: an emoji such as
+      // U+1F530 is one character and two code units. Left as it is, because it is the count the
+      // transcript itself was written with, and named here so nobody "fixes" it into disagreeing
+      // with the file it describes.
       input.plan, input.plan.length,
       typeof input.planFilePath === 'string' ? input.planFilePath : null,
       input.allowedPrompts ? JSON.stringify(input.allowedPrompts) : null,

@@ -266,11 +266,30 @@ class TestTheCensusThatMeansTranscripts:
             "the Summary card headed 'transcripts' is counting the JSON files beside them")
         assert stats["bytes"] == before[1], "and its GB caption is counting their bytes"
 
-    def test_a_store_without_the_column_still_answers(self, work_store, store, monkeypatch):
-        """`harvest.mjs` adds `kind` and this package cannot, so a store awaiting it must work."""
-        monkeypatch.setattr(store, "column_present", lambda table, column: False)
+    def test_a_store_without_the_column_still_answers(self, work_store, store):
+        """`harvest.mjs` adds `kind` and this package cannot, so a store awaiting it must work.
+
+        THE COLUMN IS REALLY DROPPED, not monkeypatched away. This stubbed `column_present` to
+        False while the column was still there, so both branches built SQL that ran, and removing
+        the guard entirely left the test green. A reviewer proved it. What the guard prevents is
+        a query naming a column the store does not have, and only a store without it can show that.
+        """
+        # REBUILT WITHOUT IT, because ALTER TABLE DROP COLUMN cannot be used here: SQLite reparses
+        # the stored CREATE TABLE to rewrite it, and harvest writes that statement with SQL
+        # comments in it, so the drop fails with "error in table files after drop column:
+        # incomplete input". The table is recreated from its live column list instead.
+        con = sqlite3.connect(str(work_store))
+        cols = [r[1] for r in con.execute("PRAGMA table_info(files)") if r[1] != "kind"]
+        listed = ",".join(f'"{c}"' for c in cols)
+        con.execute(f"CREATE TABLE files_old AS SELECT {listed} FROM files")
+        con.execute("DROP TABLE files")
+        con.execute("ALTER TABLE files_old RENAME TO files")
+        con.commit()
+        con.close()
         forget_cached_rows()
-        assert store.overview_stats()["files"] >= 0
+        assert not store.column_present("files", "kind"), "gone, as it is on an older store"
+        stats = store.overview_stats()
+        assert stats["files"] >= 0, "and the census answers rather than raising"
 
 
 class TestTheRoutes:
@@ -305,10 +324,35 @@ class TestTheRoutes:
         assert body["text"] == NEWEST
         assert len(body["text"]) > 400, "a route that truncated would pass on a short plan"
         assert body["chars"] == len(NEWEST)
-        assert body["outcome"] is None or isinstance(body["outcome"], str)
         # A PATH IS NOT A FILE. The row names one that was never created here.
         assert body["plan_file_path"].endswith("one.md")
         assert body["file_exists"] is False
+
+    def test_the_route_carries_the_verdict_from_the_call(self, api_client):
+        """ASSERTED ON THE PLAN THAT HAS A CALL. This asked `tp-1`, which has none, under
+        `outcome is None or isinstance(outcome, str)`, which is true of every value the field can
+        hold: a route returning a literal None for both fields passed. A reviewer proved it."""
+        refused = api_client.get("/api/plan/tp-0").json()
+        assert refused["outcome"] == "refused"
+        assert refused["denial_kind"] == "permission-rule"
+        assert api_client.get("/api/plan/tp-1").json()["outcome"] is None, (
+            "and a plan with no call has no verdict, which is a state and not a default")
+
+    def test_it_says_whether_the_file_the_plan_names_is_still_there(self, api_client, tmp_path):
+        """BOTH ANSWERS. Every fixture plan named a missing file, so a route hard-coding
+        `file_exists = False` passed: it would have said "no longer on disk" about every plan
+        ever written. Measured on the author's store: 291 plans against 27 surviving files, so
+        the false case is the common one and the true case is the one worth proving."""
+        assert api_client.get("/api/plan/tp-1").json()["file_exists"] is False
+        real = tmp_path / "kept.md"
+        real.write_text("a plan file that still exists", encoding="utf-8")
+        from c4x import store
+        con = sqlite3.connect(str(store.DB_PATH))
+        con.execute("UPDATE plans SET plan_file_path = ? WHERE tool_use_id = 'tp-0'", (str(real),))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        assert api_client.get("/api/plan/tp-0").json()["file_exists"] is True
 
     def test_an_unknown_plan_is_a_404(self, api_client):
         assert api_client.get("/api/plan/nope").status_code == 404
