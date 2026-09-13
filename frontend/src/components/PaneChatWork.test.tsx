@@ -28,11 +28,12 @@ const SESSIONS: TabPayload = {
 function work(over: Partial<ChatWork> = {}): ChatWork {
   return {
     session: 'sess-1', chat: ['sess-1'],
-    harvested: { plans: true, agent_runs: true, workflow_runs: true, task_events: true },
+    harvested: { plans: true, agent_runs: true, workflow_runs: true, task_events: true, changes: true },
     plans: [], plans_total: 0,
     agent_runs: [], agent_runs_total: 0,
     workflow_runs: [], workflow_runs_total: 0,
     task_events: [], task_events_total: 0, task_events_unresolved: 0,
+    changed_files: [], changed_files_total: 0, changes_total: 0,
     ...over,
   }
 }
@@ -119,5 +120,21 @@ describe('a row of the Sessions list', () => {
     fireEvent.click(screen.getAllByLabelText('plans and background work')[0])
     await waitFor(() =>
       expect(screen.getByRole('dialog').textContent).toContain('has not harvested'))
+  })
+
+  it('lists the files a chat changed as a fifth table, saying how much of each the counts cover', async () => {
+    answer(work({
+      changed_files: [{
+        file: 'C:/p/app.py', edits: 3, ok_edits: 2, additions: 3, deletions: 2, patched: 1,
+        by_subagents: 1, first_ts: null, last_ts: '2026-08-02T10:30:00Z', kinds: 'edit',
+      }],
+      changed_files_total: 1, changes_total: 3,
+    }))
+    render(<Pane payload={SESSIONS} onRowClick={vi.fn()} />)
+    fireEvent.click(screen.getAllByLabelText('plans and background work')[0])
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => expect(dialog.textContent).toContain('1 of 3 edits'))
+    expect(dialog.textContent).toContain('Files changed')
+    expect(dialog.textContent).toContain('Changes')
   })
 })

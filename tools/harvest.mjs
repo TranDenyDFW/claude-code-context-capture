@@ -291,6 +291,26 @@ CREATE TABLE IF NOT EXISTS task_events (
 );
 CREATE INDEX IF NOT EXISTS task_events_session ON task_events (session_id, ts);
 CREATE INDEX IF NOT EXISTS task_events_task ON task_events (task_id);
+-- EVERY FILE CHANGE CLAUDE MADE, tied to the turn that made it. Written by TWO passes that own
+-- disjoint columns and can arrive in either order, the rule workflow_runs already follows: the
+-- tool_use block gives identity and the text, the tool_result record gives the patch. Measured
+-- before this existed: 11,761 main-line edits carry a structured patch in their result and 20,852
+-- subagent edits carry no result at all, only the call, so a table fed from one side would lose
+-- the other. NULL additions and deletions mean no result was recorded, which is the subagent
+-- state, never a zero in disguise. The original file is not kept: the hunks carry their own
+-- context and it would be 13 MB that is only ever re-derived.
+CREATE TABLE IF NOT EXISTS changes (
+  tool_use_id TEXT PRIMARY KEY,
+  session_id TEXT, turn_uuid TEXT, ts TEXT,
+  tool_name TEXT, file TEXT, kind TEXT,
+  old_text TEXT, new_text TEXT, replace_all INTEGER,
+  old_lines INTEGER, new_lines INTEGER,
+  patch_json TEXT, additions INTEGER, deletions INTEGER,
+  original_chars INTEGER, user_modified INTEGER,
+  is_sidechain INTEGER, file_path TEXT, line_no INTEGER
+);
+CREATE INDEX IF NOT EXISTS changes_session ON changes (session_id, ts);
+CREATE INDEX IF NOT EXISTS changes_file ON changes (file);
 -- Lifecycle events from hooks/event-hook.mjs. Hooks are process level, so unlike the statusLine
 -- they fire on every entrypoint, including the desktop host. probe separates test writes from
 -- live ones at write time rather than by a later heuristic.
@@ -1568,19 +1588,74 @@ export async function reconcileDirectory(db, dir, records, { write = true, thres
  * NOT `--full`. It re-reads transcripts, as `backfillToolOutcomes` does, but writes only these two
  * tables and touches no offset, so a later ordinary harvest is unaffected by having run it.
  */
-export async function backfillWork(dbPath = DB_PATH, { quiet = false, write = true,
-                                                       projects = PROJECTS, batch = 200 } = {}) {
+/**
+ * What each transcript backfill looks for and what it writes. One scanner below runs any of them:
+ * `prefilters` are exact substrings tested before any JSON.parse, `handle` is given the parsed
+ * record, `tables` are what the report counts, `counters` map report names to Harvest stats.
+ */
+export const WORK_SPEC = {
+  label: 'work',
+  tables: ['plans', 'task_events'],
+  counters: { plans: 'plans', task_events: 'taskEvents' },
+  prefilters: ['"ExitPlanMode"', '"task_status"'],
+  handle(h, d, path, lineNo, line) {
+    if (line.includes('"task_status"') && d?.type === 'attachment') h.taskEvent(d, path, lineNo);
+    if (!line.includes('"ExitPlanMode"')) return;
+    const content = d?.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const blk of content) {
+      if (blk?.type === 'tool_use' && blk.name === 'ExitPlanMode') {
+        h.plan(d, blk.id, blk.input, path, lineNo);
+      }
+    }
+  },
+};
+
+export const CHANGES_SPEC = {
+  label: 'changes',
+  tables: ['changes'],
+  counters: { changes: 'changes', patches: 'changePatches' },
+  // EXACT, because the transcript is compact JSON: "name":"Edit" with no space. A looser test such
+  // as "Edit" alone would parse every result that merely mentions the word.
+  prefilters: ['"name":"Edit"', '"name":"Write"', '"structuredPatch"'],
+  handle(h, d, path, lineNo) {
+    const content = d?.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const blk of content) {
+      if (blk?.type === 'tool_use' && (blk.name === 'Edit' || blk.name === 'Write')) {
+        h.change(d, blk.id, blk.name, blk.input, path, lineNo);
+      } else if (blk?.type === 'tool_result' && typeof blk.tool_use_id === 'string') {
+        const r = d.toolUseResult;
+        if (r && typeof r === 'object' && Array.isArray(r.structuredPatch)) {
+          h.changeResult(d, blk.tool_use_id, r, path, lineNo);
+        }
+      }
+    }
+  },
+};
+
+/**
+ * Rows inside transcripts this store already read to the end.
+ *
+ * Both kinds of writer ride the incremental byte offsets, so they only ever see bytes appended
+ * after they shipped, and a store harvested before them holds nothing for the transcripts it has
+ * already consumed. Not `--full`: this re-reads transcripts the way `backfillToolOutcomes` does,
+ * writes only the spec's tables, and touches no offset, so a later ordinary harvest is unaffected.
+ */
+export async function backfillRecords(dbPath, { quiet = false, write = true, projects = PROJECTS,
+                                                batch = 200 } = {}, spec) {
   if (!existsSync(dbPath)) { if (!quiet) console.error(`no store at ${dbPath}`); return null; }
   const t0 = Date.now();
   const db = openDb(dbPath);
   const counted = (sql) => db.prepare(sql).get().n;
-  const before = {
-    plans: counted('SELECT COUNT(*) n FROM plans'),
-    task_events: counted('SELECT COUNT(*) n FROM task_events'),
-    turns: counted('SELECT COUNT(*) n FROM turns'),
-    messages: counted('SELECT COUNT(*) n FROM messages'),
-    files: counted('SELECT COUNT(*) n FROM files'),
+  const snapshot = () => {
+    const out = { turns: counted('SELECT COUNT(*) n FROM turns'),
+                  messages: counted('SELECT COUNT(*) n FROM messages'),
+                  files: counted('SELECT COUNT(*) n FROM files') };
+    for (const t of spec.tables) out[t] = counted(`SELECT COUNT(*) n FROM ${t}`);
+    return out;
   };
+  const before = snapshot();
   const h = new Harvest(db);
   const files = listTranscripts(projects);
   let scanned = 0, skipped = 0;
@@ -1596,20 +1671,10 @@ export async function backfillWork(dbPath = DB_PATH, { quiet = false, write = tr
         // A STRING TEST BEFORE ANY JSON.parse, the rule every sibling backfill follows: parsing
         // 475,805 records to find 318 of them is the difference between minutes and an hour.
         if (!line) continue;
-        const wantsPlan = line.includes('"ExitPlanMode"');
-        const wantsTask = line.includes('"task_status"');
-        if (!wantsPlan && !wantsTask) continue;
+        if (!spec.prefilters.some((needle) => line.includes(needle))) continue;
         let d;
         try { d = JSON.parse(line); } catch { continue; }
-        if (wantsTask && d?.type === 'attachment') h.taskEvent(d, path, lineNo);
-        if (!wantsPlan) continue;
-        const content = d?.message?.content;
-        if (!Array.isArray(content)) continue;
-        for (const blk of content) {
-          if (blk?.type === 'tool_use' && blk.name === 'ExitPlanMode') {
-            h.plan(d, blk.id, blk.input, path, lineNo);
-          }
-        }
+        spec.handle(h, d, path, lineNo, line);
       }
       // ONLY WHEN WRITING, and that word is the whole of it. Copied from backfillToolOutcomes,
       // which has no dry run, this committed every `batch` files regardless: the first --dry-run
@@ -1617,32 +1682,24 @@ export async function backfillWork(dbPath = DB_PATH, { quiet = false, write = tr
       // crossed the boundary 43 times. A ROLLBACK can only undo the last partial batch.
       if (write && scanned % batch === 0) { db.exec('COMMIT'); db.exec('BEGIN'); }
       if (!quiet && scanned % 500 === 0) {
-        process.stderr.write(`  ${scanned}/${files.length} transcripts, ${h.stats.plans} plans
+        const first = Object.values(spec.counters)[0];
+        process.stderr.write(`  ${scanned}/${files.length} transcripts, ${h.stats[first]} ${spec.label}
 `);
       }
     }
     // Counted inside the transaction, so a dry run reports the figures it would have written
     // rather than the store's previous contents. Same rule, and same reason, as backfillSidecars.
-    const after = {
-      plans: counted('SELECT COUNT(*) n FROM plans'),
-      task_events: counted('SELECT COUNT(*) n FROM task_events'),
-      turns: counted('SELECT COUNT(*) n FROM turns'),
-      messages: counted('SELECT COUNT(*) n FROM messages'),
-      files: counted('SELECT COUNT(*) n FROM files'),
-    };
+    const after = snapshot();
     if (write) db.exec('COMMIT'); else db.exec('ROLLBACK');
-    const report = {
-      transcripts: files.length, scanned, unreadable: skipped,
-      plans_seen: h.stats.plans, task_events_seen: h.stats.taskEvents,
-      plans: after.plans, task_events: after.task_events,
-      plans_added: after.plans - before.plans,
-      task_events_added: after.task_events - before.task_events,
-      // NOTHING ELSE MOVES. This reads transcripts and writes two tables; a changed turn, message
-      // or file row would mean it did something it was never asked to do.
-      rows_unchanged: before.turns === after.turns && before.messages === after.messages
-        && before.files === after.files,
-      wrote: !!write, ms: Date.now() - t0,
-    };
+    const report = { transcripts: files.length, scanned, unreadable: skipped };
+    for (const [name, stat] of Object.entries(spec.counters)) report[`${name}_seen`] = h.stats[stat];
+    for (const t of spec.tables) { report[t] = after[t]; report[`${t}_added`] = after[t] - before[t]; }
+    // NOTHING ELSE MOVES. This reads transcripts and writes the spec's tables; a changed turn,
+    // message or file row would mean it did something it was never asked to do.
+    report.rows_unchanged = before.turns === after.turns && before.messages === after.messages
+      && before.files === after.files;
+    report.wrote = !!write;
+    report.ms = Date.now() - t0;
     if (!quiet) console.log(JSON.stringify(report, null, 2));
     db.close();
     return report;
@@ -1652,6 +1709,9 @@ export async function backfillWork(dbPath = DB_PATH, { quiet = false, write = tr
     throw e;
   }
 }
+
+export const backfillWork = (dbPath = DB_PATH, opts = {}) => backfillRecords(dbPath, opts, WORK_SPEC);
+export const backfillChanges = (dbPath = DB_PATH, opts = {}) => backfillRecords(dbPath, opts, CHANGES_SPEC);
 
 export async function backfillSidecars(dbPath = DB_PATH, { quiet = false, write = true,
                                                            projects = PROJECTS } = {}) {
@@ -2206,6 +2266,30 @@ class Harvest {
          delta_summary=excluded.delta_summary, output_file_path=excluded.output_file_path,
          file_path=excluded.file_path, line_no=excluded.line_no
         WHERE excluded.session_id IS task_events.session_id`),
+      // THE CALL'S HALF OF A CHANGE, naming only its own columns, so the patch the result wrote
+      // survives it whichever lands first. Same refusal clause as plans: a resumed transcript
+      // carries the earlier session's records verbatim and must not take the row.
+      putChangeCall: db.prepare(`INSERT INTO changes
+        (tool_use_id,session_id,turn_uuid,ts,tool_name,file,old_text,new_text,replace_all,
+         old_lines,new_lines,is_sidechain,file_path,line_no)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(tool_use_id) DO UPDATE SET
+         turn_uuid=excluded.turn_uuid, ts=excluded.ts, tool_name=excluded.tool_name,
+         file=excluded.file, old_text=excluded.old_text, new_text=excluded.new_text,
+         replace_all=excluded.replace_all, old_lines=excluded.old_lines,
+         new_lines=excluded.new_lines, is_sidechain=excluded.is_sidechain,
+         file_path=excluded.file_path, line_no=excluded.line_no
+        WHERE excluded.session_id IS changes.session_id`),
+      // THE RESULT'S HALF: the patch and what it counts to. Never the text, which the call owns.
+      putChangeResult: db.prepare(`INSERT INTO changes
+        (tool_use_id,session_id,kind,patch_json,additions,deletions,original_chars,user_modified,
+         file_path,line_no)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(tool_use_id) DO UPDATE SET
+         kind=excluded.kind, patch_json=excluded.patch_json, additions=excluded.additions,
+         deletions=excluded.deletions, original_chars=excluded.original_chars,
+         user_modified=excluded.user_modified
+        WHERE excluded.session_id IS changes.session_id`),
       // THE TRANSCRIPT'S HALF OF A WORKFLOW ROW, and it names only its own columns. The JSON pass
       // owns the rest and either can land first, so an UPDATE that listed every column would wipe
       // whichever half arrived earlier. Silent, and only a self-test can see it.
@@ -2259,7 +2343,8 @@ class Harvest {
     // both questions.
     this.unknownThisRun = new Set();
     this.stats = { filesSeen: 0, filesRead: 0, rewrites: 0, lines: 0, bytes: 0, turns: 0, compactions: 0, paired: 0, toolCalls: 0, toolResults: 0, messages: 0, messageChars: 0, excludedFiles: 0,
-                   plans: 0, taskEvents: 0, workflowLinks: 0, sidecarsSeen: 0, sidecarsRead: 0, agentRuns: 0, workflowRuns: 0 };
+                   plans: 0, taskEvents: 0, workflowLinks: 0, sidecarsSeen: 0, sidecarsRead: 0, agentRuns: 0, workflowRuns: 0,
+                   changes: 0, changePatches: 0 };
     this.sessionDirs = new Set();
     this.loadExclusions();
   }
@@ -2405,6 +2490,66 @@ class Harvest {
       typeof at.outputFilePath === 'string' ? at.outputFilePath : null,
       path, lineNo);
     this.stats.taskEvents++;
+    return 1;
+  }
+
+  /**
+   * The call's half of a file change: which file, and the text that went in.
+   *
+   * THIS IS THE ONLY HALF A SUBAGENT EDIT HAS. Measured before this existed: 20,852 of the
+   * 32,613 successful edits on the author's store were made by subagents, and not one of their
+   * results carries a `toolUseResult`. The call's `input` still holds the whole old and new text,
+   * or the whole written file, and the store had been keeping a 500 character preview of it. So
+   * the text is stored here, from the call, for every edit; the patch, when a result carries one,
+   * is the other method's business.
+   */
+  change(d, toolUseId, name, input, path, lineNo) {
+    if (typeof toolUseId !== 'string' || !input || typeof input !== 'object') return 0;
+    const file = typeof input.file_path === 'string' ? input.file_path : null;
+    const isEdit = name === 'Edit';
+    const oldText = isEdit && typeof input.old_string === 'string' ? input.old_string : null;
+    const newText = isEdit
+      ? (typeof input.new_string === 'string' ? input.new_string : null)
+      : (typeof input.content === 'string' ? input.content : null);
+    if (file === null && oldText === null && newText === null) return 0;
+    // Lines, not characters, because that is what a reader compares against a patch's counts.
+    // An empty string is zero lines, not one; NULL stays NULL.
+    const lines = (s) => (s === null ? null : s === '' ? 0 : s.split('\n').length);
+    this.stmt.putChangeCall.run(
+      toolUseId, d.sessionId ?? null, d.uuid ?? null, d.timestamp ?? null,
+      name, file, oldText, newText, input.replace_all ? 1 : 0, lines(oldText), lines(newText),
+      d.isSidechain ? 1 : 0, path, lineNo);
+    this.stats.changes++;
+    return 1;
+  }
+
+  /**
+   * The result's half: the unified-diff hunks the tool produced, and what they add up to.
+   *
+   * ADDITIONS AND DELETIONS COME FROM THE HUNK PREFIXES, never from the old and new text. A hunk
+   * that replaces one line with three is `-` once and `+` three times, and counting the texts
+   * would call that one and one. The original file is measured and not kept: the hunks already
+   * carry their context lines, and the whole file is 13 MB across the store for nothing a reader
+   * would ask for.
+   */
+  changeResult(d, toolUseId, r, path, lineNo) {
+    if (typeof toolUseId !== 'string' || !r || !Array.isArray(r.structuredPatch)) return 0;
+    let additions = 0, deletions = 0;
+    for (const hunk of r.structuredPatch) {
+      for (const line of (hunk && Array.isArray(hunk.lines)) ? hunk.lines : []) {
+        if (typeof line !== 'string') continue;
+        if (line[0] === '+') additions++;
+        else if (line[0] === '-') deletions++;
+      }
+    }
+    const kind = typeof r.oldString === 'string' ? 'edit'
+      : r.type === 'create' ? 'create' : r.type === 'update' ? 'update' : null;
+    this.stmt.putChangeResult.run(
+      toolUseId, d.sessionId ?? null, kind, JSON.stringify(r.structuredPatch),
+      additions, deletions,
+      typeof r.originalFile === 'string' ? r.originalFile.length : null,
+      r.userModified ? 1 : 0, path, lineNo);
+    this.stats.changePatches++;
     return 1;
   }
 
@@ -2731,6 +2876,7 @@ class Harvest {
         // characters and JSON.stringify puts "plan" first, so the preview is the proposal's
         // opening sentence and the planFilePath that names the file is never inside it.
         if (name === 'ExitPlanMode') this.plan(d, b.id, input, path, lineNo);
+        if (name === 'Edit' || name === 'Write') this.change(d, b.id, name, input, path, lineNo);
       } else if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
         const c = b.content;
         const bytes = typeof c === 'string' ? Buffer.byteLength(c, 'utf8')
@@ -2764,6 +2910,11 @@ class Harvest {
             typeof launched.transcriptDir === 'string' ? launched.transcriptDir : null,
             typeof launched.scriptPath === 'string' ? launched.scriptPath : null);
           this.stats.workflowLinks++;
+        }
+        // THE PATCH AN EDIT PRODUCED, on the same record. Only main-line results carry one; a
+        // subagent's result is a plain string or nothing, and its row keeps the call's text alone.
+        if (launched && typeof launched === 'object' && Array.isArray(launched.structuredPatch)) {
+          this.changeResult(d, b.tool_use_id, launched, path, lineNo);
         }
       }
     }
@@ -4282,6 +4433,126 @@ async function selfTest() {
     rmSync(sdbPath + '-shm', { force: true });
   }
 
+  // A chat's file changes: the call's text and the result's patch, landing alone or together in
+  // either order, and the three shapes a reader must tell apart: an edit, a created file, and a
+  // subagent edit whose result was never recorded.
+  {
+    const cdir = join(tmp, 'changes');
+    const pdir = join(cdir, 'projects', 'P--changes');
+    const sid = 'bbbb1111-2222-4333-8444-666666666666';
+    mkdirSync(pdir, { recursive: true });
+    const NL = String.fromCharCode(10);
+    const call = (uuid, id, name, input, side = false) => JSON.stringify({
+      type: 'assistant', uuid, sessionId: sid, timestamp: '2026-09-13T01:00:00Z', isSidechain: side,
+      message: { content: [{ type: 'tool_use', id, name, input }] } });
+    const result = (uuid, id, toolUseResult) => JSON.stringify({
+      type: 'user', uuid, sessionId: sid, timestamp: '2026-09-13T01:00:01Z', toolUseResult,
+      message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+    // THE PREFIXES AND THE TEXTS DISAGREE ON PURPOSE: one old line, but the hunk removes two and
+    // adds three. A counter that read the texts would say 1 and 3; the rule says 2 and 3.
+    const hunk = { oldStart: 4, oldLines: 3, newStart: 4, newLines: 4,
+                   lines: [' context', '-gone', '-also gone', '+one', '+two', '+three'] };
+    const three = 'one' + NL + 'two' + NL + 'three';
+    const editIn = { file_path: 'C:/p/a.py', old_string: 'gone', new_string: three };
+    const editOut = { filePath: 'C:/p/a.py', oldString: 'gone', newString: three,
+                      originalFile: 'x'.repeat(50), structuredPatch: [hunk], userModified: false,
+                      replaceAll: false };
+    const createIn = { file_path: 'C:/p/new.txt', content: 'a' + NL + 'b' };
+    const createOut = { type: 'create', filePath: 'C:/p/new.txt', content: 'a' + NL + 'b',
+                        originalFile: null, structuredPatch: [] };
+
+    const cdb = new DatabaseSync(':memory:');
+    cdb.exec(SCHEMA);
+    const hc = new Harvest(cdb);
+    const row = (id) => cdb.prepare('SELECT * FROM changes WHERE tool_use_id = ?').get(id);
+    const brief = (r) => JSON.stringify(r && [r.file, r.old_text, r.old_lines, r.new_lines,
+                                                r.additions, r.deletions, r.kind]);
+
+    hc.scanBlocks(JSON.parse(call('u1', 'ch1', 'Edit', editIn)), 'f', 1);
+    checks.push(['changes: the call alone lands the file and the text, with no patch',
+      row('ch1')?.file === 'C:/p/a.py' && row('ch1')?.old_text === 'gone'
+        && row('ch1')?.old_lines === 1 && row('ch1')?.new_lines === 3
+        && row('ch1')?.patch_json === null && row('ch1')?.additions === null, brief(row('ch1'))]);
+    hc.scanBlocks(JSON.parse(result('u2', 'ch1', editOut)), 'f', 2);
+    checks.push(['changes: the result fills the patch without wiping the text (gate can fail)',
+      row('ch1')?.old_text === 'gone' && row('ch1')?.patch_json !== null
+        && row('ch1')?.kind === 'edit' && row('ch1')?.original_chars === 50, brief(row('ch1'))]);
+    checks.push(['changes: additions and deletions come from the hunk prefixes, not the texts (gate can fail)',
+      row('ch1')?.additions === 3 && row('ch1')?.deletions === 2, brief(row('ch1'))]);
+
+    hc.scanBlocks(JSON.parse(result('u3', 'ch2', editOut)), 'f', 3);
+    checks.push(['changes: the result alone lands the patch with no file and no text',
+      row('ch2')?.additions === 3 && row('ch2')?.file === null && row('ch2')?.old_text === null,
+      brief(row('ch2'))]);
+    hc.scanBlocks(JSON.parse(call('u4', 'ch2', 'Edit', editIn)), 'f', 4);
+    checks.push(['changes: and the call then fills the text without wiping the patch (gate can fail)',
+      row('ch2')?.file === 'C:/p/a.py' && row('ch2')?.additions === 3
+        && row('ch2')?.patch_json !== null, brief(row('ch2'))]);
+
+    hc.scanBlocks(JSON.parse(call('u5', 'ch3', 'Write', createIn)), 'f', 5);
+    hc.scanBlocks(JSON.parse(result('u6', 'ch3', createOut)), 'f', 6);
+    checks.push(['changes: a Write that creates a file has no old text, two new lines, zero hunks, zero deletions',
+      row('ch3')?.old_text === null && row('ch3')?.new_lines === 2 && row('ch3')?.kind === 'create'
+        && row('ch3')?.additions === 0 && row('ch3')?.deletions === 0
+        && row('ch3')?.original_chars === null, brief(row('ch3'))]);
+
+    hc.scanBlocks(JSON.parse(call('u7', 'ch4', 'Edit', editIn, true)), 'f', 7);
+    hc.scanBlocks(JSON.parse(result('u8', 'ch4', 'The file has been updated.')), 'f', 8);
+    checks.push(['changes: a subagent edit keeps its text and stays patch-less, which is a state (gate can fail)',
+      row('ch4')?.is_sidechain === 1 && row('ch4')?.old_text === 'gone'
+        && row('ch4')?.patch_json === null && row('ch4')?.additions === null, brief(row('ch4'))]);
+
+    const copy = JSON.parse(call('u9', 'ch1', 'Edit', { ...editIn, new_string: 'stolen' }));
+    copy.sessionId = 'other-session';
+    hc.scanBlocks(copy, 'g', 1);
+    checks.push(['changes: a verbatim copy in a resumed session does not take the row (gate can fail)',
+      row('ch1')?.session_id === sid && row('ch1')?.new_text === three, brief(row('ch1'))]);
+
+    hc.scanBlocks(JSON.parse(call('u10', 'ch5', 'Read', { file_path: 'C:/p/a.py' })), 'f', 9);
+    checks.push(['changes: a Read is not a change',
+      !row('ch5') && cdb.prepare('SELECT COUNT(*) n FROM changes').get().n === 4]);
+    checks.push(['changes: the counters count what was seen, including the refused copy',
+      hc.stats.changes === 5 && hc.stats.changePatches === 3,
+      JSON.stringify([hc.stats.changes, hc.stats.changePatches])]);
+    cdb.close();
+
+    // THE BACKFILL, on a transcript already marked read to the end, dry then wet, batch 1 so the
+    // dry run crosses a commit boundary on its first file.
+    const tfile = join(pdir, sid + '.jsonl');
+    writeFileSync(tfile, [call('u1', 'ch1', 'Edit', editIn), result('u2', 'ch1', editOut),
+                          call('u5', 'ch3', 'Write', createIn), result('u6', 'ch3', createOut)]
+      .join(NL) + NL);
+    const fdb = join(cdir, 'changes.db');
+    {
+      const s = new DatabaseSync(fdb);
+      s.exec(SCHEMA);
+      s.prepare('INSERT INTO files (path,size,mtime_ms,bytes_read,lines_read,rewrites,last_harvest_ts)'
+        + ' VALUES (?,?,?,?,?,?,?)').run(tfile, 99999, 0, 99999, 99, 0, 't');
+      s.close();
+    }
+    const landed = () => {
+      const s = new DatabaseSync(fdb, { readOnly: true });
+      const out = [s.prepare('SELECT COUNT(*) n FROM changes').get().n,
+                   s.prepare('SELECT additions, old_text FROM changes WHERE tool_use_id = ?').get('ch1')];
+      s.close();
+      return out;
+    };
+    const copts = { quiet: true, projects: join(cdir, 'projects'), batch: 1 };
+    const dry = await backfillChanges(fdb, { ...copts, write: false });
+    checks.push(['changes: --backfill-changes finds edits in a transcript already read to the end',
+      !!dry && dry.changes_added === 2 && dry.changes_seen === 2 && dry.patches_seen === 2
+        && dry.rows_unchanged, dry && JSON.stringify([dry.changes_added, dry.changes_seen, dry.patches_seen])]);
+    checks.push(['changes: and its dry run leaves the store alone (gate can fail)',
+      landed()[0] === 0, String(landed()[0])]);
+    await backfillChanges(fdb, copts);
+    checks.push(['changes: with write on both rows land complete, text and patch together',
+      landed()[0] === 2 && landed()[1]?.additions === 3 && landed()[1]?.old_text === 'gone',
+      JSON.stringify(landed())]);
+    rmSync(fdb, { force: true });
+    rmSync(fdb + '-wal', { force: true });
+    rmSync(fdb + '-shm', { force: true });
+  }
+
   // The two flags that stand between a bare invocation and a 10 GB re-read or a silent write.
   {
     const dir = join(ROOT, 'tmp', `plan-selftest-${process.pid}-${Date.now()}`);
@@ -4770,11 +5041,12 @@ const USAGE = `harvest.mjs
   node harvest.mjs --backfill-chains [--dry-run] [--records <dir>]
   node harvest.mjs --backfill-sidecars    read the agent and workflow files beside transcripts
   node harvest.mjs --backfill-work        re-read transcripts for plans and task notifications
+  node harvest.mjs --backfill-changes     re-read transcripts for the file changes Claude made
   node harvest.mjs --backfill-survivors | --backfill-titles | --backfill-agents
                    | --backfill-tool-outcomes | --backfill-message-source
   any of the above with --db <path> to name the store`;
 const KNOWN_FLAGS = new Set(['--full', '--yes', '--dry-run', '--self-test', '--stats', '--db', '--records',
-  '--backfill-chains', '--backfill-sidecars', '--backfill-work', '--backfill-survivors', '--backfill-titles', '--backfill-agents',
+  '--backfill-chains', '--backfill-sidecars', '--backfill-work', '--backfill-changes', '--backfill-survivors', '--backfill-titles', '--backfill-agents',
   '--backfill-tool-outcomes', '--backfill-message-source', '--help', '-h']);
 
 const argv = process.argv.slice(2);
@@ -4787,6 +5059,10 @@ else if (argv.includes('--self-test')) code = await selfTest();
 else if (argv.includes('--stats')) code = stats();
 else if (argv.includes('--backfill-survivors')) code = backfillSurvivors(DB_PATH) ? 0 : 1;
 else if (argv.includes('--backfill-titles')) code = await backfillTitles();
+else if (argv.includes('--backfill-changes')) {
+  const r = await backfillChanges(resolveDbPath(argv), { write: !argv.includes('--dry-run') });
+  code = r && r.rows_unchanged ? 0 : 1;
+}
 else if (argv.includes('--backfill-work')) {
   const r = await backfillWork(resolveDbPath(argv), { write: !argv.includes('--dry-run') });
   code = r && r.rows_unchanged ? 0 : 1;

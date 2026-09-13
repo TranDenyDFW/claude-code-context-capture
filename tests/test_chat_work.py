@@ -8,6 +8,7 @@ task id that resolves to nothing at all.
 Built on `build_store` from test_projects, so the schema is harvest's own and a column added there
 appears here without this file knowing.
 """
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -124,6 +125,35 @@ def work_store(tmp_path, monkeypatch):
                      status, description, file_path, line_no)
                    VALUES ('te-3',?, '2026-08-02T13:02:00Z','s0-0-t0','a9999','local_agent',
                            'running','a task whose run is nowhere','f',3)""", (HEAD,))
+    # THE FILE CHANGES, in the shapes a reader must tell apart: an edit whose result carried a
+    # patch, a created file, a subagent edit whose result was never recorded, and a refused edit on
+    # the superseded session. The hunk removes two lines and adds three while the old text is one
+    # line, so counting texts instead of prefixes is visible. See TestTheChanges.
+    put_change = """INSERT INTO changes (tool_use_id, session_id, turn_uuid, ts, tool_name, file,
+                      kind, old_text, new_text, replace_all, old_lines, new_lines, patch_json,
+                      additions, deletions, original_chars, user_modified, is_sidechain, file_path,
+                      line_no) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,0,?,'f',?)"""
+    hunk = json.dumps([{"oldStart": 4, "oldLines": 3, "newStart": 4, "newLines": 4,
+                        "lines": [" keep", "-gone", "-also gone", "+one", "+two", "+three"]}])
+    three = "one" + chr(10) + "two" + chr(10) + "three"
+    con.execute(put_change, ("ch-1", HEAD, "s0-0-t0", "2026-08-02T10:10:00Z", "Edit",
+                             "C:/p/app.py", "edit", "gone", three, 1, 3, hunk, 3, 2, 120, 0, 12))
+    con.execute(put_change, ("ch-2", HEAD, "s0-0-t0", "2026-08-02T10:20:00Z", "Write",
+                             "C:/p/new.txt", "create", None, "a" + chr(10) + "b", None, 2, "[]",
+                             0, 0, None, 0, 13))
+    con.execute(put_change, ("ch-3", HEAD, "s0-0-t0", "2026-08-02T10:30:00Z", "Edit",
+                             "C:/p/app.py", None, "two", "deux", 1, 1, None, None, None, None,
+                             1, 14))
+    con.execute(put_change, ("ch-4", OLD, "s0-1-t0", "2026-08-01T09:00:00Z", "Edit",
+                             "C:/p/app.py", None, "x", "y", 1, 1, None, None, None, None, 0, 15))
+    put_call = """INSERT INTO tool_calls (tool_use_id, session_id, turn_uuid, ts, tool_name,
+                    file_path, line_no, outcome, denial_kind) VALUES (?,?,?,?,?,'f',?,?,?)"""
+    con.execute(put_call, ("ch-1", HEAD, "s0-0-t0", "2026-08-02T10:10:00Z", "Edit", 12, "ok", None))
+    con.execute(put_call, ("ch-2", HEAD, "s0-0-t0", "2026-08-02T10:20:00Z", "Write", 13, "ok",
+                           None))
+    con.execute(put_call, ("ch-3", HEAD, "s0-0-t0", "2026-08-02T10:30:00Z", "Edit", 14, "ok", None))
+    con.execute(put_call, ("ch-4", OLD, "s0-1-t0", "2026-08-01T09:00:00Z", "Edit", 15, "refused",
+                           "permission-rule"))
     con.commit()
     con.close()
     monkeypatch.setattr(store, "DB_PATH", path)
@@ -234,7 +264,7 @@ class TestAStoreHarvestedBeforeThisExisted:
     def test_every_reader_answers_empty_rather_than_raising(self, work_store, store):
         """The Python package never creates a table, so an older store simply has none of these."""
         con = sqlite3.connect(str(work_store))
-        for table in ("plans", "agent_runs", "workflow_runs", "task_events"):
+        for table in ("plans", "agent_runs", "workflow_runs", "task_events", "changes"):
             con.execute(f"DROP TABLE {table}")
         con.commit()
         con.close()
@@ -243,6 +273,9 @@ class TestAStoreHarvestedBeforeThisExisted:
         assert store.chat_agent_runs(HEAD).empty
         assert store.chat_workflow_runs(HEAD).empty
         assert store.chat_task_events(HEAD).empty
+        assert store.chat_changed_files(HEAD).empty
+        assert store.chat_changes(HEAD).empty
+        assert store.change_detail("ch-1").empty
         counts = store.chat_work_counts(HEAD)
         assert counts["plans"] == 0 and not any(counts["harvested"].values())
         assert store.chat_exists(HEAD), "the chat is still a chat"
@@ -356,6 +389,86 @@ class TestTheRoutes:
 
     def test_an_unknown_plan_is_a_404(self, api_client):
         assert api_client.get("/api/plan/nope").status_code == 404
+
+    def test_the_chat_route_answers_the_files_changed_with_two_totals(self, api_client):
+        body = api_client.get(f"/api/chat/{HEAD}").json()
+        assert body["changes_total"] == 4 and body["changed_files_total"] == 2
+        assert {f["file"] for f in body["changed_files"]} == {"C:/p/app.py", "C:/p/new.txt"}
+        assert body["harvested"]["changes"] is True
+
+    def test_the_edits_route_filters_by_file_and_404s_on_an_unknown_chat(self, api_client):
+        rows = api_client.get(f"/api/chat/{HEAD}/changes",
+                              params={"file": "C:/p/app.py"}).json()["changes"]
+        assert [r["tool_use_id"] for r in rows] == ["ch-3", "ch-1", "ch-4"], "newest first"
+        assert api_client.get("/api/chat/never-seen/changes").status_code == 404
+
+    def test_the_change_route_answers_the_hunks_whole_or_says_there_are_none(self, api_client):
+        one = api_client.get("/api/change/ch-1").json()
+        assert one["hunks"][0]["lines"] == [" keep", "-gone", "-also gone", "+one", "+two",
+                                            "+three"]
+        assert one["additions"] == 3 and one["deletions"] == 2 and one["outcome"] == "ok"
+        # THREE STATES, NOT TWO. None is an edit whose result was never recorded; an empty list is
+        # a created file whose whole content is the new text.
+        agent = api_client.get("/api/change/ch-3").json()
+        assert agent["hunks"] is None and agent["old_text"] == "two"
+        assert agent["is_sidechain"] is True and agent["additions"] is None
+        created = api_client.get("/api/change/ch-2").json()
+        assert created["hunks"] == [] and created["kind"] == "create"
+        assert api_client.get("/api/change/nope").status_code == 404
+
+
+class TestTheChanges:
+    """The file changes a chat made, grouped by file, the counts covering only what was recorded."""
+
+    def test_the_files_are_grouped_and_the_counts_cover_only_what_was_recorded(self, work_store,
+                                                                               store):
+        files = store.chat_changed_files(HEAD).set_index("file")
+        assert set(files.index) == {"C:/p/app.py", "C:/p/new.txt"}
+        app = files.loc["C:/p/app.py"]
+        assert int(app["edits"]) == 3, "the patched edit, the subagent edit and the refused one"
+        assert int(app["ok_edits"]) == 2
+        assert int(app["additions"]) == 3 and int(app["deletions"]) == 2, (
+            "from the one edit that carried a patch, and from its hunk prefixes, not its texts")
+        assert int(app["patched"]) == 1 and int(app["by_subagents"]) == 1
+        new = files.loc["C:/p/new.txt"]
+        assert int(new["additions"]) == 0 and int(new["deletions"]) == 0
+        assert int(new["patched"]) == 1, "a created file has an empty patch, which is still a patch"
+
+    def test_the_edits_behind_one_file_say_whether_they_carry_a_patch(self, work_store, store):
+        rows = store.chat_changes(HEAD, file="C:/p/app.py")
+        assert list(rows["tool_use_id"]) == ["ch-3", "ch-1", "ch-4"], "newest first, whole chat"
+        by = rows.set_index("tool_use_id")
+        assert int(by.loc["ch-1"]["has_patch"]) == 1 and int(by.loc["ch-3"]["has_patch"]) == 0
+        assert by.loc["ch-4"]["outcome"] == "refused"
+        assert pd.isna(by.loc["ch-3"]["additions"]), "unknown is unknown, not zero"
+        assert len(store.chat_changes(HEAD)) == 4, "and without a file, every edit"
+
+    def test_a_change_whole_carries_the_hunks_or_says_there_are_none(self, work_store, store):
+        whole = store.change_detail("ch-1").iloc[0]
+        assert json.loads(whole["patch_json"])[0]["lines"][1] == "-gone"
+        assert whole["new_text"].count(chr(10)) == 2, "the text is the whole text"
+        assert store.change_detail("ch-3").iloc[0]["patch_json"] is None
+        assert store.change_detail("nope").empty
+
+    def test_the_counts_cover_the_whole_chat_and_reach_the_column(self, work_store, store):
+        counts = store.chat_work_counts(HEAD)
+        assert counts["changes"] == 4 and counts["changed_files"] == 2
+        assert store.chat_work_totals()[HEAD]["changes"] == 4
+        from c4x.tabs.sessions import work_summary
+        assert work_summary({"changes": 4}) == "4 changes"
+        assert work_summary({"changes": 1}) == "1 change"
+
+    def test_the_table_is_classified_for_delete_and_export(self, work_store, store):
+        """`unhandled_tables` caught four unclassified tables last time, against the LIVE store.
+        The live store may not hold this table yet; this one does, so the check is real here."""
+        from c4x import projects
+        con = sqlite3.connect(str(work_store))
+        try:
+            assert "changes" not in projects.unhandled_tables(con)
+        finally:
+            con.close()
+        assert "changes" in projects.BY_SESSION
+        assert projects.where_for("changes", ["s0-0"])[0] == "WHERE session_id IN (?)"
 
 
 class TestTheColumnForTheSessionsList:

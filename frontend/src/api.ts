@@ -572,6 +572,73 @@ export interface ChatTaskEvent {
  * `harvested` says which tables this store actually has. Without it an empty list from an older
  * store is indistinguishable from a chat that ran nothing, and the panel would state the second.
  */
+/** One file a chat changed, with counts that cover only the edits whose result recorded a patch. */
+export interface ChatChangedFile {
+  file: string
+  edits: number
+  ok_edits: number | null
+  additions: number | null
+  deletions: number | null
+  /** How many of `edits` the two sums cover. A subagent edit records no patch. */
+  patched: number | null
+  by_subagents: number | null
+  first_ts: string | null
+  last_ts: string | null
+  kinds: string | null
+}
+/** One edit, as the per-file list answers it. */
+export interface ChatChange {
+  tool_use_id: string
+  ts: string | null
+  turn_uuid: string | null
+  tool_name: string | null
+  file: string | null
+  kind: string | null
+  old_lines: number | null
+  new_lines: number | null
+  additions: number | null
+  deletions: number | null
+  has_patch: number | boolean
+  is_sidechain: number | boolean | null
+  user_modified: number | boolean | null
+  outcome: string | null
+  denial_kind: string | null
+}
+/** A unified-diff hunk as the transcript records it: prefixed lines, space, plus or minus. */
+export interface DiffHunk {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: string[]
+}
+/**
+ * One change whole. `hunks` has THREE states: a list is a recorded patch, an empty list is a
+ * created file whose whole content is `new_text`, and null is an edit whose result was never
+ * recorded, which is every subagent edit.
+ */
+export interface ChangeDetail {
+  tool_use_id: string
+  session: string | null
+  turn_uuid: string | null
+  ts: string | null
+  tool_name: string | null
+  file: string | null
+  kind: string | null
+  old_text: string | null
+  new_text: string | null
+  replace_all: boolean
+  old_lines: number | null
+  new_lines: number | null
+  hunks: DiffHunk[] | null
+  additions: number | null
+  deletions: number | null
+  original_chars: number | null
+  user_modified: boolean
+  is_sidechain: boolean
+  outcome: string | null
+  denial_kind: string | null
+}
 export interface ChatWork {
   session: string
   chat: string[]
@@ -585,6 +652,9 @@ export interface ChatWork {
   task_events: ChatTaskEvent[]
   task_events_total: number
   task_events_unresolved: number
+  changed_files: ChatChangedFile[]
+  changed_files_total: number
+  changes_total: number
 }
 
 export const api = {

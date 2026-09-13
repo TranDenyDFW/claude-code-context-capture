@@ -12,6 +12,7 @@ frontend actually needs. Measured, the difference is 128 KB against 439 KB on th
 Serving only the summary would give React nothing to draw. Serving only the raw figure would throw
 away the one shape the whole test suite already knows how to read.
 """
+import json
 import os
 import shutil
 import sys
@@ -1210,9 +1211,10 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
     """What this chat PLANNED and what it RAN, for the panel beside the Sessions list.
 
     The desktop app has two panes for this, Plan and Background tasks, and both are drawn from the
-    transcripts this store already holds. Four kinds, in one answer, because they are four views of
+    transcripts this store already holds. Five kinds, in one answer, because they are five views of
     one thing: a plan is a moment in the conversation, an agent run is a transcript the chat spawned
-    and a workflow is a set of those, and a task notification is the chat being told how one went.
+    and a workflow is a set of those, a task notification is the chat being told how one went, and
+    a change is what the chat did to a file.
 
     SCOPED OVER THE WHOLE CHAT, not one CLI session. A resumed chat is several sessions and the page
     has shown them as one row since `session_links` existed; a panel that answered for the newest
@@ -1223,6 +1225,7 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
     """
     from c4x.store import (
         chat_agent_runs,
+        chat_changed_files,
         chat_exists,
         chat_members,
         chat_plans,
@@ -1238,6 +1241,7 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
     runs = chat_agent_runs(session_id, limit=limit)
     workflows = chat_workflow_runs(session_id, limit=limit)
     tasks = chat_task_events(session_id, limit=limit)
+    changed = chat_changed_files(session_id, limit=limit)
     unresolved = 0
     if not tasks.empty and "resolved_to" in tasks.columns:
         unresolved = int(tasks["resolved_to"].isna().sum())
@@ -1258,6 +1262,77 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
         # 4 of 22 on the author's store, and a panel that dropped those rows would be reporting a
         # tidier machine than the one it is running on.
         "task_events_unresolved": unresolved,
+        # PER FILE, not per edit, and two totals. The busiest chat on the author's store wrote
+        # 11,216 files in 11,367 edits; a reader asked "what did this chat change" wants the files,
+        # and the edits behind one file are a second fetch.
+        "changed_files": records(changed) if not changed.empty else [],
+        "changed_files_total": counts["changed_files"],
+        "changes_total": counts["changes"],
+    })
+
+
+@api.get("/api/chat/{session_id}/changes")
+def chat_changes_list(session_id: str, file: str | None = Query(None),
+                      limit: int = Query(500, ge=1, le=5000)):
+    """The edits behind a chat, or behind one of its files, newest first.
+
+    Its own route rather than a field of `/api/chat`, because the per-file list is what a reader
+    opens and the per-edit list is what they open next, and the second one is up to 11,367 rows.
+    """
+    from c4x.store import chat_changes, chat_exists
+    if not chat_exists(session_id):
+        raise HTTPException(status_code=404,
+                            detail={"error": f"unknown session {session_id!r}"})
+    rows = chat_changes(session_id, limit=limit, file=file)
+    return _jsonable({
+        "session": session_id,
+        "file": file,
+        "changes": records(rows) if not rows.empty else [],
+    })
+
+
+@api.get("/api/change/{tool_use_id}")
+def change_detail_route(tool_use_id: str):
+    """One change whole: the hunks if a result recorded them, the old and new text either way.
+
+    `hunks` is None, not an empty list, when no result was recorded, which is every subagent edit on
+    the author's store. An empty list is a created file, whose whole content is `new_text`. The page
+    draws those three differently and this is what tells it which it has.
+    """
+    from c4x.store import change_detail
+    found = change_detail(tool_use_id)
+    if found.empty:
+        raise HTTPException(status_code=404,
+                            detail={"error": f"unknown change {tool_use_id!r}"})
+    row = records(found)[0]
+    patch = row.get("patch_json")
+    hunks = None
+    if isinstance(patch, str) and patch:
+        try:
+            hunks = json.loads(patch)
+        except ValueError:
+            hunks = None
+    return _jsonable({
+        "tool_use_id": tool_use_id,
+        "session": row.get("session_id"),
+        "turn_uuid": row.get("turn_uuid"),
+        "ts": row.get("ts"),
+        "tool_name": row.get("tool_name"),
+        "file": row.get("file"),
+        "kind": row.get("kind"),
+        "old_text": row.get("old_text"),
+        "new_text": row.get("new_text"),
+        "replace_all": bool(row.get("replace_all")),
+        "old_lines": row.get("old_lines"),
+        "new_lines": row.get("new_lines"),
+        "hunks": hunks,
+        "additions": row.get("additions"),
+        "deletions": row.get("deletions"),
+        "original_chars": row.get("original_chars"),
+        "user_modified": bool(row.get("user_modified")),
+        "is_sidechain": bool(row.get("is_sidechain")),
+        "outcome": row.get("outcome"),
+        "denial_kind": row.get("denial_kind"),
     })
 
 

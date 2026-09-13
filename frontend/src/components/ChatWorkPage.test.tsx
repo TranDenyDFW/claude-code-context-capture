@@ -9,11 +9,12 @@ import { ChatWorkPage, csv } from './ChatWorkPage'
 function body(over: Partial<ChatWork> = {}): ChatWork {
   return {
     session: 'sess-1', chat: ['sess-1', 'sess-0'],
-    harvested: { plans: true, agent_runs: true, workflow_runs: true, task_events: true },
+    harvested: { plans: true, agent_runs: true, workflow_runs: true, task_events: true, changes: true },
     plans: [], plans_total: 0,
     agent_runs: [], agent_runs_total: 0,
     workflow_runs: [], workflow_runs_total: 0,
     task_events: [], task_events_total: 0, task_events_unresolved: 0,
+    changed_files: [], changed_files_total: 0, changes_total: 0,
     ...over,
   }
 }
@@ -122,6 +123,93 @@ describe('a plan is a document, not its opening', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent)
       .toContain('the opening is shown'))
     expect(screen.getByText('the newest plan')).toBeTruthy()
+  })
+})
+
+describe('the changes a chat made', () => {
+  const FILE = {
+    file: 'C:/p/app.py', edits: 3, ok_edits: 2, additions: 3, deletions: 2, patched: 1,
+    by_subagents: 1, first_ts: '2026-08-02T10:10:00Z', last_ts: '2026-08-02T10:30:00Z', kinds: 'edit',
+  }
+  const EDIT = {
+    tool_use_id: 'ch-1', ts: '2026-08-02T10:10:00Z', turn_uuid: 't', tool_name: 'Edit',
+    file: 'C:/p/app.py', kind: 'edit', old_lines: 1, new_lines: 3, additions: 3, deletions: 2,
+    has_patch: 1, is_sidechain: 0, user_modified: 0, outcome: 'ok', denial_kind: null,
+  }
+  const AGENT = { ...EDIT, tool_use_id: 'ch-3', kind: null, additions: null, deletions: null,
+                  has_patch: 0, is_sidechain: 1 }
+  const DETAIL = {
+    tool_use_id: 'ch-1', session: 'sess-1', turn_uuid: 't', ts: '2026-08-02T10:10:00Z',
+    tool_name: 'Edit', file: 'C:/p/app.py', kind: 'edit', old_text: 'gone',
+    new_text: 'one\ntwo\nthree', replace_all: false, old_lines: 1, new_lines: 3,
+    hunks: [{ oldStart: 4, oldLines: 3, newStart: 4, newLines: 4,
+              lines: [' keep', '-gone', '-also gone', '+one', '+two', '+three'] }],
+    additions: 3, deletions: 2, original_chars: 120, user_modified: false, is_sidechain: false,
+    outcome: 'ok', denial_kind: null,
+  }
+  const routes = (list: ChatWork, edits: unknown[], detail: unknown) =>
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () => (url.includes('/changes?') ? { changes: edits }
+        : url.startsWith('/api/change/') ? detail : list),
+    })))
+  const chat = body({ changed_files: [FILE], changed_files_total: 1, changes_total: 3 })
+
+  it('says how much of a file the counts cover, and fetches its edits on request', async () => {
+    routes(chat, [AGENT, EDIT], DETAIL)
+    render(<ChatWorkPage session="sess-1" onBack={() => {}} />)
+    // THE QUALIFIER IS THE POINT: +3 -2 covers one edit of three, and the row says so.
+    await waitFor(() => expect(screen.getByText(/over 1 of 3 edits/)).toBeTruthy())
+    fireEvent.click(screen.getByText('Show the edits'))
+    await waitFor(() => expect(screen.getByText(/1 lines to 3, no patch recorded/)).toBeTruthy())
+    expect(fetch).toHaveBeenCalledWith('/api/chat/sess-1/changes?file=C%3A%2Fp%2Fapp.py')
+    expect(screen.getByText('by a subagent')).toBeTruthy()
+  })
+
+  it('draws a recorded patch line by line, added and removed told apart', async () => {
+    routes(chat, [EDIT], DETAIL)
+    render(<ChatWorkPage session="sess-1" onBack={() => {}} />)
+    await waitFor(() => expect(screen.getByText('Show the edits')).toBeTruthy())
+    fireEvent.click(screen.getByText('Show the edits'))
+    await waitFor(() => expect(screen.getByText('Show the diff')).toBeTruthy())
+    fireEvent.click(screen.getByText('Show the diff'))
+    await waitFor(() => expect(screen.getByText('+one')).toBeTruthy())
+    const added = document.querySelectorAll('[data-line="added"]')
+    const removed = document.querySelectorAll('[data-line="removed"]')
+    const context = document.querySelectorAll('[data-line="context"]')
+    expect([added.length, removed.length, context.length]).toEqual([3, 2, 1])
+    expect(added[0].className).toContain('text-good')
+    expect(removed[0].className).toContain('text-warn')
+    expect(screen.getByText('@@ -4,3 +4,4 @@')).toBeTruthy()
+  })
+
+  it('shows before and after, and says why that is all, for an edit with no recorded result', async () => {
+    const agentDetail = { ...DETAIL, tool_use_id: 'ch-3', hunks: null, old_text: 'two',
+                          new_text: 'deux', additions: null, deletions: null, is_sidechain: true }
+    routes(chat, [AGENT], agentDetail)
+    render(<ChatWorkPage session="sess-1" onBack={() => {}} />)
+    await waitFor(() => expect(screen.getByText('Show the edits')).toBeTruthy())
+    fireEvent.click(screen.getByText('Show the edits'))
+    await waitFor(() => expect(screen.getByText('Show the diff')).toBeTruthy())
+    fireEvent.click(screen.getByText('Show the diff'))
+    await waitFor(() => expect(screen.getByText(/No result was recorded for this edit/)).toBeTruthy())
+    expect(screen.getByText('-two')).toBeTruthy()
+    expect(screen.getByText('+deux')).toBeTruthy()
+    expect(screen.queryByText(/@@/)).toBeNull()
+  })
+
+  it('draws a created file as all new, which is the third state', async () => {
+    const created = { ...DETAIL, tool_use_id: 'ch-2', kind: 'create', hunks: [], old_text: null,
+                      new_text: 'a\nb', additions: 0, deletions: 0 }
+    routes(chat, [{ ...EDIT, tool_use_id: 'ch-2', kind: 'create', additions: 0, deletions: 0 }], created)
+    render(<ChatWorkPage session="sess-1" onBack={() => {}} />)
+    await waitFor(() => expect(screen.getByText('Show the edits')).toBeTruthy())
+    fireEvent.click(screen.getByText('Show the edits'))
+    await waitFor(() => expect(screen.getByText('Show the diff')).toBeTruthy())
+    fireEvent.click(screen.getByText('Show the diff'))
+    await waitFor(() => expect(screen.getByText(/A created file/)).toBeTruthy())
+    expect(document.querySelectorAll('[data-line="added"]')).toHaveLength(2)
+    expect(document.querySelectorAll('[data-line="removed"]')).toHaveLength(0)
   })
 })
 

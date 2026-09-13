@@ -74,6 +74,8 @@ BY_SESSION = ("hook_events", "attachments", "tool_calls", "messages", "turns",
               # behind would restore a project whose panel had lost its plans. Two of them are not
               # keyed on `session_id`, which is what `SESSION_COLUMN` below is for.
               "plans", "task_events", "agent_runs", "workflow_runs",
+              # The file changes a chat made, keyed on the session that made them.
+              "changes",
               "sessions")
 
 # THE COLUMN THAT NAMES THE SESSION, where it is not called `session_id`.

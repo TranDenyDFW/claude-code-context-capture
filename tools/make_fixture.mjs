@@ -562,6 +562,46 @@ insertTaskEvent.run('fixture-task-1', 'fixture-chat-head', iso(24), 'fixture-cha
 insertTaskEvent.run('fixture-task-2', 'fixture-chat-head', iso(25), 'fixture-chat-head-t2',
                     'a9999999999999999', 'running', 'A task whose run is not here', null, null, 15);
 
+// THE FILE CHANGES OF THE CHAT, in the three shapes a reader must tell apart plus a refused one:
+// an edit whose result carried a patch, a created file, a subagent edit whose result was never
+// recorded (text only, NULL counts), and an edit that was refused. Two files, so the per-file
+// grouping has something to group. The hunk removes two lines and adds three while the old text
+// is one line, so a reader that counted texts instead of prefixes would be caught.
+const insertChange = db.prepare(`
+  INSERT INTO changes (tool_use_id, session_id, turn_uuid, ts, tool_name, file, kind, old_text,
+                       new_text, replace_all, old_lines, new_lines, patch_json, additions,
+                       deletions, original_chars, user_modified, is_sidechain, file_path, line_no)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 0, ?, 'fixture://transcript.jsonl', ?)`);
+const NL = String.fromCharCode(10);
+const threeLines = 'one' + NL + 'two' + NL + 'three';
+const hunk = JSON.stringify([{ oldStart: 4, oldLines: 3, newStart: 4, newLines: 4,
+                               lines: [' keep', '-gone', '-also gone', '+one', '+two', '+three'] }]);
+insertChange.run('fixture-change-edit', 'fixture-chat-head', 'fixture-chat-head-t1', iso(21),
+                 'Edit', 'fixture://p/app.py', 'edit', 'gone', threeLines, 1, 3, hunk, 3, 2, 120,
+                 0, 12);
+insertChange.run('fixture-change-create', 'fixture-chat-head', 'fixture-chat-head-t2', iso(22),
+                 'Write', 'fixture://p/new.txt', 'create', null, 'a' + NL + 'b', null, 2, '[]', 0,
+                 0, null, 0, 13);
+insertChange.run('fixture-change-agent', 'fixture-chat-head', 'fixture-chat-head-t2', iso(23),
+                 'Edit', 'fixture://p/app.py', null, 'two', 'deux', 1, 1, null, null, null, null,
+                 1, 14);
+insertChange.run('fixture-change-refused', 'fixture-chat-prefix-1', 'fixture-chat-prefix-1-t1',
+                 iso(11), 'Edit', 'fixture://p/app.py', null, 'x', 'y', 1, 1, null, null, null,
+                 null, 0, 15);
+// The calls behind them, so the verdict joins: three that ran and one that was refused.
+insertToolOutcome.run('fixture-change-edit', 'fixture-chat-head', 'fixture-chat-head-t1', iso(21),
+                      'Edit', null, 'fixture://p/app.py', 'sha-ch-1', 90, 300, 0,
+                      'fixture://transcript.jsonl', 12, 'ok', null);
+insertToolOutcome.run('fixture-change-create', 'fixture-chat-head', 'fixture-chat-head-t2', iso(22),
+                      'Write', null, 'fixture://p/new.txt', 'sha-ch-2', 40, 60, 0,
+                      'fixture://transcript.jsonl', 13, 'ok', null);
+insertToolOutcome.run('fixture-change-agent', 'fixture-chat-head', 'fixture-chat-head-t2', iso(23),
+                      'Edit', null, 'fixture://p/app.py', 'sha-ch-3', 30, 20, 0,
+                      'fixture://transcript.jsonl', 14, 'ok', null);
+insertToolOutcome.run('fixture-change-refused', 'fixture-chat-prefix-1', 'fixture-chat-prefix-1-t1',
+                      iso(11), 'Edit', null, 'fixture://p/app.py', 'sha-ch-4', 30, 0, 1,
+                      'fixture://transcript.jsonl', 15, 'refused', 'permission-rule');
+
 // TWO KINDS IN ONE TABLE, which is the whole reason `files.kind` exists. A transcript's offset and
 // a sidecar's offset live side by side, and the Summary card headed "transcripts" counts one of
 // them. With no rows here at all that card read 0 on the fixture and any check on it was vacuous.
@@ -662,9 +702,14 @@ for (const table of ['sessions', 'turns', 'messages', 'compactions', 'compaction
                      'tool_calls', 'context_baselines', 'probes', 'probe_categories',
                      'probe_details', 'attachments', 'hook_events', 'record_types',
                      'session_links', 'plans', 'agent_runs', 'workflow_runs',
-                     'task_events', 'files']) {
+                     'task_events', 'files', 'changes']) {
   counts[table] = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
 }
+const changedFiles = db.prepare('SELECT COUNT(DISTINCT file) AS n FROM changes').get().n;
+const patchless = db.prepare('SELECT COUNT(*) AS n FROM changes WHERE patch_json IS NULL').get().n;
+const changesRefused = db.prepare(
+  "SELECT COUNT(*) AS n FROM changes c JOIN tool_calls t ON t.tool_use_id = c.tool_use_id "
+  + "WHERE t.outcome = 'refused'").get().n;
 const transcriptFiles = db.prepare(
   'SELECT COUNT(*) AS n FROM files WHERE kind IS NULL').get().n;
 const apiCalls = db.prepare('SELECT COUNT(*) AS n FROM api_calls').get().n;
@@ -874,6 +919,11 @@ if (!SELF_TEST) {
     ['the files table carries a transcript offset and a sidecar offset, so kind is testable',
      counts.files === 2 && transcriptFiles === 1,
      JSON.stringify([counts.files, transcriptFiles])],
+    // Four changes over two files: a patched edit, a created file, a subagent edit with no patch,
+    // and a refused one, so every branch of the per-file summary has a row to reach.
+    ['the fixture carries four file changes over two files, two of them without a patch, one refused',
+     counts.changes === 4 && changedFiles === 2 && patchless === 2 && changesRefused === 1,
+     JSON.stringify([counts.changes, changedFiles, patchless, changesRefused])],
   ];
   let failed = 0;
   for (const [what, ok] of checks) {

@@ -88,8 +88,8 @@ export function useRowInspector(
     // always held and this page could not reach. The table's own note has said "click a row to
     // read the summary it produced" since the tab existed, over a click that did nothing.
     // WHAT THIS CHAT PLANNED AND RAN. A row of the Sessions list names a chat, and the chat has
-    // four lists of its own behind it: the plans it wrote, the subagents it ran, the workflows it
-    // launched and the tasks it was told about. `row_detail` is deliberately not `detail`: the
+    // five lists of its own behind it: the plans it wrote, the subagents it ran, the workflows it
+    // launched, the tasks it was told about and the files it changed. `row_detail` is deliberately not `detail`: the
     // click on this table still selects the session, and the control beside the row opens this.
     const work = meta?.row_detail
     if (work) {
