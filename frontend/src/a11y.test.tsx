@@ -114,7 +114,7 @@ describe('axe finds no WCAG A or AA violation in', () => {
           source: 'sessions by peak',
           fields: [['series', 'peaks'], ['y', '990,000']],
           text: 'the whole message',
-          rows: { name: 'Sessions', table: { id: 't', columns: ['title'], rows: [{ title: 'the one' }] } },
+          rows: [{ name: 'Sessions', table: { id: 't', columns: ['title'], rows: [{ title: 'the one' }] } }],
           onOpen: () => {},
           onSelectSession: () => {},
         }}

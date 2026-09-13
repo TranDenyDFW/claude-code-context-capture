@@ -24,7 +24,7 @@
 import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, appendFileSync, readFileSync, writeFileSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
-import { join, dirname } from 'node:path';
+import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
@@ -56,7 +56,12 @@ CREATE TABLE IF NOT EXISTS files (
   -- copy so the copy is the one that is refused (see the ON CONFLICT clauses on turns and
   -- messages). Directory order, which this used to walk in, made "who produced this row" depend
   -- on the filesystem.
-  first_ts TEXT
+  first_ts TEXT,
+  -- NULL is a transcript, which is every row written before this column existed. 'sidecar' is one
+  -- of the small JSON files beside them, read whole rather than resumed from an offset. Here AND
+  -- in ADDED_COLUMNS, the way first_ts is: the schema builds a fresh store and the migration
+  -- carries an existing one, and a self-test that runs against an in-memory schema needs both.
+  kind TEXT
 );
 -- cwd is the directory the session LIVES in: the first cwd in its transcript whose slug is the
 -- directory the file sits in (a session can change directory; its transcript does not move), or
@@ -203,6 +208,82 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE INDEX IF NOT EXISTS tool_calls_session ON tool_calls (session_id);
 CREATE INDEX IF NOT EXISTS tool_calls_target ON tool_calls (target);
 CREATE INDEX IF NOT EXISTS tool_calls_name ON tool_calls (tool_name);
+-- THE PLAN, WHOLE. An ExitPlanMode call carries the entire proposal in its input, and until now
+-- the only trace of it was the first 500 characters of input_preview: JSON.stringify puts "plan"
+-- first, so a preview is the plan's opening sentence and NEVER its planFilePath. Measured on this
+-- store: 291 ExitPlanMode calls against 27 surviving files in ~/.claude/plans, so the transcript
+-- is the record and the file is a pointer that usually points at nothing.
+--
+-- KEYED ON THE CALL, not on the path. One path already serves two calls in one session here, and
+-- the two proposals are different documents. The outcome of the call is NOT copied in: an
+-- accepted plan and a refused one are the same text, and only tool_calls knows which.
+CREATE TABLE IF NOT EXISTS plans (
+  tool_use_id TEXT PRIMARY KEY,
+  session_id TEXT, turn_uuid TEXT, ts TEXT,
+  plan_text TEXT, plan_chars INTEGER,
+  plan_file_path TEXT, allowed_prompts_json TEXT,
+  is_sidechain INTEGER, file_path TEXT, line_no INTEGER
+);
+CREATE INDEX IF NOT EXISTS plans_session ON plans (session_id, ts);
+-- ONE ROW PER agent-<id>.jsonl, the transcript a subagent wrote for itself.
+--
+-- KEYED ON THE AGENT ID, which is unique across the machine. That is what makes the measured
+-- relocation case representable: history is bridged between sessions, so a run referenced from one
+-- chat can be stored under another chat's directory, and both ids are kept rather than one being
+-- chosen. dir_session_id is where the files are; tool_use_id is the call that asked for it.
+--
+-- tool_use_id IS NULL FOR MOST RUNS AND THAT IS A REAL STATE. Measured: 796 plain runs, of which
+-- 400 sampled all carried toolUseId, and 6,636 workflow agents, NONE of which carry one. A design
+-- that required it would hold 10% of the population.
+--
+-- meta_json is the whole meta file. The key set drifts between builds (agentType and description
+-- on every one of 400 sampled, spawnDepth on 349, name on 183, model on 71), so the columns are
+-- what is read today and this is what survives the next build adding a field.
+CREATE TABLE IF NOT EXISTS agent_runs (
+  agent_id TEXT PRIMARY KEY,
+  dir_session_id TEXT, tool_use_id TEXT, workflow_run_id TEXT,
+  agent_type TEXT, name TEXT, description TEXT,
+  spawn_depth INTEGER, model TEXT, parent_agent_id TEXT, stopped_by_user INTEGER,
+  meta_json TEXT, transcript_path TEXT,
+  meta_path TEXT, meta_size INTEGER, meta_mtime_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS agent_runs_dir ON agent_runs (dir_session_id);
+CREATE INDEX IF NOT EXISTS agent_runs_tool_use ON agent_runs (tool_use_id);
+CREATE INDEX IF NOT EXISTS agent_runs_workflow ON agent_runs (workflow_run_id);
+-- ONE ROW PER workflows/wf_<runid>.json, written by TWO passes that own different columns.
+--
+-- The transcript pass fills tool_use_id, turn_uuid and session_id from the toolUseResult on the
+-- Workflow call's result, minutes before the JSON beside the transcripts has a status or a token
+-- total. The sidecar pass fills the rest. Either can arrive first, so NEITHER may use INSERT OR
+-- REPLACE and each names only its own columns: the same hazard putToolCall's COALESCE'd result
+-- columns already document, and one that fails silently.
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  run_id TEXT PRIMARY KEY,
+  task_id TEXT, dir_session_id TEXT,
+  tool_use_id TEXT, turn_uuid TEXT, session_id TEXT,
+  workflow_name TEXT, status TEXT, started_at TEXT, ts TEXT, duration_ms INTEGER,
+  agent_count INTEGER, total_tokens INTEGER, total_tool_calls INTEGER,
+  default_model TEXT, summary TEXT, result_text TEXT,
+  phases_json TEXT, progress_json TEXT, error TEXT,
+  script_path TEXT, transcript_dir TEXT,
+  file_path TEXT, file_size INTEGER, file_mtime_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS workflow_runs_dir ON workflow_runs (dir_session_id);
+CREATE INDEX IF NOT EXISTS workflow_runs_task ON workflow_runs (task_id);
+-- The task_status attachments, DETAILED rather than counted. attachments still counts them, and
+-- still must: that census is how an unknown attachment type becomes visible. Measured here: 27 of
+-- them across 10 sessions, so this is a detail of the page and never its main source.
+--
+-- Keyed on the record uuid, the rule turns and messages use, so two events for one task stay two.
+CREATE TABLE IF NOT EXISTS task_events (
+  uuid TEXT PRIMARY KEY,
+  session_id TEXT, ts TEXT, parent_uuid TEXT,
+  task_id TEXT, task_type TEXT, status TEXT,
+  description TEXT, delta_summary TEXT, output_file_path TEXT,
+  file_path TEXT, line_no INTEGER
+);
+CREATE INDEX IF NOT EXISTS task_events_session ON task_events (session_id, ts);
+CREATE INDEX IF NOT EXISTS task_events_task ON task_events (task_id);
 -- Lifecycle events from hooks/event-hook.mjs. Hooks are process level, so unlike the statusLine
 -- they fire on every entrypoint, including the desktop host. probe separates test writes from
 -- live ones at write time rather than by a later heuristic.
@@ -388,7 +469,10 @@ export const ADDED_COLUMNS = {
   hook_events: HOOK_EVENT_COLUMNS,
   turns: ['parent_uuid'],
   tool_calls: ['subagent_type', 'input_preview', 'description', 'outcome', 'denial_kind'],
-  files: ['first_ts'],
+  // `kind` is NULL on every row written before it existed, and NULL means transcript. The sidecar
+  // pass writes 'sidecar' for the small JSON files beside them, so a reader that means transcripts
+  // can say so: the census, the dry run and the Diagnostics tab all count rows in this table.
+  files: ['first_ts', 'kind'],
 };
 const BOOLEAN_EVENT_COLUMNS = new Set(['probe', 'known', 'truncated']);
 
@@ -1127,6 +1211,12 @@ export async function transcriptIndex(dir, { excludedCwds = null } = {}) {
   return out;
 }
 
+// Directory entries, or nothing. A session directory is optional (82 of 1,135 sessions have one
+// here) and every level below it is too, so an absent one is the normal case and not a failure.
+function listDir(dir) {
+  try { return readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+}
+
 // The directory name Claude Code gives a working directory under ~/.claude/projects: every
 // character that is not a letter or a digit becomes a hyphen. The same rule as c4x/appstate.py
 // slug_for, and pinned against it by tests/test_appstate.py::TestTheSlug's inputs below.
@@ -1451,6 +1541,182 @@ export async function reconcileDirectory(db, dir, records, { write = true, thres
 
 // Every project directory. Row COUNTS must not change: this moves session_id values and writes
 // links, nothing else, and the high-water guard reports it the way backfillAgents does.
+/**
+ * Every session directory, for the stores harvested before the sidecar pass existed.
+ *
+ * ROW COUNTS MUST NOT CHANGE. This reads small JSON files beside the transcripts and writes
+ * agent_runs, workflow_runs and files; it must not touch a turn, a message or a session, and the
+ * high-water guard says so in the report the way backfillAgents and backfillChains do.
+ */
+/**
+ * The plans and task notifications inside transcripts this store already read.
+ *
+ * WITHOUT THIS THE PANEL LIES ON EVERY EXISTING STORE, and the lie is the confident kind. Both
+ * writers ride the incremental byte offsets, so they only ever see bytes appended AFTER they
+ * shipped: measured on this machine, 291 `ExitPlanMode` calls and 27 `task_status` attachments are
+ * on disk and the store held 1 plan and 0 task events. The panel's `harvested` block cannot tell
+ * that apart from a chat that planned nothing, because the tables exist and are simply empty, so
+ * it would have answered "This chat wrote no plan" over a plan the reader wrote themselves.
+ *
+ * NOT `--full`. It re-reads transcripts, as `backfillToolOutcomes` does, but writes only these two
+ * tables and touches no offset, so a later ordinary harvest is unaffected by having run it.
+ */
+export async function backfillWork(dbPath = DB_PATH, { quiet = false, write = true,
+                                                       projects = PROJECTS, batch = 200 } = {}) {
+  if (!existsSync(dbPath)) { if (!quiet) console.error(`no store at ${dbPath}`); return null; }
+  const t0 = Date.now();
+  const db = openDb(dbPath);
+  const counted = (sql) => db.prepare(sql).get().n;
+  const before = {
+    plans: counted('SELECT COUNT(*) n FROM plans'),
+    task_events: counted('SELECT COUNT(*) n FROM task_events'),
+    turns: counted('SELECT COUNT(*) n FROM turns'),
+    messages: counted('SELECT COUNT(*) n FROM messages'),
+    files: counted('SELECT COUNT(*) n FROM files'),
+  };
+  const h = new Harvest(db);
+  const files = listTranscripts(projects);
+  let scanned = 0, skipped = 0;
+  db.exec('BEGIN');
+  try {
+    for (const path of files) {
+      scanned++;
+      let text;
+      try { text = readFileSync(path, 'utf8'); } catch { skipped++; continue; }
+      let lineNo = 0;
+      for (const line of text.split('\n')) {
+        lineNo++;
+        // A STRING TEST BEFORE ANY JSON.parse, the rule every sibling backfill follows: parsing
+        // 475,805 records to find 318 of them is the difference between minutes and an hour.
+        if (!line) continue;
+        const wantsPlan = line.includes('"ExitPlanMode"');
+        const wantsTask = line.includes('"task_status"');
+        if (!wantsPlan && !wantsTask) continue;
+        let d;
+        try { d = JSON.parse(line); } catch { continue; }
+        if (wantsTask && d?.type === 'attachment') h.taskEvent(d, path, lineNo);
+        if (!wantsPlan) continue;
+        const content = d?.message?.content;
+        if (!Array.isArray(content)) continue;
+        for (const blk of content) {
+          if (blk?.type === 'tool_use' && blk.name === 'ExitPlanMode') {
+            h.plan(d, blk.id, blk.input, path, lineNo);
+          }
+        }
+      }
+      // ONLY WHEN WRITING, and that word is the whole of it. Copied from backfillToolOutcomes,
+      // which has no dry run, this committed every `batch` files regardless: the first --dry-run
+      // here reported 279 rows it would add and left 253 of them in the store, because 8,775 files
+      // crossed the boundary 43 times. A ROLLBACK can only undo the last partial batch.
+      if (write && scanned % batch === 0) { db.exec('COMMIT'); db.exec('BEGIN'); }
+      if (!quiet && scanned % 500 === 0) {
+        process.stderr.write(`  ${scanned}/${files.length} transcripts, ${h.stats.plans} plans
+`);
+      }
+    }
+    // Counted inside the transaction, so a dry run reports the figures it would have written
+    // rather than the store's previous contents. Same rule, and same reason, as backfillSidecars.
+    const after = {
+      plans: counted('SELECT COUNT(*) n FROM plans'),
+      task_events: counted('SELECT COUNT(*) n FROM task_events'),
+      turns: counted('SELECT COUNT(*) n FROM turns'),
+      messages: counted('SELECT COUNT(*) n FROM messages'),
+      files: counted('SELECT COUNT(*) n FROM files'),
+    };
+    if (write) db.exec('COMMIT'); else db.exec('ROLLBACK');
+    const report = {
+      transcripts: files.length, scanned, unreadable: skipped,
+      plans_seen: h.stats.plans, task_events_seen: h.stats.taskEvents,
+      plans: after.plans, task_events: after.task_events,
+      plans_added: after.plans - before.plans,
+      task_events_added: after.task_events - before.task_events,
+      // NOTHING ELSE MOVES. This reads transcripts and writes two tables; a changed turn, message
+      // or file row would mean it did something it was never asked to do.
+      rows_unchanged: before.turns === after.turns && before.messages === after.messages
+        && before.files === after.files,
+      wrote: !!write, ms: Date.now() - t0,
+    };
+    if (!quiet) console.log(JSON.stringify(report, null, 2));
+    db.close();
+    return report;
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* nothing left to roll back */ }
+    db.close();
+    throw e;
+  }
+}
+
+export async function backfillSidecars(dbPath = DB_PATH, { quiet = false, write = true,
+                                                           projects = PROJECTS } = {}) {
+  if (!existsSync(dbPath)) { if (!quiet) console.error(`no store at ${dbPath}`); return null; }
+  const t0 = Date.now();
+  const db = openDb(dbPath);
+  const before = {
+    turns: db.prepare('SELECT COUNT(*) n FROM turns').get().n,
+    messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
+    sessions: db.prepare('SELECT COUNT(*) n FROM sessions').get().n,
+  };
+  const h = new Harvest(db);
+  const dirs = [];
+  for (const slug of listDir(projects)) {
+    if (!slug.isDirectory()) continue;
+    for (const entry of listDir(join(projects, slug.name))) {
+      if (!entry.isDirectory()) continue;
+      if (!TRANSCRIPT_NAME.test(entry.name + '.jsonl')) continue;
+      dirs.push(join(projects, slug.name, entry.name));
+    }
+  }
+  // ALWAYS A TRANSACTION, AND THE DRY RUN IS THE REASON. `sidecars` writes unconditionally, so
+  // without a BEGIN node:sqlite autocommits every statement and `--dry-run` would modify the store
+  // it was asked not to touch, then fail on a ROLLBACK with nothing to roll back. Measured: the
+  // first run of this against a copy wrote rows for 120 session directories before it crashed.
+  // The sibling `backfillChains` needs no such pairing because it passes `write` down into
+  // `reconcileDirectory` and that function skips the writes; this one cannot.
+  db.exec('BEGIN');
+  let n = 0;
+  try {
+    for (const dir of dirs) {
+      h.sidecars(dir);
+      if (!quiet && ++n % 100 === 0) process.stderr.write(`  ${n}/${dirs.length} session directories
+`);
+    }
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* nothing left to roll back */ }
+    db.close();
+    throw e;
+  }
+  // COUNTED INSIDE THE TRANSACTION, which is what makes the dry run worth running. Read after a
+  // ROLLBACK these are the store's PREVIOUS contents, so a dry run against a store with no
+  // sidecars would report `agent_runs: 0` beside `agent_runs_written: 7432` and the figure the run
+  // exists to produce would be the one it cannot show. The guard counts are read here too, and
+  // inside the transaction they are stricter: they prove the pass touched no turn or message even
+  // before anything was undone.
+  const after = {
+    turns: db.prepare('SELECT COUNT(*) n FROM turns').get().n,
+    messages: db.prepare('SELECT COUNT(*) n FROM messages').get().n,
+    sessions: db.prepare('SELECT COUNT(*) n FROM sessions').get().n,
+  };
+  const report = {
+    directories: dirs.length,
+    sidecars_seen: h.stats.sidecarsSeen, sidecars_read: h.stats.sidecarsRead,
+    agent_runs_written: h.stats.agentRuns, workflow_runs_written: h.stats.workflowRuns,
+    agent_runs: db.prepare('SELECT COUNT(*) n FROM agent_runs').get().n,
+    agent_runs_in_workflows: db.prepare(
+      'SELECT COUNT(*) n FROM agent_runs WHERE workflow_run_id IS NOT NULL').get().n,
+    workflow_runs: db.prepare('SELECT COUNT(*) n FROM workflow_runs').get().n,
+    rows_unchanged: before.turns === after.turns && before.messages === after.messages
+      && before.sessions === after.sessions,
+    wrote: !!write, ms: Date.now() - t0,
+  };
+  if (write) db.exec('COMMIT'); else db.exec('ROLLBACK');
+  if (!quiet) console.log(JSON.stringify(report, null, 2));
+  db.close();
+  // THE REPORT, not an exit code, which is what `backfillChains` returns and what a caller that
+  // wants to check a figure needs. The CLI turns it into a code at the call site, beside the one
+  // that already did.
+  return report;
+}
+
 export async function backfillChains(dbPath = DB_PATH, { quiet = false, write = true, recordsRoots = null,
                                                         projects = PROJECTS, threshold = 0.9 } = {}) {
   if (!existsSync(dbPath)) { if (!quiet) console.error(`no store at ${dbPath}`); return null; }
@@ -1770,6 +2036,45 @@ class Harvest {
         size=excluded.size, mtime_ms=excluded.mtime_ms, bytes_read=excluded.bytes_read,
         lines_read=excluded.lines_read, rewrites=excluded.rewrites, last_harvest_ts=excluded.last_harvest_ts,
         first_ts=COALESCE(files.first_ts, excluded.first_ts)`),
+      // A SIDECAR IS READ WHOLE OR NOT AT ALL, so its row carries no offset to resume from: size
+      // and mtime are the whole test. Marked `sidecar` so nothing that counts transcripts counts
+      // these too.
+      putSidecarFile: db.prepare(`INSERT INTO files
+        (path,size,mtime_ms,bytes_read,lines_read,rewrites,last_harvest_ts,kind)
+        VALUES (?,?,?,?,1,0,?, 'sidecar') ON CONFLICT(path) DO UPDATE SET
+        size=excluded.size, mtime_ms=excluded.mtime_ms, bytes_read=excluded.bytes_read,
+        last_harvest_ts=excluded.last_harvest_ts, kind='sidecar'`),
+      putAgentRun: db.prepare(`INSERT INTO agent_runs
+        (agent_id,dir_session_id,tool_use_id,workflow_run_id,agent_type,name,description,
+         spawn_depth,model,parent_agent_id,stopped_by_user,meta_json,transcript_path,
+         meta_path,meta_size,meta_mtime_ms)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(agent_id) DO UPDATE SET
+         dir_session_id=excluded.dir_session_id, tool_use_id=excluded.tool_use_id,
+         workflow_run_id=excluded.workflow_run_id, agent_type=excluded.agent_type,
+         name=excluded.name, description=excluded.description, spawn_depth=excluded.spawn_depth,
+         model=excluded.model, parent_agent_id=excluded.parent_agent_id,
+         stopped_by_user=excluded.stopped_by_user, meta_json=excluded.meta_json,
+         transcript_path=excluded.transcript_path, meta_path=excluded.meta_path,
+         meta_size=excluded.meta_size, meta_mtime_ms=excluded.meta_mtime_ms`),
+      // THE JSON'S HALF OF A WORKFLOW ROW. It names only its own columns for the same reason
+      // linkWorkflow does: the two passes can arrive in either order and each would otherwise
+      // erase the other's work.
+      putWorkflow: db.prepare(`INSERT INTO workflow_runs
+        (run_id,dir_session_id,workflow_name,status,started_at,ts,duration_ms,agent_count,
+         total_tokens,total_tool_calls,default_model,summary,result_text,phases_json,progress_json,
+         error,file_path,file_size,file_mtime_ms)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(run_id) DO UPDATE SET
+         dir_session_id=excluded.dir_session_id, workflow_name=excluded.workflow_name,
+         status=excluded.status, started_at=excluded.started_at, ts=excluded.ts,
+         duration_ms=excluded.duration_ms, agent_count=excluded.agent_count,
+         total_tokens=excluded.total_tokens, total_tool_calls=excluded.total_tool_calls,
+         default_model=excluded.default_model, summary=excluded.summary,
+         result_text=excluded.result_text, phases_json=excluded.phases_json,
+         progress_json=excluded.progress_json, error=excluded.error,
+         file_path=excluded.file_path, file_size=excluded.file_size,
+         file_mtime_ms=excluded.file_mtime_ms`),
       putTitle: db.prepare(`INSERT INTO session_titles (session_id,kind,title,file_path,line_no)
         VALUES (?,?,?,?,?) ON CONFLICT(session_id,kind) DO UPDATE SET
         title=excluded.title, file_path=excluded.file_path, line_no=excluded.line_no`),
@@ -1871,6 +2176,39 @@ class Harvest {
         'UPDATE tool_calls SET result_bytes = ?, is_error = ?, outcome = ?, denial_kind = ? WHERE tool_use_id = ?'),
       bumpAttachment: db.prepare(`INSERT INTO attachments (session_id,type,n) VALUES (?,?,1)
         ON CONFLICT(session_id,type) DO UPDATE SET n = n + 1`),
+      // THE WHOLE PLAN, and the same refusal clause the rows beside it use: a resumed transcript
+      // carries the earlier session's ExitPlanMode records verbatim, and the copy must not take
+      // the row from the session that wrote it.
+      putPlan: db.prepare(`INSERT INTO plans
+        (tool_use_id,session_id,turn_uuid,ts,plan_text,plan_chars,plan_file_path,
+         allowed_prompts_json,is_sidechain,file_path,line_no)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(tool_use_id) DO UPDATE SET
+         turn_uuid=excluded.turn_uuid, ts=excluded.ts, plan_text=excluded.plan_text,
+         plan_chars=excluded.plan_chars, plan_file_path=excluded.plan_file_path,
+         allowed_prompts_json=excluded.allowed_prompts_json, is_sidechain=excluded.is_sidechain,
+         file_path=excluded.file_path, line_no=excluded.line_no
+        WHERE excluded.session_id IS plans.session_id`),
+      putTaskEvent: db.prepare(`INSERT INTO task_events
+        (uuid,session_id,ts,parent_uuid,task_id,task_type,status,description,delta_summary,
+         output_file_path,file_path,line_no)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(uuid) DO UPDATE SET
+         ts=excluded.ts, parent_uuid=excluded.parent_uuid, task_id=excluded.task_id,
+         task_type=excluded.task_type, status=excluded.status, description=excluded.description,
+         delta_summary=excluded.delta_summary, output_file_path=excluded.output_file_path,
+         file_path=excluded.file_path, line_no=excluded.line_no
+        WHERE excluded.session_id IS task_events.session_id`),
+      // THE TRANSCRIPT'S HALF OF A WORKFLOW ROW, and it names only its own columns. The JSON pass
+      // owns the rest and either can land first, so an UPDATE that listed every column would wipe
+      // whichever half arrived earlier. Silent, and only a self-test can see it.
+      linkWorkflow: db.prepare(`INSERT INTO workflow_runs
+        (run_id,task_id,tool_use_id,turn_uuid,session_id,transcript_dir,script_path)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(run_id) DO UPDATE SET
+         task_id=excluded.task_id, tool_use_id=excluded.tool_use_id, turn_uuid=excluded.turn_uuid,
+         session_id=excluded.session_id, transcript_dir=excluded.transcript_dir,
+         script_path=excluded.script_path`),
       bumpType: db.prepare(`INSERT INTO record_types (type,n) VALUES (?,1)
         ON CONFLICT(type) DO UPDATE SET n = n + 1`),
       // MONOTONIC. `WHERE excluded.total_cost_usd >= cost_state.total_cost_usd` is the whole point:
@@ -1913,7 +2251,9 @@ class Harvest {
     // cost-state is parsed and stored now, and every harvest still named it. One Set cannot answer
     // both questions.
     this.unknownThisRun = new Set();
-    this.stats = { filesSeen: 0, filesRead: 0, rewrites: 0, lines: 0, bytes: 0, turns: 0, compactions: 0, paired: 0, toolCalls: 0, toolResults: 0, messages: 0, messageChars: 0, excludedFiles: 0 };
+    this.stats = { filesSeen: 0, filesRead: 0, rewrites: 0, lines: 0, bytes: 0, turns: 0, compactions: 0, paired: 0, toolCalls: 0, toolResults: 0, messages: 0, messageChars: 0, excludedFiles: 0,
+                   plans: 0, taskEvents: 0, workflowLinks: 0, sidecarsSeen: 0, sidecarsRead: 0, agentRuns: 0, workflowRuns: 0 };
+    this.sessionDirs = new Set();
     this.loadExclusions();
   }
 
@@ -2015,8 +2355,172 @@ class Harvest {
     }) + String.fromCharCode(10));
   }
 
+  /**
+   * The plan an `ExitPlanMode` call carried, as a row of its own.
+   *
+   * A METHOD RATHER THAN A BLOCK INSIDE `scanBlocks`, because two callers need exactly this rule:
+   * the incremental walk that sees the call as it arrives, and `backfillWork` for the transcripts
+   * every store read before this table existed. Two copies of "what a plan row is" would have
+   * drifted the first time one of them learned a new field.
+   *
+   * THE WHOLE PLAN, not `input_preview`: that holds 500 characters and JSON.stringify puts "plan"
+   * first, so the preview is the proposal's opening sentence and the planFilePath is never in it.
+   */
+  plan(d, toolUseId, input, path, lineNo) {
+    if (typeof toolUseId !== 'string' || !input || typeof input.plan !== 'string') return 0;
+    this.stmt.putPlan.run(
+      toolUseId, d.sessionId ?? null, d.uuid ?? null, d.timestamp ?? null,
+      input.plan, input.plan.length,
+      typeof input.planFilePath === 'string' ? input.planFilePath : null,
+      input.allowedPrompts ? JSON.stringify(input.allowedPrompts) : null,
+      d.isSidechain ? 1 : 0, path, lineNo);
+    this.stats.plans++;
+    return 1;
+  }
+
+  /** One `task_status` attachment as a row. The census that counts it is the caller's business. */
+  taskEvent(d, path, lineNo) {
+    const at = d?.attachment;
+    if (!at || at.type !== 'task_status' || typeof d.uuid !== 'string') return 0;
+    this.stmt.putTaskEvent.run(
+      d.uuid, d.sessionId ?? null, d.timestamp ?? null, d.parentUuid ?? null,
+      typeof at.taskId === 'string' ? at.taskId : null,
+      typeof at.taskType === 'string' ? at.taskType : null,
+      typeof at.status === 'string' ? at.status : null,
+      typeof at.description === 'string' ? at.description : null,
+      typeof at.deltaSummary === 'string' ? at.deltaSummary : null,
+      typeof at.outputFilePath === 'string' ? at.outputFilePath : null,
+      path, lineNo);
+    this.stats.taskEvents++;
+    return 1;
+  }
+
+  /**
+   * The `<project>/<session id>` directory a transcript belongs to, or null.
+   *
+   * Covers all three shapes a read file can take: the session's own transcript, a subagent
+   * transcript under its `subagents` directory, and a workflow journal one level deeper again.
+   * The segment after the project slug is the session either way, which is the same rule the
+   * ingest already uses to name `project_slug` rather than trusting the parent directory.
+   */
+  sessionDirOf(path) {
+    const parts = String(path).split(/[\\/]/);
+    const under = parts.lastIndexOf('projects');
+    if (under < 0 || under + 2 > parts.length - 1) return null;
+    const head = parts[under + 2];
+    const id = head.endsWith('.jsonl') ? head.slice(0, -6) : head;
+    if (!TRANSCRIPT_NAME.test(id + '.jsonl')) return null;
+    return parts.slice(0, under + 2).join(sep) + sep + id;
+  }
+
+  /**
+   * The `.meta.json` and `wf_*.json` files beside a session's transcripts.
+   *
+   * NOT `.jsonl`, so `listTranscripts` never sees them and the byte-offset machinery never reads
+   * them. They are small and are read whole, so `files` carries size and mtime for each and an
+   * unchanged file is not opened: on this machine that is 7,432 agent metas and 208 workflow
+   * files, and re-parsing them on every hook-driven harvest would be the whole cost of this
+   * feature.
+   */
+  sidecars(sessionDir) {
+    const read = (p) => {
+      this.stats.sidecarsSeen++;
+      let st;
+      try { st = statSync(p); } catch { return null; }
+      const prev = this.stmt.getFile.get(p);
+      if (prev && prev.size === st.size && prev.mtime_ms === Math.round(st.mtimeMs)) return null;
+      let parsed = null;
+      try { parsed = JSON.parse(readFileSync(p, 'utf8')); } catch { parsed = null; }
+      this.stats.sidecarsRead++;
+      this.stmt.putSidecarFile.run(p, st.size, Math.round(st.mtimeMs), st.size,
+                                   new Date().toISOString());
+      return parsed && typeof parsed === 'object' ? { body: parsed, st } : null;
+    };
+    const sessionId = sessionDir.split(/[\\/]/).pop();
+    const metas = [];
+    const subagents = join(sessionDir, 'subagents');
+    for (const entry of listDir(subagents)) {
+      if (entry.isFile() && entry.name.endsWith('.meta.json')) {
+        metas.push({ path: join(subagents, entry.name), runId: null });
+      }
+    }
+    const wfRuns = join(subagents, 'workflows');
+    for (const entry of listDir(wfRuns)) {
+      if (!entry.isDirectory()) continue;
+      for (const inner of listDir(join(wfRuns, entry.name))) {
+        if (inner.isFile() && inner.name.endsWith('.meta.json')) {
+          metas.push({ path: join(wfRuns, entry.name, inner.name), runId: entry.name });
+        }
+      }
+    }
+    for (const { path: p, runId } of metas) {
+      const found = read(p);
+      if (!found) continue;
+      const m = found.body;
+      const agentId = p.split(/[\\/]/).pop().replace(/^agent-/, '').replace(/\.meta\.json$/, '');
+      // EVERY META BECOMES A ROW, including one with no toolUseId. All 6,636 workflow agents on
+      // this machine lack it and 35 of the plain ones do too; skipping them would hold a tenth of
+      // the runs and look complete.
+      this.stmt.putAgentRun.run(
+        agentId, sessionId,
+        typeof m.toolUseId === 'string' ? m.toolUseId : null, runId,
+        typeof m.agentType === 'string' ? m.agentType : null,
+        typeof m.name === 'string' ? m.name : null,
+        typeof m.description === 'string' ? m.description : null,
+        Number.isFinite(m.spawnDepth) ? m.spawnDepth : null,
+        typeof m.model === 'string' ? m.model : null,
+        typeof m.parentAgentId === 'string' ? m.parentAgentId : null,
+        m.stoppedByUser ? 1 : 0, JSON.stringify(m),
+        p.replace(/\.meta\.json$/, '.jsonl'),
+        p, found.st.size, Math.round(found.st.mtimeMs));
+      this.stats.agentRuns++;
+    }
+    const wfDir = join(sessionDir, 'workflows');
+    for (const entry of listDir(wfDir)) {
+      if (!entry.isFile() || !entry.name.startsWith('wf_') || !entry.name.endsWith('.json')) continue;
+      const p = join(wfDir, entry.name);
+      const found = read(p);
+      if (!found) continue;
+      const w = found.body;
+      const runId = typeof w.runId === 'string' ? w.runId : entry.name.slice(0, -5);
+      // startTime is epoch MILLISECONDS. Read as a string it stores NULL on every row while the
+      // code reads as though it worked, which is the shape putCostState already documents.
+      const started = Number.isFinite(w.startTime) ? new Date(w.startTime).toISOString() : null;
+      this.stmt.putWorkflow.run(
+        runId, sessionId,
+        typeof w.workflowName === 'string' ? w.workflowName : null,
+        typeof w.status === 'string' ? w.status : null,
+        started, typeof w.timestamp === 'string' ? w.timestamp : null,
+        Number.isFinite(w.durationMs) ? w.durationMs : null,
+        Number.isFinite(w.agentCount) ? w.agentCount : null,
+        Number.isFinite(w.totalTokens) ? w.totalTokens : null,
+        Number.isFinite(w.totalToolCalls) ? w.totalToolCalls : null,
+        typeof w.defaultModel === 'string' ? w.defaultModel : null,
+        typeof w.summary === 'string' ? w.summary : null,
+        typeof w.result === 'string' ? w.result : (w.result ? JSON.stringify(w.result) : null),
+        w.phases ? JSON.stringify(w.phases) : null,
+        w.workflowProgress ? JSON.stringify(w.workflowProgress) : null,
+        typeof w.error === 'string' ? w.error : null,
+        p, found.st.size, Math.round(found.st.mtimeMs));
+      this.stats.workflowRuns++;
+      // The task id lives in the JSON as well as in the transcript, and the two agree. Written
+      // only when the transcript has not already supplied it, so the launch record stays the
+      // authority on which call this run belongs to.
+      if (typeof w.taskId === 'string') {
+        this.db.prepare('UPDATE workflow_runs SET task_id = ? WHERE run_id = ? AND task_id IS NULL')
+          .run(w.taskId, runId);
+      }
+    }
+  }
+
   async file(path, full) {
     if (this.excludedPaths.has(path)) { this.stats.excludedFiles++; return; }
+    // THE SESSION TREE THIS FILE BELONGS TO, remembered for the sidecar pass. The trigger is "a
+    // file under this session was read", not "a new transcript appeared": a workflow's JSON is
+    // REWRITTEN when the run finishes, minutes after its agents stopped growing, so a new-file
+    // trigger would leave every completed run stored as still running.
+    const sessionDir = this.sessionDirOf(path);
+    if (sessionDir) this.sessionDirs.add(sessionDir);
     const st = statSync(path);
     const prev = full ? null : this.stmt.getFile.get(path);
     let start = 0, lineNo = 0, rewritten = false;
@@ -2127,6 +2631,10 @@ class Harvest {
         this.putCostState(d, path, lineNo);
       } else if (d.type === 'attachment') {
         this.stmt.bumpAttachment.run(d.sessionId ?? 'unknown', d.attachment?.type ?? 'unknown');
+        // DETAILED AS WELL AS COUNTED, never instead of. The census above is how an attachment
+        // type nobody has seen becomes visible, and converting this branch rather than extending
+        // it would take task_status out of it while looking like a richer answer.
+        this.taskEvent(d, path, lineNo);
       } else if (TITLE_FIELD[type] && d.sessionId) {
         const raw = d[TITLE_FIELD[type]];
         // A blank title is not a title. Storing '' would outrank a real fallback at read time.
@@ -2206,6 +2714,10 @@ class Harvest {
           // from being wiped by a re-read of this line.
           b.id, b.id);
         this.stats.toolCalls++;
+        // THE PLAN ITSELF, beside the call rather than inside it. `input_preview` holds 500
+        // characters and JSON.stringify puts "plan" first, so the preview is the proposal's
+        // opening sentence and the planFilePath that names the file is never inside it.
+        if (name === 'ExitPlanMode') this.plan(d, b.id, input, path, lineNo);
       } else if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') {
         const c = b.content;
         const bytes = typeof c === 'string' ? Buffer.byteLength(c, 'utf8')
@@ -2222,6 +2734,24 @@ class Harvest {
           classifyResult({ isError: !!b.is_error, denialKind: denial, version: d.version }),
           denial, b.tool_use_id);
         this.stats.toolResults++;
+        // WHICH CALL LAUNCHED A WORKFLOW, read from the same record the denial comes from. A
+        // Workflow launch answers with toolUseResult {status:'async_launched', runId, taskId,
+        // transcriptDir, scriptPath}; without it a workflow run is attached to a DIRECTORY and to
+        // no moment in the conversation.
+        //
+        // GATED ON runId, NEVER ON taskId. A taskId is four different namespaces at once here:
+        // 17 hex characters is a local agent, `w` plus eight is a workflow, `b` plus eight is a
+        // Monitor task, and a small integer is a TodoWrite item. Keying on it merges all four.
+        const launched = d.toolUseResult;
+        if (launched && typeof launched === 'object'
+            && typeof launched.runId === 'string' && launched.runId.startsWith('wf_')) {
+          this.stmt.linkWorkflow.run(
+            launched.runId, typeof launched.taskId === 'string' ? launched.taskId : null,
+            b.tool_use_id, d.uuid ?? null, d.sessionId ?? null,
+            typeof launched.transcriptDir === 'string' ? launched.transcriptDir : null,
+            typeof launched.scriptPath === 'string' ? launched.scriptPath : null);
+          this.stats.workflowLinks++;
+        }
       }
     }
   }
@@ -2288,6 +2818,26 @@ async function run({ full, recordsRoots = null }) {
   flushTypesFast(db, h.typeCounts, h.typeKnown);
   db.exec('COMMIT');
 
+  // THE SIDECARS, for every session tree this run read a file under. Its own transaction, after
+  // the ingest is committed: these are small JSON files beside the transcripts and a failure
+  // reading them must not cost the bytes that were just ingested.
+  const sidecars = { directories: h.sessionDirs.size, seen: 0, read: 0, agent_runs: 0,
+                     workflow_runs: 0, failed: [] };
+  if (h.sessionDirs.size) {
+    db.exec('BEGIN');
+    try {
+      for (const dir of h.sessionDirs) h.sidecars(dir);
+      db.exec('COMMIT');
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch { /* nothing left to roll back */ }
+      sidecars.failed.push(String(e && e.message ? e.message : e));
+    }
+    sidecars.seen = h.stats.sidecarsSeen;
+    sidecars.read = h.stats.sidecarsRead;
+    sidecars.agent_runs = h.stats.agentRuns;
+    sidecars.workflow_runs = h.stats.workflowRuns;
+  }
+
   // THE CHAINS, for every directory touched. A resume that happened since the last run is a new
   // transcript in a directory that already holds its predecessor; deriving links for that one
   // directory is what folds it into its chat on the next render without anyone running anything.
@@ -2345,6 +2895,8 @@ async function run({ full, recordsRoots = null }) {
   const out = {
     mode: full ? 'full' : 'incremental',
     chains,
+    sidecars,
+    plans: h.stats.plans, task_events: h.stats.taskEvents, workflow_links: h.stats.workflowLinks,
     files_seen: h.stats.filesSeen, files_read: h.stats.filesRead, rewritten_files: h.stats.rewrites,
     // REPORTED, not merely counted. A run that quietly reads fewer files than it saw is
     // indistinguishable from a run where nothing was there, and the whole point of an exclusion
@@ -2466,7 +3018,11 @@ function stats() {
   const q = (s) => db.prepare(s).all();
   const out = {
     db: posix(DB_PATH),
-    files: q('SELECT COUNT(*) n, SUM(bytes_read) bytes FROM files')[0],
+    // TRANSCRIPTS ONLY, and the sidecars beside them counted separately. The `files` table holds
+    // both since the work pass shipped, and one line reading "files 24,386" over a store of 8,775
+    // transcripts is the same wrong number the Summary card was about to print.
+    files: q("SELECT COUNT(*) n, SUM(bytes_read) bytes FROM files WHERE kind IS NULL")[0],
+    sidecars: q("SELECT COUNT(*) n, SUM(bytes_read) bytes FROM files WHERE kind = 'sidecar'")[0],
     sessions: q('SELECT COUNT(*) n FROM sessions')[0].n,
     // Counted over api_calls, not turns: a SUM across turns double-counts every streamed message
     // once per content block. transcript_rows keeps the raw row count visible beside it so the
@@ -3213,8 +3769,20 @@ async function selfTest() {
     const rep2 = await backfillChains(cdbPath, opts);
     checks.push(['backfill-chains: idempotent',
       !!rep2 && rep2.links_before === 4 && rep2.links_after === 4 && rep2.rows_moved.turns === 0]);
+    // COUNTED, NOT ASSERTED FROM THE REPORT'S OWN FLAG. This checked `wrote === false`, which the
+    // run sets whether or not it wrote, so it was a gate that could not fail. Its sibling in the
+    // sidecar backfill was the real thing: a dry run there wrote every row it read.
+    const linksIn = () => {
+      const s = new DatabaseSync(cdbPath, { readOnly: true });
+      const links = s.prepare('SELECT COUNT(*) n FROM session_links').get().n;
+      s.close();
+      return links;
+    };
+    const linksBefore = linksIn();
     const dryRep = await backfillChains(cdbPath, { ...opts, write: false });
-    checks.push(['backfill-chains: --dry-run reports and writes nothing', !!dryRep && dryRep.wrote === false]);
+    checks.push(['backfill-chains: --dry-run reports and writes nothing (gate can fail)',
+      !!dryRep && dryRep.wrote === false && linksIn() === linksBefore,
+      String(linksIn() - linksBefore)]);
     rmSync(cdbPath, { force: true });
     rmSync(cdbPath + '-wal', { force: true });
     rmSync(cdbPath + '-shm', { force: true });
@@ -3525,6 +4093,182 @@ async function selfTest() {
     db5.close();
   }
 
+  // A chat's own work: the plan it wrote, the tasks it reported, the agents and workflows beside
+  // its transcript. The sidecars are not .jsonl, so nothing else in this file would open them.
+  {
+    const cdir = join(tmp, 'work');
+    const pdir = join(cdir, 'projects', 'P--work');
+    const sid = 'aaaa1111-2222-4333-8444-555555555555';
+    const sdir = join(pdir, sid);
+    mkdirSync(join(sdir, 'subagents', 'workflows', 'wf_w1'), { recursive: true });
+    mkdirSync(join(sdir, 'workflows'), { recursive: true });
+    const meta = (dir, id, body) =>
+      writeFileSync(join(dir, 'agent-' + id + '.meta.json'), JSON.stringify(body));
+    meta(join(sdir, 'subagents'), 'a1', { agentType: 'Explore', description: 'look', spawnDepth: 1,
+                                          toolUseId: 'tua', name: 'scout', model: 'sonnet' });
+    meta(join(sdir, 'subagents'), 'a2', { agentType: 'general-purpose', description: 'no id' });
+    meta(join(sdir, 'subagents', 'workflows', 'wf_w1'), 'a3', { agentType: 'workflow-subagent' });
+    writeFileSync(join(sdir, 'subagents', 'agent-bad.meta.json'), '{not json');
+    writeFileSync(join(sdir, 'workflows', 'wf_w1.json'), JSON.stringify({
+      runId: 'wf_w1', taskId: 'wjournal1', workflowName: 'review-changes', status: 'completed',
+      startTime: 1789200000000, timestamp: '2026-09-12T00:00:00.000Z', durationMs: 927840,
+      agentCount: 19, totalTokens: 2559916, totalToolCalls: 429, defaultModel: 'opus',
+      summary: 'found nine', result: { confirmed: 8 }, phases: [{ title: 'Find' }],
+      workflowProgress: [{ label: 'find:export' }] }));
+
+    const wdb = new DatabaseSync(':memory:');
+    wdb.exec(SCHEMA);
+    const hw = new Harvest(wdb, { unknownLog: join(cdir, 'unknown.ndjson') });
+
+    // The session directory is derived from the path, whichever of the three shapes it takes.
+    checks.push(['work: a session transcript names its own directory',
+      hw.sessionDirOf(join(pdir, sid + '.jsonl')) === sdir,
+      String(hw.sessionDirOf(join(pdir, sid + '.jsonl')))]);
+    checks.push(['work: so does a subagent transcript under it',
+      hw.sessionDirOf(join(sdir, 'subagents', 'agent-a1.jsonl')) === sdir]);
+    checks.push(['work: and a workflow journal two levels deeper',
+      hw.sessionDirOf(join(sdir, 'subagents', 'workflows', 'wf_w1', 'journal.jsonl')) === sdir]);
+
+    hw.sidecars(sdir);
+    const runOf = (id) => wdb.prepare('SELECT * FROM agent_runs WHERE agent_id = ?').get(id);
+    checks.push(['work: an agent run is keyed on its own id and names the call that asked for it',
+      runOf('a1')?.tool_use_id === 'tua' && runOf('a1')?.dir_session_id === sid
+        && runOf('a1')?.agent_type === 'Explore' && runOf('a1')?.spawn_depth === 1,
+      JSON.stringify(runOf('a1') && [runOf('a1').tool_use_id, runOf('a1').agent_type])]);
+    checks.push(['work: the whole meta is kept, because its key set drifts between builds',
+      JSON.parse(runOf('a1')?.meta_json ?? '{}').model === 'sonnet']);
+    checks.push(['work: a run with no toolUseId is still a run (gate can fail)',
+      !!runOf('a2') && runOf('a2').tool_use_id === null, String(!!runOf('a2'))]);
+    checks.push(['work: a workflow agent lands under its run, not as a plain subagent (gate can fail)',
+      runOf('a3')?.workflow_run_id === 'wf_w1' && runOf('a3')?.tool_use_id === null,
+      String(runOf('a3')?.workflow_run_id)]);
+    checks.push(['work: a meta that is not json is skipped and the pass continues',
+      !runOf('bad') && wdb.prepare('SELECT COUNT(*) n FROM agent_runs').get().n === 3,
+      String(wdb.prepare('SELECT COUNT(*) n FROM agent_runs').get().n)]);
+    const wf = wdb.prepare('SELECT * FROM workflow_runs WHERE run_id = ?').get('wf_w1');
+    checks.push(['work: a workflow run carries what the pane shows',
+      wf?.workflow_name === 'review-changes' && wf?.agent_count === 19
+        && wf?.total_tokens === 2559916 && wf?.status === 'completed',
+      JSON.stringify(wf && [wf.workflow_name, wf.agent_count])]);
+    checks.push(['work: its start time is read as epoch milliseconds, not as a string (gate can fail)',
+      typeof wf?.started_at === 'string' && wf.started_at.startsWith('2026-'),
+      String(wf?.started_at)]);
+
+    // INCREMENTAL. 7,432 of these sit on the author's machine and a hook harvest runs on every
+    // prompt: a pass that re-parses them all is the whole cost of the feature.
+    const readAfterFirst = hw.stats.sidecarsRead;
+    hw.sidecars(sdir);
+    checks.push(['work: a second pass over unchanged sidecars reads none of them (gate can fail)',
+      hw.stats.sidecarsRead === readAfterFirst, String(hw.stats.sidecarsRead - readAfterFirst)]);
+    meta(join(sdir, 'subagents'), 'a2', { agentType: 'general-purpose', description: 'changed' });
+    hw.sidecars(sdir);
+    checks.push(['work: and one that changed is read again',
+      hw.stats.sidecarsRead === readAfterFirst + 1 && runOf('a2')?.description === 'changed',
+      String(runOf('a2')?.description)]);
+
+    // THE TRANSCRIPT'S HALF OF THE ROW SURVIVES THE JSON'S, in either order.
+    hw.scanBlocks({ sessionId: sid, uuid: 'ulaunch', timestamp: '2026-09-12T00:00:00Z',
+      toolUseResult: { status: 'async_launched', taskId: 'wjournal1', runId: 'wf_w1' },
+      message: { content: [{ type: 'tool_result', tool_use_id: 'tuw', content: 'ok' }] } }, 'f', 1);
+    const both = wdb.prepare('SELECT * FROM workflow_runs WHERE run_id = ?').get('wf_w1');
+    checks.push(['work: the launch fills its own columns without wiping the json is (gate can fail)',
+      both?.tool_use_id === 'tuw' && both?.workflow_name === 'review-changes'
+        && both?.agent_count === 19,
+      JSON.stringify(both && [both.tool_use_id, both.workflow_name])]);
+
+    // The task notifications inside the chat, detailed AND still counted.
+    const tfile = join(pdir, sid + '.jsonl');
+    const attach = (uuid, status) => JSON.stringify({
+      type: 'attachment', uuid, parentUuid: 'p1', sessionId: sid,
+      timestamp: '2026-09-12T00:0' + (status === 'running' ? '1' : '2') + ':00Z',
+      attachment: { type: 'task_status', taskId: 'ada60911f63528f6a', taskType: 'local_agent',
+                    status, description: 'verify the branch', deltaSummary: 'd',
+                    outputFilePath: 'C:/t/out.txt' } });
+    writeFileSync(tfile, attach('t1', 'running') + String.fromCharCode(10)
+      + attach('t2', 'completed') + String.fromCharCode(10));
+    await hw.file(tfile, true);
+    checks.push(['work: a task notification is stored, not only counted (gate can fail)',
+      wdb.prepare('SELECT COUNT(*) n FROM task_events').get().n === 2,
+      String(wdb.prepare('SELECT COUNT(*) n FROM task_events').get().n)]);
+    checks.push(['work: and the attachment census still counts it, which is how a new type shows up',
+      wdb.prepare("SELECT n FROM attachments WHERE type = 'task_status'").get()?.n === 2,
+      String(wdb.prepare("SELECT n FROM attachments WHERE type = 'task_status'").get()?.n)]);
+    const ev = wdb.prepare('SELECT * FROM task_events WHERE uuid = ?').get('t2');
+    checks.push(['work: it names the task, its state and the record it sits on',
+      ev?.task_id === 'ada60911f63528f6a' && ev?.status === 'completed' && ev?.parent_uuid === 'p1'
+        && ev?.task_type === 'local_agent']);
+    checks.push(['work: reading that transcript remembered the session tree for the sidecar pass',
+      hw.sessionDirs.has(sdir)]);
+    wdb.close();
+
+    // THE BACKFILL, ON A FILE, BOTH WAYS. A `--dry-run` that writes is worse than no dry run, and
+    // the first one written here did exactly that: `BEGIN` was skipped when write was false, so
+    // node:sqlite autocommitted every statement and the pass modified 120 session directories of
+    // a copied store before dying on a ROLLBACK with no transaction to undo. The check counts rows
+    // rather than reading the report's own `wrote` flag, which a broken run would still set.
+    const sdbPath = join(cdir, 'sidecars.db');
+    { const s = new DatabaseSync(sdbPath); s.exec(SCHEMA); s.close(); }
+    const sopts = { quiet: true, projects: join(cdir, 'projects') };
+    const rowsIn = () => {
+      const s = new DatabaseSync(sdbPath, { readOnly: true });
+      const n = s.prepare('SELECT COUNT(*) n FROM agent_runs').get().n
+        + s.prepare('SELECT COUNT(*) n FROM workflow_runs').get().n;
+      s.close();
+      return n;
+    };
+    const dry = await backfillSidecars(sdbPath, { ...sopts, write: false });
+    checks.push(['work: --dry-run counts what it would write (gate can fail)',
+      !!dry && dry.wrote === false && dry.agent_runs === 3 && dry.workflow_runs === 1
+        && dry.rows_unchanged,
+      dry && JSON.stringify([dry.agent_runs, dry.workflow_runs])]);
+    checks.push(['work: and leaves the store exactly as it found it (gate can fail)',
+      rowsIn() === 0, String(rowsIn())]);
+    const wet = await backfillSidecars(sdbPath, sopts);
+    checks.push(['work: the same pass with write on lands the rows',
+      !!wet && wet.wrote === true && rowsIn() === 4, String(rowsIn())]);
+
+    // THE TRANSCRIPT BACKFILL, ON A FILE ALREADY MARKED FULLY READ. Both transcript writers ride
+    // the byte offsets, so on every store that existed before them the plans and task
+    // notifications already on disk are invisible and the panel reports the chat as having
+    // planned nothing. This is the pass that answers that, and the offset row is what makes the
+    // check about the real failure rather than about an empty database.
+    writeFileSync(tfile, readFileSync(tfile, 'utf8') + JSON.stringify({
+      type: 'assistant', uuid: 'uplan', sessionId: sid, timestamp: '2026-09-12T00:03:00Z',
+      message: { content: [{ type: 'tool_use', id: 'tuplan', name: 'ExitPlanMode',
+                             input: { plan: 'x'.repeat(800), planFilePath: 'C:/p/one.md' } }] },
+    }) + String.fromCharCode(10));
+    {
+      const s = new DatabaseSync(sdbPath);
+      s.prepare('INSERT INTO files (path,size,mtime_ms,bytes_read,lines_read,rewrites,last_harvest_ts)'
+        + ' VALUES (?,?,?,?,?,?,?)')
+        .run(tfile, 99999, 0, 99999, 99, 0, 't');
+      s.close();
+    }
+    const workOf = () => {
+      const s = new DatabaseSync(sdbPath, { readOnly: true });
+      const n = [s.prepare('SELECT COUNT(*) n FROM plans').get().n,
+                 s.prepare('SELECT COUNT(*) n FROM task_events').get().n,
+                 s.prepare('SELECT plan_chars c FROM plans WHERE tool_use_id = ?').get('tuplan')?.c];
+      s.close();
+      return n;
+    };
+    // BATCH SIZE 1, so the dry run crosses a commit boundary on the very first file. At the
+    // default 200 this fixture's single transcript never reaches one, and the check that follows
+    // passed over a pass that committed 253 rows of a real store it was told not to touch.
+    const wdry = await backfillWork(sdbPath, { ...sopts, write: false, batch: 1 });
+    checks.push(['work: --backfill-work finds a plan in a transcript already read to the end',
+      !!wdry && wdry.plans_added === 1 && wdry.task_events_added === 2 && wdry.rows_unchanged,
+      wdry && JSON.stringify([wdry.plans_added, wdry.task_events_added])]);
+    checks.push(['work: and its dry run leaves the store alone (gate can fail)',
+      JSON.stringify(workOf()) === JSON.stringify([0, 0, undefined]), JSON.stringify(workOf())]);
+    await backfillWork(sdbPath, { ...sopts, batch: 1 });
+    checks.push(['work: with write on the whole plan lands, not the 500 byte preview',
+      JSON.stringify(workOf()) === JSON.stringify([1, 2, 800]), JSON.stringify(workOf())]);
+    rmSync(sdbPath, { force: true });
+    rmSync(sdbPath + '-wal', { force: true });
+    rmSync(sdbPath + '-shm', { force: true });
+  }
+
   // The two flags that stand between a bare invocation and a 10 GB re-read or a silent write.
   {
     const dir = join(ROOT, 'tmp', `plan-selftest-${process.pid}-${Date.now()}`);
@@ -3680,6 +4424,64 @@ async function selfTest() {
       row?.input_preview?.length === TOOL_INPUT_PREVIEW, String(row?.input_preview?.length)]);
     checks.push(["the byte count still measures the WHOLE input, not the preview (gate can fail)",
       row?.input_bytes > TOOL_INPUT_PREVIEW * 3, String(row?.input_bytes)]);
+    // THE PLAN, WHOLE AND BESIDE THE CALL. The preview above is the same record cut to 500
+    // characters, and JSON.stringify puts "plan" first, so the file path that names the proposal
+    // is never inside it.
+    const planned = scratchDb.prepare("SELECT * FROM plans WHERE tool_use_id = ?").get("toolu_1");
+    checks.push(["the plan is stored whole, not cut to the preview (gate can fail)",
+      planned?.plan_chars === proposal.length && planned?.plan_text?.length === proposal.length,
+      String(planned?.plan_chars)]);
+    checks.push(["the tool call row is still there beside it, not replaced by the plan",
+      row?.tool_name === "ExitPlanMode"]);
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u1b", timestamp: "2026-09-07T05:03:00Z",
+      message: { content: [{ type: "tool_use", id: "toolu_1b", name: "ExitPlanMode",
+        input: { plan: "a second proposal", planFilePath: "C:/p/one.md",
+                 allowedPrompts: ["run the tests"] } }] },
+    }, "f", 3);
+    const second = scratchDb.prepare("SELECT * FROM plans WHERE tool_use_id = ?").get("toolu_1b");
+    checks.push(["the path the plan was written to is kept (gate can fail)",
+      second?.plan_file_path === "C:/p/one.md", String(second?.plan_file_path)]);
+    checks.push(["and what the plan pre-approved with it",
+      second?.allowed_prompts_json === JSON.stringify(["run the tests"])]);
+    // TWO CALLS, ONE PATH, TWO ROWS. Measured on this store: one plan file already serves two
+    // ExitPlanMode calls in one session, and they are different documents.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u1c", timestamp: "2026-09-07T05:04:00Z",
+      message: { content: [{ type: "tool_use", id: "toolu_1c", name: "ExitPlanMode",
+        input: { plan: "a third proposal, same file", planFilePath: "C:/p/one.md" } }] },
+    }, "f", 4);
+    checks.push(["two plans written to one path stay two rows (gate can fail)",
+      scratchDb.prepare("SELECT COUNT(*) n FROM plans WHERE plan_file_path = ?")
+        .get("C:/p/one.md").n === 2]);
+    // THE WORKFLOW LAUNCH, read off the result record rather than the block, which is where the
+    // denial kind already comes from.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u1d", timestamp: "2026-09-07T05:05:00Z",
+      toolUseResult: { status: "async_launched", taskId: "wtest0001", runId: "wf_test-001",
+                       transcriptDir: "C:/t/dir", scriptPath: "C:/t/s.js" },
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+    }, "f", 5);
+    const linked = scratchDb.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get("wf_test-001");
+    checks.push(["a workflow launch names the call it came from, before any json exists (gate can fail)",
+      linked?.tool_use_id === "toolu_1" && linked?.turn_uuid === "u1d"
+        && linked?.session_id === "s1" && linked?.task_id === "wtest0001",
+      JSON.stringify(linked && [linked.tool_use_id, linked.task_id])]);
+    checks.push(["and the tool result it rode in on was still recorded, not shadowed by the link",
+      scratchDb.prepare("SELECT result_bytes FROM tool_calls WHERE tool_use_id = ?")
+        .get("toolu_1")?.result_bytes === 2,
+      String(scratchDb.prepare("SELECT result_bytes FROM tool_calls WHERE tool_use_id = ?")
+        .get("toolu_1")?.result_bytes)]);
+    // A taskId is FOUR namespaces: a local agent, a workflow, a Monitor task and a TodoWrite item.
+    // Gating on it rather than on runId would write a workflow row for a todo list.
+    h6.scanBlocks({
+      sessionId: "s1", uuid: "u1e", timestamp: "2026-09-07T05:06:00Z",
+      toolUseResult: { success: true, taskId: "6", updatedFields: ["status"] },
+      message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+    }, "f", 6);
+    checks.push(["a todo item's taskId is not a workflow run (gate can fail)",
+      scratchDb.prepare("SELECT COUNT(*) n FROM workflow_runs").get().n === 1,
+      String(scratchDb.prepare("SELECT COUNT(*) n FROM workflow_runs").get().n)]);
     // A short input is stored whole, which is 73% of the calls on this store.
     h6.scanBlocks({
       sessionId: "s1", uuid: "u2", timestamp: "2026-09-07T05:01:45Z",
@@ -3953,11 +4755,13 @@ const USAGE = `harvest.mjs
   node harvest.mjs --self-test     prove the parser detects what it claims to detect
   node harvest.mjs --stats         print store contents, harvest nothing
   node harvest.mjs --backfill-chains [--dry-run] [--records <dir>]
+  node harvest.mjs --backfill-sidecars    read the agent and workflow files beside transcripts
+  node harvest.mjs --backfill-work        re-read transcripts for plans and task notifications
   node harvest.mjs --backfill-survivors | --backfill-titles | --backfill-agents
                    | --backfill-tool-outcomes | --backfill-message-source
   any of the above with --db <path> to name the store`;
 const KNOWN_FLAGS = new Set(['--full', '--yes', '--dry-run', '--self-test', '--stats', '--db', '--records',
-  '--backfill-chains', '--backfill-survivors', '--backfill-titles', '--backfill-agents',
+  '--backfill-chains', '--backfill-sidecars', '--backfill-work', '--backfill-survivors', '--backfill-titles', '--backfill-agents',
   '--backfill-tool-outcomes', '--backfill-message-source', '--help', '-h']);
 
 const argv = process.argv.slice(2);
@@ -3970,6 +4774,14 @@ else if (argv.includes('--self-test')) code = await selfTest();
 else if (argv.includes('--stats')) code = stats();
 else if (argv.includes('--backfill-survivors')) code = backfillSurvivors(DB_PATH) ? 0 : 1;
 else if (argv.includes('--backfill-titles')) code = await backfillTitles();
+else if (argv.includes('--backfill-work')) {
+  const r = await backfillWork(resolveDbPath(argv), { write: !argv.includes('--dry-run') });
+  code = r && r.rows_unchanged ? 0 : 1;
+}
+else if (argv.includes('--backfill-sidecars')) {
+  const r = await backfillSidecars(resolveDbPath(argv), { write: !argv.includes('--dry-run') });
+  code = r && r.rows_unchanged ? 0 : 1;
+}
 else if (argv.includes('--backfill-agents')) code = await backfillAgents(resolveDbPath(argv));
 else if (argv.includes('--backfill-tool-outcomes'))
   code = await backfillToolOutcomes(resolveDbPath(argv));

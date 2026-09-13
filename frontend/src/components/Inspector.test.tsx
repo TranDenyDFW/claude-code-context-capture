@@ -13,10 +13,10 @@ const content: InspectorContent = {
   title: 'resident at turn 158',
   source: 'Context window over the session',
   fields: [['series', 'resident'], ['x', '158'], ['y', '568,477']],
-  rows: {
+  rows: [{
     name: 'Messages',
     table: { id: 'tbl-messages', columns: ['ts', 'role'], rows: [{ ts: '10:00', role: 'user' }] },
-  },
+  }],
   onOpen: vi.fn(),
 }
 

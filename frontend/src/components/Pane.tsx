@@ -13,6 +13,7 @@ export function Pane({
   onOpenTable,
   onOpenFigure,
   onOpenCompaction,
+  onOpenChatWork,
 }: {
   payload: TabPayload
   onRowClick?: (row: Record<string, unknown>) => void
@@ -22,6 +23,8 @@ export function Pane({
   onOpenFigure?: (index: number) => void
   /** Open one compaction full width: a boundary is two documents and a drawer shows one. */
   onOpenCompaction?: (uuid: string) => void
+  /** Open one chat's plans and background work on a page of its own. */
+  onOpenChatWork?: (sessionId: string) => void
 }) {
   const figures = payload.plotly ?? []
   const sections = payload.details ?? []
@@ -103,7 +106,11 @@ export function Pane({
   // session key is navigable, so its click selects the session and this drawer never opens for
   // such a row; the only rows that do reach it carry no session to offer. The standalone page is
   // the opposite case, because it passes no row click, and it does pass the handler.
-  const reader = useRowInspector(payload, names, undefined, onOpenCompaction)
+  //
+  // ONE ROW KIND NOW REACHES IT WITH A SESSION: the Sessions list's own work control, which opens
+  // the drawer beside a row whose click still selects. It is deliberately still not offered here,
+  // because the button that would select this session is the row the control sits on.
+  const reader = useRowInspector(payload, names, undefined, onOpenCompaction, onOpenChatWork)
 
   /** A click on a chart: the point's fields, the rows behind it, and a way to open those rows. */
   const inspectPoint = (figureIndex: number) => (point: PlotPoint) => {

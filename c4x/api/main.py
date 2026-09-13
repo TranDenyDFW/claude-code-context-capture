@@ -554,6 +554,15 @@ def _render_payload(pane):
             # the promise; this is the thing that keeps it.
             if entry.get("id") == "tbl-compactions" and rows and "uuid" in rows[0]:
                 entry["detail"] = {"url": "/api/compaction", "key": "uuid"}
+            # WHAT THIS CHAT PLANNED AND RAN, on the row that names it. A SEPARATE KEY from
+            # `detail`, and the difference is the whole reason it exists: `DataTable` reads the
+            # ABSENCE of `detail` to decide that a row click selects the session rather than
+            # opening the row, so attaching `detail` here would silently turn every click on the
+            # Sessions list into something else. `row_detail` says "there is a document reachable
+            # from this row" and leaves the click alone.
+            if entry.get("id") == "tbl-session" and rows and "session_id" in rows[0]:
+                entry["row_detail"] = {"url": "/api/chat", "key": "session_id",
+                                       "title": "plans and background work"}
 
     # WHICH POPULATION THIS TAB DESCRIBES, as a field rather than as prose.
     #
@@ -1193,6 +1202,98 @@ def compaction(uuid: str, limit: int = Query(300, ge=1, le=5000)):
         "kept_recorded": compaction_survivors_recorded(uuid),
         "kept_total": compaction_kept_count(uuid),
         "kept_shown": int(len(kept)),
+    })
+
+
+@api.get("/api/chat/{session_id}")
+def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
+    """What this chat PLANNED and what it RAN, for the panel beside the Sessions list.
+
+    The desktop app has two panes for this, Plan and Background tasks, and both are drawn from the
+    transcripts this store already holds. Four kinds, in one answer, because they are four views of
+    one thing: a plan is a moment in the conversation, an agent run is a transcript the chat spawned
+    and a workflow is a set of those, and a task notification is the chat being told how one went.
+
+    SCOPED OVER THE WHOLE CHAT, not one CLI session. A resumed chat is several sessions and the page
+    has shown them as one row since `session_links` existed; a panel that answered for the newest
+    session alone would report nothing for work the chat did before its last resume.
+
+    `harvested` is not decoration. A store harvested by an older build has none of these tables, and
+    an empty list is otherwise indistinguishable from a chat that ran nothing.
+    """
+    from c4x.store import (
+        chat_agent_runs,
+        chat_exists,
+        chat_members,
+        chat_plans,
+        chat_task_events,
+        chat_work_counts,
+        chat_workflow_runs,
+    )
+    if not chat_exists(session_id):
+        raise HTTPException(status_code=404,
+                            detail={"error": f"unknown session {session_id!r}"})
+    counts = chat_work_counts(session_id)
+    plans = chat_plans(session_id, limit=limit)
+    runs = chat_agent_runs(session_id, limit=limit)
+    workflows = chat_workflow_runs(session_id, limit=limit)
+    tasks = chat_task_events(session_id, limit=limit)
+    unresolved = 0
+    if not tasks.empty and "resolved_to" in tasks.columns:
+        unresolved = int(tasks["resolved_to"].isna().sum())
+    return _jsonable({
+        "session": session_id,
+        # The whole chat, so a reader can see that a count spans more than the row they clicked.
+        "chat": list(chat_members(session_id)),
+        "harvested": counts["harvested"],
+        "plans": records(plans) if not plans.empty else [],
+        "plans_total": counts["plans"],
+        "agent_runs": records(runs) if not runs.empty else [],
+        "agent_runs_total": counts["agent_runs"],
+        "workflow_runs": records(workflows) if not workflows.empty else [],
+        "workflow_runs_total": counts["workflow_runs"],
+        "task_events": records(tasks) if not tasks.empty else [],
+        "task_events_total": counts["task_events"],
+        # NAMED RATHER THAN HIDDEN. A task id that resolves to no run is a real state, measured at
+        # 4 of 22 on the author's store, and a panel that dropped those rows would be reporting a
+        # tidier machine than the one it is running on.
+        "task_events_unresolved": unresolved,
+    })
+
+
+@api.get("/api/plan/{tool_use_id}")
+def plan_detail(tool_use_id: str):
+    """One plan, whole, with what became of it and whether its file is still there.
+
+    `file_exists` is worth the stat call: 291 plans were proposed on the author's machine against 27
+    surviving files, so a panel that offered the path without checking would usually be pointing at
+    nothing.
+    """
+    from c4x.store import plan_text
+    found = plan_text(tool_use_id)
+    if found.empty:
+        raise HTTPException(status_code=404,
+                            detail={"error": f"unknown plan {tool_use_id!r}"})
+    # THROUGH THE FRAME HELPER, which is what every other route here uses: it turns NaN into None
+    # and numpy scalars into JSON numbers, so nothing below has to know pandas.
+    row = records(found)[0]
+    path = row.get("plan_file_path")
+    here = False
+    if isinstance(path, str) and path:
+        try:
+            here = Path(path).is_file()
+        except OSError:
+            here = False
+    return _jsonable({
+        "tool_use_id": tool_use_id,
+        "text": row.get("plan_text") or "",
+        "chars": row.get("plan_chars"),
+        "ts": row.get("ts"),
+        "session": row.get("session_id"),
+        "plan_file_path": path if isinstance(path, str) else None,
+        "file_exists": here,
+        "outcome": row.get("outcome"),
+        "denial_kind": row.get("denial_kind"),
     })
 
 

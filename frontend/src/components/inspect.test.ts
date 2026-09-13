@@ -92,7 +92,7 @@ describe('describing a point', () => {
     expect(out.tableIndex).toBe(0)
     expect(out.filter).toEqual({ key: 'session_id', value: 's2' })
     expect(out.query).toBeNull()
-    expect(out.content.rows?.table.rows).toEqual([sessions.rows[1]])
+    expect(out.content.rows?.[0].table.rows).toEqual([sessions.rows[1]])
     expect(out.content.fields).toContainEqual(['y', '999'])
   })
 

@@ -142,8 +142,11 @@ export function describePoint(
       title,
       source: figureTitle,
       fields,
+      // ONE LIST, IN THE LIST THE DRAWER NOW TAKES. A chart point identifies rows of exactly one
+      // table; a chat's panel has four, which is why the field became an array.
       rows: found
-        ? { name: names[found.index], table: { ...tables[found.index], rows: found.rows }, meta: meta[found.index] }
+        ? [{ name: names[found.index], table: { ...tables[found.index], rows: found.rows },
+             meta: meta[found.index] }]
         : null,
       // SAID, not left blank. Most points on a turn chart identify no row at all, and a drawer
       // that just stops reads as a drawer that failed.

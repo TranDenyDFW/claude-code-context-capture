@@ -142,6 +142,15 @@ export interface TableMeta {
    * dropped context is a separate document the store holds and the row only references.
    */
   detail?: { url: string; key: string }
+  /**
+   * A document reachable FROM the row, without the click meaning anything different.
+   *
+   * Separate from `detail` on purpose. `DataTable` decides a row is navigable, meaning a click
+   * selects the session it names, from the ABSENCE of `detail`: reusing that field on the Sessions
+   * table would have turned every click on the main list into an open, in a one line change on
+   * the server. This one puts a control on the row instead and leaves the click alone.
+   */
+  row_detail?: { url: string; key: string; title?: string }
   full_text?: { url: string; key: string; column: string; as: string }
 }
 
@@ -501,6 +510,81 @@ export interface SharingReport {
   restart_required: boolean
   backup?: string | null
   state: AccountsState
+}
+
+/** One plan a chat proposed. The whole text lives behind `/api/plan/<tool_use_id>`. */
+export interface ChatPlan {
+  tool_use_id: string
+  ts: string | null
+  plan_chars: number | null
+  plan_file_path: string | null
+  preview: string | null
+  /** From the CALL, not the plan: the same text is a proposal whether it was accepted or refused. */
+  outcome: string | null
+  denial_kind: string | null
+}
+
+/** One subagent run, reached through the call that spawned it or through the directory it sits in. */
+export interface ChatAgentRun {
+  agent_id: string
+  agent_type: string | null
+  name: string | null
+  description: string | null
+  workflow_run_id: string | null
+  tool_use_id: string | null
+  called_from: string | null
+  spawned_at: string | null
+  outcome: string | null
+  records: number | null
+  output_tokens: number | null
+}
+
+/** One workflow run. `agent_count` is what it reported; `agents_on_disk` is what this store holds. */
+export interface ChatWorkflowRun {
+  run_id: string
+  task_id: string | null
+  workflow_name: string | null
+  status: string | null
+  started_at: string | null
+  duration_ms: number | null
+  agent_count: number | null
+  agents_on_disk: number | null
+  total_tokens: number | null
+  total_tool_calls: number | null
+  summary: string | null
+}
+
+/** One task notification inside the chat. `resolved_to` is null when nothing on disk matches it. */
+export interface ChatTaskEvent {
+  uuid: string
+  ts: string | null
+  task_id: string | null
+  task_type: string | null
+  status: string | null
+  description: string | null
+  resolved_to: 'agent' | 'workflow' | null
+  ran_under: string | null
+}
+
+/**
+ * What `/api/chat/<session>` answers.
+ *
+ * `harvested` says which tables this store actually has. Without it an empty list from an older
+ * store is indistinguishable from a chat that ran nothing, and the panel would state the second.
+ */
+export interface ChatWork {
+  session: string
+  chat: string[]
+  harvested: Record<string, boolean>
+  plans: ChatPlan[]
+  plans_total: number
+  agent_runs: ChatAgentRun[]
+  agent_runs_total: number
+  workflow_runs: ChatWorkflowRun[]
+  workflow_runs_total: number
+  task_events: ChatTaskEvent[]
+  task_events_total: number
+  task_events_unresolved: number
 }
 
 export const api = {

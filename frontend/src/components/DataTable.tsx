@@ -233,6 +233,11 @@ export function DataTable({
   const identifies = table.rows.some((row) => 'session_id' in row || 'session' in row)
   const navigable = Boolean(onRowClick) && !reads && identifies
   const openable = Boolean(onOpenRow) && !navigable
+  // A DOCUMENT REACHABLE FROM THE ROW, WITHOUT TAKING THE CLICK. Deliberately outside `reads`, so
+  // `navigable` is untouched: on the Sessions list a click still selects the session, and this is
+  // a control in a column of its own. Folding it into `reads` would have changed what the main
+  // list does on every click, which is the interaction the whole dashboard is built on.
+  const inspects = Boolean(onOpenRow) && Boolean(meta?.row_detail)
 
   const filtering = Boolean(query.trim() || Object.values(columnQuery).some((v) => v.trim()))
 
@@ -334,6 +339,9 @@ export function DataTable({
         <table className="w-full border-collapse text-sm">
           <thead className="sticky top-0 z-10 bg-panel-raised">
             <tr>
+              {inspects && (
+                <th className="w-8 border-b border-edge px-2 py-2" aria-label="open" />
+              )}
               {visible.map((column) => {
                 const help = table.tooltips?.[column.id]
                 const active = sort?.column === column.id
@@ -376,6 +384,7 @@ export function DataTable({
               })}
             </tr>
             <tr>
+              {inspects && <th className="border-b border-edge/60 px-2 pb-1.5" />}
               {visible.map((column) => (
                 <th key={column.id} className="border-b border-edge/60 px-2 pb-1.5">
                   <input
@@ -404,6 +413,25 @@ export function DataTable({
                 className={`border-b border-edge/40 last:border-0 hover:bg-panel-raised
                             ${navigable || openable ? 'cursor-pointer' : ''}`}
               >
+                {inspects && (
+                  <td className="px-2 py-1.5 align-middle">
+                    <button
+                      type="button"
+                      // STOPS THE CLICK HERE. Without this the row's own handler fires too, so
+                      // the session is selected and the whole pane rebuilds underneath the panel
+                      // that was just opened.
+                      onClick={(event) => { event.stopPropagation(); onOpenRow!(row) }}
+                      title={meta?.row_detail?.title
+                        ? `open the ${meta.row_detail.title} of this row`
+                        : 'open this row'}
+                      aria-label={meta?.row_detail?.title ?? 'open this row'}
+                      className="rounded border border-edge px-1.5 py-0.5 text-2xs text-ink-faint
+                                 transition-colors hover:border-accent hover:text-accent"
+                    >
+                      ›
+                    </button>
+                  </td>
+                )}
                 {visible.map((column) => {
                   const value = row[column.id]
                   const band = shadeFor(value, column.bands)

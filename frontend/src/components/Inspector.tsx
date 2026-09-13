@@ -51,8 +51,15 @@ export interface InspectorContent {
   onOpenDetail?: (() => void) | null
   /** A qualifier on `text` that the reader must see, such as a count being a lower bound. */
   textNote?: string | null
-  /** The rows behind the thing, already filtered, drawn as the same table they came from. */
-  rows?: { name: string; table: Table; meta?: TableMeta } | null
+  /**
+   * The rows behind the thing, already filtered, drawn as the same table they came from.
+   *
+   * A LIST OF LISTS, because a drawer about a chat has four of them: the plans it wrote, the
+   * agents it ran, the workflows it launched and the tasks it was told about. One list was the
+   * shape when the only subject was one row of one table; pretending four are one would have made
+   * the second one a rebuild rather than an entry.
+   */
+  rows?: { name: string; table: Table; meta?: TableMeta }[] | null
   /** Why there are none, when there are none. */
   noRows?: string | null
   /** Open those rows on a page of their own. */
@@ -207,14 +214,16 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
         </section>
       )}
 
-      {content.rows && (
-        <section className="flex flex-col gap-2">
+      {(content.rows ?? []).map((group, index) => (
+        <section key={group.name} className="flex flex-col gap-2">
           <div className="flex items-baseline justify-between gap-3">
             <h3 className="text-2xs tracking-[0.06em] text-ink-faint">
-              THE ROWS BEHIND IT: {content.rows.name}, {content.rows.table.rows.length.toLocaleString()}{' '}
-              {content.rows.table.rows.length === 1 ? 'row' : 'rows'}
+              THE ROWS BEHIND IT: {group.name}, {group.table.rows.length.toLocaleString()}{' '}
+              {group.table.rows.length === 1 ? 'row' : 'rows'}
             </h3>
-            {content.onOpen && (
+            {/* The window button belongs to the FIRST list only: it opens the subject, and four
+                buttons saying the same thing would each look like they opened a different one. */}
+            {index === 0 && content.onOpen && (
               <button
                 onClick={content.onOpen}
                 className="rounded border border-edge px-2 py-0.5 text-2xs text-ink-dim hover:text-ink"
@@ -224,11 +233,11 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
               </button>
             )}
           </div>
-          <DataTable table={content.rows.table} meta={content.rows.meta} title={content.rows.name} />
+          <DataTable table={group.table} meta={group.meta} title={group.name} />
         </section>
-      )}
+      ))}
 
-      {!content.rows && content.noRows && (
+      {!(content.rows ?? []).length && content.noRows && (
         <p className="text-2xs text-ink-faint">{content.noRows}</p>
       )}
     </div>
