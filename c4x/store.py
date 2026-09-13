@@ -1951,20 +1951,49 @@ def chat_agent_runs(session_id: str, limit: int = 500) -> pd.DataFrame:
         return pd.DataFrame()
     by_dir, dir_params = chain_where(session_id, "a.dir_session_id")
     by_call, call_params = chain_where(session_id, "t.session_id")
+    # GROUPED ONCE PER TABLE, NEVER ONCE PER RUN, and the LIMIT is why that matters rather than
+    # being an optimisation. This was four correlated subqueries in the SELECT list, and the ORDER
+    # BY reads one of them, so SQLite has to evaluate all four for EVERY matching row before it can
+    # order and cut: `limit=1` cost exactly as much as `limit=500`. On the busiest chat in this
+    # store that is 1,335 runs times four scans of 363,151 messages and 475,805 turns, and a
+    # measured call for a single row did not return in ten minutes. As two grouped CTEs it is one
+    # pass over each table whatever the limit is.
+    #
+    # The CTEs cover every MATCHING run rather than the limited set, because the limit cannot be
+    # applied before `first_ts` exists; that keeps the ordering identical to the version this
+    # replaces.
     return q(
         f"""
-        SELECT a.agent_id, a.agent_type, a.name, a.description, a.spawn_depth,
-               a.workflow_run_id, a.tool_use_id, a.dir_session_id,
-               t.session_id AS called_from, t.turn_uuid, t.ts AS spawned_at, t.outcome,
-               (SELECT MIN(ts) FROM messages m WHERE m.file_path = a.transcript_path) AS first_ts,
-               (SELECT MAX(ts) FROM messages m WHERE m.file_path = a.transcript_path) AS last_ts,
-               (SELECT COUNT(*) FROM messages m WHERE m.file_path = a.transcript_path) AS records,
-               (SELECT SUM(x.o) FROM (SELECT MAX(output_tokens) AS o FROM turns
-                  WHERE file_path = a.transcript_path AND request_id IS NOT NULL
-                  GROUP BY request_id) x) AS output_tokens
-        FROM agent_runs a LEFT JOIN tool_calls t ON t.tool_use_id = a.tool_use_id
-        WHERE ({by_dir}) OR ({by_call})
-        ORDER BY COALESCE(t.ts, first_ts) DESC LIMIT ?
+        WITH runs AS (
+          SELECT a.agent_id, a.agent_type, a.name, a.description, a.spawn_depth,
+                 a.workflow_run_id, a.tool_use_id, a.dir_session_id, a.transcript_path,
+                 t.session_id AS called_from, t.turn_uuid, t.ts AS spawned_at, t.outcome
+          FROM agent_runs a LEFT JOIN tool_calls t ON t.tool_use_id = a.tool_use_id
+          WHERE ({by_dir}) OR ({by_call})
+        ),
+        seen AS (
+          SELECT file_path, MIN(ts) AS first_ts, MAX(ts) AS last_ts, COUNT(*) AS records
+          FROM messages WHERE file_path IN (SELECT transcript_path FROM runs)
+          GROUP BY file_path
+        ),
+        spent AS (
+          -- Summed over request groups, never over raw turn rows: a retried request repeats its
+          -- counts, and those tokens were never spent.
+          SELECT file_path, SUM(o) AS output_tokens FROM (
+            SELECT file_path, request_id, MAX(output_tokens) AS o FROM turns
+            WHERE file_path IN (SELECT transcript_path FROM runs) AND request_id IS NOT NULL
+            GROUP BY file_path, request_id)
+          GROUP BY file_path
+        )
+        SELECT runs.agent_id, runs.agent_type, runs.name, runs.description, runs.spawn_depth,
+               runs.workflow_run_id, runs.tool_use_id, runs.dir_session_id,
+               runs.called_from, runs.turn_uuid, runs.spawned_at, runs.outcome,
+               seen.first_ts, seen.last_ts, COALESCE(seen.records, 0) AS records,
+               spent.output_tokens
+        FROM runs
+        LEFT JOIN seen ON seen.file_path = runs.transcript_path
+        LEFT JOIN spent ON spent.file_path = runs.transcript_path
+        ORDER BY COALESCE(runs.spawned_at, seen.first_ts) DESC LIMIT ?
         """,
         (*dir_params, *call_params, int(limit)),
     )
@@ -2086,7 +2115,12 @@ def chat_work_totals(ttl: float = 45.0) -> dict:
     totals: dict[str, dict[str, int]] = {}
 
     def add(kind, sid, n):
-        if not sid:
+        # A STRING OR NOTHING. pandas reads a SQL NULL as float('nan'), and bool(nan) is True, so a
+        # falsiness test let one through: the LEFT JOIN below produces a NULL caller for every run
+        # with no matching tool call, and this dict grew a nan key holding 6,671 agent runs and 207
+        # workflow runs. Every one of those was also counted under its real owner, so no number was
+        # wrong; the key was simply not a session and had no business being offered to a caller.
+        if not isinstance(sid, str) or not sid:
             return
         head = head_of.get(sid, sid)
         row = totals.setdefault(head, {})
@@ -2101,7 +2135,7 @@ def chat_work_totals(ttl: float = 45.0) -> dict:
         rows worth looking at.
         """
         for owner, caller, n in rows:
-            heads = {head_of.get(x, x) for x in (owner, caller) if x}
+            heads = {head_of.get(x, x) for x in (owner, caller) if isinstance(x, str) and x}
             for head in heads:
                 add(kind, head, n)
 

@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 CREATE INDEX IF NOT EXISTS turns_session_ts ON turns(session_id, ts);
 CREATE INDEX IF NOT EXISTS turns_request ON turns(request_id);
+-- BY FILE, because a subagent run is identified by the transcript it wrote and by nothing else.
+-- The transcript_path column of agent_runs joins here, and without this index every such lookup is
+-- a scan of 475,805 rows; the panel reading them was measured taking over ten minutes for one chat.
+-- No backticks in this comment: the whole schema is a JS template literal and one would end it.
+CREATE INDEX IF NOT EXISTS turns_file ON turns(file_path);
 -- ONE ROW PER API CALL. Read this before summing anything out of turns.
 --
 -- Claude Code writes a streamed assistant message as SEVERAL transcript entries, one per content
@@ -132,6 +137,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_session_ts ON messages(session_id, ts);
 CREATE INDEX IF NOT EXISTS messages_type ON messages(type);
+-- The same join as turns_file, for the count and the first and last timestamps of a run.
+CREATE INDEX IF NOT EXISTS messages_file ON messages(file_path);
 CREATE TABLE IF NOT EXISTS compactions (
   uuid TEXT PRIMARY KEY, session_id TEXT, ts TEXT, trigger TEXT, version TEXT, entrypoint TEXT,
   pre_tokens INTEGER, post_tokens INTEGER, duration_ms INTEGER,

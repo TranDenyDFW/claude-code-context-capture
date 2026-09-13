@@ -56,12 +56,24 @@ def work_store(tmp_path, monkeypatch):
     con.execute("""UPDATE tool_calls SET tool_name = 'Agent', subagent_type = 'general-purpose'
                    WHERE tool_use_id = 's0-0-tc'""")
     con.execute("UPDATE tool_calls SET tool_use_id = 'tc-agent' WHERE tool_use_id = 's0-0-tc'")
-    # Three runs: one reached through the call that spawned it, one only through the directory it
-    # sits in, and one belonging to a workflow.
+    # A CALL IN THIS CHAT, A DIRECTORY IN ANOTHER. This is the ONLY row reachable through the
+    # calling session alone, and without it the OR in `chat_agent_runs` is ungated: an independent
+    # reviewer deleted the caller-side clause and the whole file stayed green, because every other
+    # run here sits under this chat's own directory. Measured shape, not invented: history is
+    # bridged between sessions, so a run the chat asked for can be stored under another chat's
+    # directory, and dropping this reach loses it while the header count still counts it.
+    con.execute("""INSERT INTO tool_calls (tool_use_id, session_id, turn_uuid, ts, tool_name,
+                     subagent_type, file_path, line_no)
+                   VALUES ('tc-elsewhere', ?, 's0-0-t0', '2026-08-02T11:30:00Z', 'Agent',
+                           'general-purpose', 'f', 20)""", (HEAD,))
+    # Four runs: one reached through the call that spawned it, one only through the directory it
+    # sits in, one belonging to a workflow, and one reachable ONLY through the call.
     runs = [
         ("a1", HEAD, "tc-agent", None, "general-purpose", AGENT_FILE),
         ("a2", HEAD, None, None, "Explore", r"C:\t\s0-0\subagents\agent-a2.jsonl"),
         ("a3", HEAD, None, "wf_1", "workflow-subagent", r"C:\t\s0-0\subagents\agent-a3.jsonl"),
+        ("a4", "s1-0", "tc-elsewhere", None, "Explore",
+         r"C:\t\s1-0\subagents\agent-a4.jsonl"),
     ]
     for agent_id, where, call, wf, kind, transcript in runs:
         con.execute("""INSERT INTO agent_runs (agent_id, dir_session_id, tool_use_id,
@@ -132,9 +144,17 @@ class TestThePlans:
 class TestTheAgentRuns:
     def test_a_run_is_reachable_through_the_call_and_through_the_directory(self, work_store, store):
         rows = store.chat_agent_runs(HEAD).set_index("agent_id")
-        assert set(rows.index) == {"a1", "a2", "a3"}
+        assert set(rows.index) == {"a1", "a2", "a3", "a4"}
         assert rows.loc["a1"]["called_from"] == HEAD, "this one names the call that spawned it"
         assert pd.isna(rows.loc["a2"]["called_from"]), "and this one is only in the directory"
+
+    def test_a_run_this_chat_called_but_does_not_hold_is_still_its_run(self, work_store, store):
+        """The gate on the OR. Without the caller-side reach this row disappears, and the header
+        count above it does not, so the panel shows a number over a list that lacks the row."""
+        rows = store.chat_agent_runs(HEAD).set_index("agent_id")
+        assert "a4" in rows.index
+        assert rows.loc["a4"]["dir_session_id"] == "s1-0", "stored under another chat"
+        assert rows.loc["a4"]["called_from"] == HEAD, "and reached only through the call"
 
     def test_its_size_is_derived_from_its_own_transcript(self, work_store, store):
         row = store.chat_agent_runs(HEAD).set_index("agent_id").loc["a1"]
@@ -147,7 +167,10 @@ class TestTheAgentRuns:
         assert int(row["output_tokens"]) == 300
 
     def test_a_run_of_another_chat_is_not_listed(self, work_store, store):
-        assert store.chat_agent_runs("s1-0").empty
+        """`s1-1` neither called a run nor holds one. `s1-0` is not the example any more: it holds
+        the directory of the run this chat called, so it can see that one, which is the point."""
+        assert store.chat_agent_runs("s1-1").empty
+        assert set(store.chat_agent_runs("s1-0")["agent_id"]) == {"a4"}
 
 
 class TestTheWorkflowRuns:
@@ -178,7 +201,7 @@ class TestTheCounts:
     def test_they_cover_the_whole_chat(self, work_store, store):
         counts = store.chat_work_counts(HEAD)
         assert counts["plans"] == 2, "including the one written before the last resume"
-        assert counts["agent_runs"] == 3
+        assert counts["agent_runs"] == 4, "including the one stored under another chat"
         assert counts["workflow_runs"] == 1
         assert counts["task_events"] == 3
         assert all(counts["harvested"].values())
@@ -228,3 +251,74 @@ class TestTheCensusThatMeansTranscripts:
         monkeypatch.setattr(store, "column_present", lambda table, column: False)
         forget_cached_rows()
         assert store.overview_stats()["files"] >= 0
+
+
+class TestTheRoutes:
+    """The two routes the panel fetches. Neither had a test until a reviewer said so."""
+
+    @pytest.fixture
+    def api_client(self, work_store, store):
+        from fastapi.testclient import TestClient
+
+        from c4x.api.main import api
+        return TestClient(api, base_url="http://127.0.0.1:8059")
+
+    def test_the_chat_route_answers_all_four_kinds_with_their_totals(self, api_client):
+        body = api_client.get(f"/api/chat/{HEAD}").json()
+        assert body["session"] == HEAD
+        assert sorted(body["chat"]) == [HEAD, OLD], "the whole chat, not the newest session"
+        assert body["plans_total"] == 2
+        assert body["agent_runs_total"] == 4
+        assert body["workflow_runs_total"] == 1
+        assert body["task_events_total"] == 3
+        assert body["task_events_unresolved"] == 1
+        assert all(body["harvested"].values())
+        assert {r["agent_id"] for r in body["agent_runs"]} == {"a1", "a2", "a3", "a4"}
+
+    def test_a_session_this_store_never_saw_is_a_404_that_names_it(self, api_client):
+        answer = api_client.get("/api/chat/never-seen")
+        assert answer.status_code == 404
+        assert "never-seen" in str(answer.json()["detail"])
+
+    def test_the_plan_route_answers_the_whole_text_not_a_preview(self, api_client):
+        body = api_client.get("/api/plan/tp-1").json()
+        assert body["text"] == "the newest plan"
+        assert body["chars"] == 15
+        assert body["outcome"] is None or isinstance(body["outcome"], str)
+        # A PATH IS NOT A FILE. The row names one that was never created here.
+        assert body["plan_file_path"].endswith("one.md")
+        assert body["file_exists"] is False
+
+    def test_an_unknown_plan_is_a_404(self, api_client):
+        assert api_client.get("/api/plan/nope").status_code == 404
+
+
+class TestTheColumnForTheSessionsList:
+    """`chat_work_totals` answers for every chat at once, and its keys must all be chats."""
+
+    def test_a_run_with_no_calling_session_adds_no_key_of_its_own(self, work_store, store):
+        """pandas reads a SQL NULL as nan, and bool(nan) is True.
+
+        Found by an independent reviewer: the caller column is NULL for every run with no matching
+        tool call, and a falsiness guard let those through, so the dict grew a nan key holding
+        6,671 agent runs on the author's store. Every one was also counted under its real owner, so
+        no number was wrong; the key was simply not a session.
+        """
+        totals = store.chat_work_totals()
+        assert all(isinstance(key, str) and key for key in totals), (
+            f"these keys are not session ids: {[k for k in totals if not isinstance(k, str)]}")
+
+    def test_it_counts_each_chat_the_way_the_panel_does(self, work_store, store):
+        totals = store.chat_work_totals()
+        counts = store.chat_work_counts(HEAD)
+        assert totals[HEAD]["agent_runs"] == counts["agent_runs"] == 4
+        assert totals[HEAD]["plans"] == counts["plans"] == 2
+        # THE OTHER CHAT SEES THE RUN IT HOLDS, which is the same statement the panel makes.
+        assert totals["s1-0"]["agent_runs"] == 1
+
+    def test_the_column_says_which_kinds_rather_than_four_numbers(self, work_store, store):
+        from c4x.tabs.sessions import work_summary
+        assert work_summary({"plans": 2, "agent_runs": 1}) == "2 plans, 1 agent"
+        assert work_summary({"plans": 1}) == "1 plan"
+        assert work_summary({"plans": 0}) == "", "a zero is nothing to say, not a zero to print"
+        assert work_summary(None) == ""
