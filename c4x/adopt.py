@@ -141,18 +141,57 @@ def cut(text: Any, limit: int = TITLE_MAX) -> str:
     return head.rstrip(" ,;:.") + "..."
 
 
-def title_for(kinds: dict, first_prompt: Any = None, last_ts: Any = None) -> tuple[str, str]:
-    """(title, titleSource) for a record: a name a person or a model chose, else the opening
-    request cut short, else the date. The source is `user` for a `custom` title, which a person
-    typed, and `auto` for everything else, which is what the app writes for names it made itself."""
-    for kind, source, trim in (("custom", "user", False), ("ai", "auto", False),
-                               ("last-prompt", "auto", True)):
+def title_for(kinds: dict, first_prompt: Any = None, last_ts: Any = None,
+              reviewed: Any = None) -> tuple[str, str]:
+    """(title, titleSource) for a record: a name a person or a model chose, else the name of the
+    chat this one read when it is a review run, else the opening request cut short, else the
+    date. The source is `user` for a `custom` title, which a person typed, and `auto` for
+    everything else, which is what the app writes for names it made itself.
+
+    `reviewed` is the reviewed chat's own name (see `c4x/reviews.py`). It outranks the opening
+    prompt, which for such a run is the reviewer's instructions and says nothing about the chat,
+    and never a name a person or a model gave the run itself."""
+    for kind, source in (("custom", "user"), ("ai", "auto")):
         text = kinds.get(kind)
         if isinstance(text, str) and text.strip():
-            return (cut(text) if trim else " ".join(text.split())), source
+            return " ".join(text.split()), source
+    if isinstance(reviewed, str) and reviewed.strip():
+        return review_title(reviewed), "auto"
+    text = kinds.get("last-prompt")
+    if isinstance(text, str) and text.strip():
+        return cut(text), "auto"
     if isinstance(first_prompt, str) and first_prompt.strip():
         return cut(first_prompt), "auto"
     return f"Chat from {str(last_ts or '')[:10] or 'an unknown date'}", "auto"
+
+
+def review_title(name: Any) -> str:
+    """"Reviewer - <the chat it read>", never longer than TITLE_MAX, the `...` of a cut name
+    counted (`cut` itself appends it past the limit it is given)."""
+    from c4x import reviews
+    return reviews.PREFIX + cut(name, TITLE_MAX - len(reviews.PREFIX) - 3)
+
+
+def _review_names(rows: list, titles: dict, session_ids) -> dict:
+    """run id -> the name of the chat it read, for the review runs among `session_ids`."""
+    from c4x import reviews
+    by_id = {r["session_id"]: r for r in rows}
+    out: dict = {}
+    for run, read in reviews.reviewed_by(rows, session_ids).items():
+        r = by_id.get(read)
+        if r is not None:
+            out[run] = title_for(titles.get(read, {}), r.get("first_prompt"), r.get("last_ts"))[0]
+    return out
+
+
+def _needs_review_name(record: dict, reviewed: Any) -> bool:
+    """An auto-named record of a review run whose name is not yet the chat it read. A name a
+    person gave the run (`titleSource` `user`) is theirs and is never replaced."""
+    if not isinstance(reviewed, str) or not reviewed.strip():
+        return False
+    if record.get("titleSource") != "auto":
+        return False
+    return record.get("title") != review_title(reviewed)
 
 
 def state(root=None, include_cli=False) -> dict:
@@ -181,7 +220,8 @@ def state(root=None, include_cli=False) -> dict:
     rows = _sessions()
     ids = [r["session_id"] for r in rows]
     titles = store.titles_for(ids) if ids else {}
-    by_cwd: dict[str, list] = {}
+    ledger = _ledger_records()
+    eligible: list = []
     counted_cli = 0
     seen_other = 0
     for r in rows:
@@ -203,7 +243,16 @@ def state(root=None, include_cli=False) -> dict:
             counted_cli += 1
             if not include_cli:
                 continue
-        title, source = title_for(titles.get(sid, {}), r.get("first_prompt"), r["last_ts"])
+        eligible.append((r, cli))
+    # A REVIEW RUN TAKES THE NAME OF THE CHAT IT READ, both when it is offered here and when its
+    # record is checked below; asked once, for the candidates and the ledger's sessions together.
+    names = _review_names(rows, titles, [r["session_id"] for r, _cli in eligible]
+                          + [str(e.get("session_id")) for e, _rec, _p in ledger])
+    by_cwd: dict[str, list] = {}
+    for r, cli in eligible:
+        sid = r["session_id"]
+        title, source = title_for(titles.get(sid, {}), r.get("first_prompt"), r["last_ts"],
+                                  reviewed=names.get(sid))
         by_cwd.setdefault(str(r["cwd"] or ""), []).append({
             "session_id": sid, "title": title, "title_source": source, "last_ts": r["last_ts"],
             "first_ts": r["first_ts"], "turns": r["turns"], "model": r["model"], "cli": cli,
@@ -222,8 +271,11 @@ def state(root=None, include_cli=False) -> dict:
             "candidates": sum(1 for g in groups for s in g["sessions"] if not s["cli"]),
             "cli_candidates": counted_cli, "other_account": seen_other,
             "deleted_markers": len(list(pair_dir.glob("deleted_*"))) if pair_dir.is_dir() else 0,
-            "untitled_adopted": sum(1 for _e, rec, _p in _ledger_records()
+            "untitled_adopted": sum(1 for _e, rec, _p in ledger
                                     if rec is not None and not _titled(rec)),
+            "review_runs_to_name": sum(
+                1 for e, rec, _p in ledger if rec is not None
+                and _needs_review_name(rec, names.get(str(e.get("session_id"))))),
             "app_running": accounts.app_running(), "sharing": accounts.intended_mode()}
 
 
@@ -294,22 +346,29 @@ def retitle(root=None) -> dict:
     `user`) or any non-blank title is left alone and counted as kept. Read, written, read back.
     """
     from c4x import store
-    report: dict[str, Any] = {"renamed": [], "kept": 0, "missing": 0, "restart_required": False}
+    report: dict[str, Any] = {"renamed": [], "kept": 0, "missing": 0, "reviews": 0,
+                              "restart_required": False}
     resolved = _ledger_records()
     wanted = {str(e.get("session_id")) for e, _r, _p in resolved}
-    by_id = {r["session_id"]: r for r in _sessions() if r["session_id"] in wanted}
-    titles = store.titles_for(list(wanted)) if wanted else {}
+    rows = _sessions()
+    by_id = {r["session_id"]: r for r in rows if r["session_id"] in wanted}
+    # Every session's titles, not only the ledger's: the chat a review run read is named from its
+    # own titles, and it need not be in the ledger.
+    titles = store.titles_for([r["session_id"] for r in rows]) if rows else {}
+    names = _review_names(rows, titles, list(wanted))
     for entry, record, path in resolved:
         if record is None or path is None:
             report["missing"] += 1
             continue
-        if _titled(record):
+        sid = str(entry.get("session_id"))
+        review = _needs_review_name(record, names.get(sid))
+        if _titled(record) and not review:
             report["kept"] += 1
             continue
-        sid = str(entry.get("session_id"))
         session = by_id.get(sid)
         title, source = title_for(titles.get(sid, {}), (session or {}).get("first_prompt"),
-                                  (session or {}).get("last_ts") or record.get("lastActivityAt"))
+                                  (session or {}).get("last_ts") or record.get("lastActivityAt"),
+                                  reviewed=names.get(sid))
         record["title"], record["titleSource"] = title, source
         blob = json.dumps(record, ensure_ascii=False).encode("utf-8")
         try:
@@ -320,6 +379,8 @@ def retitle(root=None) -> dict:
             report.setdefault("failed", []).append({"session_id": sid, "why": str(exc)})
             continue
         report["renamed"].append({"session_id": sid, "path": str(path), "title": title})
+        if review:
+            report["reviews"] += 1
     report["restart_required"] = bool(report["renamed"])
     return report
 

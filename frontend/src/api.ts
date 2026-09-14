@@ -552,15 +552,21 @@ export interface AdoptState {
   deleted_markers: number
   /** Records c4x wrote that carry no name; the app shows each as "General coding session". */
   untitled_adopted: number
+  /**
+   * Records c4x wrote for review runs (a hook's `claude -p` reading another chat) that still
+   * carry the reviewer's own prompt as their name; each takes "Reviewer - <the chat it read>".
+   */
+  review_runs_to_name: number
   app_running: boolean
   sharing: 'all' | 'current' | null
 }
 
-/** What `POST /api/adopt/retitle` answers. */
+/** What `POST /api/adopt/retitle` answers. `reviews` counts the review runs among `renamed`. */
 export interface RetitleReport {
   renamed: { session_id: string; path: string; title: string }[]
   kept: number
   missing: number
+  reviews: number
   restart_required: boolean
 }
 

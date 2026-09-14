@@ -86,7 +86,7 @@ beforeEach(() => {
   vi.mocked(api.adopt.state).mockResolvedValue({
     supported: true, why_not: '', pair: null, physical: null, groups: [], candidates: 0,
     cli_candidates: 0, other_account: 0, deleted_markers: 0, untitled_adopted: 0,
-    app_running: false, sharing: null,
+    review_runs_to_name: 0, app_running: false, sharing: null,
   })
   vi.mocked(api.tab).mockResolvedValue(payload())
 })

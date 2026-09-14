@@ -634,3 +634,21 @@ describe('slugFor', () => {
   })
 })
 
+describe('where the dialog is rendered', () => {
+  // The header has a backdrop filter, which makes it the containing block for a fixed descendant:
+  // rendered in place, the backdrop covered only the header's strip and the page below stayed
+  // clickable under a dialog that declared itself modal. The portal takes it out from under.
+  it('puts the backdrop and dialog at the end of the document, not inside the header', () => {
+    const { container } = render(
+      <ProjectMoves cohort={COHORT} cohorts={cohorts} writesEnabled onChanged={vi.fn()} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /project/i }))
+    const dialog = screen.getByRole('dialog')
+    expect(container.contains(dialog)).toBe(false)
+    const backdrop = dialog.parentElement
+    expect(backdrop?.getAttribute('role')).toBe('presentation')
+    expect(backdrop?.parentElement).toBe(document.body)
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+  })
+})
+

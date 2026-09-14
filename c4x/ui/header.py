@@ -11,13 +11,13 @@ before exercising the callbacks, because the real one harvests and an audit must
 store it is auditing.
 """
 import os
-import subprocess
 import threading as _threading
 import time as _time
 from typing import TypedDict
 
 from dash import dcc, html
 
+from c4x import proc
 from c4x.store import (
     ROOT,
     THRESHOLDS,
@@ -156,12 +156,12 @@ def refresh_store(min_interval: float = 4.0) -> None:
         if now - _harvest_state["ts"] < min_interval:
             return
         _harvest_state["ts"] = now
-        proc = subprocess.run(
+        done = proc.run(
             ["node", str(ROOT / "tools" / "harvest.mjs")],
             capture_output=True, text=True, cwd=str(ROOT), timeout=120,
         )
-        _harvest_state["error"] = (None if proc.returncode == 0
-                                   else (proc.stderr or "").strip()[:200])
+        _harvest_state["error"] = (None if done.returncode == 0
+                                   else (done.stderr or "").strip()[:200])
         _harvest_state["runs"] += 1
     except Exception as exc:                        # noqa: BLE001 - reported in the UI, not raised
         _harvest_state["error"] = str(exc)[:200]
