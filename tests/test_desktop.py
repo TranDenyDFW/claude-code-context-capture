@@ -27,11 +27,12 @@ def appx(lines):
 
 class TestFindingTheApp:
     def test_the_store_build_is_started_through_the_shell_with_the_manifest_s_id(self):
-        found = desktop.find_app(run=appx(["Claude_pzs8sxrjxfjjc", r"C:\Program Files\WindowsApps\Claude_1"]),
-                                 read=lambda path: MANIFEST, exists=lambda p: False,
-                                 system="Windows")
+        lines = ["Claude_pzs8sxrjxfjjc", r"C:\Program Files\WindowsApps\Claude_1"]
+        found = desktop.find_app(run=appx(lines), read=lambda path: MANIFEST,
+                                 exists=lambda p: False, system="Windows")
         assert found == {"kind": "store", "family": "Claude_pzs8sxrjxfjjc", "app_id": "Claude",
-                         "launch": ["explorer.exe", r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"]}
+                         "launch": ["explorer.exe",
+                                    r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"]}
 
     def test_the_manifest_is_read_from_the_package_s_own_location(self):
         seen = []
@@ -51,13 +52,15 @@ class TestFindingTheApp:
 
     def test_the_installer_s_exe_is_started_by_its_path(self):
         exe = r"C:\Users\me\AppData\Local\Programs\Claude\Claude.exe"
+        local = r"C:\Users\me\AppData\Local"
         found = desktop.find_app(run=appx(["none"]), exists=lambda p: p == exe,
-                                 expand=lambda raw: raw.replace("%LOCALAPPDATA%", r"C:\Users\me\AppData\Local"),
+                                 expand=lambda raw: raw.replace("%LOCALAPPDATA%", local),
                                  system="Windows")
         assert found == {"kind": "exe", "launch": [exe]}
 
     def test_nothing_found_is_none_and_off_windows_nothing_is_asked(self):
-        assert desktop.find_app(run=appx(["none"]), exists=lambda p: False, system="Windows") is None
+        nothing = desktop.find_app(run=appx(["none"]), exists=lambda p: False, system="Windows")
+        assert nothing is None
 
         def never(*a, **k):
             raise AssertionError("powershell was run off Windows")
@@ -134,13 +137,13 @@ class TestTheRestart:
                                      relaunch_s=5.0)
         return report, first, state
 
-    def test_every_app_process_is_terminated_then_the_app_is_started_and_seen_back(self, monkeypatch):
+    def test_every_app_process_is_terminated_then_started_and_seen_back(self, monkeypatch):
         report, first, state = self._drive(monkeypatch)
         assert all(p.terminated for p in first) and not any(p.killed for p in first)
         assert state["launched"] == [["explorer.exe", r"shell:AppsFolder\F!Claude"]]
         assert state["waited"][0] == ([10, 11], desktop.TERMINATE_S)
-        assert report == {"restarted": True, "killed": 2,
-                          "launch": ["explorer.exe", r"shell:AppsFolder\F!Claude"], "why": "relaunched"}
+        assert report == {"restarted": True, "killed": 2, "why": "relaunched",
+                          "launch": ["explorer.exe", r"shell:AppsFolder\F!Claude"]}
 
     def test_a_process_that_ignores_terminate_is_killed(self, monkeypatch):
         report, first, state = self._drive(monkeypatch, stuck=True)

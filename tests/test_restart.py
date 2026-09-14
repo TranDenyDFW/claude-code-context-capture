@@ -60,14 +60,19 @@ class TestRestartServer:
         monkeypatch.setattr(store, "DB_PATH", tmp_path / "data" / "context.db")
         monkeypatch.setattr(server, "hardened_shutdown", lambda reason, spare=(): None)
         seen = []
-        server.restart_server("x", detach=lambda argv, log, cwd=None: seen.append(Path(log)) or SimpleNamespace(pid=1))
+
+        def detach(argv, log, cwd=None):
+            seen.append(Path(log))
+            return SimpleNamespace(pid=1)
+        server.restart_server("x", detach=detach)
         assert seen == [tmp_path / "data" / "raw" / "dashboard.log"]
 
 
 class TestDetach:
     def test_a_child_outlives_the_call_and_its_output_lands_in_the_log(self, tmp_path):
         log = tmp_path / "raw" / "child.log"
-        child = proc.detach([sys.executable, "-c", "print('spoken by the child')"], log, cwd=tmp_path)
+        child = proc.detach([sys.executable, "-c", "print('spoken by the child')"], log,
+                            cwd=tmp_path)
         assert child.pid > 0
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and child.poll() is None:
