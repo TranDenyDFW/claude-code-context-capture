@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+from c4x.paths import bundle_root, install_root
+
+# The install (store, node tools, tmp/), which is not this file's directory once the API is frozen
+# into an exe. The built page comes from the BUNDLE, resolved where it is mounted below.
+ROOT = install_root()
 
 # THE API IS A READER. The dashboard is not: its refresh tick runs an incremental harvest, so
 # pointing two of those at one store means two writers. This is set before `app` is imported,
@@ -1835,7 +1839,9 @@ async def _no_cache_shell(request: Request, call_next):
     return response
 
 
-_dist = ROOT / "frontend" / "dist"
+# FROM THE BUNDLE, not the install: the exe packs the built page beside itself and the checkout it
+# runs inside may hold a newer or older one. Not frozen, both are the repo.
+_dist = bundle_root() / "frontend" / "dist"
 
 if _dist.is_dir():
 

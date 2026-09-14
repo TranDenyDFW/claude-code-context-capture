@@ -16,7 +16,6 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_PORT = 8059
 
 
@@ -117,8 +116,9 @@ def main(argv=None):
     # edit cost two rounds of "the frontend is broken" during this migration, and both times the
     # frontend was fine.
     if reload:
+        from c4x.paths import install_root
         uvicorn.run("c4x.api.main:api", host="127.0.0.1", port=port, log_level="warning",
-                    reload=True, reload_dirs=[str(ROOT / "c4x")])
+                    reload=True, reload_dirs=[str(install_root() / "c4x")])
     else:
         from c4x.api.main import api
         uvicorn.run(api, host="127.0.0.1", port=port, log_level="warning")
