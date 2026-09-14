@@ -68,6 +68,10 @@ BY_SESSION = ("hook_events", "attachments", "tool_calls", "messages", "turns",
               # session rows do. Keyed on the PREFIX session's id: a chat's links travel and die
               # with the chat's own sessions, which are in the same project by construction.
               "session_links",
+              # A review run's tie to the chat it read, and the record of a run that tied to
+              # nothing. Both keyed on the run's own session id; a run and the session it reviewed
+              # share a cwd by construction, so they travel and die with one project.
+              "review_links", "review_misses",
               # WHAT A CHAT PLANNED AND RAN. Four tables harvest writes beside the transcripts, and
               # they belong to a project for the same reason the offsets do: the runs sit inside
               # the session directory this delete is about to remove, and an export that left them
@@ -1160,7 +1164,8 @@ def import_(path, into=None, dry_run=False):
                 # rows this store holds for those members are the stale ones: keeping them would
                 # split one chat into two rows here. Every other table is keyed on identities that
                 # do not change meaning between exports.
-                verb = "INSERT OR REPLACE" if table == "session_links" else "INSERT OR IGNORE"
+                verb = ("INSERT OR REPLACE" if table in ("session_links", "review_links")
+                        else "INSERT OR IGNORE")
                 con.execute(f"{verb} INTO main.{table} ({listed}) "
                             f"SELECT {listed} FROM src.{table}")
                 after = con.execute(f"SELECT COUNT(*) FROM main.{table}").fetchone()[0]

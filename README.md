@@ -127,7 +127,7 @@ A review run (a hook's `claude -p` that read another chat) is never offered: har
 the chat it read by quotation (`docs/desktop-records.md` §7), it is listed nowhere on its own,
 the chat's page lists it with its verdict and the prompt it followed, and its tokens count toward
 the chat under "Including Subagents" (the Cost tab always). The drawer offers to take back the
-records an earlier build wrote for such runs.
+records an earlier build wrote for such runs (`POST /api/adopt/unadopt-reviews`).
 
 **Without Python.** `tools/build_exe.py` builds the server into `dist/c4x/` (`c4x.exe`) with
 PyInstaller, and the `build-exe` workflow attaches that directory to every release as
