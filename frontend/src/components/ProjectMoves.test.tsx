@@ -650,5 +650,18 @@ describe('where the dialog is rendered', () => {
     expect(backdrop?.parentElement).toBe(document.body)
     expect(dialog.getAttribute('aria-modal')).toBe('true')
   })
+
+  // Escape is handled on the dialog, so it only ever fired after a click inside: focus had never
+  // left the button that opened it. A modal takes focus when it opens and gives it back on close.
+  it('takes focus when it opens, closes on Escape, and hands focus back to the button', () => {
+    render(<ProjectMoves cohort={COHORT} cohorts={cohorts} writesEnabled onChanged={vi.fn()} />)
+    const trigger = screen.getByRole('button', { name: /project/i })
+    fireEvent.click(trigger)
+    const dialog = screen.getByRole('dialog')
+    expect(document.activeElement).toBe(dialog)
+    fireEvent.keyDown(dialog, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+  })
 })
 

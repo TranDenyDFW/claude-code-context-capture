@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '@/api'
 import type { Cohort, DeleteReport, ImportReport } from '@/api'
 import { Portal } from './Portal'
@@ -93,6 +93,20 @@ export function ProjectMoves({
   const [staged, setStaged] = useState<{ file: File; plan: ImportReport } | null>(null)
   const [into, setInto] = useState('')
   const upload = useRef<HTMLInputElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const dialog = useRef<HTMLDivElement>(null)
+
+  // FOCUS GOES INTO THE DIALOG WHEN IT OPENS and back to the button when it closes, which is what
+  // opening and closing a modal mean. Without this, Escape (handled on the dialog) only worked
+  // after a click inside, because focus had never left the button that opened it. The drawer in
+  // AdoptSessions.tsx does the same.
+  useEffect(() => {
+    if (!open) return
+    dialog.current?.focus()
+    return () => {
+      trigger.current?.focus()
+    }
+  }, [open])
 
   const project = pathOf(cohort)
   const label = cohorts.find((c) => c.value === cohort)?.label ?? project ?? ''
@@ -189,6 +203,7 @@ export function ProjectMoves({
   return (
     <>
       <button
+        ref={trigger}
         onClick={() => setOpen(true)}
         title="Export, import or delete a whole project"
         className="rounded-md border border-edge bg-panel px-2.5 py-1.5 text-sm text-ink-dim
@@ -209,6 +224,8 @@ export function ProjectMoves({
           role="presentation"
         >
           <div
+            ref={dialog}
+            tabIndex={-1}
             onMouseDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.key === 'Escape' && close()}
             role="dialog"
@@ -219,7 +236,7 @@ export function ProjectMoves({
             // report, which is the only place the backup path is shown, was rendered where nobody
             // could read it and nothing scrolled to reach it.
             className="flex max-h-[80vh] w-full max-w-[44rem] flex-col overflow-hidden rounded-lg
-                       bg-panel shadow-float"
+                       bg-panel shadow-float outline-none"
           >
             <div className="shrink-0 border-b border-edge px-5 py-3">
               <h2 className="text-md font-semibold text-ink">Move a project</h2>
