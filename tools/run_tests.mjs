@@ -256,6 +256,15 @@ const PY = [
   // a wrong pane that looks entirely right, which is the one failure a latency gate cannot see.
   ['-m', ['c4x.api.cache', '--self-test'], 'API response cache self-test', 'SELF-TEST PASS',
    { noStore: true }],
+  // The API entry point: its flags, and the probe that asks a bound port who holds it before
+  // binding on top, which Windows would allow. Real sockets, no store.
+  ['-m', ['c4x.api', '--self-test'], 'API entry: flags and the already-running probe',
+   'SELF-TEST PASS', { noStore: true }],
+  // The exe build. The self-test reads the PyInstaller argv and the smoke plan without a build
+  // and without PyInstaller, which the matrix legs never install; the build itself runs in
+  // .github/workflows/build-exe.yml and is proven by the smoke there.
+  ['tools/build_exe.py', ['--self-test'], 'exe build argv and smoke plan', 'SELF-TEST PASS',
+   { noStore: true }],
   ['tools/table_audit.py', [], 'audit of the live app', 'AUDIT PASS'],
   // The same DATA rules, applied to the API payload instead of a Dash component tree, so they
   // outlive Dash. Store-dependent, and not marked noStore: importing table_audit for its rule

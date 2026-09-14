@@ -28,6 +28,7 @@ vi.mock('@/api', async (importOriginal) => {
       // header threw and four tests about the population chip failed for a reason none of them
       // named.
       accounts: { state: vi.fn(), share: vi.fn(), verify: vi.fn() },
+      adopt: { state: vi.fn(), run: vi.fn() },
     },
   }
 })
@@ -80,6 +81,11 @@ beforeEach(() => {
   vi.mocked(api.accounts.state).mockResolvedValue({
     supported: true, why_not: '', app_running: false, mode: 'current', intended: 'current',
     roots: [], pairs: 1, linked: 0, chats_visible: 0,
+  })
+  // Nothing to adopt, so the header shows no adopt control in these tests.
+  vi.mocked(api.adopt.state).mockResolvedValue({
+    supported: true, why_not: '', pair: null, physical: null, groups: [], candidates: 0,
+    cli_candidates: 0, other_account: 0, deleted_markers: 0, app_running: false, sharing: null,
   })
   vi.mocked(api.tab).mockResolvedValue(payload())
 })

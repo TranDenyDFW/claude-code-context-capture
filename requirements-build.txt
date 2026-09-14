@@ -1,0 +1,16 @@
+# What builds the executable (tools/build_exe.py), on top of requirements.txt.
+#
+#   pip install -c constraints-ci.txt -r requirements.txt -r requirements-build.txt
+#
+# EXACT PINS, AND OUTSIDE constraints-ci.txt ON PURPOSE. That file is a union of an Ubuntu resolve
+# and a Windows resolve (tools/make_constraints.py, .github/workflows/pins.yml), and the matrix legs
+# install it whole. The build runs on Windows alone (.github/workflows/build-exe.yml), the test
+# legs never install this file, and a set only one platform installs would sit in the union with
+# markers nobody else exercises. So this file pins its own graph, exactly, at the versions the exe
+# was first built and smoke-tested with, and moves as a set when someone rebuilds with newer ones
+# and re-runs the smoke. `pip check` in the build job says whether it still agrees with the rest.
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+altgraph==0.17.5
+pefile==2024.8.26 ; sys_platform == "win32"
+pywin32-ctypes==0.2.3 ; sys_platform == "win32"

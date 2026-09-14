@@ -11,6 +11,37 @@ removed and nothing here said so.
 
 ### Added
 
+- **The dashboard starts with Claude and stops when Claude is gone.** Capture was automatic and the
+  page was not: nothing started `python -m c4x.api`, and nothing ever stopped it. The SessionStart
+  hook now asks the port who holds it (a bounded probe against `/__health__`, comparing the store
+  it names with this install's, resolved and case-folded) and, when nobody does, spawns
+  `tools/dashboard.mjs` detached to start the server, off the hook's ten-second clock: one python
+  import of the dashboard's modules costs 3.2 to 3.6 s warm on the author's machine, so the
+  interpreter is resolved once at install (or once a week) and never inline. The server carries a
+  watchdog (`--watchdog`) that stops it through the hardened shutdown once no process named
+  `claude` (or node running the npm package) has been seen for 60 s, and it refuses to bind on a
+  port another c4x dashboard already answers, which Windows would otherwise allow. `install status`
+  gained a `dashboard` line with the stop command, `install uninstall` stops a server the hook
+  started, and `install --no-dashboard` records the opt-out in the receipt, where a re-run keeps it.
+- **Adopt: a record for every chat the desktop app has no record of, per folder.** A reinstall
+  keeps every transcript and loses every `local_<uuid>.json`, so the sidebar shows a cloud list
+  pointing at a device that no longer exists. One record built from the store, the nine fields
+  every real record carries plus the transcript's id, written under the signed-in account's pair,
+  was listed by the app after a restart; `c4x/adopt.py` is that write made repeatable and chosen.
+  Chosen, because the rule cannot tell a reinstall orphan from a chat deleted in the app (923 of
+  1,027 desktop sessions with a transcript had no record on the author's machine, 915 from one
+  month), so the control groups by folder, preselects nothing and says how many `deleted_<uuid>`
+  markers the pair holds. A title is written only from the `custom` or `ai` kind, never the raw
+  last prompt; the account switch is untouched, and under sharing All the bytes land through the
+  junction in the shared directory, which the report says.
+- **An executable, for a machine with node and no Python.** `tools/build_exe.py` freezes
+  `python -m c4x.api` with PyInstaller into `dist/c4x-api/` and proves the build by running it: the
+  shell from the bundle, the tab list (which imports `app.py`, so dash is in) and a rendered pane
+  (plotly). `c4x/paths.py` separates the bundle (the packed page and `prices.json`) from the
+  install (the store, the node tools, `tmp/`), and a frozen exe with no checkout above it exits 2
+  with the reason rather than serving a page whose every tab is a 500. The `build-exe` workflow
+  builds and smoke-tests on Windows and attaches the zip to every release.
+
 - **An Account switch: show every account's chats, or only the signed-in one's.** Signing into a
   second account on the same machine hides nothing, it points the desktop app at a different
   directory: `<account uuid>/<org uuid>` is the whole of the separation and the listing is the

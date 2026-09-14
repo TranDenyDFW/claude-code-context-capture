@@ -1,0 +1,348 @@
+"""Build the dashboard into an executable, and prove the build serves a page.
+
+    python tools/build_exe.py                        # dist/c4x-api/c4x-api(.exe)
+    python tools/build_exe.py --smoke --db <store>   # run the built exe against a store
+    python tools/build_exe.py --self-test            # the argv builder and the smoke plan, no build
+
+WHAT THE EXE REPLACES: Python. Not node, and not the checkout. The hooks and the harvester are
+node, the store they write is under the checkout's data/, and c4x/store.py shells out to the
+checkout's tools/*.mjs for window math. The exe runs from inside an install (dist/c4x-api/ under
+the checkout is where the SessionStart hook looks for it) and refuses to run anywhere else; see
+c4x/paths.py. It is for a machine that has node and no Python.
+
+WHY A SMOKE, NOT A BUILD LOG. PyInstaller reports success when it wrote an exe, and an exe that
+imports dash lazily through `import app` (c4x/api/main.py, `_app()`) can be missing half of
+plotly and still start. So the check here is the page: the shell served from the bundle, the tab
+list (which imports app.py, so dash is in), and one rendered pane (which draws with plotly). A
+build that passes this has everything the hook-started server has.
+
+PYINSTALLER IS IMPORTED INSIDE build() ONLY. The suite runs --self-test on every CI leg, and the
+legs install requirements.txt and requirements-dev.txt, not requirements-build.txt; a module-level
+import would fail all three for a package only the build job needs. The self-test asserts that.
+"""
+import hashlib
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+NAME = "c4x-api"
+ENTRY = Path("c4x") / "api" / "__main__.py"
+# Packages the dashboard never imports that PyInstaller would still walk into on a machine that
+# happens to have them: plotly and pandas import several of these optionally, and the analysis
+# follows an optional import as far as the interpreter allows. Measured here: an interpreter
+# with 543 packages spent over fifteen minutes analysing pyspark before this list existed. CI
+# installs none of them, so the exclusion changes nothing there and keeps a developer build
+# the same shape as the shipped one.
+EXCLUDES = ("pyspark", "torch", "tensorflow", "matplotlib", "IPython", "ipykernel", "jupyter",
+            "jupyter_client", "notebook", "nbformat", "scipy", "sklearn", "numba", "polars",
+            "sympy", "PIL", "xarray", "dask", "kaleido", "statsmodels", "seaborn", "bokeh",
+            "PyQt5", "PyQt6", "PySide2", "PySide6", "tkinter", "pytest", "mypy", "ruff",
+            # Not pinned in constraints-ci.txt, so CI runs pandas without it and the local build
+            # should not carry a hundred megabytes CI never sees.
+            "pyarrow")
+# The routes the smoke asks for, in order, and what each proves.
+SMOKE_PLAN = (
+    ("GET", "/__health__", "the server answers for the store and the port it was given"),
+    ("GET", "/", "the shell is served from the bundle, not from a checkout path"),
+    ("GET", "/api/tabs", "app.py imported, so dash and every tab module are in the bundle"),
+    ("GET", "/api/tab/{first}/render", "one pane rendered, so plotly's package data is in"),
+    ("GET", "/api/health", "the API's own health shape"),
+    ("POST", "/__shutdown__", "the token in the announce line stops it"),
+)
+
+
+def exe_path(root: Path = ROOT, platform: str = sys.platform) -> Path:
+    return root / "dist" / NAME / (f"{NAME}.exe" if platform.startswith("win") else NAME)
+
+
+def pyinstaller_args(root: Path = ROOT, platform: str = sys.platform) -> list[str]:
+    """The whole PyInstaller command line, pure, so the self-test reads it without a build.
+
+    `--add-data` separates source and destination with `;` on Windows and `:` elsewhere, which is
+    `os.pathsep` and easy to write the wrong way round. One-dir, because one-file extracts the
+    bundle on every launch and the extraction directory dies with the process, so `install_root`
+    would have nothing stable to walk up from.
+    """
+    sep = ";" if platform.startswith("win") else ":"
+    work = root / "tmp" / "pyinstaller"
+    return [
+        "--noconfirm", "--clean", "--onedir", "--console", "--name", NAME,
+        "--paths", str(root),
+        "--collect-submodules", "c4x",
+        "--hidden-import", "app",
+        "--collect-all", "dash",
+        "--collect-all", "plotly",
+        "--collect-submodules", "uvicorn",
+        *[arg for name in EXCLUDES for arg in ("--exclude-module", name)],
+        "--add-data", f"{root / 'frontend' / 'dist'}{sep}frontend/dist",
+        "--add-data", f"{root / 'c4x' / 'prices.json'}{sep}c4x",
+        "--workpath", str(work), "--specpath", str(work),
+        "--distpath", str(root / "dist"),
+        str(root / ENTRY),
+    ]
+
+
+def build(root: Path = ROOT) -> int:
+    shell = root / "frontend" / "dist" / "index.html"
+    if not shell.is_file():
+        print(f"no built page at {shell}: run `npm run build --prefix frontend` first, or check "
+              "out the tracked frontend/dist")
+        return 2
+    from importlib.metadata import version
+
+    from PyInstaller.__main__ import run as pyinstaller_run
+    started = time.monotonic()
+    pyinstaller_run(pyinstaller_args(root))
+    exe = exe_path(root)
+    if not exe.is_file():
+        print(f"PyInstaller returned and {exe} does not exist")
+        return 1
+    sha = "unknown"
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                             cwd=root, timeout=20).stdout.strip() or sha
+    except (OSError, subprocess.SubprocessError):
+        pass
+    total = sum(p.stat().st_size for p in exe.parent.rglob("*") if p.is_file())
+    stamp = {
+        "name": NAME, "git": sha, "python": sys.version.split()[0],
+        "pyinstaller": version("pyinstaller"),
+        "index_sha256": hashlib.sha256(shell.read_bytes()).hexdigest(),
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "bytes": total, "seconds": round(time.monotonic() - started, 1),
+    }
+    (exe.parent / "BUILD.json").write_text(json.dumps(stamp, indent=1) + "\n", encoding="utf-8")
+    print(f"built {exe} ({total / (1 << 20):.0f} MB, {stamp['seconds']} s); BUILD.json beside it")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# The smoke.
+# ---------------------------------------------------------------------------
+def pick_free_port() -> int:
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def token_from(text: str) -> str | None:
+    """The shutdown token out of the announce line c4x/server.py prints."""
+    found = re.search(r"X-C4X-Shutdown:\s*([^\"\s]+)", text or "")
+    return found.group(1) if found else None
+
+
+def _get(url: str, timeout: float = 5.0):
+    """(status, content type, body bytes); status 0 when nothing answered."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(url, timeout=timeout) as response:
+            return response.status, response.headers.get("Content-Type", ""), response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, "", b""
+    except (urllib.error.URLError, OSError, ValueError):
+        return 0, "", b""
+
+
+def _post(url: str, headers: dict, timeout: float = 5.0) -> int:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(url, method="POST", headers=headers, data=b"")
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except (urllib.error.URLError, OSError, ValueError):
+        return 0
+
+
+def smoke(db: str, port: int | None = None, root: Path = ROOT, startup_s: float = 120.0) -> int:
+    """Run the built exe against `db` and walk SMOKE_PLAN. Non-zero on the first miss; the child
+    is killed on any path out, so a failed CI smoke never leaves an exe running."""
+    exe = exe_path(root)
+    checks: list[tuple[str, bool, str]] = []
+    add = checks.append
+    if not exe.is_file():
+        add(("the exe exists", False, str(exe)))
+        return _report(checks, "SMOKE")
+    store = Path(db).resolve()
+    add(("the store exists", store.is_file(), str(store)))
+    port = port or pick_free_port()
+    base = f"http://127.0.0.1:{port}"
+    status, _, _ = _get(f"{base}/__health__", timeout=1.0)
+    add((f"nothing answers on {port} before the launch", status == 0, f"status {status}"))
+    own = subprocess.run([str(exe), "--self-test"], capture_output=True, text=True, cwd=root,
+                         timeout=120)
+    add(("the exe's own self-test passes", "SELF-TEST PASS" in own.stdout,
+         (own.stdout + own.stderr)[-300:]))
+    if any(not ok for _, ok, _ in checks):
+        return _report(checks, "SMOKE")
+
+    lines: list[str] = []
+    token: dict = {}
+    child = subprocess.Popen([str(exe), "--db", str(store), "--port", str(port)],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                             cwd=root, bufsize=1)
+
+    def drain():
+        assert child.stdout is not None
+        for line in child.stdout:
+            lines.append(line.rstrip())
+            if "token" not in token:
+                found = token_from(line)
+                if found:
+                    token["token"] = found
+
+    threading.Thread(target=drain, daemon=True).start()
+    try:
+        deadline = time.monotonic() + startup_s
+        answered = None
+        while time.monotonic() < deadline and child.poll() is None:
+            status, _, body = _get(f"{base}/__health__", timeout=2.0)
+            if status == 200:
+                try:
+                    answered = json.loads(body)
+                except ValueError:
+                    answered = None
+                if isinstance(answered, dict) and answered.get("ok"):
+                    break
+            time.sleep(0.5)
+        theirs = os.path.normcase(str(Path(str((answered or {}).get("db", ""))).resolve()))
+        add((SMOKE_PLAN[0][2], isinstance(answered, dict) and answered.get("port") == port
+             and theirs == os.path.normcase(str(store)),
+             f"exit {child.poll()} answer {answered!r} log {lines[-5:]}"))
+        if not checks[-1][1]:
+            return _report(checks, "SMOKE")
+        status, ctype, body = _get(f"{base}/")
+        add((SMOKE_PLAN[1][2], status == 200 and "text/html" in ctype and b'id="root"' in body,
+             f"status {status} type {ctype} bytes {len(body)}"))
+        status, _, body = _get(f"{base}/api/tabs", timeout=60.0)
+        tabs = []
+        try:
+            tabs = json.loads(body) if status == 200 else []
+        except ValueError:
+            tabs = []
+        add((SMOKE_PLAN[2][2], status == 200 and isinstance(tabs, list) and len(tabs) > 0,
+             f"status {status} tabs {len(tabs)} log {lines[-3:]}"))
+        first = tabs[0]["id"] if tabs and isinstance(tabs[0], dict) else "none"
+        status, _, body = _get(f"{base}/api/tab/{first}/render", timeout=120.0)
+        add((SMOKE_PLAN[3][2].replace("one pane", f"pane {first}"), status == 200 and len(body) > 0,
+             f"status {status} bytes {len(body)} log {lines[-3:]}"))
+        status, _, body = _get(f"{base}/api/health")
+        add((SMOKE_PLAN[4][2], status == 200 and b'"ok"' in body, f"status {status}"))
+        waited = time.monotonic() + 5
+        while "token" not in token and time.monotonic() < waited:
+            time.sleep(0.1)
+        status = _post(f"{base}/__shutdown__", {"X-C4X-Shutdown": token.get("token", "")})
+        add((SMOKE_PLAN[5][2], status == 200, f"status {status} token seen {'token' in token}"))
+        try:
+            child.wait(timeout=15)
+            add(("the process exited after the shutdown", True, f"exit {child.returncode}"))
+        except subprocess.TimeoutExpired:
+            add(("the process exited after the shutdown", False, "still running after 15 s"))
+    finally:
+        if child.poll() is None:
+            child.kill()
+    return _report(checks, "SMOKE")
+
+
+def _report(checks: list, label: str) -> int:
+    bad = 0
+    for what, ok, detail in checks:
+        if not ok:
+            bad += 1
+            print(f"  FAIL  {what}  [{detail}]")
+        else:
+            print(f"  ok    {what}")
+    print(f"{label} {'PASS' if not bad else 'FAIL'} ({len(checks)} checks)")
+    return 1 if bad else 0
+
+
+# ---------------------------------------------------------------------------
+def self_test() -> int:
+    """The argv builder, the smoke plan and the helpers. No build, no PyInstaller."""
+    win = pyinstaller_args(Path("X:/r"), platform="win32")
+    nix = pyinstaller_args(Path("/r"), platform="linux")
+    source = Path(__file__).read_text(encoding="utf-8")
+    top_level = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
+    checks = [
+        ("the entry script is the API's own __main__", win[-1].endswith(str(ENTRY))),
+        ("one-dir, never one-file", "--onedir" in win and "--onefile" not in win),
+        ("the page is added from frontend/dist with the Windows separator",
+         any(a.endswith(";frontend/dist") for a in win)),
+        ("and with the posix separator elsewhere", any(a.endswith(":frontend/dist") for a in nix)),
+        ("prices.json rides in under c4x/, where pricing.py looks",
+         any(a.endswith(";c4x") and "prices.json" in a for a in win)),
+        ("dash and plotly are collected whole, because app.py imports them lazily",
+         win.count("--collect-all") == 2 and "dash" in win and "plotly" in win),
+        ("root app.py is a hidden import",
+         "app" in win and win[win.index("app") - 1] == "--hidden-import"),
+        ("every c4x submodule is collected",
+         "c4x" in win and win[win.index("c4x") - 1] == "--collect-submodules"),
+        ("the work and spec paths are under tmp/, which every gate skips",
+         all("tmp" in Path(win[win.index(f) + 1]).parts for f in ("--workpath", "--specpath"))),
+        ("the output lands in dist/", win[win.index("--distpath") + 1].endswith("dist")),
+        ("the optional heavyweights are excluded, pyspark and torch among them",
+         all(name in win and win[win.index(name) - 1] == "--exclude-module"
+             for name in ("pyspark", "torch"))),
+        ("and nothing the dashboard needs is",
+         not any(name in EXCLUDES
+                 for name in ("pandas", "numpy", "plotly", "dash", "fastapi", "uvicorn",
+                              "psutil"))),
+        ("the exe path follows the platform", exe_path(Path("X:/r"), "win32").name == "c4x-api.exe"
+         and exe_path(Path("/r"), "linux").name == "c4x-api"),
+        # The plan pins the routes that prove the bundle: the tab list (dash) and a rendered pane
+        # (plotly). Without these two a smoke could pass on an exe that serves a page over nothing.
+        ("the smoke plan asks for the tab list", any(p[1] == "/api/tabs" for p in SMOKE_PLAN)),
+        ("and renders a pane", any(p[1].endswith("/render") for p in SMOKE_PLAN)),
+        ("and stops the process it started", SMOKE_PLAN[-1][1] == "/__shutdown__"),
+        ("a free port is a port", isinstance(pick_free_port(), int) and pick_free_port() > 0),
+        ("the token is read out of the announce line",
+         token_from('  stop it with: curl -X POST http://127.0.0.1:1/__shutdown__ '
+                    '-H "X-C4X-Shutdown: abc_DEF-1"') == "abc_DEF-1"),
+        ("no token in an ordinary line", token_from("c4x api on http://127.0.0.1:8059") is None),
+        # The gate for the class: a module-level PyInstaller import would fail every CI leg's
+        # self-test, and nothing but this line would say why.
+        ("PyInstaller is not imported at module level (gate can fail)",
+         not any("PyInstaller" in line for line in top_level)),
+        ("and is not loaded by running the self-test", "PyInstaller" not in sys.modules),
+    ]
+    bad = 0
+    for what, ok in checks:
+        if not ok:
+            bad += 1
+            print(f"  FAIL  {what}")
+    print(f"SELF-TEST {'PASS' if not bad else 'FAIL'} ({len(checks)} checks)")
+    return 1 if bad else 0
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--self-test" in argv:
+        return self_test()
+    if "--smoke" in argv:
+        db = ""
+        if "--db" in argv and argv.index("--db") + 1 < len(argv):
+            db = argv[argv.index("--db") + 1]
+        if not db:
+            print("--smoke needs --db <store>: the exe refuses to run without one it can find")
+            return 2
+        port = None
+        if "--port" in argv and argv.index("--port") + 1 < len(argv):
+            port = int(argv[argv.index("--port") + 1])
+        return smoke(db, port)
+    return build()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

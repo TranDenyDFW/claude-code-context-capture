@@ -34,12 +34,17 @@ flowchart LR
     PR --> DB
     DB --> APP & MIR & SEG & WST
     MIR -. constants read at startup .-> APP
+    EH -. SessionStart starts it,<br/>its watchdog stops it .-> APP
 ```
 
 ## What each stage is for
 
 **Capture** writes small things fast and never blocks Claude. The hooks always exit 0: a capture
-tool that can fail a tool call is worse than one that misses a row.
+tool that can fail a tool call is worse than one that misses a row. The one thing a hook starts
+that is not capture is the read stage itself: on SessionStart, `event-hook.mjs` asks port 8059 who
+is there (a bounded probe) and, when nobody is, spawns `tools/dashboard.mjs` detached to start the
+API; the API's own watchdog stops it about a minute after the last Claude process. Nothing slow
+runs in the hook, and nothing it starts is waited for.
 
 **Ingest** is where the transcripts become measurements. `harvest.mjs` stores a file offset per
 transcript and reads only what was appended, so a re-run is cheap and the first run is retroactive,

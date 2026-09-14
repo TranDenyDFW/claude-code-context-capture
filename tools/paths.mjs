@@ -7,7 +7,8 @@
 //
 // Precedence, identical everywhere: --db flag, then C4X_DB, then <root>/data/context.db.
 
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
+import http from 'node:http';
 import { existsSync, mkdirSync, chmodSync, readdirSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
@@ -35,6 +36,78 @@ export function posix(p) {
 
 export function defaultDb(root) {
   return join(root, 'data', 'context.db');
+}
+
+// ---------------------------------------------------------------------------
+// Is the dashboard up, and is it OURS. Three callers ask: the SessionStart hook before it starts
+// one, tools/dashboard.mjs before it spawns one, and `install status` when it reports. They live
+// here because every one of them already imports this module and the hook must not import the
+// helper it spawns (dashboard.mjs imports the hook for `record`, and a cycle between them would
+// leave one side's bindings unset at the moment they are read).
+// ---------------------------------------------------------------------------
+
+/** The port the API serves: C4X_API_PORT, else 8059, which is what c4x/api/__main__.py does. */
+export function portFrom(env = process.env) {
+  const n = Number(env.C4X_API_PORT);
+  return Number.isInteger(n) && n > 0 ? n : 8059;
+}
+
+/**
+ * Whether two spellings name one store file.
+ *
+ * The server answers `/__health__` with `DB_PATH.as_posix()`, resolved by Python; the node side
+ * holds `join(ROOT, 'data', 'context.db')`, with backslashes on Windows and whatever drive-letter
+ * case node was started with. A plain string comparison of those two never matched, so a hook
+ * that asked "is this ours" would have read its own server as a stranger's on every session.
+ * Resolved, forward slashes, and case-folded where the filesystem is.
+ */
+export function sameStorePath(a, b) {
+  if (!a || !b) return false;
+  const norm = (p) => {
+    const s = posix(resolve(String(p)));
+    return process.platform === 'win32' ? s.toLowerCase() : s;
+  };
+  return norm(a) === norm(b);
+}
+
+/**
+ * Ask `/__health__` on a port who is there. Resolves, never rejects, to one of:
+ *   { answered: false, why }                        refused, or nothing within timeoutMs
+ *   { answered: true, ours: false, db: null, why }   something that is not a c4x dashboard
+ *   { answered: true, ours, db, port, storeExists }  a c4x dashboard, ours when db is `store`
+ * Bounded by `timeoutMs` in every path: a hook calls this inside a 10 s budget.
+ */
+export function probeHealth(port, store, { timeoutMs = 1000 } = {}) {
+  return new Promise((done) => {
+    let settled = false;
+    const finish = (answer) => { if (!settled) { settled = true; done(answer); } };
+    const timer = setTimeout(() => finish({ answered: false, why: `no answer within ${timeoutMs} ms` }), timeoutMs);
+    let req;
+    try {
+      req = http.get({ host: '127.0.0.1', port, path: '/__health__', timeout: timeoutMs }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { if (body.length < 4096) body += chunk; });
+        res.on('end', () => {
+          clearTimeout(timer);
+          if (res.statusCode !== 200) return finish({ answered: true, ours: false, db: null, why: `status ${res.statusCode}` });
+          let parsed = null;
+          try { parsed = JSON.parse(body); } catch { /* not JSON: not a dashboard */ }
+          if (!parsed || parsed.ok !== true || typeof parsed.db !== 'string') {
+            return finish({ answered: true, ours: false, db: null, why: 'answered, but not as a c4x dashboard' });
+          }
+          finish({ answered: true, ours: sameStorePath(parsed.db, store), db: parsed.db,
+                   port: parsed.port ?? null, storeExists: parsed.store_exists ?? null });
+        });
+        res.on('error', (e) => { clearTimeout(timer); finish({ answered: false, why: e.message }); });
+      });
+      req.on('timeout', () => { req.destroy(); });
+      req.on('error', (e) => { clearTimeout(timer); finish({ answered: false, why: e.code || e.message }); });
+    } catch (e) {
+      clearTimeout(timer);
+      finish({ answered: false, why: e.message });
+    }
+  });
 }
 
 // Directories this tool creates for its own data, made PRIVATE TO THE USER who created them.
@@ -282,7 +355,7 @@ export function sourceFiles(root, dirs = ['tools', 'hooks']) {
 // directory hardening and the Windows argument quoting, and an exemption that no longer describes
 // its subject is how a gate goes quiet. The exemption is gone and these run with the rest.
 // ---------------------------------------------------------------------------
-function selfTest() {
+async function selfTest() {
   const checks = [];
   const add = (what, ok, detail = '') => checks.push([what, ok, detail]);
 
@@ -325,6 +398,51 @@ function selfTest() {
   add('rootFrom strips the leading slash from a Windows file URL',
     /^[A-Za-z]:/.test(slash(rootFrom('file:///C:/a/b/c.mjs'))));
 
+  // The port, and the store comparison the hook's "is this ours" rests on.
+  add('the port is 8059 unless C4X_API_PORT says otherwise',
+    portFrom({}) === 8059 && portFrom({ C4X_API_PORT: '8061' }) === 8061);
+  add('a malformed C4X_API_PORT falls back rather than probing port NaN',
+    portFrom({ C4X_API_PORT: 'abc' }) === 8059 && portFrom({ C4X_API_PORT: '-1' }) === 8059);
+  add('two spellings of one relative path are the same store',
+    sameStorePath('tmp/x.db', './tmp/../tmp/x.db'));
+  add('two different files are not (gate can fail)', !sameStorePath('tmp/x.db', 'tmp/y.db'));
+  add('an empty side is never a match', !sameStorePath('', 'tmp/x.db') && !sameStorePath(null, null));
+  if (process.platform === 'win32') {
+    // The exact pair that never matched: Python's as_posix() against node's join().
+    add('on Windows, backslashes and drive-letter case do not make two stores',
+      sameStorePath(['P:', 'x', 'data', 'context.db'].join(String.fromCharCode(92)), 'p:/x/data/context.db'));
+  }
+
+  // The probe, against real sockets: the four answers the hook and the helper act on.
+  {
+    const serve = (body, status = 200) => new Promise((ready) => {
+      const server = http.createServer((req, res) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(body); });
+      server.listen(0, '127.0.0.1', () => ready(server));
+    });
+    const store = join(rootFrom(import.meta.url), 'tmp', 'probe-store.db');
+    const ours = await serve(JSON.stringify({ ok: true, db: posix(store), port: 1, store_exists: false }));
+    const theirs = await serve(JSON.stringify({ ok: true, db: 'Q:/elsewhere/context.db' }));
+    const junk = await serve('<html>not a dashboard</html>');
+    const a = await probeHealth(ours.address().port, store);
+    add('our own server answers ours, with the store spelled the other way',
+      a.answered === true && a.ours === true && a.storeExists === false, JSON.stringify(a));
+    const b = await probeHealth(theirs.address().port, store);
+    add('another store answers as not ours and names itself', b.answered === true && b.ours === false && b.db === 'Q:/elsewhere/context.db');
+    const c = await probeHealth(junk.address().port, store);
+    add('a listener that is not a dashboard is answered, not ours, no db', c.answered === true && c.ours === false && c.db === null);
+    for (const s of [ours, theirs, junk]) s.close();
+    const closed = await new Promise((ready) => { const s = http.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => ready(p)); }); });
+    const d = await probeHealth(closed, store);
+    add('a closed port is unanswered (gate can fail)', d.answered === false);
+    const { createServer } = await import('node:net');
+    const silent = createServer(() => { /* accept and say nothing */ });
+    await new Promise((ready) => silent.listen(0, '127.0.0.1', ready));
+    const t0 = Date.now();
+    const e = await probeHealth(silent.address().port, store, { timeoutMs: 300 });
+    add('a listener that never answers is unanswered within the timeout', e.answered === false && Date.now() - t0 < 2000, `${Date.now() - t0} ms`);
+    silent.close();
+  }
+
   // ensureStoreDir returns its directory and is idempotent; the ACL half is platform behaviour and
   // is exercised where it can be observed, not asserted here.
   const scratch = join(rootFrom(import.meta.url), 'tmp', `paths-selftest-${process.pid}`);
@@ -348,4 +466,4 @@ const IS_ENTRY = (() => {
     return process.argv[1] ? pathToFileURL(process.argv[1]).href === import.meta.url : false;
   } catch { return false; }
 })();
-if (IS_ENTRY && process.argv.includes('--self-test')) process.exit(selfTest());
+if (IS_ENTRY && process.argv.includes('--self-test')) process.exit(await selfTest());

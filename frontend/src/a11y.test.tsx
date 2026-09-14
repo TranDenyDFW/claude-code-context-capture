@@ -20,15 +20,17 @@
  * accurate, or whether the page is usable with a screen reader. A pass means no rule was broken.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { findByRole, render, screen } from '@testing-library/react'
 import axe from 'axe-core'
 import { Pane } from './components/Pane'
 import { Palette } from './components/Palette'
 import { CompareArms } from './components/CompareArms'
 import { ProjectMoves } from './components/ProjectMoves'
+import { AdoptSessions } from './components/AdoptSessions'
 import { Sidebar } from './components/Sidebar'
 import { Inspector } from './components/Inspector'
 import { TablePage } from './components/TablePage'
+import { api } from './api'
 import type { TabPayload } from './api'
 
 vi.mock('./components/Plot', () => ({ Plot: () => <div data-testid="chart" /> }))
@@ -209,6 +211,24 @@ describe('axe finds no WCAG A or AA violation in', () => {
     )
     container.querySelector('button')?.click()
     expect(await violations(container.ownerDocument.body)).toEqual([])
+  })
+
+  // The adopt control: a disclosure button, a per-folder checkbox list, two link-styled buttons
+  // and the CLI checkbox. Every checkbox has to carry a name, which is what the label wrapping
+  // buys and what this proves.
+  it('the adopt control, opened', async () => {
+    vi.spyOn(api.adopt, 'state').mockResolvedValue({
+      supported: true, why_not: '', pair: { account: 'a', org: 'o', root: 'R', source: 's' },
+      physical: 'R/a/o', candidates: 2, cli_candidates: 1, other_account: 1, deleted_markers: 3,
+      app_running: false, sharing: 'current',
+      groups: [{ cwd: `project::${PROJECT}`, project: 'SecDb', count: 2,
+                 newest: '2026-08-03T12:01:00Z', sessions: [] }],
+    })
+    const { container } = render(<AdoptSessions writesEnabled onChanged={() => {}} />)
+    const opener = await findByRole(container, 'button', { name: /no record of/ })
+    opener.click()
+    await findByRole(container, 'checkbox', { name: /SecDb/ })
+    expect(await violations(container)).toEqual([])
   })
 })
 

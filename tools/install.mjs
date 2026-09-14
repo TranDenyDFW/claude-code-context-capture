@@ -16,6 +16,7 @@
 //   node install.mjs install --adopt <dir>  carry an older install's store forward first
 //   node install.mjs uninstall [--purge]    remove only our entries; --purge also drops the store
 //   node install.mjs install --evict-missing  also remove c4x entries whose script file is gone
+//   node install.mjs install --no-dashboard  do not start the dashboard with Claude (--dashboard undoes it)
 //   node install.mjs reset --data|--settings|--all
 //   node install.mjs --self-test
 //
@@ -51,7 +52,7 @@ const mib = (n) => (n >= 1 << 30 ? `${(n / (1 << 30)).toFixed(1)} GB` : `${Math.
 
 // UserPromptSubmit is deliberately matcher-less: the event does not support a matcher at all, and
 // supplying one is the kind of silently-ignored key this tool exists to catch.
-const WIRING = [
+export const WIRING = [
   { event: 'SessionStart', script: 'hooks/event-hook.mjs', timeout: 10, matcher: null },
   { event: 'SessionEnd', script: 'hooks/event-hook.mjs', timeout: 10, matcher: null },
   { event: 'UserPromptSubmit', script: 'hooks/event-hook.mjs', timeout: 10, matcher: null },
@@ -415,7 +416,20 @@ export const receiptDescribes = (receipt, settingsPath) => {
   return posix(receipt.settings).toLowerCase() === posix(settingsPath).toLowerCase();
 };
 
-function saveReceipt(extra) {
+/**
+ * The receipt fields that are CHOICES rather than facts about this install, carried forward
+ * across re-runs. `saveReceipt` rebuilds the file from scratch, so a field it does not carry is a
+ * field a plain `install` or `reset` silently drops: the README promises a re-run changes nothing,
+ * and a dashboard opt-out that came back on that promise would be exactly the surprise it forbids.
+ */
+export function receiptFields(argv = [], prior = null) {
+  let dashboard = prior?.dashboard ?? true;
+  if (argv.includes('--no-dashboard')) dashboard = false;
+  if (argv.includes('--dashboard')) dashboard = true;
+  return { dashboard, dashboardLauncher: prior?.dashboardLauncher ?? null };
+}
+
+function saveReceipt(extra, argv = []) {
   ensureStoreDir(join(ROOT, 'data'), { force: true });
   const prior = loadReceipt();
   writeJsonAtomic(RECEIPT, {
@@ -423,8 +437,41 @@ function saveReceipt(extra) {
     installedAt: new Date().toISOString(),
     priorStatusLine: prior?.priorStatusLine ?? null,
     wiring: WIRING.map((w) => ({ ...w, command: cmdFor(ROOT, w.script) })),
+    ...receiptFields(argv, prior),
     ...extra,
   });
+}
+
+// ---------------------------------------------------------------- the dashboard
+
+// Through a child process, never an import: tools/dashboard.mjs imports the hook for `record`,
+// and the hook imports this file, so importing the helper here would close a cycle whose bindings
+// are unset at the moment they are read. Each call is bounded; `status` is a script gate.
+function dashboardJson(verb, args = [], timeout = 4000) {
+  const r = spawnSync(process.execPath, [join(ROOT, 'tools', 'dashboard.mjs'), verb, '--json', ...args],
+                      { encoding: 'utf8', cwd: ROOT, timeout, windowsHide: true });
+  try { return JSON.parse(String(r.stdout).trim().split(String.fromCharCode(10)).pop()); } catch { return null; }
+}
+
+/**
+ * The "dashboard" line of `status`. Pure, like captureLine, so its states are checked with fixed
+ * inputs rather than a live port.
+ */
+export function dashboardLine({ probe = null, receipt = null, env = {} } = {}) {
+  if (env.C4X_NO_DASHBOARD === '1') return 'disabled (C4X_NO_DASHBOARD=1)';
+  if (receipt && receipt.dashboard === false) return 'disabled (install --no-dashboard; `install --dashboard` turns it back on)';
+  if (probe?.answered && probe.ours) {
+    const missing = probe.storeExists === false ? ', but the store it names is missing' : '';
+    const stop = probe.token
+      ? `; stop it with: curl -X POST http://127.0.0.1:${probe.port}/__shutdown__ -H "X-C4X-Shutdown: ${probe.token}"`
+      : '';
+    return `answering on ${probe.port} for ${probe.db}${missing}${stop}`;
+  }
+  if (probe?.answered) return `port ${probe.port} held by ${probe.db || 'something that is not a c4x dashboard'}`;
+  const l = receipt?.dashboardLauncher;
+  const launcher = l?.launcher ? `${l.launcher.cmd.join(' ')} (${l.launcher.kind})`
+    : l ? `none: ${l.why}` : 'resolved at the next Claude session';
+  return `not running (launcher: ${launcher}); starts with the next Claude session`;
 }
 
 // ---------------------------------------------------------------- commands
@@ -573,6 +620,9 @@ function cmdStatus() {
   console.log(`status line  : ${live.samples === null ? 'no samples file' : `${live.samples.toLocaleString()} genuine samples, last ${ago(live.lastSample)}`}`);
   console.log(`self-heal    : ${live.lastHeal ? `last rewrote ${posix(SETTINGS)} ${ago(live.lastHeal)}`
     : 'never rewrote your settings'}${NO_SELF_HEAL_HINT}`);
+  // IS THE PAGE UP, and is it ours. The hook starts it with Claude and the server stops itself
+  // about a minute after the last Claude process; this line is how anyone finds out which it is.
+  console.log(`dashboard    : ${dashboardLine({ probe: dashboardJson('probe'), receipt, env: process.env })}`);
   if (live.events > 0 && live.samples === 0) {
     findings.push({ level: 'warn', event: 'statusLine',
                     why: `never fired, while the hooks captured ${live.events.toLocaleString()} `
@@ -690,6 +740,11 @@ function cmdInstall(argv) {
 
   if (!changes.length && !adopted && !(evict && gone.length)) {
     console.log('no changes: already converged');
+    // A choice is not a change to the wiring, and it still has to land.
+    if (!dry && (argv.includes('--no-dashboard') || argv.includes('--dashboard'))) {
+      saveReceipt({}, argv);
+      console.log(`dashboard autostart: ${loadReceipt()?.dashboard === false ? 'off' : 'on'}`);
+    }
     firstHarvest(argv, dry);
     return 0;
   }
@@ -703,7 +758,22 @@ function cmdInstall(argv) {
   // statusLine that arrived in between is still the one we record as the prior value.
   const priorStatusLine = ownsCommand(before?.statusLine?.command, ROOT) ? undefined : (before?.statusLine ?? null);
   if (!rewire) ensureStoreDir(join(ROOT, 'data', 'raw'), { force: true });
-  saveReceipt({ settingsBackup: backup ? posix(backup) : null, ...(priorStatusLine === undefined ? {} : { priorStatusLine }) });
+  // WHICH LAUNCHER, decided now rather than in the hook: this is the one place that may take its
+  // time, and a python probe costs seconds. Written into the receipt so the hook reads it.
+  const resolved = dashboardJson('resolve', ['--fresh'], 60_000);
+  const dashboardLauncher = resolved
+    ? { launcher: resolved.launcher ?? null, why: resolved.why ?? '', resolvedAt: new Date().toISOString() }
+    : null;
+  saveReceipt({ settingsBackup: backup ? posix(backup) : null,
+                ...(priorStatusLine === undefined ? {} : { priorStatusLine }),
+                ...(dashboardLauncher ? { dashboardLauncher } : {}) }, argv);
+  {
+    const r = loadReceipt();
+    const l = r?.dashboardLauncher;
+    console.log(`dashboard    : ${r?.dashboard === false ? 'off (--no-dashboard)'
+      : l?.launcher ? `starts with Claude via ${l.launcher.cmd.join(' ')} (${l.launcher.kind})`
+      : `cannot start: ${l?.why ?? 'launcher not resolved'}`}`);
+  }
   console.log(`wrote ${posix(SETTINGS)}${backup ? ` (backup: ${posix(backup)})` : ''}`);
   // Measured, not assumed: the first hook fired nine seconds after this write, in a session that
   // had already been running for twenty hours. The only thing a running session cannot get is an
@@ -760,6 +830,15 @@ function cmdUninstall(argv) {
   }
 
   if (dry) { console.log('--dry-run: nothing written'); return 0; }
+  // A server the hook started would otherwise outlive the install that started it, holding the
+  // store open for up to a minute after the last Claude process, or for as long as one stays open.
+  {
+    const up = dashboardJson('probe');
+    if (up?.answered && up.ours) {
+      const r = dashboardJson('stop');
+      console.log(`dashboard    : ${r?.stopped ? 'stopped' : `still running: ${r?.why ?? 'could not ask it to stop'}`}`);
+    }
+  }
   if (changes.length) { backupSettings(); writeSettingsAtomic((s) => removeWiring(s, ROOT, loadReceipt()).next); }
   if (purge) {
     for (const f of purgeTargets(ROOT, db)) rmSync(f, { recursive: true, force: true });
@@ -808,7 +887,7 @@ function cmdReset(argv) {
     const cleared = removeWiring(settings, ROOT, loadReceipt()).next;
     const { changes } = applyWiring(cleared, ROOT);
     for (const c of changes) console.log(`${dry ? 'would ' : ''}${c}`);
-    if (!dry) { backupSettings(); writeSettingsAtomic((s) => applyWiring(removeWiring(s, ROOT, loadReceipt()).next, ROOT).next); saveReceipt({}); }
+    if (!dry) { backupSettings(); writeSettingsAtomic((s) => applyWiring(removeWiring(s, ROOT, loadReceipt()).next, ROOT).next); saveReceipt({}, argv); }
   }
   if (dry) console.log('--dry-run: nothing written');
   return 0;
@@ -1107,6 +1186,37 @@ function selfTest() {
     add('and a log older than the last harvest adds nothing (gate can fail)',
       captureLine({ events: 5, lastEvent: '2026-01-02T00:00:00Z', rawPending: true,
                     lastRawEvent: '2026-01-01T00:00:00Z' }, at) === '5 events, last a while ago');
+  }
+
+  // The dashboard choice survives a re-run, which is what a choice recorded in a file rebuilt
+  // from scratch was not going to do on its own.
+  add('a fresh install starts the dashboard by default', receiptFields([], null).dashboard === true);
+  add('--no-dashboard records the opt-out', receiptFields(['--no-dashboard'], null).dashboard === false);
+  add('a re-install without the flag KEEPS the opt-out (gate can fail)',
+    receiptFields([], { dashboard: false }).dashboard === false);
+  add('--dashboard lifts it', receiptFields(['--dashboard'], { dashboard: false }).dashboard === true);
+  add('the resolved launcher is carried forward too',
+    receiptFields([], { dashboardLauncher: { why: 'x' } }).dashboardLauncher?.why === 'x');
+
+  // The status line's states, with fixed inputs.
+  {
+    const up = { answered: true, ours: true, port: 8059, db: 'P:/c4x/data/context.db', storeExists: true, token: 'tok' };
+    add('a live server of ours is reported with how to stop it',
+      dashboardLine({ probe: up }) === 'answering on 8059 for P:/c4x/data/context.db; stop it with: '
+        + 'curl -X POST http://127.0.0.1:8059/__shutdown__ -H "X-C4X-Shutdown: tok"');
+    add('a live server whose store is missing says so',
+      dashboardLine({ probe: { ...up, storeExists: false, token: null } }).includes('the store it names is missing'));
+    add('another holder is named',
+      dashboardLine({ probe: { answered: true, ours: false, port: 8059, db: 'E:/x.db' } }) === 'port 8059 held by E:/x.db');
+    add('not running names the launcher the receipt resolved',
+      dashboardLine({ probe: { answered: false }, receipt: { dashboardLauncher: { launcher: { cmd: ['py', '-3'], kind: 'python' } } } })
+        === 'not running (launcher: py -3 (python)); starts with the next Claude session');
+    add('not running with no launcher says why',
+      dashboardLine({ probe: { answered: false }, receipt: { dashboardLauncher: { launcher: null, why: 'no python' } } }).includes('none: no python'));
+    add('the env opt-out wins over a live server (gate can fail)',
+      dashboardLine({ probe: up, env: { C4X_NO_DASHBOARD: '1' } }).startsWith('disabled'));
+    add('the receipt opt-out is reported with the way back',
+      dashboardLine({ probe: { answered: false }, receipt: { dashboard: false } }).includes('install --dashboard'));
   }
 
   let bad = 0;

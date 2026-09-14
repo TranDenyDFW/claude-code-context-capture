@@ -512,6 +512,61 @@ export interface SharingReport {
   state: AccountsState
 }
 
+/** One chat the desktop app has no record of. */
+export interface AdoptSession {
+  session_id: string
+  title: string | null
+  first_ts: string
+  last_ts: string
+  turns: number
+  model: string
+  cli: boolean
+  cwd: string
+}
+
+/** The chats without a record under one working directory, newest first. */
+export interface AdoptGroup {
+  cwd: string
+  project: string
+  count: number
+  newest: string
+  sessions: AdoptSession[]
+}
+
+/**
+ * What `/api/adopt` reports: what could be adopted, and where a record would land.
+ *
+ * `deleted_markers` counts the `deleted_<uuid>` files the app leaves when a chat is deleted on
+ * purpose; those chats look like reinstall orphans to the rule, so the page says the number.
+ */
+export interface AdoptState {
+  supported: boolean
+  why_not: string
+  pair: { account: string; org: string; root: string; source: string } | null
+  physical: string | null
+  groups: AdoptGroup[]
+  candidates: number
+  cli_candidates: number
+  other_account: number
+  deleted_markers: number
+  app_running: boolean
+  sharing: 'all' | 'current' | null
+}
+
+/** What a POST to `/api/adopt` answers. `note` is set when the bytes live in a shared directory. */
+export interface AdoptReport {
+  supported: boolean
+  why_not: string
+  pair: AdoptState['pair']
+  physical: string | null
+  note: string | null
+  written: { session_id: string; path: string; title: string | null }[]
+  skipped: { session_id: string; why: string }[]
+  selected: number
+  restart_required: boolean
+  dry_run: boolean
+}
+
 /** One plan a chat proposed. The whole text lives behind `/api/plan/<tool_use_id>`. */
 export interface ChatPlan {
   tool_use_id: string
@@ -704,6 +759,17 @@ export const api = {
     verify: () =>
       get<{ ok: boolean; intended: string; problems: string[] }>('/api/accounts/verify'),
     share: (mode: 'all' | 'current') => post<SharingReport>('/api/accounts/sharing', { mode }),
+  },
+
+  /**
+   * The chats the desktop app has no record of, and the write that gives it one per chosen
+   * folder. New files only, into the signed-in account's directory; Claude reads them on restart.
+   */
+  adopt: {
+    state: (includeCli = false) =>
+      get<AdoptState>('/api/adopt', { include_cli: includeCli ? 'true' : undefined }),
+    run: (body: { cwds: string[]; include_cli: boolean; dry_run: boolean }) =>
+      post<AdoptReport>('/api/adopt', body),
   },
 
   project: {

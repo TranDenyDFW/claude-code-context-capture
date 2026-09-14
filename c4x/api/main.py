@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+from c4x.paths import bundle_root, install_root
+
+# The install (store, node tools, tmp/), which is not this file's directory once the API is frozen
+# into an exe. The built page comes from the BUNDLE, resolved where it is mounted below.
+ROOT = install_root()
 
 # THE API IS A READER. The dashboard is not: its refresh tick runs an incremental harvest, so
 # pointing two of those at one store means two writers. This is set before `app` is imported,
@@ -1475,8 +1479,11 @@ def shutdown(request: Request, reason: str = Query("user hit /__shutdown__"),
 def legacy_health():
     """The dashboard's health shape, kept so anything watching for it still works."""
     from c4x import store
+    # `store_exists`, so a hook or `install status` can tell "answering" from "answering for a
+    # store that is not there", which an exe run from the wrong place would otherwise hide.
     return {"ok": True, "db": store.DB_PATH.as_posix(),
-            "port": int(os.environ.get("C4X_API_PORT", 8059))}
+            "port": int(os.environ.get("C4X_API_PORT", 8059)),
+            "store_exists": store.DB_PATH.exists()}
 
 
 class _Predict(BaseModel):
@@ -1724,6 +1731,41 @@ def accounts_verify():
     return accounts.verify()
 
 
+@api.get("/api/adopt")
+def adopt_state(include_cli: bool = Query(False)):
+    """Sessions the desktop app has no record for, grouped by folder, and where a record would land.
+
+    Read only. The count can be large (923 of 1,027 desktop sessions on the machine this was
+    written on), which is why the page groups them and preselects nothing.
+    """
+    from c4x import adopt
+    return adopt.state(include_cli=include_cli)
+
+
+@api.post("/api/adopt")
+def adopt_run(body: dict):
+    """`{"cwds": [...], "include_cli": false, "dry_run": false}`: write a record per candidate
+    under the chosen folders, into the signed-in account's pair and nowhere else.
+
+    400 with nothing selected, 409 when sharing is on but the signed-in pair is not part of it
+    (writing there would start a second list), and the app may be open: new files only.
+    """
+    from c4x import adopt
+    _require_writes()
+    body = body or {}
+    cwds = body.get("cwds")
+    if not isinstance(cwds, list) or not cwds:
+        raise HTTPException(status_code=400,
+                            detail={"error": "nothing selected: pass the folders to adopt as cwds"})
+    try:
+        return adopt.adopt(cwds, include_cli=bool(body.get("include_cli")),
+                           dry_run=bool(body.get("dry_run")))
+    except adopt.SharingMismatch as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
 @api.post("/api/project/include")
 def project_include(body: dict):
     """Lift an exclusion so harvest picks the project up again."""
@@ -1835,7 +1877,9 @@ async def _no_cache_shell(request: Request, call_next):
     return response
 
 
-_dist = ROOT / "frontend" / "dist"
+# FROM THE BUNDLE, not the install: the exe packs the built page beside itself and the checkout it
+# runs inside may hold a newer or older one. Not frozen, both are the repo.
+_dist = bundle_root() / "frontend" / "dist"
 
 if _dist.is_dir():
 

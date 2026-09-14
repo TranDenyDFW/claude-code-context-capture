@@ -1,0 +1,97 @@
+name: build-exe
+
+# Builds the dashboard into an executable and proves the build serves a page, on Windows, the
+# platform the exe is for. It replaces Python on a machine that has node and no Python; the hooks
+# and the harvester stay node, and the exe runs from inside a checkout (c4x/paths.py).
+#
+# NOT A MERGE GATE. Branch protection requires `suite` from tests.yml alone. A PyInstaller build
+# of pandas, plotly and dash takes minutes and produces a few hundred megabytes, and doing that on
+# every pull request to gate a change to a docstring would teach people to ignore the job. It runs
+# where it can be wrong: on a change to the Python package, to the build tool, to the pins, or to
+# the built page, on every push to main, and on a tag, where it also attaches the zip to the
+# release so a machine without Python can fetch it.
+#
+# The smoke is the proof, not the build log. PyInstaller reports success when it wrote an exe; an
+# exe missing half of plotly still starts. tools/build_exe.py --smoke runs the exe against the
+# fixture store and asks for the shell, the tab list (dash) and a rendered pane (plotly).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'c4x/**'
+      - 'app.py'
+      - 'tools/build_exe.py'
+      - 'requirements*.txt'
+      - 'constraints-ci.txt'
+      - 'frontend/dist/**'
+      - '.github/workflows/build-exe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Node 24 for the fixture store the smoke runs against (tools/make_fixture.mjs uses the
+      # built-in node:sqlite), and because the exe expects a checkout with node beside it.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # The runtime set under the same pins the test legs use, plus the build set, which pins its
+      # own graph (see requirements-build.txt for why it is outside the union).
+      - name: Install Python dependencies
+        run: |
+          pip install -c constraints-ci.txt -r requirements.txt -r requirements-build.txt
+          pip check
+
+      - name: Build the fixture store
+        run: |
+          mkdir -p tmp
+          node tools/make_fixture.mjs --out tmp/fixture.db --force
+
+      - name: The build tool's own checks
+        run: python tools/build_exe.py --self-test
+
+      - name: Build the executable
+        run: python tools/build_exe.py
+
+      - name: Run the executable against the fixture
+        run: python tools/build_exe.py --smoke --db tmp/fixture.db
+
+      - name: Say what was built
+        run: cat dist/c4x-api/BUILD.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: c4x-api-windows
+          path: dist/c4x-api/
+          if-no-files-found: error
+          retention-days: 30
+
+      # On a tag, the same directory zipped onto the release. A machine without Python unpacks it
+      # into <checkout>/dist/c4x-api/ and the SessionStart hook finds it there.
+      - name: Zip the build for the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          powershell -NoProfile -Command "Compress-Archive -Path dist/c4x-api -DestinationPath c4x-api-windows.zip"
+          ls -l c4x-api-windows.zip
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: c4x-api-windows.zip

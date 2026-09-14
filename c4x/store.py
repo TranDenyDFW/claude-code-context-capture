@@ -24,8 +24,11 @@ from typing import Any, TypedDict
 import pandas as pd
 
 from c4x.labels import distinct_short_paths, is_folderless, plural, titled_path
+from c4x.paths import install_root
 
-ROOT = Path(__file__).resolve().parent.parent
+# The install, not this file's directory: they differ once the API is frozen into an exe, and
+# this is the root the store and the node tools are found under. See c4x/paths.py.
+ROOT = install_root()
 # C4X_DB, the same override every node tool honours through paths.mjs. That module exists because
 # some tools read the variable and others hardcoded the default, so `C4X_DB=copy.db` silently read
 # one store and wrote another. The Python side never got the same treatment and ignored the
