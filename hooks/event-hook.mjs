@@ -23,12 +23,12 @@
 //   node event-hook.mjs --self-test
 
 import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, existsSync, renameSync } from 'node:fs';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { ensureStoreDir } from '../tools/paths.mjs';
+import { ensureStoreDir, defaultDb, portFrom, probeHealth } from '../tools/paths.mjs';
 import { pathToFileURL } from 'node:url';
-import { audit, applyWiring, backupSettings } from '../tools/install.mjs';
+import { audit, applyWiring, backupSettings, WIRING } from '../tools/install.mjs';
 
 const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 const DEFAULT_OUT = join(ROOT, 'data', 'raw', 'events.ndjson');
@@ -42,6 +42,10 @@ const IS_PROBE = Boolean(OUT_OVERRIDE);
 // config manager, a deliberate divergence - needs a way to say no that is not uninstalling capture
 // altogether. Set C4X_NO_SELF_HEAL=1 and the wiring is left exactly as found.
 const NO_SELF_HEAL = process.env.C4X_NO_SELF_HEAL === '1';
+// The same shape of opt-out for the dashboard the SessionStart hook starts. `install
+// --no-dashboard` records the same choice in the receipt, for people who would rather not set a
+// variable in every shell.
+const NO_DASHBOARD = process.env.C4X_NO_DASHBOARD === '1';
 
 // One event is a lifecycle marker, not a transcript. Anything past this is the payload carrying
 // content we already have in the transcript, so it is cut rather than duplicated into this file.
@@ -246,7 +250,105 @@ function readStdin() {
   try { return readFileSync(0, 'utf8'); } catch { return ''; }
 }
 
-function selfTest() {
+// ---------------------------------------------------------------------------
+// Starting the dashboard with Claude.
+//
+// The page used to be started by hand and nothing ever stopped it. Now SessionStart asks the port
+// who is there and, when nobody is, spawns tools/dashboard.mjs DETACHED to start the server; the
+// server carries its own watchdog and exits about a minute after the last Claude process. Nothing
+// slow runs here: the probe is bounded, the spawn returns at once, and the hook's ten-second
+// budget (WIRING, install.mjs) is never at risk. Measured before this was written: one python
+// import of the dashboard's modules costs 3.2 to 3.6 s on this machine, warm.
+// ---------------------------------------------------------------------------
+export const DASHBOARD_PROBE_MS = 1000;
+// The whole branch, probe included, ends by this deadline whatever the socket does.
+export const DASHBOARD_BUDGET_MS = 1500;
+
+function readReceipt() {
+  try { return JSON.parse(readFileSync(RECEIPT, 'utf8')); } catch { return null; }
+}
+
+/**
+ * What to do about the dashboard on SessionStart, from what the port answered. Pure.
+ *   skip   nothing to do (opted out, or our own server is already answering)
+ *   held   another store's dashboard, or something else, holds the port: record it, never fight
+ *   spawn  nothing answered: start one
+ */
+export function dashboardDecision({ answer, noDashboard = false, receipt = null } = {}) {
+  if (noDashboard) return { act: 'skip', why: 'C4X_NO_DASHBOARD=1' };
+  if (receipt && receipt.dashboard === false) return { act: 'skip', why: 'install --no-dashboard' };
+  if (answer?.answered && answer.ours) return { act: 'skip', why: 'already answering' };
+  if (answer?.answered) return { act: 'held', why: answer.db || 'something that is not a c4x dashboard' };
+  return { act: 'spawn', why: answer?.why || 'nothing answered' };
+}
+
+function spawnHelper(port) {
+  spawn(process.execPath, [join(ROOT, 'tools', 'dashboard.mjs'), 'launch', '--port', String(port)],
+        { detached: true, stdio: 'ignore', windowsHide: true, cwd: ROOT }).unref();
+}
+
+/**
+ * Probe, decide, act. Bounded by DASHBOARD_BUDGET_MS in every path: the probe is raced against a
+ * timer, so a socket that never answers cannot hold the hook past the budget, and the timer is
+ * cleared the moment the probe answers, so it cannot hold the process open either.
+ */
+export async function ensureDashboard(io = {}) {
+  const { port = portFrom(), store = process.env.C4X_DB || defaultDb(ROOT),
+          noDashboard = NO_DASHBOARD, receipt = readReceipt(), probe = probeHealth,
+          spawnIt = spawnHelper, log = record, budgetMs = DASHBOARD_BUDGET_MS } = io;
+  // An opt-out costs nothing: decided before any socket is opened.
+  const early = dashboardDecision({ answer: null, noDashboard, receipt });
+  if (early.act === 'skip') return early;
+  let timer = null;
+  const deadline = new Promise((r) => {
+    // REFERENCED, not unref'd: with nothing else on the loop node exits before an unref'd timer
+    // fires, and the race would end by the process ending. It is cleared the moment the probe wins.
+    timer = setTimeout(() => r({ answered: false, why: 'probe budget exhausted' }), budgetMs);
+  });
+  const answer = await Promise.race([probe(port, store, { timeoutMs: DASHBOARD_PROBE_MS }), deadline]);
+  clearTimeout(timer);
+  const decision = dashboardDecision({ answer, noDashboard, receipt });
+  if (decision.act === 'held') {
+    log({ hook_event_name: 'SessionStart', reason: `c4x dashboard: ${port} held by ${decision.why}` });
+  } else if (decision.act === 'spawn') {
+    spawnIt(port);
+  }
+  return decision;
+}
+
+/**
+ * Everything a recorded event triggers, in order: the self-heal, the dashboard, the harvest. Each
+ * in its own try, so one failing never stops the next. Exported and driven by the self-test with
+ * every side effect stubbed, which is the only way the ORDER is testable: the entry block below
+ * awaits this and only then exits, and an exit that ran while the probe was still pending is the
+ * defect that would make the dashboard never start while every check stayed green.
+ */
+export async function dispatch(payload, io = {}) {
+  const { heal = applyHeal, ensure = ensureDashboard, harvest = runHarvest,
+          noSelfHeal = NO_SELF_HEAL, due = harvestDue, log = record,
+          warn = (m) => process.stderr.write(m) } = io;
+  const event = payload?.hook_event_name;
+  if (event === 'SessionStart' && !noSelfHeal) {
+    try {
+      const repaired = heal();
+      // Recorded through the normal path so the rewrite lands in hook_events.reason. A tool
+      // that edits your settings without being asked should at minimum say that it did.
+      if (repaired) log({ hook_event_name: 'SessionStart', reason: `c4x self-heal: ${repaired}` });
+    } catch (e) {
+      try { warn(`event-hook: self-heal skipped: ${e.message}` + String.fromCharCode(10)); } catch { /* nothing left */ }
+    }
+  }
+  if (event === 'SessionStart') {
+    try { await ensure(); } catch (e) {
+      try { warn(`event-hook: dashboard skipped: ${e.message}` + String.fromCharCode(10)); } catch { /* nothing left */ }
+    }
+  }
+  if (shouldHarvestAfter(event) && due()) {
+    try { harvest(harvestModeFor(event)); } catch { /* a stale store beats a hook that errors in the session */ }
+  }
+}
+
+async function selfTest() {
   const checks = [];
   const add = (n, ok, d = '') => checks.push([n, ok, d]);
 
@@ -384,6 +486,80 @@ function selfTest() {
       JSON.stringify(next.hooks.Stop).includes('somebody/else/hook.mjs'));
   }
 
+  // ---- the dashboard, on SessionStart -----------------------------------------------------
+  {
+    const d = dashboardDecision;
+    add('an env opt-out skips before any socket', d({ answer: null, noDashboard: true }).act === 'skip');
+    add('a receipt opt-out skips too', d({ answer: null, receipt: { dashboard: false } }).act === 'skip');
+    add('a receipt without the field does not opt out', d({ answer: { answered: false }, receipt: {} }).act === 'spawn');
+    add('our own server answering: skip', d({ answer: { answered: true, ours: true } }).act === 'skip');
+    add('another store on the port: held, and the holder is named (gate can fail)',
+      d({ answer: { answered: true, ours: false, db: 'E:/x.db' } }).act === 'held'
+        && d({ answer: { answered: true, ours: false, db: 'E:/x.db' } }).why === 'E:/x.db');
+    add('nothing answering: spawn', d({ answer: { answered: false, why: 'ECONNREFUSED' } }).act === 'spawn');
+
+    const drive = async (answer, extra = {}) => {
+      const spawned = []; const logged = []; let probed = 0;
+      const out = await ensureDashboard({ port: 8059, store: 'D:/s.db', receipt: null, noDashboard: false,
+        probe: async () => { probed++; if (answer === 'hang') return new Promise(() => {}); return answer; },
+        spawnIt: (port) => spawned.push(port), log: (p) => logged.push(p.reason), budgetMs: 200, ...extra });
+      return { out, spawned, logged, probed };
+    };
+    const up = await drive({ answered: true, ours: true });
+    add('ensureDashboard: ours up, nothing spawned', up.out.act === 'skip' && up.spawned.length === 0);
+    const held = await drive({ answered: true, ours: false, db: 'E:/x.db' });
+    add('ensureDashboard: held, nothing spawned, recorded',
+      held.spawned.length === 0 && held.logged[0]?.includes('held by E:/x.db'));
+    const down = await drive({ answered: false });
+    add('ensureDashboard: refused, the helper is spawned on the port', down.out.act === 'spawn' && down.spawned[0] === 8059);
+    const opted = await drive({ answered: false }, { noDashboard: true });
+    add('ensureDashboard: opted out, the port is never probed (gate can fail)', opted.probed === 0 && opted.spawned.length === 0);
+    const t0 = Date.now();
+    const hung = await drive('hang');
+    add('a probe that never answers ends at the budget and counts as refused',
+      hung.out.act === 'spawn' && Date.now() - t0 < 1500 && hung.out.why === 'probe budget exhausted', `${Date.now() - t0} ms`);
+    add('the branch fits inside half the wiring timeout (gate can fail)',
+      DASHBOARD_BUDGET_MS + DASHBOARD_PROBE_MS < WIRING.find((w) => w.event === 'SessionStart').timeout * 1000 / 2);
+
+    // dispatch: the dashboard is AWAITED, and only on SessionStart; a failure in one step does
+    // not stop the next.
+    const order = [];
+    const io = {
+      heal: () => { order.push('heal'); return null; },
+      ensure: () => new Promise((r) => setTimeout(() => { order.push('ensure'); r({ act: 'skip' }); }, 20)),
+      harvest: () => order.push('harvest'), due: () => true, noSelfHeal: false, log: () => {}, warn: () => {},
+    };
+    await dispatch({ hook_event_name: 'SessionStart' }, io);
+    add('SessionStart heals, then AWAITS the dashboard before returning (gate can fail)',
+      order.join(',') === 'heal,ensure', order.join(','));
+    order.length = 0;
+    await dispatch({ hook_event_name: 'PostToolUse' }, io);
+    add('PostToolUse touches neither the settings nor the dashboard', order.length === 0, order.join(','));
+    order.length = 0;
+    await dispatch({ hook_event_name: 'UserPromptSubmit' }, io);
+    add('UserPromptSubmit harvests and nothing else', order.join(',') === 'harvest');
+    order.length = 0;
+    await dispatch({ hook_event_name: 'SessionStart' }, { ...io, heal: () => { throw new Error('no settings'); } });
+    add('a self-heal that throws does not stop the dashboard', order.join(',') === 'ensure');
+    order.length = 0;
+    await dispatch({ hook_event_name: 'SessionStart' }, { ...io, ensure: () => Promise.reject(new Error('socket')) });
+    add('a dashboard step that rejects is swallowed, as the contract says', order.join(',') === 'heal');
+
+    // THE EXIT CONTRACT, end to end: the hook as a child with a SessionStart payload exits 0 and
+    // promptly. Probe mode (C4X_EVENTS_OUT) keeps every side effect off, which is the point: this
+    // proves the async entry reaches process.exit, not that it started anything.
+    const out = join(ROOT, 'tmp', `hook-exit-${process.pid}.ndjson`);
+    const t1 = Date.now();
+    const child = spawnSync(process.execPath, [join(ROOT, 'hooks', 'event-hook.mjs')], {
+      input: JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'self-test' }),
+      env: { ...process.env, C4X_EVENTS_OUT: out }, timeout: 8000, encoding: 'utf8', windowsHide: true,
+    });
+    add('the hook exits 0 on SessionStart and does not hang (gate can fail)',
+      child.status === 0 && !child.error && Date.now() - t1 < 4000,
+      `status ${child.status} in ${Date.now() - t1} ms ${child.stderr || ''}`);
+    rmSync(out, { force: true });
+  }
+
   let bad = 0;
   for (const [n, ok, d] of checks) {
     if (!ok) bad++;
@@ -406,40 +582,30 @@ const IS_ENTRY = (() => {
 
 if (!IS_ENTRY) { /* imported for its exports: do nothing */ }
 else if (process.argv.includes('--self-test')) {
-  process.exit(selfTest());
+  process.exit(await selfTest());
 } else {
   // Never blocks and never fails loudly. A hook that throws here would surface as an error in the
   // user's session, which is a worse outcome than a missing row.
-  try {
-    const text = readStdin();
-    if (text.trim()) {
-      const payload = JSON.parse(text);
-      record(payload);
-
-      // Side effects are skipped entirely under C4X_EVENTS_OUT: that override marks a probe or a
-      // test run, and neither should rewrite the user's settings or spawn a harvest.
-      if (!IS_PROBE) {
-        const event = payload?.hook_event_name;
-
-        if (event === 'SessionStart' && !NO_SELF_HEAL) {
-          // Each in its own try: a failed repair must not stop the harvest, and vice versa.
-          try {
-            const repaired = applyHeal();
-            // Recorded through the normal path so the rewrite lands in hook_events.reason. A tool
-            // that edits your settings without being asked should at minimum say that it did.
-            if (repaired) record({ hook_event_name: 'SessionStart', reason: `c4x self-heal: ${repaired}` });
-          } catch (e) {
-            try { process.stderr.write(`event-hook: self-heal skipped: ${e.message}\n`); } catch { /* nothing left */ }
-          }
-        }
-
-        if (shouldHarvestAfter(event) && harvestDue()) {
-          try { runHarvest(harvestModeFor(event)); } catch { /* a stale store beats a hook that errors in the session */ }
-        }
+  //
+  // ASYNC, WITH THE EXIT INSIDE. The dashboard step awaits a socket, and a process.exit(0) placed
+  // after a synchronous block would run while that probe was still pending: the hook would exit
+  // clean every time and the dashboard would never start. The exit is the last statement of the
+  // same async function that awaits the work, and the work is bounded (DASHBOARD_BUDGET_MS), so
+  // the hook can neither leave early nor hang.
+  (async () => {
+    try {
+      const text = readStdin();
+      if (text.trim()) {
+        const payload = JSON.parse(text);
+        record(payload);
+        // Side effects are skipped entirely under C4X_EVENTS_OUT: that override marks a probe or a
+        // test run, and none of them should rewrite the user's settings, start a server or spawn a
+        // harvest.
+        if (!IS_PROBE) await dispatch(payload);
       }
+    } catch (e) {
+      try { process.stderr.write(`event-hook: ${e.message}` + String.fromCharCode(10)); } catch { /* nothing left to do */ }
     }
-  } catch (e) {
-    try { process.stderr.write(`event-hook: ${e.message}\n`); } catch { /* nothing left to do */ }
-  }
-  process.exit(0);
+    process.exit(0);
+  })();
 }
