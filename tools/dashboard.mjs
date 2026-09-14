@@ -31,7 +31,7 @@
 // there and nowhere else, so `install status` can show how to stop a server the hook started,
 // `install uninstall` can stop it, and a child that died at startup leaves its reason behind.
 
-import { closeSync, existsSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
@@ -152,9 +152,33 @@ export function debounced(stampPath = STAMP, now = Date.now(), windowMs = DEBOUN
   try { return now - statSync(stampPath).mtimeMs < windowMs; } catch { return false; }
 }
 
-function writeStamp(stampPath = STAMP) {
+/**
+ * Take the launch for this process, atomically. Returns true for the one launch that may spawn.
+ *
+ * NOT check-then-write. Two sessions started in the same second on 2026-09-14, both hooks found no
+ * stamp, both spawned a server: one bound the port, the other died on it (Errno 10048) after
+ * truncating the shared log, and the log then held the dead one's token, so `stop` got a 403 from
+ * the live one. `wx` creates the file or fails because it exists, in one step the filesystem
+ * decides; a stamp older than the window is a crashed launch and is taken over.
+ */
+export function claim(stampPath = STAMP, now = Date.now(), windowMs = DEBOUNCE_MS) {
   ensureStoreDir(RAW);
-  writeFileSync(stampPath, new Date().toISOString());
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(stampPath, 'wx');
+      writeFileSync(fd, new Date(now).toISOString());
+      closeSync(fd);
+      return true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') return false;
+      if (!debounced(stampPath, now, windowMs)) {
+        try { unlinkSync(stampPath); } catch { return false; }
+        continue;
+      }
+      return false;
+    }
+  }
+  return false;
 }
 
 /** The shutdown token out of the server's own announce line, or null. */
@@ -167,9 +191,15 @@ export function readLog(path = LOG) {
   try { return readFileSync(path, 'utf8'); } catch { return ''; }
 }
 
+/**
+ * Spawn the server with its output in a log OF ITS OWN, then keep that log as `dashboard.log`
+ * only once the port answers: a server that lost the port to another dies after writing its token,
+ * and a shared log written by the loser is what sent `stop` to the winner with the wrong token.
+ */
 function spawnServer(argv) {
   ensureStoreDir(RAW);
-  const fd = openSync(LOG, 'w');
+  const own = `${LOG}.${process.pid}`;
+  const fd = openSync(own, 'w');
   try {
     const child = spawn(argv[0], argv.slice(1),
                         { cwd: ROOT, detached: true, stdio: ['ignore', fd, fd], windowsHide: true });
@@ -177,6 +207,20 @@ function spawnServer(argv) {
   } finally {
     closeSync(fd);
   }
+  return own;
+}
+
+/** Wait for the server to answer, then promote its log; a server that never answers keeps its own log for reading. */
+export async function settle(ownLog, port, db, { probe = probeHealth, tries = 60, everyMs = 500, promote = renameSync } = {}) {
+  for (let i = 0; i < tries; i++) {
+    const answer = await probe(port, db, { timeoutMs: 1000 });
+    if (answer.answered && answer.ours) {
+      try { promote(ownLog, LOG); } catch { /* the own log stays readable under its own name */ }
+      return { up: true, tries: i + 1 };
+    }
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+  return { up: false, tries };
 }
 
 /**
@@ -185,10 +229,9 @@ function spawnServer(argv) {
  */
 export async function launch({ port = portFrom(), env = process.env, now = Date.now(), io = {} } = {}) {
   const { probe = probeHealth, spawnIt = spawnServer, log = record, stampPath = STAMP,
-          stamp = writeStamp, resolve = resolveLauncher } = io;
+          take = claim, resolve = resolveLauncher, wait = settle } = io;
   const db = env.C4X_DB || defaultDb(ROOT);
-  if (debounced(stampPath, now)) return { did: 'skipped', why: 'another session is starting it' };
-  stamp(stampPath);
+  if (!take(stampPath, now)) return { did: 'skipped', why: 'another session is starting it' };
   // The hook probed seconds ago; a server it did not see may have answered since.
   const answer = await probe(port, db, { timeoutMs: 1000 });
   if (answer.answered && answer.ours) return { did: 'skipped', why: `already answering on ${port}` };
@@ -203,9 +246,13 @@ export async function launch({ port = portFrom(), env = process.env, now = Date.
     return { did: 'none', why };
   }
   const argv = launchArgv(launcher, { db, port });
-  spawnIt(argv);
+  const ownLog = spawnIt(argv);
   log({ hook_event_name: 'SessionStart', reason: `c4x dashboard: started ${posix(argv[0])} (${launcher.kind}) on ${port}` });
-  return { did: 'started', argv, launcher };
+  const settled = ownLog ? await wait(ownLog, port, db, { probe }) : { up: null };
+  if (settled.up === false) {
+    log({ hook_event_name: 'SessionStart', reason: `c4x dashboard: ${posix(argv[0])} did not answer on ${port}; its output is in ${posix(ownLog)}` });
+  }
+  return { did: 'started', argv, launcher, up: settled.up };
 }
 
 /**
@@ -320,12 +367,15 @@ async function selfTest() {
   add('the token is read out of the announce line', tokenFrom(announce) === 'abc-DEF_123');
   add('a log without one yields null', tokenFrom('c4x api on http://127.0.0.1:8059') === null);
 
-  // The debounce, on a real stamp.
+  // The launch lock, on a real stamp: atomic, and taken over when stale.
   const stampPath = join(ROOT, 'tmp', `dashboard-stamp-${process.pid}`);
   ensureStoreDir(join(ROOT, 'tmp'));
+  try { unlinkSync(stampPath); } catch { /* none yet */ }
   add('no stamp: not debounced', debounced(stampPath, Date.now()) === false);
-  writeFileSync(stampPath, 'x');
+  add('the first claim wins', claim(stampPath, Date.now()) === true);
+  add('the second claim, at once, loses (gate can fail)', claim(stampPath, Date.now()) === false);
   add('a fresh stamp debounces (gate can fail)', debounced(stampPath, Date.now()) === true);
+  add('a stale stamp is taken over', claim(stampPath, Date.now() + DEBOUNCE_MS + 5000) === true);
   // A margin of seconds, not a millisecond: the file's mtime comes from the filesystem clock and
   // Date.now() from the process, and on the Windows CI runner the former sat ahead of the latter
   // by more than 1 ms, which failed the suite once for a property that plainly held.
@@ -336,9 +386,9 @@ async function selfTest() {
     const spawned = []; const logged = []; let probed = 0;
     const out = await launch({ port: 8059, env: { C4X_DB: 'D:/s.db' }, now: opts.now ?? Date.now() + 60_000, io: {
       probe: async () => { probed++; return answer; },
-      spawnIt: (argv) => spawned.push(argv),
+      spawnIt: (argv) => { spawned.push(argv); return null; },
       log: (p) => logged.push(p.reason),
-      stampPath, stamp: () => {},
+      stampPath, take: opts.take ?? (() => true),
       resolve: () => ({ launcher, why: launcher ? 'stub' : 'no launcher here' }),
     } });
     return { out, spawned, logged, probed };
@@ -357,9 +407,23 @@ async function selfTest() {
   const nothing = await drive({ answered: false }, null);
   add('refused and no launcher: nothing spawned, the reason recorded',
     nothing.out.did === 'none' && nothing.spawned.length === 0 && nothing.logged[0]?.includes('not started: no launcher here'));
-  const bounced = await drive({ answered: false }, pyL, { now: Date.now() });
-  add('a fresh stamp skips everything, the probe included (gate can fail)',
+  const bounced = await drive({ answered: false }, pyL, { take: () => false });
+  add('a lost claim skips everything, the probe included (gate can fail)',
     bounced.out.did === 'skipped' && bounced.probed === 0 && bounced.spawned.length === 0);
+
+  // settle(): the log is promoted only once the port answers as ours.
+  {
+    const moves = [];
+    const up = await settle('X:/raw/dashboard.log.1', 8059, 'D:/s.db',
+      { probe: async () => ({ answered: true, ours: true }), promote: (a, b) => moves.push([a, b]), everyMs: 1 });
+    add('a server that answers has its log promoted (gate can fail)', up.up === true && moves.length === 1 && moves[0][1] === LOG);
+    const down = await settle('X:/raw/dashboard.log.2', 8059, 'D:/s.db',
+      { probe: async () => ({ answered: false }), promote: (a, b) => moves.push([a, b]), tries: 3, everyMs: 1 });
+    add('a server that never answers keeps its own log and is reported down', down.up === false && moves.length === 1);
+    const other = await settle('X:/raw/dashboard.log.3', 8059, 'D:/s.db',
+      { probe: async () => ({ answered: true, ours: false, db: 'E:/x.db' }), promote: (a, b) => moves.push([a, b]), tries: 2, everyMs: 1 });
+    add('another store answering does not promote our log (gate can fail)', other.up === false && moves.length === 1);
+  }
   try { const { rmSync } = await import('node:fs'); rmSync(stampPath, { force: true }); } catch { /* scratch */ }
 
   // stop() against a real socket: a refused port is a reason, a 200 is a stop.
