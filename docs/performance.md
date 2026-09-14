@@ -43,10 +43,18 @@ receipt      : written 2026-08-28T19:26:22.167Z
 hook capture : 1,204 events, last 3 min ago
 status line  : 11 genuine samples, last 3 min ago
 self-heal    : never rewrote your settings  (set C4X_NO_SELF_HEAL=1 to stop it)
+dashboard    : answering on 8059 for /path/to/claude-code-context-capture/data/context.db; stop it with: curl -X POST http://127.0.0.1:8059/__shutdown__ -H "X-C4X-Shutdown: <token>"
 HEALTHY
 ```
 
 Exit code 0 is healthy, 1 is drifted, 2 is misuse, so it can gate a script.
+
+The `dashboard` line has three states: `answering on <port> for <store>` when the page the hook
+started (or one started by hand) is up, with the stop command read from `data/raw/dashboard.log`;
+`not running (launcher: ...)` naming the interpreter or exe the next Claude session will start it
+with, or why there is none; and `disabled` when `install --no-dashboard` or `C4X_NO_DASHBOARD=1`
+turned the autostart off. A fourth, `port <port> held by ...`, means something else answers there
+and the hook will not fight it.
 
 The last three lines are liveness rather than wiring: whether anything has actually been captured,
 and when. `hook capture` counts what a harvest has stored and also reports when a hook last

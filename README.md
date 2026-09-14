@@ -54,7 +54,7 @@ Everything below runs against transcripts you already have.
 ```bash
 node tools/harvest.mjs --stats               # confirm it captured something
 python -m c4x.cli sessions --limit 5         # your sessions, largest first
-python -m c4x.api                            # the dashboard, on 127.0.0.1:8059
+python -m c4x.api                            # the dashboard, on 127.0.0.1:8059 (starts with Claude by itself, see below)
 ```
 
 ```
@@ -106,9 +106,27 @@ sqlite3 data/context.db
 
 ## The dashboard
 
-`python -m c4x.api`, then `http://127.0.0.1:8059/`. Closing it does not stop capture. The page is
+`http://127.0.0.1:8059/`. It starts with Claude: the SessionStart hook asks the port who is there
+and, when nobody is, starts the server detached; the server watches for Claude processes and stops
+itself about a minute after the last one exits. `node tools/install.mjs status` says whether it is
+up and how to stop it by hand; `install --no-dashboard` turns the autostart off (`--dashboard` turns
+it back on), as does `C4X_NO_DASHBOARD=1`. `python -m c4x.api` by hand still works and does not
+stop itself unless asked to with `--watchdog`. Closing the page does not stop capture. The page is
 committed built, so npm is needed only to change the frontend. The same server serves every tab as
 JSON: `curl 127.0.0.1:8059/api/tab/tab-cost`.
+
+Beside the Account switch, **Adopt** lists the chats on this machine that the desktop app has no
+record of, grouped by folder. A reinstall leaves every transcript and none of the records, so the
+app shows a cloud list pointing at a device that no longer exists; ticking a folder writes the
+records into the signed-in account's directory and Claude lists the chats after a restart. Nothing
+is preselected: a chat you deleted in the app looks the same to this rule as one a reinstall
+orphaned, and the page says how many of those the app has deleted.
+
+**Without Python.** `tools/build_exe.py` builds the server into `dist/c4x-api/` with PyInstaller,
+and the `build-exe` workflow attaches that directory to every release as `c4x-api-windows.zip`.
+Unpack it into `dist/c4x-api/` under the checkout and the hook uses it when no Python imports the
+dashboard. It replaces Python only: the hooks and the harvester are node, and the exe runs from
+inside a checkout, never on its own.
 
 The CLI renders the same callbacks the browser does, so a dump is what the page shows rather than a
 parallel implementation of it.

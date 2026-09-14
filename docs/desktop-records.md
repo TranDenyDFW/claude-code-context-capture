@@ -176,3 +176,40 @@ list, and this machine already holds two records roots because that migration ha
 that replaces a junction with a real directory ends the sharing silently, which is why the intended
 mode is recorded beside the store and `--verify` compares the two rather than reading the disk
 alone.
+
+## 7. Adopting a session the app has no record of
+
+A reinstall (a renamed data directory, a new device identity) keeps every transcript under
+`~/.claude/projects` and loses every record, so the app shows the account's cloud list pointing at
+a device that no longer exists and nothing local. Measured on the test laptop after one: 121
+transcripts, 1 record.
+
+**What was proven before it was written.** One record built from the store for a 37-turn session
+and written under the signed-in account's pair while the app was open: after a restart the sidebar
+listed it as a local session under its project folder, retitled by the app's own rule, and the
+stale cloud entries were sorted into "Other". The fields it carried are the ones every real record
+has, measured over 189 records on the author's machine, present on all: `createdAt`, `cwd`,
+`isArchived`, `lastActivityAt`, `model`, `originCwd`, `permissionMode`,
+`remoteMcpServersConfig`, `sessionId`; plus `cliSessionId`, the link to the transcript.
+
+`c4x/adopt.py` is that write made repeatable, through the Adopt control beside the Account switch
+or `POST /api/adopt`. A candidate is a session in the store whose transcript is on disk and not a
+subagent's, that has at least one turn, whose entrypoint is `claude-desktop` (or unset), and that
+has no record under any records root. CLI and SDK sessions never had a record and are offered only
+behind a checkbox. `createdAt` and `lastActivityAt` come from the first and last turn; `model`
+from the newest; a `title` only from the store's `custom` or `ai` kind, never the raw last prompt,
+and omitted otherwise so the app names the record itself.
+
+**Never across pairs.** The record goes into the signed-in account's pair, the one an import writes
+to (`appstate.desktop_pair`); a session whose record sits under another account's pair is counted
+and left alone. Under sharing All that pair is a junction and the bytes land in its target, which
+is the shared list; the report names both directories and says the records stay there if sharing
+is turned off. A signed-in pair that sharing does not cover is refused rather than started as a
+second list. Every record c4x wrote is named in `data/adopted-records.json`.
+
+**Why nothing is preselected.** The app leaves a `deleted_<record uuid>` marker in the pair when a
+chat is deleted on purpose and removes the record; the store never learns a record's uuid, so a
+deleted chat and a reinstall orphan look the same to the rule above. On the author's machine 923
+of 1,027 desktop sessions with a transcript had no record, 915 of them from one month. So the
+control groups the candidates by folder, says how many markers the pair holds, and adopts only
+what was ticked. Claude may stay open: these are new files, read when it next starts.
