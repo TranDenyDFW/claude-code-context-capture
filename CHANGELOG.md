@@ -11,6 +11,27 @@ removed and nothing here said so.
 
 ### Added
 
+- **Every adopted record carries a name, and the ones a first build left nameless can be named.**
+  The desktop app shows a record with no `title` as "General coding session", every one of them,
+  and the first build wrote a title only from the store's `custom` or `ai` kinds: 64 of 82 on the
+  test laptop. The store has a name for every session (a person's, a model's, the opening request
+  the titles table keeps as `last-prompt`, the first typed prompt in `messages`, or the date), so
+  `title_for` always answers, prompt-derived names cut at 60 on a word boundary, and
+  `POST /api/adopt/retitle` (the page's "Name them") names c4x's own nameless records through the
+  ledger, resolving a path written from inside a packaged app's redirected `%APPDATA%` under every
+  records root. "No folder" for scratch-workspace sessions is the app's own rule and is documented
+  as such.
+- **The hook's server has no console window.** The first build spawned `py -3` with the hide flag
+  on py.exe; the launcher then started python.exe from a parent with no console and Windows gave
+  it one. The probe now answers with `sys.executable`, that path is what is spawned, as
+  `pythonw.exe` when it sits beside `python.exe` on Windows, and a receipt or cache carrying the
+  old shape is re-resolved once.
+- **The executable is `c4x.exe`, with a version resource and the app's icon.** `dist/c4x/c4x.exe`,
+  "c4x dashboard (Claude Code context capture)" in its file properties, the version folded from
+  `git describe`; the icon is read out of the Claude desktop app installed on the building machine
+  (`--icon FILE.exe,0`, the Store build first, then the non-Store one, then `C4X_ICON`) and is
+  never committed, so a release build carries PyInstaller's own icon. `--check-icon` proves the
+  built exe's icon is the app's, pixel for pixel.
 - **The dashboard starts with Claude and stops when Claude is gone.** Capture was automatic and the
   page was not: nothing started `python -m c4x.api`, and nothing ever stopped it. The SessionStart
   hook now asks the port who holds it (a bounded probe against `/__health__`, comparing the store
