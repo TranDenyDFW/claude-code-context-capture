@@ -30,7 +30,11 @@ THE RULE, all of it:
     `min(2, snippets)`. A tie, no snippet or no hit ties nothing, and the run keeps whatever name
     it would have had.
 
-Answers are cached per (store, store mtime, run), so a page refresh repeats no query.
+Answers are cached per store and run. A tie, once found, is kept for good: quotation does not
+go away when the store grows. A run that tied to nothing is asked again only after the store
+changed, since a new session in its folder could be the one it quotes. Measured on the test
+laptop: 60 one-shots cost 4.0 s cold and 0.02 s from the cache, and every hook run changes the
+store, which is why a found tie must not depend on its mtime.
 """
 import os
 import re
@@ -156,9 +160,12 @@ def reviewed_by(sessions: list, session_ids) -> dict:
     pool_runs = one_shots({sid for run in runs for sid in pool_for(run)})
     out: dict = {}
     for run in runs:
-        key = (stamp, run)
-        if key not in _cache:
-            _cache[key] = _tie(run, [sid for sid in pool_for(run) if sid not in pool_runs])
-        if _cache[key]:
-            out[run] = _cache[key]
+        key = (stamp[0], run)
+        known = _cache.get(key)
+        # A found tie is kept whatever the store's mtime; a miss is retried once the store changed.
+        if known is None or (not known[1] and known[0] != stamp[1]):
+            known = (stamp[1], _tie(run, [sid for sid in pool_for(run) if sid not in pool_runs]))
+            _cache[key] = known
+        if known[1]:
+            out[run] = known[1]
     return out

@@ -542,6 +542,23 @@ class TestReviewRuns:
         assert reviews.reviewed_by(rows, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
         assert reviews.reviewed_by(rows, ["s3-0", "r-2", "r-3"]) == {}, "only what was asked"
 
+    def test_a_found_tie_outlives_a_store_change_and_a_miss_does_not(self, reviewed, monkeypatch):
+        """Every hook run changes the store; a tie, once found, must not be bought again."""
+        rows = adopt._sessions()
+        ids = [r["session_id"] for r in rows]
+        assert reviews.reviewed_by(rows, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
+        asked: list = []
+
+        def counting(run, pool):
+            asked.append(run)
+            return None
+        monkeypatch.setattr(reviews, "_tie", counting)
+        assert reviews.reviewed_by(rows, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
+        assert asked == [], "the store did not change: nothing is asked again"
+        monkeypatch.setattr(reviews, "_stamp", lambda: (str(store.DB_PATH), 999))
+        assert reviews.reviewed_by(rows, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
+        assert sorted(asked) == ["r-2", "r-3"], "only the misses are retried after a change"
+
     def test_the_run_is_offered_under_the_name_of_the_chat_it_read(self, reviewed):
         delta = next(g for g in adopt.state()["groups"] if g["cwd"] == DELTA)
         titles = {s["session_id"]: s["title"] for s in delta["sessions"]}
