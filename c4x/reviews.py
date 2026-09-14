@@ -41,7 +41,10 @@ def snippets(prompt: Any, want: int = WANT, min_len: int = MIN_LINE, tail: int =
 
 def reviewed_by(session_ids=None) -> dict:
     """run id -> the id of the session it reviewed, for the runs among `session_ids`, or for every
-    run the store knows when none are named."""
+    run the store knows when none are named. The value is None for a run harvest recorded as a
+    review it could not place (a NULL head: its lines are said somewhere in the store and its
+    reply is a verdict, but no session in its folder says them). Such a run is still a run: never
+    offered, its record taken back with the rest."""
     from c4x import store
     parent_of, _runs = store.review_links()
     if session_ids is None:

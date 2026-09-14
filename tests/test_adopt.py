@@ -436,11 +436,11 @@ class TestTheRoutes:
 
     def test_review_run_records_are_taken_back_through_the_route(self, client, reviewed,
                                                                  monkeypatch):
-        assert client.get("/api/adopt").json()["review_runs"] == 2
+        assert client.get("/api/adopt").json()["review_runs"] == 3
         written_by_hand(reviewed, "r-1")
         first = client.get("/api/adopt").json()
-        # r-1 has a record now, so it is out before the run filter ever sees it: one run left.
-        assert first["review_records"] == 1 and first["review_runs"] == 1
+        # r-1 has a record now, so it is out before the run filter ever sees it: two runs left.
+        assert first["review_records"] == 1 and first["review_runs"] == 2
         answer = client.post("/api/adopt/unadopt-reviews")
         assert answer.status_code == 200, answer.text
         assert [r["session_id"] for r in answer.json()["removed"]] == ["r-1"]
@@ -467,8 +467,9 @@ def test_the_module_never_imports_accounts_at_module_level():
 @pytest.fixture
 def reviewed(machine, tmp_path):
     """Four more desktop sessions under Delta. Harvest has tied two of them, r-1 and r-4, to s3-0
-    as its review runs (`review_links`); r-2 and r-3 are ordinary one-shots. The rule itself is
-    harvest's and is tested there; what is tested here is what Adopt does with the table."""
+    as its review runs (`review_links`); r-3 is a run it could not place (a NULL head, an orphan);
+    r-2 is an ordinary one-shot. The rule itself is harvest's and is tested there; what is tested
+    here is what Adopt does with the table."""
     db = tmp_path / "data" / "context.db"
     home = tmp_path / "home" / ".claude" / "projects" / "slug"
     con = sqlite3.connect(str(db))
@@ -491,6 +492,9 @@ def reviewed(machine, tmp_path):
                          method, linked_at)
                        VALUES (?, 's3-0', 2, 3, 'APPROVED', 'test', '2026-08-05T00:00:00Z')""",
                     (run,))
+    con.execute("""INSERT INTO review_links (session_id, head_id, hits, snippets, verdict,
+                     method, linked_at)
+                   VALUES ('r-3', NULL, 2, 3, 'PROBLEMS', 'test', '2026-08-05T00:00:00Z')""")
     con.commit()
     con.close()
     forget_cached_rows()
@@ -511,23 +515,28 @@ class TestReviewRuns:
         state = adopt.state()
         delta = next(g for g in state["groups"] if g["cwd"] == DELTA)
         offered = {s["session_id"] for s in delta["sessions"]}
-        assert {"r-2", "r-3"} <= offered, "an ordinary one-shot is still a chat"
+        assert "r-2" in offered, "an ordinary one-shot is still a chat"
         assert not ({"r-1", "r-4"} & offered), "a review run is not"
-        assert state["review_runs"] == 2 and state["review_records"] == 0
+        assert "r-3" not in offered, "nor is a run the store cannot place"
+        assert state["review_runs"] == 3 and state["review_records"] == 0
         written = {w["session_id"] for w in adopt.adopt([DELTA])["written"]}
-        assert written == {"s3-0", "s3-1", "r-2", "r-3"}
+        assert written == {"s3-0", "s3-1", "r-2"}
 
     def test_records_a_first_build_wrote_for_runs_are_counted_and_taken_back(self, reviewed):
         p1 = written_by_hand(reviewed, "r-1")
+        p3 = written_by_hand(reviewed, "r-3")
         p4 = written_by_hand(reviewed, "r-4", title="Mine")
-        assert adopt.state()["review_records"] == 2
+        assert adopt.state()["review_records"] == 3
         result = adopt.unadopt_reviews()
-        assert sorted(r["session_id"] for r in result["removed"]) == ["r-1", "r-4"]
-        assert all(r["reviewed"] == "s3-0" for r in result["removed"])
+        assert sorted(r["session_id"] for r in result["removed"]) == ["r-1", "r-3", "r-4"]
+        reviewed_of = {r["session_id"]: r["reviewed"] for r in result["removed"]}
+        assert reviewed_of == {"r-1": "s3-0", "r-3": None, "r-4": "s3-0"}, (
+            "an orphan's record goes too, and it names no chat")
         assert result["restart_required"] is True and result["missing"] == 0
-        assert not p1.exists() and not p4.exists(), "a person's title does not keep a run's record"
+        assert not p1.exists() and not p3.exists() and not p4.exists(), (
+            "a person's title does not keep a run's record")
         stamped = {e["session_id"]: e.get("removed_at") for e in adopt._load_ledger()}
-        assert stamped["r-1"] and stamped["r-4"]
+        assert stamped["r-1"] and stamped["r-3"] and stamped["r-4"]
         assert adopt.state()["review_records"] == 0
         assert adopt._ledger_records() == [], "a taken-back entry is out of every later count"
         again = adopt.unadopt_reviews()
@@ -543,7 +552,7 @@ class TestReviewRuns:
         assert adopt.retitle()["renamed"] == [], "the nameless rule is untouched by any of this"
 
     def test_the_reader_answers_from_the_table(self, reviewed):
-        assert reviews.reviewed_by() == {"r-1": "s3-0", "r-4": "s3-0"}
-        assert reviews.reviewed_by(["r-1", "r-2"]) == {"r-1": "s3-0"}
+        assert reviews.reviewed_by() == {"r-1": "s3-0", "r-3": None, "r-4": "s3-0"}
+        assert reviews.reviewed_by(["r-1", "r-2", "r-3"]) == {"r-1": "s3-0", "r-3": None}
         assert reviews.runs_of("s3-0") == ["r-4", "r-1"], "newest first"
         assert reviews.runs_of("s3-1") == []

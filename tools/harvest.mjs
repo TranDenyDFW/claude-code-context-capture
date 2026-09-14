@@ -1857,6 +1857,12 @@ export const REVIEW = {
   ONE_SHOT_MESSAGES: 3,  // one typed prompt and at most three messages: the only sessions tested
   SLACK_MS: 3600 * 1000, // how long a session may have been quiet before a run that read it began
   CHUNK: 900,            // parameters per query, under SQLite's limit with room for the others
+  // WHAT A SESSION SAID: its assistant text, its tool results, and its compaction summaries. The
+  // last is a user-role row nobody typed: the model wrote it when the context was compacted, and
+  // the laptop's fourth unplaced run quoted exactly that (the chat beside it had just compacted,
+  // so the hook's "last 250 records" were the summary). A person cannot type one, so counting it
+  // keeps the guard the said rule exists for: a repeated typed prompt still matches nothing here.
+  SAID: "(role = 'assistant' OR type IN ('tool_result', 'compact_summary'))",
 };
 // CLAUDE SAID: / OUTPUT WAS: / USER:, the label the excerpt's writer put in front of a copied line.
 // Dropped, so the line matches what the reviewed session actually said.
@@ -1983,7 +1989,7 @@ export function deriveReviews(db, sessionIds, { write = true, method = 'harvest'
       // reviewer shared one said line and one typed line with it, and lost on the said count.
       const hits = new Map();
       const saidSum = snips.map(() =>
-        "MAX(CASE WHEN (role = 'assistant' OR type = 'tool_result') AND instr(text, ?) > 0 THEN 1 ELSE 0 END)").join(' + ');
+        `MAX(CASE WHEN ${REVIEW.SAID} AND instr(text, ?) > 0 THEN 1 ELSE 0 END)`).join(' + ');
       const anySum = snips.map(() => 'MAX(CASE WHEN instr(text, ?) > 0 THEN 1 ELSE 0 END)').join(' + ');
       for (const chunk of reviewChunks(pool)) {
         result.hit_queries++;
@@ -2016,7 +2022,7 @@ export function deriveReviews(db, sessionIds, { write = true, method = 'harvest'
       result.hit_queries++;
       const anySum = snips.map(() => 'MAX(CASE WHEN instr(text, ?) > 0 THEN 1 ELSE 0 END)').join(' + ');
       const row = db.prepare(`SELECT ${anySum} AS said FROM messages
-        WHERE session_id <> ? AND (role = 'assistant' OR type = 'tool_result')`).get(...snips, shot);
+        WHERE session_id <> ? AND ${REVIEW.SAID}`).get(...snips, shot);
       const said = Number(row?.said ?? 0);
       if (said >= Math.min(2, snips.length)) {
         result.orphans.push({ session_id: shot, head_id: null, hits: said, snippets: snips.length, verdict });
@@ -4507,7 +4513,8 @@ async function selfTest() {
     const sid = (tag) => `${tag}-0000-4000-8000-00000000000a`;
     const V = { P: sid('aaaa000a'), R1: sid('bbbb000a'), R2: sid('cccc000a'),
                 P2: sid('dddd000a'), P3: sid('eeee000a'), R3: sid('ffff000a'), R4: sid('abab000a'),
-                R5: sid('acac000a'), R6: sid('adad000a'), R7: sid('aeae000a') };
+                R5: sid('acac000a'), R6: sid('adad000a'), R7: sid('aeae000a'),
+                P5: sid('afaf000a'), R8: sid('baba000a') };
     const CWD = 'P:\\review';
     // A folder of its own, so a run there has no pool at all: what an orphan looks like.
     const CWD2 = 'P:\\elsewhere';
@@ -4526,6 +4533,8 @@ async function selfTest() {
       timestamp: ts, cwd, message: { model: 'm', usage: { input_tokens: 1, cache_creation_input_tokens: 0,
                                                             cache_read_input_tokens: 0, output_tokens: 1 },
                                       content: [{ type: 'text', text }] } });
+    const summary = (s, ts, text, cwd = CWD) => JSON.stringify({ type: 'user', uuid: `v${++vn}`, sessionId: s,
+      timestamp: ts, cwd, isCompactSummary: true, message: { role: 'user', content: text } });
     const ran = (s, ts, id) => JSON.stringify({ type: 'assistant', uuid: `v${++vn}`, sessionId: s, timestamp: ts,
       cwd: CWD, message: { model: 'm', usage: { input_tokens: 1, output_tokens: 1 },
                            content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'pytest' } }] } });
@@ -4554,6 +4563,14 @@ async function selfTest() {
     put(V.R6, [user(V.R6, at(16), PREAMBLE + 'CLAUDE SAID: ' + L1 + '\n\nOUTPUT WAS: ' + L2 + '\n', CWD2),
                said(V.R6, at(17), 'I read through this and the parser change looks reasonable to me.', CWD2)]);
     put(V.R7, [user(V.R7, at(18), T, CWD2), said(V.R7, at(19), 'APPROVED\nnothing to add', CWD2)]);
+    // A run quoting the chat's COMPACTION SUMMARY, a user-role row the model wrote (the laptop's
+    // fourth unplaced run quoted exactly that). It ties to the chat like a quoted said line does.
+    const S1 = 'The migration ran clean on the copy and the two counts that were compared agreed exactly by row';
+    const S2 = 'Remaining work is the receipt field and the one docs paragraph that still names the old flag';
+    put(V.P5, [user(V.P5, at(0), 'carry on'), summary(V.P5, at(1), 'This session is being continued.\n' + S1 + '\n' + S2 + '\n'),
+               said(V.P5, at(2), 'continuing'), user(V.P5, at(3), 'thanks')]);
+    put(V.R8, [user(V.R8, at(20), PREAMBLE + 'CLAUDE SAID: ' + S1 + '\n\nCLAUDE SAID: ' + S2 + '\n'),
+               said(V.R8, at(21), 'APPROVED\nthe summary holds')]);
     const vdb = new DatabaseSync(':memory:');
     vdb.exec(SCHEMA);
     const vh = new Harvest(vdb);
@@ -4572,10 +4589,13 @@ async function selfTest() {
     checks.push(['reviews: write:false writes nothing and still reports the links (gate can fail)',
       vdb.prepare('SELECT COUNT(*) n FROM review_links').get().n === 0
       && vdb.prepare('SELECT COUNT(*) n FROM review_misses').get().n === 0
-      && dry.linked.length === 2 && dry.orphans.length === 2]);
+      && dry.linked.length === 3 && dry.orphans.length === 2]);
     const rv = deriveReviews(vdb, vids, { write: true, now: '2026-05-01T12:00:00.000Z' });
     const link = (s) => vdb.prepare('SELECT * FROM review_links WHERE session_id = ?').get(s);
-    checks.push(['reviews: seven one-shots seen, the parents are not', rv.one_shots === 7, String(rv.one_shots)]);
+    checks.push(['reviews: eight one-shots seen, the parents are not', rv.one_shots === 8, String(rv.one_shots)]);
+    checks.push(['reviews: a run quoting a compaction summary of the chat ties to that chat (gate can fail)',
+      link(V.R8) && link(V.R8).head_id === V.P5 && link(V.R8).hits === 2 && link(V.R8).verdict === 'APPROVED',
+      JSON.stringify(link(V.R8))]);
     checks.push(['reviews: a verdict reply quoting lines said elsewhere is an orphan, head NULL (gate can fail)',
       link(V.R5) && link(V.R5).head_id === null && link(V.R5).hits === 2 && link(V.R5).verdict === 'PROBLEMS'
       && rv.orphans.length === 2, JSON.stringify(link(V.R5))]);
@@ -4595,10 +4615,10 @@ async function selfTest() {
       && rv.misses === 3, JSON.stringify({ r3: link(V.R3), misses: rv.misses })]);
     checks.push(['reviews: a miss remembers its pool',
       vdb.prepare('SELECT pool_key FROM review_misses WHERE session_id = ?').get(V.R2)?.pool_key
-        === [V.P, V.P2, V.P3].sort().join(',')]);
+        === [V.P, V.P2, V.P3, V.P5].sort().join(',')]);
     const again = deriveReviews(vdb, vids, { write: true });
     checks.push(['reviews: a second pass asks nothing again',
-      again.already === 4 && again.unchanged === 3 && again.hit_queries === 0 && again.linked.length === 0
+      again.already === 5 && again.unchanged === 3 && again.hit_queries === 0 && again.linked.length === 0
       && again.orphans.length === 0]);
     // A session joining the pool makes the one miss in that folder worth asking again, and the
     // answer holds; the two misses in the other folder are untouched.
@@ -4607,7 +4627,7 @@ async function selfTest() {
     await vh.file(join(vdir, P4 + '.jsonl'), true);
     const third = deriveReviews(vdb, vids.concat(P4), { write: true });
     checks.push(['reviews: a session joining the pool reopens its miss, and it stays a miss',
-      third.hit_queries === 1 && third.misses === 1 && third.already === 4 && third.unchanged === 2,
+      third.hit_queries === 1 && third.misses === 1 && third.already === 5 && third.unchanged === 2,
       JSON.stringify({ q: third.hit_queries, m: third.misses, a: third.already, u: third.unchanged })]);
     // THE REBUILD: a store from the build before orphans, head_id NOT NULL, keeps its row and
     // takes a NULL head afterwards, with the index back on the new table.
@@ -4643,12 +4663,12 @@ async function selfTest() {
     const dryRep = await backfillReviews(vpath, { quiet: true, write: false });
     const fcount = () => { const d = new DatabaseSync(vpath); const n = d.prepare('SELECT COUNT(*) n FROM review_links').get().n; d.close(); return n; };
     checks.push(['backfill-reviews: --dry-run reports and writes nothing (gate can fail)',
-      dryRep.linked === 2 && dryRep.orphans === 2 && dryRep.wrote === false && fcount() === 0]);
+      dryRep.linked === 3 && dryRep.orphans === 2 && dryRep.wrote === false && fcount() === 0]);
     const rep = await backfillReviews(vpath, { quiet: true, write: true });
     checks.push(['backfill-reviews: the links and the orphans land, with their verdicts counted',
-      rep.linked === 2 && rep.orphans === 2 && rep.by_verdict.APPROVED === 1 && rep.by_verdict.none === 1
-      && rep.by_verdict.PROBLEMS === 2 && rep.heads === 1
-      && fcount() === 4 && rep.links_after === 4 && rep.links_before === 0,
+      rep.linked === 3 && rep.orphans === 2 && rep.by_verdict.APPROVED === 2 && rep.by_verdict.none === 1
+      && rep.by_verdict.PROBLEMS === 2 && rep.heads === 2
+      && fcount() === 5 && rep.links_after === 5 && rep.links_before === 0,
       JSON.stringify({ l: rep.linked, o: rep.orphans, v: rep.by_verdict, h: rep.heads, n: fcount() })]);
   }
 

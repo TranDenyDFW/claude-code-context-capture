@@ -210,7 +210,8 @@ def state(root=None, include_cli=False) -> dict:
     # A REVIEW RUN IS NEVER OFFERED. It folds into the chat it reviewed (harvest's `review_links`,
     # read through `c4x.reviews`), and a record for it would put a reviewer's reading of a chat
     # in the app's sidebar as a chat of its own, which is what the first build did 58 times on
-    # the test laptop. Counted, so the page can say how many were left out and why.
+    # the test laptop. A run the store cannot place (`reviewed_by` answers None for it) is a run
+    # all the same: out here too. Counted, so the page can say how many were left out and why.
     runs = reviews.reviewed_by([r["session_id"] for r, _cli in eligible])
     eligible = [(r, cli) for r, cli in eligible if r["session_id"] not in runs]
     every_run = reviews.reviewed_by()
@@ -366,6 +367,7 @@ def unadopt_reviews() -> dict:
     ledger's records and only the runs: the file is removed, the ledger entry is stamped
     `removed_at` and kept, so what was written and taken back stays on record, and a stamped entry
     is out of every later count. The app reads the directory when it starts, hence the restart.
+    A run the store cannot place is removed with the rest and reported with `reviewed` None.
 
     WHAT THE APP ITSELF WRITES ON A DELETE is not mimicked beyond the removal, because it has not
     been measured: docs/desktop-records.md records that a `deleted_<record uuid>` marker appears
