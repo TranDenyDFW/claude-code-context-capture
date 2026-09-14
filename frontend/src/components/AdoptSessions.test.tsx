@@ -28,6 +28,7 @@ function state(over: Partial<AdoptState> = {}): AdoptState {
     other_account: 1,
     deleted_markers: 0,
     untitled_adopted: 0,
+    review_runs_to_name: 0,
     app_running: false,
     sharing: 'current',
     ...over,
@@ -52,7 +53,7 @@ function report(over: Partial<AdoptReport> = {}): AdoptReport {
 
 function named(over: Partial<RetitleReport> = {}): RetitleReport {
   return { renamed: [{ session_id: 's1', path: 'p1', title: 'raw prompt' }], kept: 0, missing: 0,
-           restart_required: true, ...over }
+           reviews: 0, restart_required: true, ...over }
 }
 
 beforeEach(() => {
@@ -60,7 +61,7 @@ beforeEach(() => {
 })
 
 async function opened() {
-  fireEvent.click(await screen.findByRole('button', { name: /no record of|without a name/ }))
+  fireEvent.click(await screen.findByRole('button', { name: /no record of|without a name|to name/ }))
 }
 
 describe('AdoptSessions', () => {
@@ -83,6 +84,49 @@ describe('AdoptSessions', () => {
     expect(await screen.findByText(/Restart Claude to see the 64 names/)).not.toBeNull()
     expect(onChanged).toHaveBeenCalled()
     expect(stateCall).toHaveBeenCalledTimes(2)
+  })
+
+  it('opens as a drawer at the end of the document, with focus in and back out again', async () => {
+    vi.spyOn(api.adopt, 'state').mockResolvedValue(state())
+    const { container } = render(<AdoptSessions writesEnabled />)
+    const trigger = await screen.findByRole('button', { name: /no record of/ })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(trigger)
+    const drawer = screen.getByRole('dialog', { name: 'Adopted chats' })
+    // Not inside the header's subtree: a fixed element there is clipped to the header's box.
+    expect(container.contains(drawer)).toBe(false)
+    expect(drawer.parentElement).toBe(document.body)
+    expect(document.activeElement).toBe(drawer)
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+    expect(trigger.getAttribute('aria-controls')).toBe(drawer.id)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('says how many adopted chats are a reviewer\'s reading of another chat, and names them', async () => {
+    vi.spyOn(api.adopt, 'state')
+      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, untitled_adopted: 1,
+                                     review_runs_to_name: 54 }))
+      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0 }))
+    const retitle = vi.spyOn(api.adopt, 'retitle').mockResolvedValue(named({
+      renamed: Array.from({ length: 55 }, (_, i) => ({ session_id: `s${i}`, path: `p${i}`, title: `t${i}` })),
+      reviews: 54,
+    }))
+    render(<AdoptSessions writesEnabled />)
+    expect((await screen.findByRole('button', { name: /to name/ })).textContent)
+      .toContain('55 adopted chats to name')
+    await opened()
+    const line = screen.getByText(/1 adopted chat has no name yet/).textContent ?? ''
+    expect(line).toContain('54 adopted chats are a reviewer\'s reading of another chat')
+    expect(line).toContain('Reviewer - <that chat>')
+    fireEvent.click(screen.getByRole('button', { name: 'Name them' }))
+    await waitFor(() => expect(retitle).toHaveBeenCalled())
+    expect(await screen.findByText(/Restart Claude to see the 55 names/)).not.toBeNull()
   })
 
   it('shows nothing when every chat already has a record', async () => {

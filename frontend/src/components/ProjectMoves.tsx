@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { api, ApiError } from '@/api'
 import type { Cohort, DeleteReport, ImportReport } from '@/api'
+import { Portal } from './Portal'
 
 /**
  * Move a whole project in or out of the store.
@@ -197,6 +198,10 @@ export function ProjectMoves({
       </button>
 
       {open && (
+        // OUT FROM UNDER THE HEADER. Rendered in place, this backdrop covered only the header's
+        // strip: its backdrop filter made it the containing block, and the page below stayed
+        // undimmed and clickable while the dialog declared itself modal. See Portal.tsx.
+        <Portal>
         <div
           onMouseDown={close}
           className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 p-4 pt-[10vh]
@@ -740,6 +745,7 @@ export function ProjectMoves({
             </div>
           </div>
         </div>
+        </Portal>
       )}
     </>
   )
