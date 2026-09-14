@@ -24,6 +24,14 @@ the same decision an import makes); a session whose record sits under another ac
 counted as `other_account` and left alone. Under sharing All the signed-in pair is a junction and
 the bytes land in its target, which IS the shared list; the report says so. `c4x/accounts.py` is
 not touched by anything here.
+
+EVERY RECORD CARRIES A NAME. The first cut wrote `title` only from the store's `custom` or `ai`
+kinds, on the theory that the app would name the rest by its own rule. It does: a record with no
+title shows as "General coding session", every one of them, and on the test laptop that was 64 of
+82. The store has a real name for every session (`session_titles`, where `last-prompt` is the
+OPENING request cut to 200, then the first typed prompt in `messages`), so `title_for` always
+answers, and `retitle` gives the records a first build left nameless the same name through the
+ledger.
 """
 import hashlib
 import json
@@ -37,6 +45,9 @@ from typing import Any
 
 DESKTOP = "claude-desktop"
 LEDGER = "adopted-records.json"
+# A prompt-derived name is cut here, on a word boundary. Longer than the page's 40 (labels.py):
+# the sidebar has the room, and a name cut mid-word reads as a defect.
+TITLE_MAX = 60
 # Every field every real record carries (189 of 189 on this machine), plus the link and the name.
 FIELDS = ("createdAt", "cwd", "isArchived", "lastActivityAt", "model", "originCwd",
           "permissionMode", "remoteMcpServersConfig", "sessionId")
@@ -97,23 +108,51 @@ def _sessions() -> list:
                  ORDER BY t2.ts DESC LIMIT 1) AS model
           FROM sessions s LEFT JOIN turns t ON t.session_id = s.session_id
          GROUP BY s.session_id""")
+    # THE OPENING TYPED PROMPT, for the sessions the titles table does not name. Only the typed
+    # rows are read (15K of 367K messages on the author's store) and only their first 400
+    # characters; the earliest per session wins, decided here rather than in a correlated query.
+    first: dict[str, tuple[str, str]] = {}
+    typed = store.q_optional("""
+        SELECT session_id, ts, substr(text, 1, 400) AS text FROM messages
+         WHERE type = 'typed' AND role = 'user' AND COALESCE(is_sidechain, 0) = 0
+           AND COALESCE(chars, 0) > 0 AND text IS NOT NULL""", columns=("session_id", "ts", "text"))
+    for m in typed.itertuples(index=False):
+        sid, ts = str(m.session_id), str(m.ts)
+        if sid not in first or ts < first[sid][0]:
+            first[sid] = (ts, str(m.text))
     rows = []
     for r in df.itertuples(index=False):
         rows.append({"session_id": r.session_id, "cwd": r.cwd, "entrypoint": r.entrypoint,
                      "transcript_path": r.transcript_path, "first_ts": r.first_ts,
                      "last_ts": r.last_ts, "turns": int(r.turns or 0),
-                     "model": r.model if isinstance(r.model, str) else None})
+                     "model": r.model if isinstance(r.model, str) else None,
+                     "first_prompt": first.get(str(r.session_id), ("", None))[1]})
     return rows
 
 
-def best_title(kinds: dict) -> str | None:
-    """`custom`, then `ai`. NEVER `last-prompt`: that is the raw last prompt, up to 200 characters,
-    and the app titles a record with no title by its own rule, which is what was observed."""
-    for kind in ("custom", "ai"):
+def cut(text: Any, limit: int = TITLE_MAX) -> str:
+    """Whitespace collapsed, and cut on a word boundary with `...` when longer than `limit`."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    head = flat[:limit]
+    if " " in head:
+        head = head[:head.rfind(" ")]
+    return head.rstrip(" ,;:.") + "..."
+
+
+def title_for(kinds: dict, first_prompt: Any = None, last_ts: Any = None) -> tuple[str, str]:
+    """(title, titleSource) for a record: a name a person or a model chose, else the opening
+    request cut short, else the date. The source is `user` for a `custom` title, which a person
+    typed, and `auto` for everything else, which is what the app writes for names it made itself."""
+    for kind, source, trim in (("custom", "user", False), ("ai", "auto", False),
+                               ("last-prompt", "auto", True)):
         text = kinds.get(kind)
         if isinstance(text, str) and text.strip():
-            return text.strip()
-    return None
+            return (cut(text) if trim else " ".join(text.split())), source
+    if isinstance(first_prompt, str) and first_prompt.strip():
+        return cut(first_prompt), "auto"
+    return f"Chat from {str(last_ts or '')[:10] or 'an unknown date'}", "auto"
 
 
 def state(root=None, include_cli=False) -> dict:
@@ -164,8 +203,9 @@ def state(root=None, include_cli=False) -> dict:
             counted_cli += 1
             if not include_cli:
                 continue
+        title, source = title_for(titles.get(sid, {}), r.get("first_prompt"), r["last_ts"])
         by_cwd.setdefault(str(r["cwd"] or ""), []).append({
-            "session_id": sid, "title": best_title(titles.get(sid, {})), "last_ts": r["last_ts"],
+            "session_id": sid, "title": title, "title_source": source, "last_ts": r["last_ts"],
             "first_ts": r["first_ts"], "turns": r["turns"], "model": r["model"], "cli": cli,
             "cwd": r["cwd"]})
     groups = []
@@ -182,13 +222,16 @@ def state(root=None, include_cli=False) -> dict:
             "candidates": sum(1 for g in groups for s in g["sessions"] if not s["cli"]),
             "cli_candidates": counted_cli, "other_account": seen_other,
             "deleted_markers": len(list(pair_dir.glob("deleted_*"))) if pair_dir.is_dir() else 0,
+            "untitled_adopted": sum(1 for _e, rec, _p in _ledger_records()
+                                    if rec is not None and not _titled(rec)),
             "app_running": accounts.app_running(), "sharing": accounts.intended_mode()}
 
 
 def record_for(session: dict) -> dict:
-    """The record, the nine fields plus the link and, when the store has a real name, the title."""
+    """The record: the nine fields, the link, and always a name with where it came from."""
     cwd = session["cwd"]
-    out = {
+    title = session.get("title") or f"Chat from {str(session.get('last_ts') or '')[:10]}"
+    return {
         "sessionId": f"local_{uuid.uuid4()}",
         "cliSessionId": session["session_id"],
         "cwd": cwd,
@@ -199,10 +242,86 @@ def record_for(session: dict) -> dict:
         "isArchived": False,
         "permissionMode": "default",
         "remoteMcpServersConfig": [],
+        "title": title,
+        "titleSource": session.get("title_source") or "auto",
     }
-    if session.get("title"):
-        out["title"] = session["title"]
+
+
+def _titled(record: dict) -> bool:
+    text = record.get("title")
+    return isinstance(text, str) and bool(text.strip())
+
+
+def _ledger_records(roots=None) -> list:
+    """(entry, record or None, path or None) for every ledger entry, the file resolved.
+
+    THE LEDGER PATH IS THE WRITER'S VIEW. On a packaged install the server is a descendant of the
+    app and its `%APPDATA%` writes are redirected into the package's `LocalCache`, so the path it
+    recorded need not exist for a reader outside that container. The file is then looked for under
+    the same `<account>/<org>/<name>` below every records root this machine has.
+    """
+    from c4x import appstate
+    try:
+        entries = json.loads(ledger_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        entries = []
+    if not isinstance(entries, list):
+        entries = []
+    roots = [Path(r) for r in (roots if roots is not None else appstate.sessions_roots())]
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("path"):
+            continue
+        written = Path(str(entry["path"]))
+        candidates = [written] + [root / written.parent.parent.name / written.parent.name
+                                  / written.name for root in roots]
+        found = next((c for c in candidates if c.is_file()), None)
+        record = None
+        if found is not None:
+            try:
+                loaded = json.loads(found.read_text(encoding="utf-8"))
+                record = loaded if isinstance(loaded, dict) else None
+            except (OSError, ValueError):
+                record = None
+        out.append((entry, record, found))
     return out
+
+
+def retitle(root=None) -> dict:
+    """Name every record c4x wrote that has no name, the way `record_for` would today.
+
+    Only the ledger's records, and only the nameless: a title a person typed (`titleSource`
+    `user`) or any non-blank title is left alone and counted as kept. Read, written, read back.
+    """
+    from c4x import store
+    report: dict[str, Any] = {"renamed": [], "kept": 0, "missing": 0, "restart_required": False}
+    resolved = _ledger_records()
+    wanted = {str(e.get("session_id")) for e, _r, _p in resolved}
+    by_id = {r["session_id"]: r for r in _sessions() if r["session_id"] in wanted}
+    titles = store.titles_for(list(wanted)) if wanted else {}
+    for entry, record, path in resolved:
+        if record is None or path is None:
+            report["missing"] += 1
+            continue
+        if _titled(record):
+            report["kept"] += 1
+            continue
+        sid = str(entry.get("session_id"))
+        session = by_id.get(sid)
+        title, source = title_for(titles.get(sid, {}), (session or {}).get("first_prompt"),
+                                  (session or {}).get("last_ts") or record.get("lastActivityAt"))
+        record["title"], record["titleSource"] = title, source
+        blob = json.dumps(record, ensure_ascii=False).encode("utf-8")
+        try:
+            path.write_bytes(blob)
+            if hashlib.sha256(path.read_bytes()).hexdigest() != hashlib.sha256(blob).hexdigest():
+                raise OSError(f"{path} does not read back as what was written")
+        except OSError as exc:
+            report.setdefault("failed", []).append({"session_id": sid, "why": str(exc)})
+            continue
+        report["renamed"].append({"session_id": sid, "path": str(path), "title": title})
+    report["restart_required"] = bool(report["renamed"])
+    return report
 
 
 def _check_sharing(root: str, pair_dir: Path) -> None:

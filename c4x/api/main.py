@@ -1766,6 +1766,15 @@ def adopt_run(body: dict):
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
 
+@api.post("/api/adopt/retitle")
+def adopt_retitle():
+    """Name every record c4x wrote that has none. A first build left 64 of 82 nameless on the
+    test laptop, and the app shows each of those as "General coding session"."""
+    from c4x import adopt
+    _require_writes()
+    return adopt.retitle()
+
+
 @api.post("/api/project/include")
 def project_include(body: dict):
     """Lift an exclusion so harvest picks the project up again."""
