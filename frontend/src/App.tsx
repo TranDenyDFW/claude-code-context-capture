@@ -11,6 +11,7 @@ import { Palette, type Choice } from '@/components/Palette'
 import { CompareArms } from '@/components/CompareArms'
 import { ProjectMoves } from '@/components/ProjectMoves'
 import { AccountSharing } from '@/components/AccountSharing'
+import { AdoptSessions } from '@/components/AdoptSessions'
 import { Sidebar, useCollapsed } from '@/components/Sidebar'
 
 /**
@@ -428,6 +429,14 @@ export default function App() {
               writesEnabled={health.data?.writes_enabled ?? false}
               // Sharing changes which chats exist as far as the desktop app is concerned, and the
               // store's own view of them is read from those same directories.
+              onChanged={() => {
+                void client.invalidateQueries()
+              }}
+            />
+            <AdoptSessions
+              // New records under the signed-in account's directory: the store's view of which
+              // chats exist is read from those same directories, so everything refetches.
+              writesEnabled={health.data?.writes_enabled ?? false}
               onChanged={() => {
                 void client.invalidateQueries()
               }}
