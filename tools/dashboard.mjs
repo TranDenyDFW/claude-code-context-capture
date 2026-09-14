@@ -208,8 +208,24 @@ export async function launch({ port = portFrom(), env = process.env, now = Date.
   return { did: 'started', argv, launcher };
 }
 
-/** POST /__shutdown__ with the token the server printed into the log. Resolves, never rejects. */
-export function stop({ port = portFrom(), token = tokenFrom(readLog()), timeoutMs = 3000 } = {}) {
+/**
+ * POST /__shutdown__ with the token the server printed into the log. Resolves, never rejects.
+ *
+ * A LOST REPLY IS CHECKED, NOT REPORTED. The server answers the shutdown and exits a quarter of a
+ * second later, and that reply can be cut on its way out: seen here as "no answer" from a server
+ * that was already gone. So when the request ends without a 200, the port is probed once more,
+ * and nothing answering is the stop that was asked for.
+ */
+export async function stop({ port = portFrom(), token = tokenFrom(readLog()), timeoutMs = 3000,
+                             probe = probeHealth } = {}) {
+  const first = await request({ port, token, timeoutMs });
+  if (first.stopped || !token) return first;
+  const after = await probe(port, '', { timeoutMs: 1000 });
+  if (!after.answered) return { stopped: true, why: `stopped (${first.why}, and nothing answers now)` };
+  return first;
+}
+
+function request({ port, token, timeoutMs }) {
   return new Promise((done) => {
     if (!token) {
       return done({ stopped: false, why: `no shutdown token in ${posix(LOG)}: stop it with taskkill, or wait for the watchdog` });
@@ -353,9 +369,15 @@ async function selfTest() {
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
-  add('stop with the right token is a stop', (await stop({ port, token: 'tok' })).stopped === true);
-  add('stop with the wrong token reports the refusal', (await stop({ port, token: 'nope' })).why.includes('403'));
-  add('stop with no token says where the token would be', (await stop({ port, token: null })).why.includes('dashboard.log'));
+  const stillUp = async () => ({ answered: true, ours: true });
+  add('stop with the right token is a stop', (await stop({ port, token: 'tok', probe: stillUp })).stopped === true);
+  add('stop with the wrong token reports the refusal', (await stop({ port, token: 'nope', probe: stillUp })).why.includes('403'));
+  add('stop with no token says where the token would be', (await stop({ port, token: null, probe: stillUp })).why.includes('dashboard.log'));
+  // The reply is lost but the server is gone: a stop, said as one.
+  const gone = async () => ({ answered: false, why: 'ECONNREFUSED' });
+  const lost = await stop({ port, token: 'nope', probe: gone });
+  add('a lost reply with nothing answering afterwards is reported as stopped (gate can fail)',
+    lost.stopped === true && lost.why.includes('nothing answers now'));
   server.close();
 
   let bad = 0;
