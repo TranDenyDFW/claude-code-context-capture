@@ -7,7 +7,7 @@
 
 WHAT THE EXE REPLACES: Python. Not node, and not the checkout. The hooks and the harvester are
 node, the store they write is under the checkout's data/, and c4x/store.py shells out to the
-checkout's tools/*.mjs for window math. The exe runs from inside an install (dist/c4x-api/ under
+checkout's tools/*.mjs for window math. The exe runs from inside an install (dist/c4x/ under
 the checkout is where the SessionStart hook looks for it) and refuses to run anywhere else; see
 c4x/paths.py. It is for a machine that has node and no Python.
 
