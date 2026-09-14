@@ -16,8 +16,16 @@
 // The launcher, in order: C4X_DASHBOARD_CMD (a path to an executable); the install receipt's;
 // the cache in data/raw (a cached "none" too, so a machine with nothing pays the probe once a
 // week rather than once a session); the first of `py -3`, `python`, `python3` that imports the
-// dashboard's modules; the built exe under dist/c4x-api. Python beats the exe when both work, so
-// a stale exe beside a checkout never shadows the source.
+// dashboard's modules, recorded as the INTERPRETER'S PATH; the built exe under dist/c4x. Python
+// beats the exe when both work, so a stale exe beside a checkout never shadows the source.
+//
+// THE PATH, NOT THE LAUNCHER, and on Windows pythonw. The first build spawned `py -3` with
+// windowsHide, and the hide landed on py.exe; py.exe then started python.exe, a console program,
+// from a parent with no console, and Windows gave it a new one: a python window on the desktop for
+// as long as the server ran (on the test laptop, py.exe pid 16076 and its python.exe 16264, both
+// alive). Spawning the interpreter itself removes the indirection; pythonw.exe, which has no
+// console at all, removes the class. Its stdout and stderr still reach data/raw/dashboard.log
+// through the spawn's fds, since a redirected handle is a valid sys.stdout.
 //
 // The server's stdout and stderr go to data/raw/dashboard.log. The shutdown token is printed
 // there and nowhere else, so `install status` can show how to stop a server the hook started,
@@ -44,20 +52,20 @@ export const PROBE_TIMEOUT_MS = 8000;
 // c4x.api.main, not c4x.api: the package's __init__ is a docstring, so importing it proves
 // nothing. main builds every route, which pulls in the store (pandas) and the upload route
 // (python-multipart), the two imports a python with only fastapi installed fails on.
-export const PROBE_IMPORT = 'import c4x.api.main, uvicorn, dash, psutil';
+export const PROBE_IMPORT = 'import c4x.api.main, uvicorn, dash, psutil, sys; print(sys.executable)';
 
 export function candidatesFor(platform = process.platform) {
   return platform === 'win32' ? [['py', '-3'], ['python'], ['python3']] : [['python3'], ['python']];
 }
 
 export function exePath(root = ROOT, platform = process.platform) {
-  return join(root, 'dist', 'c4x-api', platform === 'win32' ? 'c4x-api.exe' : 'c4x-api');
+  return join(root, 'dist', 'c4x', platform === 'win32' ? 'c4x.exe' : 'c4x');
 }
 
-// A python launcher is trusted by name: it was probed when it was recorded, and `py` is on PATH
-// rather than at a path. An exe or an override must still be where it was.
-const usable = (l, exists) => Boolean(l && Array.isArray(l.cmd) && l.cmd.length
-  && (l.kind === 'python' || exists(l.cmd[0])));
+// Every launcher is a path now, python included, and a path that is gone is not a launcher. A
+// receipt or cache from the first build carries `['py', '-3']`, no such file, so it is re-resolved
+// once and rewritten in the new shape.
+const usable = (l, exists) => Boolean(l && Array.isArray(l.cmd) && l.cmd.length && exists(l.cmd[0]));
 
 /**
  * Which launcher, and why. Pure: every input is a parameter, so the self-test drives all six
@@ -83,8 +91,12 @@ export function dashboardLauncher({ env = {}, receipt = null, cache = null, now 
     return { launcher: cache.launcher, why: cache.why || 'cached', fromCache: true };
   }
   for (const cmd of candidatesFor(platform)) {
-    if (tryPython(cmd)) {
-      return { launcher: { cmd, module: true, kind: 'python' }, why: `${cmd.join(' ')} imports the dashboard`, fromCache: false };
+    // tryPython answers with the interpreter's path (sys.executable), or null. The path is what
+    // gets spawned; the candidate that found it is kept as `via` for the status line.
+    const interpreter = tryPython(cmd);
+    if (typeof interpreter === 'string' && interpreter) {
+      return { launcher: { cmd: [interpreter], module: true, kind: 'python', via: cmd.join(' ') },
+               why: `${cmd.join(' ')} imports the dashboard (${posix(interpreter)})`, fromCache: false };
     }
   }
   const exe = exePath(root, platform);
@@ -94,16 +106,26 @@ export function dashboardLauncher({ env = {}, receipt = null, cache = null, now 
               + `executable at ${posix(exe)}` };
 }
 
-export function launchArgv(launcher, { db, port }) {
-  return [...launcher.cmd, ...(launcher.module ? ['-m', 'c4x.api'] : []),
+/** The interpreter with no console, when it is beside the one that was found. Windows only. */
+export function windowless(interpreter, { exists = existsSync, platform = process.platform } = {}) {
+  if (platform !== 'win32' || !/python\.exe$/i.test(interpreter)) return interpreter;
+  const quiet = interpreter.replace(/python\.exe$/i, 'pythonw.exe');
+  return exists(quiet) ? quiet : interpreter;
+}
+
+export function launchArgv(launcher, { db, port, exists = existsSync, platform = process.platform }) {
+  const head = launcher.kind === 'python' ? windowless(launcher.cmd[0], { exists, platform }) : launcher.cmd[0];
+  return [head, ...launcher.cmd.slice(1), ...(launcher.module ? ['-m', 'c4x.api'] : []),
           '--db', db, '--port', String(port), '--watchdog'];
 }
 
-/** Does this interpreter import the dashboard's modules? Bounded; a hang is a no. */
+/** The path of the interpreter this command runs, when it imports the dashboard's modules; else null. */
 export function pythonImports(cmd, { root = ROOT, timeoutMs = PROBE_TIMEOUT_MS } = {}) {
   const r = spawnSync(cmd[0], [...cmd.slice(1), '-c', PROBE_IMPORT],
-                      { cwd: root, timeout: timeoutMs, stdio: 'ignore', windowsHide: true });
-  return r.status === 0 && !r.error;
+                      { cwd: root, timeout: timeoutMs, encoding: 'utf8', windowsHide: true });
+  if (r.status !== 0 || r.error) return null;
+  const path = String(r.stdout || '').trim().split(/\r?\n/).pop();
+  return path ? path : null;
 }
 
 function readJson(path) {
@@ -216,6 +238,10 @@ async function selfTest() {
   const yes = () => true;
   const no = () => false;
   const win = { platform: 'win32', root: R };
+  // tryPython stubs answer as the real one does: the interpreter's path, or null.
+  const PY = 'X:/py314/python.exe';
+  const found = () => PY;
+  const notFound = () => null;
 
   // The launcher decision, every branch.
   const env = dashboardLauncher({ ...win, env: { C4X_DASHBOARD_CMD: 'X:/tool/c4x-api.exe' }, exists: yes });
@@ -223,40 +249,55 @@ async function selfTest() {
     env.launcher?.kind === 'env' && env.launcher.module === false && env.launcher.cmd[0] === 'X:/tool/c4x-api.exe');
   add('a C4X_DASHBOARD_CMD that does not exist is a reason, not a launcher',
     dashboardLauncher({ ...win, env: { C4X_DASHBOARD_CMD: 'X:/gone.exe' }, exists: no }).launcher === null);
-  const receipt = { dashboardLauncher: { launcher: { cmd: ['py', '-3'], module: true, kind: 'python' } } };
-  const fromReceipt = dashboardLauncher({ ...win, receipt, exists: no, tryPython: no });
+  const receipt = { dashboardLauncher: { launcher: { cmd: [PY], module: true, kind: 'python', via: 'py -3' } } };
+  const fromReceipt = dashboardLauncher({ ...win, receipt, exists: (p) => p === PY, tryPython: notFound });
   add('the receipt\u0027s python launcher is used without probing again',
-    fromReceipt.why === 'install receipt' && fromReceipt.launcher.cmd.join(' ') === 'py -3');
-  const staleExe = { dashboardLauncher: { launcher: { cmd: ['X:/old/c4x-api.exe'], module: false, kind: 'exe' } } };
+    fromReceipt.why === 'install receipt' && fromReceipt.launcher.cmd.join(' ') === PY);
+  const oldShape = { dashboardLauncher: { launcher: { cmd: ['py', '-3'], module: true, kind: 'python' } } };
+  const reResolved = dashboardLauncher({ ...win, receipt: oldShape, exists: (p) => p === PY, tryPython: found });
+  add('a first-build receipt naming the py launcher is re-resolved to a path (gate can fail)',
+    reResolved.why !== 'install receipt' && reResolved.launcher?.cmd[0] === PY);
+  const staleExe = { dashboardLauncher: { launcher: { cmd: ['X:/old/c4x.exe'], module: false, kind: 'exe' } } };
   add('a receipt naming an exe that is gone is skipped (gate can fail)',
-    dashboardLauncher({ ...win, receipt: staleExe, exists: no, tryPython: no }).launcher === null);
+    dashboardLauncher({ ...win, receipt: staleExe, exists: no, tryPython: notFound }).launcher === null);
   const now = 1_000_000_000_000;
   const cachedNone = { launcher: null, why: 'nothing last week', checkedAt: now - 1000 };
-  const c1 = dashboardLauncher({ ...win, cache: cachedNone, now, exists: yes, tryPython: yes });
+  const c1 = dashboardLauncher({ ...win, cache: cachedNone, now, exists: yes, tryPython: found });
   add('a cached "none" is honoured, so a miss is paid once a week not once a session',
     c1.launcher === null && c1.fromCache === true && c1.why === 'nothing last week');
   const expired = { ...cachedNone, checkedAt: now - CACHE_MS - 1 };
-  add('an expired cache is probed again', dashboardLauncher({ ...win, cache: expired, now, exists: no, tryPython: yes }).launcher?.kind === 'python');
-  const py = dashboardLauncher({ ...win, exists: yes, tryPython: (cmd) => cmd[0] === 'python' });
-  add('the first python that imports the dashboard wins, in order',
-    py.launcher?.kind === 'python' && py.launcher.cmd.join(' ') === 'python' && py.launcher.module === true);
+  add('an expired cache is probed again', dashboardLauncher({ ...win, cache: expired, now, exists: no, tryPython: found }).launcher?.kind === 'python');
+  const py = dashboardLauncher({ ...win, exists: yes, tryPython: (cmd) => (cmd[0] === 'python' ? PY : null) });
+  add('the first python that imports the dashboard wins, in order, recorded as its path',
+    py.launcher?.kind === 'python' && py.launcher.cmd.join(' ') === PY && py.launcher.module === true
+      && py.launcher.via === 'python');
+  add('the launcher is never the py launcher itself (gate can fail)',
+    !dashboardLauncher({ ...win, exists: yes, tryPython: found }).launcher.cmd[0].startsWith('py'));
   add('python beats an exe that is also there (gate can fail)',
-    dashboardLauncher({ ...win, exists: yes, tryPython: yes }).launcher?.kind === 'python');
-  const exe = dashboardLauncher({ ...win, exists: (p) => p === exePath(R, 'win32'), tryPython: no });
+    dashboardLauncher({ ...win, exists: yes, tryPython: found }).launcher?.kind === 'python');
+  const exe = dashboardLauncher({ ...win, exists: (p) => p === exePath(R, 'win32'), tryPython: notFound });
   add('with no python the built exe is used', exe.launcher?.kind === 'exe' && exe.launcher.module === false);
-  const none = dashboardLauncher({ ...win, exists: no, tryPython: no });
+  add('the exe is dist/c4x/c4x.exe on Windows and dist/c4x/c4x elsewhere',
+    posix(exePath(R, 'win32')).endsWith('/dist/c4x/c4x.exe') && posix(exePath('/r', 'linux')).endsWith('/dist/c4x/c4x'));
+  const none = dashboardLauncher({ ...win, exists: no, tryPython: notFound });
   add('with neither the answer is null and the reason names both', none.launcher === null
-    && none.why.includes('requirements.txt') && none.why.includes('dist/c4x-api'));
+    && none.why.includes('requirements.txt') && none.why.includes('dist/c4x'));
   add('posix candidates never try the py launcher', !candidatesFor('linux').some((c) => c[0] === 'py'));
 
+  const pyL = { cmd: [PY], module: true, kind: 'python' };
   add('the server argv carries the store, the port and the watchdog',
-    launchArgv({ cmd: ['py', '-3'], module: true }, { db: 'D:/s.db', port: 8061 }).join(' ')
-      === 'py -3 -m c4x.api --db D:/s.db --port 8061 --watchdog');
-  add('an exe takes the flags without -m',
-    launchArgv({ cmd: ['X:/c4x-api.exe'], module: false }, { db: 'D:/s.db', port: 8059 }).join(' ')
-      === 'X:/c4x-api.exe --db D:/s.db --port 8059 --watchdog');
-  add('an interpreter that does not exist is a no, quickly',
-    pythonImports(['c4x-no-such-interpreter-xyz'], { timeoutMs: 2000 }) === false);
+    launchArgv(pyL, { db: 'D:/s.db', port: 8061, exists: no, platform: 'win32' }).join(' ')
+      === `${PY} -m c4x.api --db D:/s.db --port 8061 --watchdog`);
+  add('on Windows pythonw beside the interpreter is spawned instead (gate can fail)',
+    launchArgv(pyL, { db: 'D:/s.db', port: 8059, exists: (p) => p === 'X:/py314/pythonw.exe', platform: 'win32' })[0]
+      === 'X:/py314/pythonw.exe');
+  add('but only when it is there', windowless(PY, { exists: no, platform: 'win32' }) === PY);
+  add('and never off Windows', windowless('/usr/bin/python3', { exists: yes, platform: 'linux' }) === '/usr/bin/python3');
+  add('an exe takes the flags without -m and is never swapped',
+    launchArgv({ cmd: ['X:/c4x.exe'], module: false, kind: 'exe' }, { db: 'D:/s.db', port: 8059, exists: yes, platform: 'win32' }).join(' ')
+      === 'X:/c4x.exe --db D:/s.db --port 8059 --watchdog');
+  add('an interpreter that does not exist is null, quickly',
+    pythonImports(['c4x-no-such-interpreter-xyz'], { timeoutMs: 2000 }) === null);
 
   // The token, from the exact line c4x/server.py prints.
   const announce = '  stop it with: curl -X POST http://127.0.0.1:8059/__shutdown__ -H "X-C4X-Shutdown: abc-DEF_123"';
@@ -286,7 +327,6 @@ async function selfTest() {
     } });
     return { out, spawned, logged, probed };
   };
-  const pyL = { cmd: ['python'], module: true, kind: 'python' };
   const ours = await drive({ answered: true, ours: true, db: 'D:/s.db' }, pyL);
   add('a server of ours already up: nothing spawned', ours.out.did === 'skipped' && ours.spawned.length === 0);
   const held = await drive({ answered: true, ours: false, db: 'E:/other.db' }, pyL);
@@ -295,8 +335,9 @@ async function selfTest() {
   const started = await drive({ answered: false }, pyL);
   add('refused plus a launcher: the server is spawned with --db, --port and --watchdog',
     started.out.did === 'started' && started.spawned.length === 1
-      && started.spawned[0].join(' ') === 'python -m c4x.api --db D:/s.db --port 8059 --watchdog');
-  add('and the start is recorded', started.logged[0]?.startsWith('c4x dashboard: started python'));
+      && started.spawned[0].slice(1).join(' ') === '-m c4x.api --db D:/s.db --port 8059 --watchdog'
+      && /python(w)?\.exe$/i.test(started.spawned[0][0]));
+  add('and the start is recorded', started.logged[0]?.startsWith('c4x dashboard: started X:/py314/python'));
   const nothing = await drive({ answered: false }, null);
   add('refused and no launcher: nothing spawned, the reason recorded',
     nothing.out.did === 'none' && nothing.spawned.length === 0 && nothing.logged[0]?.includes('not started: no launcher here'));
