@@ -210,34 +210,49 @@ boundary), the first typed prompt in `messages` (`role='user', type='typed'`), a
 those the date. Everything but `custom` is written with `titleSource` `auto`, the app's own value
 for a name it made. Records a first build left nameless are named after the fact through the
 ledger: `POST /api/adopt/retitle`, or the page's "Name them", touches only c4x's own records and
-only the ones with no name, or with an automatic name the rule below improves on.
+only the ones with no name.
 
-**A review run is named after the chat it read.** A Stop hook in the test laptop's old install
-(`sonnet-review.mjs`) ran `claude -p --model sonnet` with a fixed prompt whose second half was the
-last 250 records of the transcript under review, pasted in as `USER:` / `CLAUDE SAID:` /
-`OUTPUT WAS:` blocks. Each run wrote a one-prompt transcript of its own into the reviewed session's
+**A review run folds into the chat it reviewed.** A Stop hook in the test laptop's old install
+(`sonnet-review.mjs`) ran `claude -p --model sonnet` after each turn with a fixed prompt whose second
+half was the last 250 records of the transcript under review, pasted in as `USER:` / `CLAUDE SAID:`
+/ `OUTPUT WAS:` blocks. Each run wrote a one-prompt transcript of its own into the reviewed session's
 folder, with the app's entrypoint inherited from its environment, so the store held 58 of them as
-sessions and Adopt named every one after the prompt's opening line, "You are reviewing another
-Claude instance's work before it...". The prompt carries no session id, and timing cannot tell
-them apart: a run that approves starts after the session's last turn, and five long sessions
-overlapped in one folder. Quotation can. `c4x/reviews.py` tests only one-shots (one typed prompt,
-at most three messages), takes up to eight ASCII lines from the end of the prompt (an all-caps
-label dropped, the last 120 characters kept; a non-ASCII line can never match, since the excerpt
-crossed a shell pipe and the store holds U+FFFD where the transcript had anything else) and looks
-for them, in one query, in the messages of the sessions in the same folder that were alive when
-the run started (begun no later, last active no more than an hour before) and are not one-shots
-themselves. The session saying the most of them, when unique and at least two, is the one.
-Measured there: 55 of 58 tied to 16 chats in 1.4 s; the three others quote lines no session in
-their folder says, and keep their names; the two genuine one-line test chats among the one-shots
-tie to nothing and are untouched. A tied run is offered and written as "Reviewer - <the reviewed chat's
-own name>", cut to 60 with the ellipsis counted, below a name a person or a model gave the run
-itself. "Name them" also renames the records c4x wrote with the old automatic name (`titleSource`
-`auto`) and reports how many; a name a person gave (`user`) is never replaced. A found tie is
-cached for good, since quotation does not go away as the store grows; a miss is kept while the
-run's pool is the same sessions and asked again when one joins it (with every folder session as
-the pool and a query per snippet, the author's store took 26.5 s cold; this is what made it a
-page-load cost worth measuring). One chat reviewed fifteen times gets fifteen records of the same
-name, and the app orders them by activity.
+sessions, Adopt offered and adopted every one, and the sidebar listed them as chats named "You are
+reviewing another Claude instance's work before it...". The prompt carries no session id, and timing
+cannot tell them apart: a run that approves starts after the session's last turn, and five long
+sessions overlapped in one folder. Quotation can, and harvest does it (`deriveReviews` in
+`tools/harvest.mjs`, writing `review_links`; the schema comment there records the measurement).
+Only one-shots are tested (one typed prompt, at most three messages); the pool is the sessions of
+the run's cwd alive when it started (begun no later, last active within an hour), not one-shots
+themselves; up to eight ASCII lines from the end of the prompt (an all-caps label dropped, the last
+120 characters kept; a non-ASCII line can never match, since the excerpt crossed a shell pipe and
+the store holds U+FFFD where the transcript had anything else) are counted per pool session in one
+query. A session whose assistant text and tool results contain none of them is out, whatever its
+typed prompts say: a one-shot that repeats a person's prompt word for word (a test harness running
+the same command in seven sessions here) matches typed rows alone and is not a review. Among the
+rest every quoted line counts, and the unique top with at least two is the reviewed session. A
+found link is permanent; a miss is asked again only when a session joins its pool. Measured on the
+laptop's store: 54 of 58 tied to 16 chats, the four others quoting lines no session alive in their
+folder says; here, 3 sdk-py security reviews of one chat.
+
+**What the fold changes, and what it leaves alone.** The store reads `review_links` beside
+`session_links`: a run resolves to the head of the chat it reviewed, so a link naming the run opens
+that chat. It is listed nowhere on its own: not in the Sessions list, the pickers, Compare's arms,
+or the Summary's session count. The chat carries it as a count, `reviews`, in the work column and
+in the picker's label, which is what a search for "review" finds. Its tokens and cost reach the
+chat's numbers under "Including Subagents" and never under "Main Thread Only", the user's choice:
+it ran beside the chat, outside its context, like a subagent turn; the Cost tab asks for that
+scope, so cost always includes it. The chat's Messages and tool calls never show a reviewer's prompt
+as something the chat typed. The chat's own page and the drawer beside the Sessions list add a
+sixth list, Reviews: when each run started, its verdict (the reply's first word when it is APPROVED
+or PROBLEMS), its round among the chat's reviews, the prompt the chat was answering when it started
+(the newest typed prompt before the run's first turn, which is where it was dispatched), and its
+tokens and cost. Adopt never offers a run, says how many it left out, and takes back the records an
+earlier build wrote for runs (`POST /api/adopt/unadopt-reviews`, the drawer's "Remove them from
+Claude"): the file is removed and the ledger entry is stamped `removed_at` and kept, so what was
+written and taken back stays on record. What the app itself writes on a delete beyond the removal
+is not mimicked, because it has not been measured beyond the marker's name (`deleted_<record
+uuid>`); that measurement precedes the removal on the laptop.
 
 **"No folder" is the app's rule, not a defect.** Fifty of the laptop's 82 adopted sessions had a
 scratch-workspace working directory (`AppData\Roaming\Claude\scratch-workspaces\<account>\
