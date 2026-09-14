@@ -16,13 +16,13 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
 import time as _time
 from pathlib import Path
 from typing import Any, TypedDict
 
 import pandas as pd
 
+from c4x import proc
 from c4x.labels import distinct_short_paths, is_folderless, plural, titled_path
 from c4x.paths import install_root
 
@@ -47,14 +47,14 @@ _window_cache: dict = {}
 # ---------------------------------------------------------------------------
 def _node_json(script: str):
     """Run a node snippet that prints JSON, return the parsed value."""
-    proc = subprocess.run(
+    done = proc.run(
         ["node", "-e", script], capture_output=True, text=True, cwd=str(ROOT), timeout=60,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"node exited {proc.returncode}: {proc.stderr.strip()[:400]}")
-    out = proc.stdout.strip()
+    if done.returncode != 0:
+        raise RuntimeError(f"node exited {done.returncode}: {done.stderr.strip()[:400]}")
+    out = done.stdout.strip()
     if not out:
-        raise RuntimeError(f"node produced no stdout. stderr: {proc.stderr.strip()[:400]}")
+        raise RuntimeError(f"node produced no stdout. stderr: {done.stderr.strip()[:400]}")
     return json.loads(out)
 
 
@@ -84,26 +84,26 @@ def load_math():
 
 def _node_json_argv(args, timeout=120):
     """Run a node script that prints JSON on stdout, return the parsed value."""
-    proc = subprocess.run(["node", *args], capture_output=True, text=True,
-                          cwd=str(ROOT), timeout=timeout)
-    if proc.returncode != 0:
-        raise RuntimeError(f"node {args[0]} exited {proc.returncode}: {proc.stderr.strip()[:400]}")
-    if not proc.stdout.strip():
+    done = proc.run(["node", *args], capture_output=True, text=True,
+                    cwd=str(ROOT), timeout=timeout)
+    if done.returncode != 0:
+        raise RuntimeError(f"node {args[0]} exited {done.returncode}: {done.stderr.strip()[:400]}")
+    if not done.stdout.strip():
         raise RuntimeError(
-            f"node {args[0]} produced no stdout. stderr: {proc.stderr.strip()[:400]}")
-    return json.loads(proc.stdout)
+            f"node {args[0]} produced no stdout. stderr: {done.stderr.strip()[:400]}")
+    return json.loads(done.stdout)
 
 
 def predict(tokens: int, window: int):
     """Ask tools/mirror.mjs, so the answer is the validated implementation's answer."""
-    proc = subprocess.run(
+    done = proc.run(
         ["node", str(ROOT / "tools" / "mirror.mjs"),
          "--predict", str(int(tokens)), "--window", str(int(window))],
         capture_output=True, text=True, cwd=str(ROOT), timeout=60,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"mirror.mjs exited {proc.returncode}: {proc.stderr.strip()[:300]}")
-    return json.loads(proc.stdout)
+    if done.returncode != 0:
+        raise RuntimeError(f"mirror.mjs exited {done.returncode}: {done.stderr.strip()[:300]}")
+    return json.loads(done.stdout)
 
 
 # ---------------------------------------------------------------------------

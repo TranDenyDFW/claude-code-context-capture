@@ -9,13 +9,13 @@ nowhere, so this subtracts a recorded baseline from the resident total. Resident
 space are exact; everything between them is inferred and labelled as such.
 """
 import json
-import subprocess
 
 import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
 from dash.dash_table.Format import Format, Scheme
 
+from c4x import proc
 from c4x.dash_compat import DataTable
 from c4x.labels import stamp
 from c4x.store import ROOT, q, scoped
@@ -75,8 +75,8 @@ def tool_spec(script, flag):
     to a literal, because a stale literal that renders normally is the failure being avoided.
     """
     try:
-        out = subprocess.run(["node", str(ROOT / "tools" / script), flag],
-                             capture_output=True, text=True, timeout=20, check=True)
+        out = proc.run(["node", str(ROOT / "tools" / script), flag],
+                       capture_output=True, text=True, timeout=20, check=True)
         return json.loads(out.stdout), None
     except Exception as exc:
         return None, f"could not read {flag} from tools/{script}: {exc}"

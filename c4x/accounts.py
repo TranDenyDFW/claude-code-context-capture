@@ -39,11 +39,12 @@ import json
 import os
 import platform
 import shutil
-import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -72,8 +73,9 @@ def supported():
 def _make_link(link, target):
     """Point `link` at `target`, using whatever this platform calls that. Raises on failure."""
     if platform.system() == "Windows":
-        run = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
-                             capture_output=True, text=True)
+        from c4x import proc
+        run = proc.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                       capture_output=True, text=True)
         if run.returncode != 0 or link_target(link) is None:
             raise RuntimeError((run.stderr or run.stdout).strip() or "mklink failed")
         return
@@ -83,7 +85,8 @@ def _make_link(link, target):
 def _remove_link(link):
     """Remove the LINK and never what it points at, which is what `rmdir` does to a junction."""
     if platform.system() == "Windows":
-        subprocess.run(["cmd", "/c", "rmdir", str(link)], capture_output=True, text=True)
+        from c4x import proc
+        proc.run(["cmd", "/c", "rmdir", str(link)], capture_output=True, text=True)
         return
     os.unlink(link)
 
@@ -94,15 +97,19 @@ def app_running():
     A directory the app has open cannot be replaced, and a half-moved pair is the one state worth
     avoiding: the first run of this by hand moved four files and then stopped on a collision, which
     left the signed-in account pointing at an empty directory until it was finished.
+
+    NO CHILD PROCESS. This asked `tasklist`, and it is called on every page load through
+    `/api/adopt` and `/api/accounts`; once the server ran without a console, every one of those
+    calls flashed a console window. The rule is the same one `tasklist /FI "IMAGENAME eq
+    claude.exe"` applied: a process whose image name is `claude.exe`, in any case. A process that
+    refuses its name (another user's) has `None` there and is skipped.
     """
     if platform.system() != "Windows":
         return False
-    try:
-        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq claude.exe", "/NH"],
-                             capture_output=True, text=True, timeout=20).stdout
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return "claude.exe" in out.lower()
+    for process in psutil.process_iter(["name"]):
+        if str(process.info.get("name") or "").lower() == "claude.exe":
+            return True
+    return False
 
 
 def link_target(path):

@@ -173,3 +173,42 @@ class TestSharingAndPuttingItBack:
         answer = accounts.verify()
         assert not answer["ok"]
         assert any("migration" in p for p in answer["problems"]), answer["problems"]
+
+
+class TestAppRunning:
+    """No child process: the answer comes from the process table, by image name, in any case.
+
+    It asked `tasklist`, on every page load, and once the server ran without a console each of
+    those calls flashed a console window.
+    """
+    class _Process:
+        def __init__(self, name):
+            self.info = {"name": name}
+
+    def _table(self, monkeypatch, names):
+        seen = {"attrs": None}
+
+        def process_iter(attrs=None):
+            seen["attrs"] = attrs
+            return iter(self._Process(n) for n in names)
+        monkeypatch.setattr(accounts.psutil, "process_iter", process_iter)
+        return seen
+
+    def test_the_app_is_found_by_image_name_in_any_case(self, monkeypatch):
+        monkeypatch.setattr(accounts.platform, "system", lambda: "Windows")
+        seen = self._table(monkeypatch, ["svchost.exe", "CLAUDE.EXE"])
+        assert accounts.app_running() is True
+        assert seen["attrs"] == ["name"], "only the name is asked for, which is what stays cheap"
+
+    def test_a_process_that_refuses_its_name_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(accounts.platform, "system", lambda: "Windows")
+        self._table(monkeypatch, [None, "node.exe", "claude-helper.exe"])
+        assert accounts.app_running() is False, "a helper is not the app, and None is not a name"
+
+    def test_off_windows_the_table_is_never_read(self, monkeypatch):
+        monkeypatch.setattr(accounts.platform, "system", lambda: "Linux")
+
+        def never(attrs=None):
+            raise AssertionError("the process table was read")
+        monkeypatch.setattr(accounts.psutil, "process_iter", never)
+        assert accounts.app_running() is False
