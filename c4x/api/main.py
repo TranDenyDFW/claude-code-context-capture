@@ -1479,8 +1479,11 @@ def shutdown(request: Request, reason: str = Query("user hit /__shutdown__"),
 def legacy_health():
     """The dashboard's health shape, kept so anything watching for it still works."""
     from c4x import store
+    # `store_exists`, so a hook or `install status` can tell "answering" from "answering for a
+    # store that is not there", which an exe run from the wrong place would otherwise hide.
     return {"ok": True, "db": store.DB_PATH.as_posix(),
-            "port": int(os.environ.get("C4X_API_PORT", 8059))}
+            "port": int(os.environ.get("C4X_API_PORT", 8059)),
+            "store_exists": store.DB_PATH.exists()}
 
 
 class _Predict(BaseModel):
