@@ -39,6 +39,10 @@ export function csv(body: ChatWork): string {
       w.status, `${w.agent_count ?? ''} agents ${readableMs(w.duration_ms)} ${w.summary ?? ''}`]),
     ...body.task_events.map((t) => ['task_event', t.task_id, t.ts, t.description, t.status,
       t.resolved_to ?? 'unresolved']),
+    ...body.reviews.map((r) => ['review', r.session_id, r.ts, r.after_prompt ?? '',
+      r.verdict ?? 'no verdict',
+      `round ${r.round} ${(r.input_tokens ?? 0) + (r.cache_read ?? 0) + (r.cache_creation ?? 0)
+        + (r.output_tokens ?? 0)} tokens ${r.cost_usd ?? ''}`]),
     ...body.changed_files.map((f) => ['changed_file', f.file, f.last_ts, `${f.edits} edits`, f.kinds,
       f.additions === null ? 'no patch recorded'
         : `+${f.additions} -${f.deletions} over ${f.patched ?? 0} of ${f.edits} edits`]),
@@ -372,6 +376,35 @@ export function ChatWorkPage({ session, onBack }: { session: string; onBack: () 
                   <span className="ml-auto tabular-nums">{String(t.ts ?? '').slice(0, 19)}</span>
                 </Meta>
                 <p className="mt-0.5 text-2xs text-ink-dim">{t.description}</p>
+              </Row>
+            ))}
+          </Section>
+
+          {/* THE REVIEWS THIS CHAT RECEIVED: a hook's headless reviewer read it after a turn and
+              left a one-prompt session of its own, tied to this chat by harvest and listed
+              nowhere else. When, what it decided, which prompt the chat was answering, its cost. */}
+          <Section title="Reviews" count={body.reviews_total ?? 0} shown={body.reviews.length}>
+            {body.reviews.map((r) => (
+              <Row key={r.session_id}>
+                <Meta>
+                  <span className={r.verdict === 'PROBLEMS' ? 'font-semibold text-warn'
+                    : r.verdict === 'APPROVED' ? 'font-semibold text-good' : 'text-ink-dim'}>
+                    {r.verdict ?? 'no verdict'}
+                  </span>
+                  <span>round {r.round}</span>
+                  <span className="tabular-nums">
+                    {((r.input_tokens ?? 0) + (r.cache_read ?? 0) + (r.cache_creation ?? 0)
+                      + (r.output_tokens ?? 0)).toLocaleString()} tokens
+                  </span>
+                  {r.cost_usd !== null && <span className="tabular-nums">${r.cost_usd.toFixed(4)}</span>}
+                  <span className="font-mono">{r.session_id.slice(0, 8)}</span>
+                  <span className="ml-auto tabular-nums">{String(r.ts ?? '').slice(0, 19)}</span>
+                </Meta>
+                <p className="mt-0.5 text-2xs text-ink-dim">
+                  {r.after_prompt
+                    ? `after the prompt: ${r.after_prompt}`
+                    : 'before any prompt this store holds for the chat'}
+                </p>
               </Row>
             ))}
           </Section>

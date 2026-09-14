@@ -220,7 +220,7 @@ describe('axe finds no WCAG A or AA violation in', () => {
     vi.spyOn(api.adopt, 'state').mockResolvedValue({
       supported: true, why_not: '', pair: { account: 'a', org: 'o', root: 'R', source: 's' },
       physical: 'R/a/o', candidates: 2, cli_candidates: 1, other_account: 1, deleted_markers: 3,
-      untitled_adopted: 2, review_runs_to_name: 0,
+      untitled_adopted: 2, review_runs: 0, review_records: 0,
       app_running: false, sharing: 'current',
       groups: [{ cwd: `project::${PROJECT}`, project: 'SecDb', count: 2,
                  newest: '2026-08-03T12:01:00Z', sessions: [] }],

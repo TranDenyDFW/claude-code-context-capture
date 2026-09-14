@@ -553,20 +553,29 @@ export interface AdoptState {
   /** Records c4x wrote that carry no name; the app shows each as "General coding session". */
   untitled_adopted: number
   /**
-   * Records c4x wrote for review runs (a hook's `claude -p` reading another chat) that still
-   * carry the reviewer's own prompt as their name; each takes "Reviewer - <the chat it read>".
+   * Review runs (a hook's `claude -p` reading another chat, tied to it by harvest) among the
+   * sessions that would otherwise be offered: folded into the chat they reviewed, never offered.
    */
-  review_runs_to_name: number
+  review_runs: number
+  /** Records c4x wrote for review runs that are still on disk; the drawer offers to take them back. */
+  review_records: number
   app_running: boolean
   sharing: 'all' | 'current' | null
 }
 
-/** What `POST /api/adopt/retitle` answers. `reviews` counts the review runs among `renamed`. */
+/** What `POST /api/adopt/retitle` answers. */
 export interface RetitleReport {
   renamed: { session_id: string; path: string; title: string }[]
   kept: number
   missing: number
-  reviews: number
+  restart_required: boolean
+}
+
+/** What `POST /api/adopt/unadopt-reviews` answers: the records taken back, and their chats. */
+export interface UnadoptReport {
+  removed: { session_id: string; path: string; reviewed: string }[]
+  missing: number
+  kept: number
   restart_required: boolean
 }
 
@@ -636,6 +645,29 @@ export interface ChatTaskEvent {
   description: string | null
   resolved_to: 'agent' | 'workflow' | null
   ran_under: string | null
+}
+
+/**
+ * One review of the chat: a one-shot session a hook's headless reviewer left, tied to the chat
+ * by quotation (harvest's `review_links`) and listed nowhere on its own. `after_prompt` is the
+ * prompt the chat was answering when the run started, which is where it was dispatched; `round`
+ * counts the chat's reviews in time order.
+ */
+export interface ChatReview {
+  session_id: string
+  ts: string | null
+  verdict: 'APPROVED' | 'PROBLEMS' | null
+  round: number
+  after_prompt_ts: string | null
+  after_prompt: string | null
+  calls: number
+  input_tokens: number | null
+  cache_read: number | null
+  cache_creation: number | null
+  output_tokens: number | null
+  cost_usd: number | null
+  hits: number
+  snippets: number
 }
 
 /**
@@ -727,6 +759,8 @@ export interface ChatWork {
   changed_files: ChatChangedFile[]
   changed_files_total: number
   changes_total: number
+  reviews: ChatReview[]
+  reviews_total: number
 }
 
 export const api = {
@@ -788,6 +822,7 @@ export const api = {
     run: (body: { cwds: string[]; include_cli: boolean; dry_run: boolean }) =>
       post<AdoptReport>('/api/adopt', body),
     retitle: () => post<RetitleReport>('/api/adopt/retitle', {}),
+    unadoptReviews: () => post<UnadoptReport>('/api/adopt/unadopt-reviews', {}),
   },
 
   project: {

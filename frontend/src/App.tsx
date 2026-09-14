@@ -468,7 +468,7 @@ export default function App() {
               onClick={() =>
                 setSelection((was) => ({ ...was, scope: was.scope === 'all' ? 'main' : 'all' }))
               }
-              title="Subagent turns run inside a session but are not part of its own context."
+              title="Subagent turns and review runs happen beside a session but are not part of its own context."
               className={`rounded-md border px-2.5 py-1.5 text-sm transition-colors ${
                 selection.scope === 'all'
                   ? 'border-accent/60 bg-accent/10 text-accent'

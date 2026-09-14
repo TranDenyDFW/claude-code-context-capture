@@ -9,12 +9,14 @@ import { ChatWorkPage, csv } from './ChatWorkPage'
 function body(over: Partial<ChatWork> = {}): ChatWork {
   return {
     session: 'sess-1', chat: ['sess-1', 'sess-0'],
-    harvested: { plans: true, agent_runs: true, workflow_runs: true, task_events: true, changes: true },
+    harvested: { plans: true, agent_runs: true, workflow_runs: true, task_events: true, changes: true,
+                 reviews: true },
     plans: [], plans_total: 0,
     agent_runs: [], agent_runs_total: 0,
     workflow_runs: [], workflow_runs_total: 0,
     task_events: [], task_events_total: 0, task_events_unresolved: 0,
     changed_files: [], changed_files_total: 0, changes_total: 0,
+    reviews: [], reviews_total: 0,
     ...over,
   }
 }
@@ -42,6 +44,31 @@ describe('the chat work page', () => {
     render(<ChatWorkPage session="sess-1" onBack={() => {}} />)
     await waitFor(() =>
       expect(screen.getByText(/2 CLI sessions are folded into this chat/)).toBeTruthy())
+  })
+
+  it('lists each review with its verdict, its round and the prompt it followed', async () => {
+    answer(body({
+      reviews: [{
+        session_id: 'run-1111-2222', ts: '2026-08-02T14:00:00Z', verdict: 'PROBLEMS', round: 2,
+        after_prompt_ts: '2026-08-02T13:30:00Z', after_prompt: 'and now the tests',
+        calls: 1, input_tokens: 9000, cache_read: 0, cache_creation: 0, output_tokens: 40,
+        cost_usd: 0.03, hits: 4, snippets: 8,
+      }, {
+        session_id: 'run-3333-4444', ts: '2026-08-02T12:00:00Z', verdict: null, round: 1,
+        after_prompt_ts: null, after_prompt: null,
+        calls: 1, input_tokens: 100, cache_read: 0, cache_creation: 0, output_tokens: 5,
+        cost_usd: null, hits: 2, snippets: 3,
+      }],
+      reviews_total: 2,
+    }))
+    render(<ChatWorkPage session="sess-1" onBack={() => {}} />)
+    await waitFor(() => expect(screen.getByText('PROBLEMS')).toBeTruthy())
+    expect(screen.getByText(/after the prompt: and now the tests/)).toBeTruthy()
+    expect(screen.getByText('round 2')).toBeTruthy()
+    expect(screen.getByText('$0.0300')).toBeTruthy()
+    // A run with no verdict and no prompt before it says so rather than showing blanks.
+    expect(screen.getByText('no verdict')).toBeTruthy()
+    expect(screen.getByText(/before any prompt this store holds/)).toBeTruthy()
   })
 
   it('names the cap when a list holds more than it was given (gate can fail)', async () => {
@@ -234,13 +261,21 @@ describe('the export', () => {
         status: 'completed', description: 'the run', resolved_to: 'agent', ran_under: 'sess-1',
       }],
       task_events_total: 1,
+      reviews: [{
+        session_id: 'run-1', ts: '2026-08-02T14:00:00Z', verdict: 'APPROVED', round: 1,
+        after_prompt_ts: '2026-08-02T13:30:00Z', after_prompt: 'and now the tests',
+        calls: 1, input_tokens: 9000, cache_read: 0, cache_creation: 0, output_tokens: 40,
+        cost_usd: 0.03, hits: 4, snippets: 8,
+      }],
+      reviews_total: 1,
     }))
     const lines = text.split('\n')
     expect(lines[0]).toBe('kind,id,when,what,status,detail')
-    expect(lines).toHaveLength(5)
+    expect(lines).toHaveLength(6)
     expect(lines.map((l) => l.split(',')[0])).toEqual(
-      ['kind', '"plan"', '"agent_run"', '"workflow_run"', '"task_event"'])
+      ['kind', '"plan"', '"agent_run"', '"workflow_run"', '"task_event"', '"review"'])
     expect(text).toContain('1m 30s')
+    expect(text).toContain('"and now the tests","APPROVED","round 1 9040 tokens 0.03"')
   })
 
   it('doubles a quote in a value rather than ending the field early', () => {
