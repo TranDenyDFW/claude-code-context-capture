@@ -4617,14 +4617,14 @@ async function selfTest() {
         INSERT INTO review_links VALUES ('r-old', 'h-old', 2, 3, 'APPROVED', 'test', '2026-05-01T00:00:00Z');`);
       odb.close();
       const ndb = openDb(opath);
-      const kept = ndb.prepare("SELECT head_id FROM review_links WHERE session_id = 'r-old'").get();
+      const oldRow = ndb.prepare("SELECT head_id FROM review_links WHERE session_id = 'r-old'").get();
       let nullOk = true;
       try { ndb.prepare("INSERT INTO review_links VALUES ('r-new', NULL, 2, 2, 'PROBLEMS', 'test', 'now')").run(); } catch { nullOk = false; }
       const indexed = ndb.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND name='review_links_head'").get();
       const oldGone = !ndb.prepare("SELECT 1 FROM sqlite_master WHERE name='review_links_old'").get();
       ndb.close();
       checks.push(['reviews: a store with the NOT NULL head is rebuilt, rows kept, NULL accepted, index on the new table (gate can fail)',
-        kept?.head_id === 'h-old' && nullOk && indexed?.tbl_name === 'review_links' && oldGone]);
+        oldRow?.head_id === 'h-old' && nullOk && indexed?.tbl_name === 'review_links' && oldGone]);
     }
     // The backfill, on a file, both ways.
     const vpath = join(tmp, 'reviews', 'store.db');
