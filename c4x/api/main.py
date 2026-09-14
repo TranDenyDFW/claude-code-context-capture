@@ -1782,6 +1782,15 @@ def adopt_retitle():
     return adopt.retitle()
 
 
+@api.post("/api/adopt/unadopt-reviews")
+def adopt_unadopt_reviews():
+    """Take back the records c4x wrote for review runs: a run folds into the chat it reviewed
+    and is no chat of its own in the app either. The ledger's records only, the runs only."""
+    from c4x import adopt
+    _require_writes()
+    return adopt.unadopt_reviews()
+
+
 @api.post("/api/project/include")
 def project_include(body: dict):
     """Lift an exclusion so harvest picks the project up again."""
