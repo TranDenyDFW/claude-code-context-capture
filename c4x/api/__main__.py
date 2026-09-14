@@ -135,6 +135,9 @@ def self_test():
 
     here = str(Path("tmp/self-test-store.db").resolve())
     posix_here = Path(here).as_posix()
+    respelled = f"{Path(here).parent}{os.sep}.{os.sep}{Path(here).name}"
+    if os.name == "nt":
+        respelled = respelled.replace("\\", "/").upper()
     ours = serve(json.dumps({"ok": True, "db": posix_here, "port": 1}))
     theirs = serve(json.dumps({"ok": True, "db": Path("tmp/other.db").resolve().as_posix()}))
     garbage = serve("<html>not json</html>")
@@ -167,8 +170,11 @@ def self_test():
         ("nothing answers on a closed port", already_running(free_port(), here) is None),
         ("a listener that never answers is nobody, within the timeout",
          silent_answer is None and silent_took < 3.0),
+        # A second spelling of the same file: a `.` segment everywhere, and upper case only on
+        # Windows, where the filesystem folds case. Upper-casing on Linux names a different file,
+        # and this check said OURS there once, which CI caught.
         ("our own store answers OURS, whatever the spelling",
-         already_running(ours.server_port, here.replace("\\", "/").upper()) == OURS),
+         already_running(ours.server_port, respelled) == OURS),
         ("another store's dashboard is named",
          (already_running(theirs.server_port, here) or "").startswith("a c4x dashboard for ")),
         ("a listener that is not a dashboard is said to be one",
