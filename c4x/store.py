@@ -2235,7 +2235,10 @@ def chat_reviews(session_id: str, limit: int = 200) -> pd.DataFrame:
     marks = ",".join("?" * len(runs))
     df = q(f"""
         SELECT r.session_id, r.head_id, r.verdict, r.hits, r.snippets,
-               (SELECT MIN(t.ts) FROM turns t WHERE t.session_id = r.session_id) AS ts,
+               -- The run's first turn, or the session row's own start for a run whose transcript
+               -- carries no usage at all (an sdk-py review here has messages and no turns).
+               COALESCE((SELECT MIN(t.ts) FROM turns t WHERE t.session_id = r.session_id),
+                        s.first_ts) AS ts,
                (SELECT COUNT(*) FROM api_calls a WHERE a.session_id = r.session_id) AS calls,
                (SELECT SUM(COALESCE(input_tokens,0)) FROM api_calls a
                  WHERE a.session_id = r.session_id) AS input_tokens,
@@ -2245,7 +2248,8 @@ def chat_reviews(session_id: str, limit: int = 200) -> pd.DataFrame:
                  WHERE a.session_id = r.session_id) AS cache_creation,
                (SELECT SUM(COALESCE(output_tokens,0)) FROM api_calls a
                  WHERE a.session_id = r.session_id) AS output_tokens
-        FROM review_links r WHERE r.session_id IN ({marks})
+        FROM review_links r LEFT JOIN sessions s ON s.session_id = r.session_id
+        WHERE r.session_id IN ({marks})
         ORDER BY ts ASC
     """, tuple(runs))
     if df.empty:

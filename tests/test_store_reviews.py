@@ -15,6 +15,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,13 +35,13 @@ PROMPT = ("You are reviewing another Claude instance's work before it is allowed
           "turn.\n\n--- THE WORK ---\nCLAUDE SAID: " + L1 + "\n")
 
 
-def _run(con, sid, cwd, at_minute, verdict, parent, reply):
+def _run(con, sid, cwd, at_minute, verdict, parent, reply, turns=6):
     """A one-shot session: six turns (well over the floor), one typed prompt, one reply."""
     first = f"2026-08-01T00:{at_minute:02d}:00Z"
     con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
                 (sid, "slug-r", cwd, "main", "2.1.263", "claude-desktop", first, first,
                  rf"C:\t\{sid}.jsonl"))
-    for i in range(6):
+    for i in range(turns):
         con.execute("""INSERT INTO turns (uuid, session_id, ts, model, request_id, input_tokens,
                          cache_creation_input_tokens, cache_read_input_tokens, output_tokens,
                          thinking_tokens, total_resident, is_sidechain, file_path, line_no)
@@ -79,6 +80,12 @@ def review_store(tmp_path, monkeypatch):
                     (uuid_, sid, ts, text, len(text)))
     _run(con, RUN, ALPHA, 20, "APPROVED", OLD, "APPROVED\nfine")
     _run(con, RUN2, BETA, 50, "PROBLEMS", LONE, "PROBLEMS\n- one thing")
+    # A run whose transcript carries no usage: messages and a session row, no turns (an sdk-py
+    # review here is shaped like this). Its time is the session row's own start.
+    _run(con, "r-3", BETA, 55, None, LONE, "Looking at this", turns=0)
+    con.execute("""INSERT INTO review_links (session_id, head_id, hits, snippets, verdict, method,
+                     linked_at) VALUES ('r-3', ?, 3, 8, NULL, 'test', '2026-08-02T00:00:00Z')
+                   ON CONFLICT(session_id) DO NOTHING""", (LONE,))
     for sid, usd in ((HEAD, 1.0), (RUN, 0.25)):
         con.execute("INSERT INTO cost_state (session_id, total_cost_usd) VALUES (?, ?)", (sid, usd))
     con.commit()
@@ -98,8 +105,8 @@ def store(review_store):
 class TestTheMap:
     def test_a_run_knows_its_chat_and_a_chat_its_runs(self, store):
         parent_of, runs_of = store.review_links(ttl=0)
-        assert parent_of == {RUN: OLD, RUN2: LONE}
-        assert runs_of == {OLD: [RUN], LONE: [RUN2]}
+        assert parent_of == {RUN: OLD, RUN2: LONE, "r-3": LONE}
+        assert runs_of == {OLD: [RUN], LONE: ["r-3", RUN2]}, "newest first"
 
     def test_a_run_resolves_to_the_head_of_the_chat_it_reviewed(self, store):
         assert store.chat_head(RUN) == HEAD, "through the chain: OLD folds into HEAD"
@@ -110,7 +117,7 @@ class TestTheMap:
         assert store.chat_members(HEAD) == [HEAD, OLD]
         assert store.chat_members(HEAD, reviews=True) == [HEAD, OLD, RUN]
         assert store.chat_members(RUN) == [HEAD, OLD], "a run names its chat, not itself"
-        assert store.chat_members(LONE, reviews=True) == [LONE, RUN2]
+        assert store.chat_members(LONE, reviews=True) == [LONE, "r-3", RUN2]
         clause, params = store.chain_where(HEAD)
         assert RUN not in params and clause.startswith("session_id IN")
         assert RUN in store.chain_where(HEAD, reviews=True)[1]
@@ -133,16 +140,17 @@ class TestTheLists:
         rows = store.session_rows(ttl=0)
         listed = set(rows["session_id"])
         assert RUN not in listed and RUN2 not in listed, "six turns, and still not a chat"
+        assert "r-3" not in listed, "no turns at all, and still not a chat"
         by_id = dict(zip(rows["session_id"], rows["reviews"], strict=True))
-        assert by_id[HEAD] == 1 and by_id[LONE] == 1
-        assert sum(by_id.values()) == 2
+        assert by_id[HEAD] == 1 and by_id[LONE] == 2
+        assert sum(by_id.values()) == 3
         assert int(rows.loc[rows["session_id"] == HEAD, "cli_sessions"].iloc[0]) == 2, (
             "the run is not a CLI session of the chat")
 
     def test_the_summary_counts_chats_not_runs(self, store):
         stats = store.overview_stats()
         total = store.q("SELECT COUNT(*) n FROM sessions")["n"].iloc[0]
-        assert stats["sessions"] == int(total) - 2
+        assert stats["sessions"] == int(total) - 3
 
     def test_the_picker_says_how_many_reviews_a_chat_received(self, store):
         from c4x.ui.header import selector_options
@@ -157,7 +165,7 @@ class TestTheLists:
         assert store.chat_work_counts(HEAD)["harvested"]["reviews"] is True
         assert store.chat_work_counts("s0-2")["reviews"] == 0
         totals = store.chat_work_totals(ttl=0)
-        assert totals[HEAD]["reviews"] == 1 and totals[LONE]["reviews"] == 1
+        assert totals[HEAD]["reviews"] == 1 and totals[LONE]["reviews"] == 2
         assert work_summary({"reviews": 2}) == "2 reviews"
         assert work_summary({"plans": 1, "reviews": 1}) == "1 plan, 1 review"
 
@@ -197,8 +205,16 @@ class TestTheChatPage:
         assert row["cost_usd"] > 0
         assert int(row["hits"]) == 2 and int(row["snippets"]) == 3
         lone = store.chat_reviews(LONE)
-        assert list(lone["verdict"]) == ["PROBLEMS"]
-        assert lone.iloc[0]["after_prompt"] == "start over"
+        assert list(lone["session_id"]) == ["r-3", RUN2], "newest first"
+        # pandas reads a missing verdict and a missing cost as NaN, which is what the route then
+        # sends as null; `is None` would be the wrong question of a frame.
+        assert pd.isna(lone.iloc[0]["verdict"]) and lone.iloc[1]["verdict"] == "PROBLEMS"
+        assert list(lone["round"]) == [2, 1]
+        assert lone.iloc[1]["after_prompt"] == "start over"
+        turnless = lone.iloc[0]
+        assert turnless["ts"] == "2026-08-01T00:55:00Z", "the session row's own start"
+        assert int(turnless["calls"]) == 0 and pd.isna(turnless["cost_usd"])
+        assert turnless["after_prompt"] == "start over"
         assert store.chat_reviews("s0-2").empty
 
     def test_the_route_carries_the_reviews_beside_the_other_lists(self, store):
