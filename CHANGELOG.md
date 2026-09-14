@@ -11,6 +11,28 @@ removed and nothing here said so.
 
 ### Added
 
+- **The server's children open no console window.** Once the hook started the server as
+  `pythonw.exe`, every console program it ran got a console of its own from Windows, a box that
+  flashed on every page load: `tasklist` behind `/api/adopt` and `/api/accounts`, `node` behind
+  the mirror routes. Every spawn in the package now goes through `c4x/proc.py`, which adds
+  `CREATE_NO_WINDOW` on Windows and reaches `subprocess.run` at call time so the delete guard still
+  sees it; `accounts.app_running()` reads the process table through psutil instead of spawning
+  anything. A source sweep in `tests/test_proc.py` refuses a new direct spawn, and is fed a
+  known-bad module so it cannot pass vacuously.
+- **The Adopt control is a drawer, and the project modal covers the page.** The header keeps one
+  Adopt button beside the Account switch; everything else opens in a non-modal drawer at the side
+  of the page (Escape, a close button, focus in on open and back on the button on close). It is
+  rendered through a portal at the end of the document, because the header's backdrop filter makes
+  it the containing block for a fixed descendant: measured in the live page, a fixed element inside
+  the header was clipped to the header's box, and the project mover's `inset-0` backdrop covered
+  only the header strip while its dialog declared `aria-modal`. Both now cover what they claim.
+- **A review run is named after the chat it read.** A Stop hook's `claude -p` left 58 one-prompt
+  sessions on the test laptop, each quoting the last 250 records of the transcript it reviewed,
+  and Adopt named every one after the reviewer's own prompt. `c4x/reviews.py` ties a one-shot
+  session to the session it quotes (same folder, alive when the run started, the most snippets
+  said, unique, at least two): 55 of 58 there, to 16 chats, in 1.4 s. A tied run is offered and written as
+  "Reviewer - <the chat's own name>"; "Name them" renames the records that still carry the old
+  automatic name and reports how many (`reviews`), and never a name a person gave.
 - **Every adopted record carries a name, and the ones a first build left nameless can be named.**
   The desktop app shows a record with no `title` as "General coding session", every one of them,
   and the first build wrote a title only from the store's `custom` or `ai` kinds: 64 of 82 on the

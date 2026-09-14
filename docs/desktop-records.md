@@ -192,8 +192,8 @@ has, measured over 189 records on the author's machine, present on all: `created
 `isArchived`, `lastActivityAt`, `model`, `originCwd`, `permissionMode`,
 `remoteMcpServersConfig`, `sessionId`; plus `cliSessionId`, the link to the transcript.
 
-`c4x/adopt.py` is that write made repeatable, through the Adopt control beside the Account switch
-or `POST /api/adopt`. A candidate is a session in the store whose transcript is on disk and not a
+`c4x/adopt.py` is that write made repeatable, through the Adopt drawer (the button beside the
+Account switch) or `POST /api/adopt`. A candidate is a session in the store whose transcript is on disk and not a
 subagent's, that has at least one turn, whose entrypoint is `claude-desktop` (or unset), and that
 has no record under any records root. CLI and SDK sessions never had a record and are offered only
 behind a checkbox. `createdAt` and `lastActivityAt` come from the first and last turn; `model`
@@ -210,7 +210,34 @@ boundary), the first typed prompt in `messages` (`role='user', type='typed'`), a
 those the date. Everything but `custom` is written with `titleSource` `auto`, the app's own value
 for a name it made. Records a first build left nameless are named after the fact through the
 ledger: `POST /api/adopt/retitle`, or the page's "Name them", touches only c4x's own records and
-only the ones with no name.
+only the ones with no name, or with an automatic name the rule below improves on.
+
+**A review run is named after the chat it read.** A Stop hook in the test laptop's old install
+(`sonnet-review.mjs`) ran `claude -p --model sonnet` with a fixed prompt whose second half was the
+last 250 records of the transcript under review, pasted in as `USER:` / `CLAUDE SAID:` /
+`OUTPUT WAS:` blocks. Each run wrote a one-prompt transcript of its own into the reviewed session's
+folder, with the app's entrypoint inherited from its environment, so the store held 58 of them as
+sessions and Adopt named every one after the prompt's opening line, "You are reviewing another
+Claude instance's work before it...". The prompt carries no session id, and timing cannot tell
+them apart: a run that approves starts after the session's last turn, and five long sessions
+overlapped in one folder. Quotation can. `c4x/reviews.py` tests only one-shots (one typed prompt,
+at most three messages), takes up to eight ASCII lines from the end of the prompt (an all-caps
+label dropped, the last 120 characters kept; a non-ASCII line can never match, since the excerpt
+crossed a shell pipe and the store holds U+FFFD where the transcript had anything else) and looks
+for them, in one query, in the messages of the sessions in the same folder that were alive when
+the run started (begun no later, last active no more than an hour before) and are not one-shots
+themselves. The session saying the most of them, when unique and at least two, is the one.
+Measured there: 55 of 58 tied to 16 chats in 1.4 s; the three others quote lines no session in
+their folder says, and keep their names; the two genuine one-line test chats among the one-shots
+tie to nothing and are untouched. A tied run is offered and written as "Reviewer - <the reviewed chat's
+own name>", cut to 60 with the ellipsis counted, below a name a person or a model gave the run
+itself. "Name them" also renames the records c4x wrote with the old automatic name (`titleSource`
+`auto`) and reports how many; a name a person gave (`user`) is never replaced. A found tie is
+cached for good, since quotation does not go away as the store grows; a miss is kept while the
+run's pool is the same sessions and asked again when one joins it (with every folder session as
+the pool and a query per snippet, the author's store took 26.5 s cold; this is what made it a
+page-load cost worth measuring). One chat reviewed fifteen times gets fifteen records of the same
+name, and the app orders them by activity.
 
 **"No folder" is the app's rule, not a defect.** Fifty of the laptop's 82 adopted sessions had a
 scratch-workspace working directory (`AppData\Roaming\Claude\scratch-workspaces\<account>\

@@ -113,14 +113,18 @@ up and how to stop it by hand; `install --no-dashboard` turns the autostart off 
 it back on), as does `C4X_NO_DASHBOARD=1`. `python -m c4x.api` by hand still works and does not
 stop itself unless asked to with `--watchdog`. Closing the page does not stop capture. The page is
 committed built, so npm is needed only to change the frontend. The same server serves every tab as
-JSON: `curl 127.0.0.1:8059/api/tab/tab-cost`.
+JSON: `curl 127.0.0.1:8059/api/tab/tab-cost`. The server runs without a console and gives none to
+the programs it runs (`c4x/proc.py`), so nothing flashes when the page loads.
 
-Beside the Account switch, **Adopt** lists the chats on this machine that the desktop app has no
-record of, grouped by folder. A reinstall leaves every transcript and none of the records, so the
-app shows a cloud list pointing at a device that no longer exists; ticking a folder writes the
-records into the signed-in account's directory and Claude lists the chats after a restart. Nothing
-is preselected: a chat you deleted in the app looks the same to this rule as one a reinstall
-orphaned, and the page says how many of those the app has deleted.
+Beside the Account switch, the **Adopt** button opens a drawer listing the chats on this machine
+that the desktop app has no record of, grouped by folder. A reinstall leaves every transcript and
+none of the records, so the app shows a cloud list pointing at a device that no longer exists;
+ticking a folder writes the records into the signed-in account's directory and Claude lists the
+chats after a restart. Nothing is preselected: a chat you deleted in the app looks the same to
+this rule as one a reinstall orphaned, and the page says how many of those the app has deleted.
+The same drawer names the records c4x wrote: a nameless one after the store's name for it, and a
+review run (a hook's `claude -p` that read another chat) as "Reviewer - <the chat it read>", tied
+to that chat by quotation (`docs/desktop-records.md` §7).
 
 **Without Python.** `tools/build_exe.py` builds the server into `dist/c4x/` (`c4x.exe`) with
 PyInstaller, and the `build-exe` workflow attaches that directory to every release as
