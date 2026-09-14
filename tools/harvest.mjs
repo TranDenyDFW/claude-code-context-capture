@@ -768,6 +768,10 @@ export function openDb(dbPath = DB_PATH) {
     db.exec(`INSERT INTO review_links (session_id, head_id, hits, snippets, verdict, method, linked_at)
              SELECT session_id, head_id, hits, snippets, verdict, method, linked_at FROM review_links_old`);
     db.exec('DROP TABLE review_links_old');
+    // The misses go too, once: every one was judged before the orphan look existed, and a miss is
+    // asked again only when its pool changes, which for a run in a folder of its own is never.
+    // Emptying the table here makes the next pass ask each of them under the new rule.
+    db.exec("DELETE FROM review_misses WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE name='review_misses')");
     console.error('harvest: rebuilt review_links so head_id may be NULL (a review of a chat this store cannot name)');
   }
   db.exec(SCHEMA);
@@ -4614,9 +4618,13 @@ async function selfTest() {
         session_id TEXT PRIMARY KEY, head_id TEXT NOT NULL, hits INTEGER NOT NULL, snippets INTEGER NOT NULL,
         verdict TEXT, method TEXT NOT NULL, linked_at TEXT NOT NULL, CHECK (head_id <> session_id));
         CREATE INDEX review_links_head ON review_links(head_id);
-        INSERT INTO review_links VALUES ('r-old', 'h-old', 2, 3, 'APPROVED', 'test', '2026-05-01T00:00:00Z');`);
+        INSERT INTO review_links VALUES ('r-old', 'h-old', 2, 3, 'APPROVED', 'test', '2026-05-01T00:00:00Z');
+        CREATE TABLE review_misses (session_id TEXT PRIMARY KEY, pool_key TEXT NOT NULL, checked_at TEXT NOT NULL);
+        INSERT INTO review_misses VALUES ('r-miss', 'a,b', '2026-05-01T00:00:00Z');`);
       odb.close();
       const ndb = openDb(opath);
+      const missesLeft = ndb.prepare('SELECT COUNT(*) n FROM review_misses').get().n;
+      checks.push(['reviews: the rebuild forgets every miss, so each is asked again under the orphan look', missesLeft === 0]);
       const oldRow = ndb.prepare("SELECT head_id FROM review_links WHERE session_id = 'r-old'").get();
       let nullOk = true;
       try { ndb.prepare("INSERT INTO review_links VALUES ('r-new', NULL, 2, 2, 'PROBLEMS', 'test', 'now')").run(); } catch { nullOk = false; }
