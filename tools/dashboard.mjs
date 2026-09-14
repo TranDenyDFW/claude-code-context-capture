@@ -269,7 +269,10 @@ async function selfTest() {
   add('no stamp: not debounced', debounced(stampPath, Date.now()) === false);
   writeFileSync(stampPath, 'x');
   add('a fresh stamp debounces (gate can fail)', debounced(stampPath, Date.now()) === true);
-  add('an old stamp does not', debounced(stampPath, Date.now() + DEBOUNCE_MS + 1) === false);
+  // A margin of seconds, not a millisecond: the file's mtime comes from the filesystem clock and
+  // Date.now() from the process, and on the Windows CI runner the former sat ahead of the latter
+  // by more than 1 ms, which failed the suite once for a property that plainly held.
+  add('an old stamp does not', debounced(stampPath, Date.now() + DEBOUNCE_MS + 5000) === false);
 
   // launch(), every outcome, with every side effect stubbed.
   const drive = async (answer, launcher, opts = {}) => {
