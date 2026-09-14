@@ -573,10 +573,31 @@ export interface RetitleReport {
 
 /** What `POST /api/adopt/unadopt-reviews` answers: the records taken back, and their chats. */
 export interface UnadoptReport {
-  removed: { session_id: string; path: string; reviewed: string }[]
+  /** `reviewed` is null for a run the store knows is a review but cannot place. */
+  removed: { session_id: string; path: string; reviewed: string | null }[]
   missing: number
   kept: number
   restart_required: boolean
+}
+
+/** What one startup sweep did: `adopt.sweep_reviews`, read back from its stamp file. */
+export interface SweepReport {
+  at: string
+  epoch: number
+  removed: number
+  missing: number
+  failed: number
+  restarted: boolean
+  restarted_epoch: number | null
+  why: string
+  restart: { restarted: boolean; killed: number; launch: string[] | null; why: string } | null
+}
+
+/** What `GET /api/adopt/sweep` answers. */
+export interface SweepState {
+  /** Off under `--no-writes` and `--no-review-sweep`. */
+  enabled: boolean
+  last: SweepReport | null
 }
 
 /** What a POST to `/api/adopt` answers. `note` is set when the bytes live in a shared directory. */
@@ -773,6 +794,8 @@ export const api = {
     get<{
       ok: boolean
       db: string
+      /** The server process, so a restart can be told apart from the server it replaced. */
+      pid: number
       /** This process never harvests. Always true on the API server. */
       read_only: boolean
       /** The project export/import/delete routes will answer. Off with `--no-writes`. */
@@ -823,6 +846,18 @@ export const api = {
       post<AdoptReport>('/api/adopt', body),
     retitle: () => post<RetitleReport>('/api/adopt/retitle', {}),
     unadoptReviews: () => post<UnadoptReport>('/api/adopt/unadopt-reviews', {}),
+    /** The sweep the server runs at startup: whether it is on here, and what the last one did. */
+    sweep: () => get<SweepState>('/api/adopt/sweep'),
+  },
+
+  /**
+   * The server that serves this page. Stop leaves nothing answering until the next Claude
+   * session starts one; restart starts a replacement with the same flags, and the page waits for
+   * a different process to answer `health`.
+   */
+  server: {
+    stop: () => post<{ stopped: boolean }>('/api/server/stop', {}),
+    restart: () => post<{ restarting: boolean; pid: number; argv: string[] }>('/api/server/restart', {}),
   },
 
   project: {

@@ -235,6 +235,27 @@ found link is permanent; a miss is asked again only when a session joins its poo
 laptop's store: 54 of 58 tied to 16 chats, the four others quoting lines no session alive in their
 folder says; here, 3 sdk-py security reviews of one chat.
 
+**What a session "said" includes its compaction summaries.** One of the four quoted the chat
+beside it exactly, and still tied to nothing: the chat had just compacted, so the hook's "last 250
+records" were its compaction summary, which the transcript carries as a user-role record nobody
+typed (`compact_summary` in the store). The said rule now counts assistant text, tool results and
+compaction summaries; a person cannot type a compaction summary, so the guard against a repeated
+prompt is unchanged, and that run ties to its chat like any other (55 of 58 on the laptop).
+
+**A review the store cannot place is still a review: an orphan.** The other three quote lines no
+session in their folder says: one ran in a skills `references` directory whose folder holds no
+session at all, two ran in a fixtures subfolder and quote fixture lines two chats said evenly. A
+one-shot whose lines are said (as above) by sessions anywhere in the store, at least two of them,
+AND whose reply begins with APPROVED or PROBLEMS, is recorded with `head_id NULL`. The verdict is
+what keeps a person's real chat safe: someone who pastes another chat's output into a new session
+gets an answer, not a one-word verdict, and the self-test pins that case. The store-wide look runs
+only past the verdict test and only once per miss (a miss is asked again when its pool changes),
+and the `review_links` table from the build before orphans, whose `head_id` was `NOT NULL`, is
+rebuilt on first open with its rows kept and its misses forgotten, so every miss is judged once
+under the new rule. An orphan folds into nothing and is listed nowhere: it maps to `None` in the
+store's review map, counts toward no chat, is never offered by Adopt, and its record is taken back
+with the rest (`reviewed: null` in the report).
+
 **What the fold changes, and what it leaves alone.** The store reads `review_links` beside
 `session_links`: a run resolves to the head of the chat it reviewed, so a link naming the run opens
 that chat. It is listed nowhere on its own: not in the Sessions list, the pickers, Compare's arms,
@@ -253,6 +274,24 @@ Claude"): the file is removed and the ledger entry is stamped `removed_at` and k
 written and taken back stays on record. What the app itself writes on a delete beyond the removal
 is not mimicked, because it has not been measured beyond the marker's name (`deleted_<record
 uuid>`); that measurement precedes the removal on the laptop.
+
+**The sweep runs itself when the app starts, and restarts the app.** The user's decision: the
+button should not be needed. "The app starts" has one observable in c4x, the SessionStart hook
+finding nobody on the port and starting the server, so the server runs the sweep once, right after
+it binds (`c4x/api/__main__.py`, `start_review_sweep`, a thread that waits for the server's own
+`/__health__` answer; `adopt.sweep_reviews`): `unadopt_reviews`, the ledger's records only, never
+one the app wrote; and when that removed anything, `desktop.restart_app`: every `claude.exe`
+terminated (killed after 10 s), then the app started again, the Store build through
+`explorer.exe shell:AppsFolder\<PackageFamilyName>!<Application Id>` with the id read from the
+package's `AppxManifest.xml` (`Claude_pzs8sxrjxfjjc!Claude` on the laptop), the installer's build
+by its exe path; kill first because the app keeps a single instance, so a launch while it runs
+only fronts the old window. The server itself is `pythonw.exe` and is never touched. Guards: only
+while Claude is running (nothing to restart otherwise); never a second restart within ten minutes
+(a record that cannot be removed cannot restart the app on a loop); off under `--no-writes`; off
+with `install --no-review-sweep` (the receipt's `reviewSweep`, carried into the server's argv as
+`--no-review-sweep`, `--review-sweep` undoes it) or `C4X_NO_REVIEW_SWEEP=1`. The report lands in
+`data/raw/.review-sweep` and in `dashboard.log`; `GET /api/adopt/sweep` reads it and the drawer
+shows it as one line. The drawer keeps its button for a sweep without a restart.
 
 **"No folder" is the app's rule, not a defect.** Fifty of the laptop's 82 adopted sessions had a
 scratch-workspace working directory (`AppData\Roaming\Claude\scratch-workspaces\<account>\

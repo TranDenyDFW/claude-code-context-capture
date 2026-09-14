@@ -177,6 +177,9 @@ def health():
     from c4x import store
     return {"ok": True,
             "db": store.DB_PATH.as_posix(),
+            # The process, so a page that asked for a restart can tell the replacement from the
+            # server it asked: both answer here, a quarter of a second apart.
+            "pid": os.getpid(),
             # TWO SEPARATE FACTS, reported separately on purpose. `read_only` means this process
             # never harvests and is always true here. `writes_enabled` means the export, import and
             # delete routes will answer. Collapsing them into one flag would leave the UI unable to
@@ -1789,6 +1792,36 @@ def adopt_unadopt_reviews():
     from c4x import adopt
     _require_writes()
     return adopt.unadopt_reviews()
+
+
+@api.get("/api/adopt/sweep")
+def adopt_sweep():
+    """The sweep this server runs at startup (`adopt.sweep_reviews`): whether it is on here, and
+    what the last one did, read from its stamp file. Nothing is run by asking."""
+    from c4x import adopt
+    return {"enabled": adopt.sweep_enabled(), "last": adopt.last_sweep()}
+
+
+# THE TWO SERVER BUTTONS. JSON-bodied POSTs, so a browser sends a preflight for them cross-origin
+# and the middleware below refuses it; `/__shutdown__` keeps its token for scripts, these are for
+# the page, which cannot know the token by design. Neither is a store write, so `--no-writes`
+# does not gate them: stopping a server that answers no writes is still the person's call.
+@api.post("/api/server/stop")
+def server_stop(body: dict):
+    """Stop this server. The SessionStart hook starts one again with the next Claude session."""
+    from c4x.server import hardened_shutdown
+    _ = body
+    hardened_shutdown("Stop C4X button")
+    return {"stopped": True}
+
+
+@api.post("/api/server/restart")
+def server_restart(body: dict):
+    """Start a replacement with the same flags, then stop; the page polls health until the
+    replacement answers."""
+    from c4x.server import restart_server
+    _ = body
+    return restart_server("Restart C4X button")
 
 
 @api.post("/api/project/include")

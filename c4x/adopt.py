@@ -409,6 +409,103 @@ def unadopt_reviews() -> dict:
     return report
 
 
+# THE SWEEP AT STARTUP. The server runs this once, right after it binds (`c4x/api/__main__.py`,
+# `start_review_sweep`): take back every record c4x wrote for a review run, and when that removed
+# anything, restart Claude so the sidebar reflects it. The user's decision, so the drawer's button
+# is not needed for the ordinary case. Guards, each stated where it applies: never a record the
+# app itself wrote (only the ledger's, `unadopt_reviews`); only while the app is running (nothing
+# to restart otherwise, and the hook starts this server as the app starts); never a second restart
+# within SWEEP_COOLDOWN, so a record that cannot be removed cannot restart the app on a loop; off
+# under --no-writes and under C4X_NO_REVIEW_SWEEP=1, which `--no-review-sweep` sets.
+SWEEP_COOLDOWN = 600.0
+SWEEP_STAMP = ".review-sweep"
+
+
+def sweep_stamp_path() -> Path:
+    """The last sweep's report, beside the dashboard log: `data/raw/.review-sweep`."""
+    from c4x import store
+    return Path(store.DB_PATH).parent / "raw" / SWEEP_STAMP
+
+
+def sweep_enabled(env=None) -> bool:
+    environment = os.environ if env is None else env
+    return not environment.get("C4X_NO_WRITES") and environment.get("C4X_NO_REVIEW_SWEEP") != "1"
+
+
+def last_sweep() -> dict | None:
+    """What the last sweep did, or None when none has run on this store."""
+    try:
+        data = json.loads(sweep_stamp_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _say(message: str) -> None:
+    """Flushed, because the server's stdout is a log file: block-buffered, so an unflushed line
+    about a restart that has already happened would sit in the buffer until the process exits."""
+    print(message, flush=True)
+
+
+def sweep_reviews(*, restart=None, running=None, now=None, log=_say) -> dict:
+    """Take back the review runs' records and restart Claude when that removed something.
+
+    Returns the report it also writes to the stamp file: `at`, `removed`, `missing`, `failed`,
+    `restarted`, `why`, and the restart's own report under `restart`. A refused sweep (writes
+    off, the app not running, the cooldown) writes no stamp and says why.
+    """
+    from c4x import accounts, desktop
+    clock = time.time if now is None else (lambda: now)
+    at = float(clock())
+    report: dict[str, Any] = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at)),
+                              "epoch": at, "removed": 0, "missing": 0, "failed": 0,
+                              "restarted": False, "restarted_epoch": None, "why": "",
+                              "restart": None}
+    if os.environ.get("C4X_NO_WRITES"):
+        report["why"] = "writes are off (--no-writes)"
+        return _said(report, log)
+    if os.environ.get("C4X_NO_REVIEW_SWEEP") == "1":
+        report["why"] = "off (--no-review-sweep)"
+        return _said(report, log)
+    is_running = accounts.app_running if running is None else running
+    if not is_running():
+        report["why"] = "Claude is not running; nothing to restart"
+        return _said(report, log)
+    last = last_sweep() or {}
+    since = last.get("restarted_epoch")
+    if isinstance(since, (int, float)) and at - float(since) < SWEEP_COOLDOWN:
+        report["why"] = (f"Claude was restarted {int(at - float(since))} s ago; not again within "
+                         f"{int(SWEEP_COOLDOWN)} s")
+        return _said(report, log)
+    taken = unadopt_reviews()
+    report["removed"] = len(taken["removed"])
+    report["missing"] = int(taken["missing"])
+    report["failed"] = len(taken.get("failed", []))
+    if taken["removed"]:
+        do_restart = desktop.restart_app if restart is None else restart
+        outcome = do_restart()
+        report["restart"] = outcome
+        report["restarted"] = bool(outcome.get("restarted"))
+        report["restarted_epoch"] = at if report["restarted"] else None
+        report["why"] = (f"removed {report['removed']} review-run record(s); "
+                         + ("Claude restarted" if report["restarted"]
+                            else f"Claude was not restarted: {outcome.get('why', '')}"))
+    else:
+        report["why"] = "nothing to remove; no restart"
+    path = sweep_stamp_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
+    except OSError as exc:
+        log(f"[review sweep] could not write {path}: {exc}")
+    return _said(report, log)
+
+
+def _said(report: dict, log) -> dict:
+    log(f"[review sweep] {report['why']}")
+    return report
+
+
 def _check_sharing(root: str, pair_dir: Path) -> None:
     """Under sharing All the signed-in pair must be a link or the directory the links point at."""
     from c4x import accounts

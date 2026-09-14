@@ -111,7 +111,13 @@ and, when nobody is, starts the server detached; the server watches for Claude p
 itself about a minute after the last one exits. `node tools/install.mjs status` says whether it is
 up and how to stop it by hand; `install --no-dashboard` turns the autostart off (`--dashboard` turns
 it back on), as does `C4X_NO_DASHBOARD=1`. `python -m c4x.api` by hand still works and does not
-stop itself unless asked to with `--watchdog`. Closing the page does not stop capture. The page is
+stop itself unless asked to with `--watchdog`. The header's **Stop C4X** stops the server from the
+page (it asks first; the next Claude session starts one again) and **Restart C4X** starts a fresh
+one with the same flags and reloads the page once a different process answers. Once the server is
+up it runs one sweep: the records c4x wrote for review runs (below) are taken back and, when that
+removed any, Claude is restarted so its sidebar reflects it; never twice within ten minutes, only
+while Claude is running, off with `install --no-review-sweep` (`--review-sweep` undoes it) or
+`C4X_NO_REVIEW_SWEEP=1`. Closing the page does not stop capture. The page is
 committed built, so npm is needed only to change the frontend. The same server serves every tab as
 JSON: `curl 127.0.0.1:8059/api/tab/tab-cost`. The server runs without a console and gives none to
 the programs it runs (`c4x/proc.py`), so nothing flashes when the page loads.
@@ -126,8 +132,11 @@ The same drawer names the records c4x wrote that carry no name, after the store'
 A review run (a hook's `claude -p` that read another chat) is never offered: harvest ties it to
 the chat it read by quotation (`docs/desktop-records.md` §7), it is listed nowhere on its own,
 the chat's page lists it with its verdict and the prompt it followed, and its tokens count toward
-the chat under "Including Subagents" (the Cost tab always). The drawer offers to take back the
-records an earlier build wrote for such runs (`POST /api/adopt/unadopt-reviews`).
+the chat under "Including Subagents" (the Cost tab always). A run whose lines are said somewhere
+in the store but by no session in its folder, and whose reply is a bare verdict, is a review the
+store cannot place: recorded with no chat, listed nowhere, never offered. The drawer offers to take
+back the records an earlier build wrote for such runs (`POST /api/adopt/unadopt-reviews`), which
+the server does on its own at startup (`GET /api/adopt/sweep` says what the last sweep did).
 
 **Without Python.** `tools/build_exe.py` builds the server into `dist/c4x/` (`c4x.exe`) with
 PyInstaller, and the `build-exe` workflow attaches that directory to every release as

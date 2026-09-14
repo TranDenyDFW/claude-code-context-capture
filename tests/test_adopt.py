@@ -556,3 +556,140 @@ class TestReviewRuns:
         assert reviews.reviewed_by(["r-1", "r-2", "r-3"]) == {"r-1": "s3-0", "r-3": None}
         assert reviews.runs_of("s3-0") == ["r-4", "r-1"], "newest first"
         assert reviews.runs_of("s3-1") == []
+
+
+class TestTheSweep:
+    """`adopt.sweep_reviews`: the drawer's "Remove them" run by the server at startup, plus the
+    restart, each guard fed the input that trips it."""
+
+    @pytest.fixture
+    def swept(self, reviewed, monkeypatch):
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        monkeypatch.delenv("C4X_NO_REVIEW_SWEEP", raising=False)
+        written_by_hand(reviewed, "r-1")
+        written_by_hand(reviewed, "r-3")
+        return reviewed
+
+    def test_records_are_taken_back_and_claude_is_restarted_once(self, swept):
+        restarts = []
+
+        def restart():
+            restarts.append(1)
+            return {"restarted": True, "killed": 2, "launch": ["explorer.exe", "shell:x"],
+                    "why": "relaunched"}
+        report = adopt.sweep_reviews(restart=restart, running=lambda: True, now=1000.0,
+                                     log=lambda m: None)
+        assert report["removed"] == 2 and report["restarted"] is True and restarts == [1]
+        assert report["restart"]["killed"] == 2 and "Claude restarted" in report["why"]
+        assert adopt.last_sweep() == report, "the stamp is the report"
+        assert adopt.sweep_stamp_path() == Path(store.DB_PATH).parent / "raw" / ".review-sweep"
+        assert adopt.state()["review_records"] == 0
+
+    def test_nothing_to_remove_means_no_restart(self, reviewed, monkeypatch):
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+
+        def never():
+            raise AssertionError("restarted with nothing removed")
+        report = adopt.sweep_reviews(restart=never, running=lambda: True, now=1000.0,
+                                     log=lambda m: None)
+        assert report["removed"] == 0 and report["restarted"] is False
+        assert report["why"] == "nothing to remove; no restart"
+        assert adopt.last_sweep()["restarted_epoch"] is None
+
+    def test_a_second_restart_within_the_cooldown_is_refused(self, swept, reviewed):
+        ok = lambda: {"restarted": True, "killed": 1, "launch": ["x"], "why": "relaunched"}  # noqa: E731
+        first = adopt.sweep_reviews(restart=ok, running=lambda: True, now=1000.0,
+                                    log=lambda m: None)
+        assert first["restarted"] is True
+        written_by_hand(reviewed, "r-4")
+        again = []
+        second = adopt.sweep_reviews(restart=lambda: again.append(1) or ok(), running=lambda: True,
+                                     now=1000.0 + adopt.SWEEP_COOLDOWN - 1, log=lambda m: None)
+        assert again == [] and second["restarted"] is False and "not again" in second["why"]
+        assert adopt.state()["review_records"] == 1, "the record waits for the next sweep"
+        assert adopt.last_sweep()["epoch"] == 1000.0, "a refused sweep writes no stamp"
+        third = adopt.sweep_reviews(restart=lambda: again.append(1) or ok(), running=lambda: True,
+                                    now=1000.0 + adopt.SWEEP_COOLDOWN + 1, log=lambda m: None)
+        assert again == [1] and third["removed"] == 1 and third["restarted"] is True
+
+    def test_a_restart_that_did_not_bring_the_app_back_is_said_and_starts_no_cooldown(self, swept):
+        stayed_down = {"restarted": False, "killed": 1, "launch": ["x"],
+                       "why": "the app did not come back within 20 s"}
+        report = adopt.sweep_reviews(restart=lambda: stayed_down, running=lambda: True,
+                                     now=1000.0, log=lambda m: None)
+        assert report["removed"] == 2 and report["restarted"] is False
+        assert "was not restarted: the app did not come back" in report["why"]
+        assert report["restarted_epoch"] is None
+
+    @pytest.mark.parametrize("env,running,expect", [
+        ({"C4X_NO_WRITES": "1"}, True, "writes are off"),
+        ({"C4X_NO_REVIEW_SWEEP": "1"}, True, "off (--no-review-sweep)"),
+        ({}, False, "Claude is not running"),
+    ])
+    def test_each_refusal_removes_nothing_and_writes_no_stamp(self, swept, monkeypatch, env,
+                                                              running, expect):
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+
+        def never():
+            raise AssertionError("restarted under a refusal")
+        report = adopt.sweep_reviews(restart=never, running=lambda: running, now=1000.0,
+                                     log=lambda m: None)
+        assert expect in report["why"] and report["removed"] == 0
+        assert adopt.last_sweep() is None
+        assert adopt.state()["review_records"] == 2, "nothing was removed"
+
+    def test_enabled_reads_the_two_switches(self):
+        assert adopt.sweep_enabled(env={}) is True
+        assert adopt.sweep_enabled(env={"C4X_NO_WRITES": "1"}) is False
+        assert adopt.sweep_enabled(env={"C4X_NO_REVIEW_SWEEP": "1"}) is False
+
+
+class TestTheServerRoutes:
+    @pytest.fixture
+    def client(self, machine, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from c4x.api.main import api
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        monkeypatch.delenv("C4X_NO_REVIEW_SWEEP", raising=False)
+        return TestClient(api, base_url="http://127.0.0.1:8059")
+
+    def test_the_sweep_route_reports_the_switch_and_the_last_stamp(self, client, monkeypatch):
+        assert client.get("/api/adopt/sweep").json() == {"enabled": True, "last": None}
+        adopt.sweep_stamp_path().parent.mkdir(parents=True, exist_ok=True)
+        adopt.sweep_stamp_path().write_text(json.dumps({"at": "2026-09-14T00:00:00Z", "removed": 4,
+                                                        "restarted": True, "why": "x"}),
+                                            encoding="utf-8")
+        body = client.get("/api/adopt/sweep").json()
+        assert body["last"]["removed"] == 4 and body["last"]["restarted"] is True
+        monkeypatch.setenv("C4X_NO_REVIEW_SWEEP", "1")
+        assert client.get("/api/adopt/sweep").json()["enabled"] is False
+
+    def test_stop_and_restart_reach_the_server_module_and_nothing_else(self, client, monkeypatch):
+        from c4x import server
+        calls = []
+        answer = {"restarting": True, "pid": 1, "argv": ["x"]}
+        monkeypatch.setattr(server, "hardened_shutdown",
+                            lambda reason, spare=(): calls.append(("stop", reason)))
+        monkeypatch.setattr(server, "restart_server",
+                            lambda reason: calls.append(("restart", reason)) or answer)
+        assert client.post("/api/server/stop", json={}).json() == {"stopped": True}
+        assert client.post("/api/server/restart", json={}).json() == answer
+        assert calls == [("stop", "Stop C4X button"), ("restart", "Restart C4X button")]
+
+    def test_a_foreign_page_cannot_stop_or_restart_this_server(self, client, monkeypatch):
+        from c4x import server
+
+        def never(*a, **k):
+            raise AssertionError("a cross-origin request reached the shutdown")
+        monkeypatch.setattr(server, "hardened_shutdown", never)
+        monkeypatch.setattr(server, "restart_server", never)
+        for path in ("/api/server/stop", "/api/server/restart"):
+            answer = client.post(path, json={}, headers={"Origin": "https://evil.example"})
+            assert answer.status_code == 403, answer.text
+            rebound = client.post(path, json={}, headers={"Host": "attacker.example:8059"})
+            assert rebound.status_code == 403, rebound.text
+
+    def test_the_health_answer_names_the_process(self, client):
+        assert client.get("/api/health").json()["pid"] == os.getpid()

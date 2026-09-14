@@ -120,12 +120,20 @@ describe('AdoptSessions', () => {
       removed: Array.from({ length: 58 }, (_, i) => ({ session_id: `r${i}`, path: `p${i}`, reviewed: 'c' })),
       missing: 0, kept: 24, restart_required: true,
     })
+    vi.spyOn(api.adopt, 'sweep').mockResolvedValue({
+      enabled: true,
+      last: { at: '2026-09-14T22:24:05Z', epoch: 1, removed: 4, missing: 0, failed: 0, restarted: true,
+              restarted_epoch: 1, why: 'removed 4 review-run record(s); Claude restarted',
+              restart: { restarted: true, killed: 6, launch: ['explorer.exe'], why: 'relaunched' } },
+    })
     render(<AdoptSessions writesEnabled />)
     expect((await screen.findByRole('button', { name: /still in Claude/ })).textContent)
       .toContain('58 review runs still in Claude')
     await opened()
     expect(screen.getByText(/58 review runs are listed in Claude as a chat/)).not.toBeNull()
     expect(screen.getByText(/3 review runs on this machine are folded/)).not.toBeNull()
+    expect((await screen.findByTestId('startup-sweep')).textContent)
+      .toBe('Startup sweep at 2026-09-14 22:24:05 UTC: removed 4 review-run record(s); Claude restarted.')
     fireEvent.click(screen.getByRole('button', { name: 'Remove them from Claude' }))
     await waitFor(() => expect(unadopt).toHaveBeenCalled())
     expect(await screen.findByText(/Restart Claude to drop the 58 review runs/)).not.toBeNull()
@@ -237,5 +245,24 @@ describe('AdoptSessions', () => {
     expect(button.disabled).toBe(true)
     fireEvent.click(button)
     expect(run).not.toHaveBeenCalled()
+  })
+})
+
+describe('the startup sweep line', () => {
+  it('says the sweep is off on a server started with --no-review-sweep', async () => {
+    vi.spyOn(api.adopt, 'state').mockResolvedValue(state({ groups: [], cli_candidates: 0, review_records: 1 }))
+    vi.spyOn(api.adopt, 'sweep').mockResolvedValue({ enabled: false, last: null })
+    render(<AdoptSessions writesEnabled />)
+    await opened()
+    expect((await screen.findByTestId('startup-sweep')).textContent).toContain('off on this server')
+  })
+
+  it('shows no line when the server cannot say', async () => {
+    vi.spyOn(api.adopt, 'state').mockResolvedValue(state({ groups: [], cli_candidates: 0, review_records: 1 }))
+    vi.spyOn(api.adopt, 'sweep').mockRejectedValue(new Error('404'))
+    render(<AdoptSessions writesEnabled />)
+    await opened()
+    expect(screen.getByText(/1 review run is listed in Claude/)).not.toBeNull()
+    expect(screen.queryByTestId('startup-sweep')).toBeNull()
   })
 })
