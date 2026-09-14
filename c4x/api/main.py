@@ -1731,6 +1731,41 @@ def accounts_verify():
     return accounts.verify()
 
 
+@api.get("/api/adopt")
+def adopt_state(include_cli: bool = Query(False)):
+    """Sessions the desktop app has no record for, grouped by folder, and where a record would land.
+
+    Read only. The count can be large (923 of 1,027 desktop sessions on the machine this was
+    written on), which is why the page groups them and preselects nothing.
+    """
+    from c4x import adopt
+    return adopt.state(include_cli=include_cli)
+
+
+@api.post("/api/adopt")
+def adopt_run(body: dict):
+    """`{"cwds": [...], "include_cli": false, "dry_run": false}`: write a record per candidate
+    under the chosen folders, into the signed-in account's pair and nowhere else.
+
+    400 with nothing selected, 409 when sharing is on but the signed-in pair is not part of it
+    (writing there would start a second list), and the app may be open: new files only.
+    """
+    from c4x import adopt
+    _require_writes()
+    body = body or {}
+    cwds = body.get("cwds")
+    if not isinstance(cwds, list) or not cwds:
+        raise HTTPException(status_code=400,
+                            detail={"error": "nothing selected: pass the folders to adopt as cwds"})
+    try:
+        return adopt.adopt(cwds, include_cli=bool(body.get("include_cli")),
+                           dry_run=bool(body.get("dry_run")))
+    except adopt.SharingMismatch as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+
 @api.post("/api/project/include")
 def project_include(body: dict):
     """Lift an exclusion so harvest picks the project up again."""
