@@ -122,11 +122,14 @@ records into the signed-in account's directory and Claude lists the chats after 
 is preselected: a chat you deleted in the app looks the same to this rule as one a reinstall
 orphaned, and the page says how many of those the app has deleted.
 
-**Without Python.** `tools/build_exe.py` builds the server into `dist/c4x-api/` with PyInstaller,
-and the `build-exe` workflow attaches that directory to every release as `c4x-api-windows.zip`.
-Unpack it into `dist/c4x-api/` under the checkout and the hook uses it when no Python imports the
-dashboard. It replaces Python only: the hooks and the harvester are node, and the exe runs from
-inside a checkout, never on its own.
+**Without Python.** `tools/build_exe.py` builds the server into `dist/c4x/` (`c4x.exe`) with
+PyInstaller, and the `build-exe` workflow attaches that directory to every release as
+`c4x-windows.zip`. Unpack it into `dist/c4x/` under the checkout and the hook uses it when no
+Python imports the dashboard. It replaces Python only: the hooks and the harvester are node, and
+the exe runs from inside a checkout, never on its own. Built on a machine with the Claude desktop
+app installed, the exe carries the app's icon, read out of the installed app at build time and
+never committed (`C4X_ICON=<file.ico or file.exe>` names another source); the release build has
+PyInstaller's icon.
 
 The CLI renders the same callbacks the browser does, so a dump is what the page shows rather than a
 parallel implementation of it.

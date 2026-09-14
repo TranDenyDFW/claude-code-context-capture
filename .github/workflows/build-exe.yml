@@ -74,24 +74,25 @@ jobs:
         run: python tools/build_exe.py --smoke --db tmp/fixture.db
 
       - name: Say what was built
-        run: cat dist/c4x-api/BUILD.json
+        run: cat dist/c4x/BUILD.json
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: c4x-api-windows
-          path: dist/c4x-api/
+          name: c4x-windows
+          path: dist/c4x/
           if-no-files-found: error
           retention-days: 30
 
       # On a tag, the same directory zipped onto the release. A machine without Python unpacks it
-      # into <checkout>/dist/c4x-api/ and the SessionStart hook finds it there.
+      # into <checkout>/dist/c4x/ and the SessionStart hook finds it there. No icon here: the app is
+      # not installed on the runner and its icon is not in this repository (tools/build_exe.py).
       - name: Zip the build for the release
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          powershell -NoProfile -Command "Compress-Archive -Path dist/c4x-api -DestinationPath c4x-api-windows.zip"
-          ls -l c4x-api-windows.zip
+          powershell -NoProfile -Command "Compress-Archive -Path dist/c4x -DestinationPath c4x-windows.zip"
+          ls -l c4x-windows.zip
 
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: c4x-api-windows.zip
+          files: c4x-windows.zip

@@ -46,6 +46,7 @@ def test_frozen_outside_any_checkout_exits_2_with_the_reason(tmp_path, capsys):
     assert stopped.value.code == 2
     err = capsys.readouterr().err
     assert "inside a c4x install" in err and "replaces Python, not node" in err
+    assert "c4x.exe" in err and "<root>/dist/c4x/" in err, "the message names the exe as built"
 
 
 def test_a_store_inside_a_checkout_names_that_checkout(tmp_path):

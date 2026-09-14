@@ -35,7 +35,7 @@ REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 MARKER = ("tools", "harvest.mjs")
 
 NOT_AN_INSTALL = (
-    "c4x-api must run from inside a c4x install (for example <root>/dist/c4x-api/), or be given "
+    "c4x.exe must run from inside a c4x install (for example <root>/dist/c4x/), or be given "
     "--db <store> inside one. It replaces Python, not node: the hooks and the harvester are node, "
     "and the store they write is what this serves.\n"
 )
