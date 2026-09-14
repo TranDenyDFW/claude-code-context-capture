@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from c4x import accounts, adopt, appstate, store  # noqa: E402
+from c4x import accounts, adopt, appstate, reviews, store  # noqa: E402
 from tests.test_projects import build_store, forget_cached_rows  # noqa: E402
 
 A, B = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
@@ -434,6 +434,20 @@ class TestTheRoutes:
         monkeypatch.setenv("C4X_NO_WRITES", "1")
         assert client.post("/api/adopt/retitle").status_code == 403
 
+    def test_review_runs_are_counted_and_named_through_the_routes(self, client, reviewed):
+        written = client.post("/api/adopt", json={"cwds": [DELTA]}).json()["written"]
+        titles = {w["session_id"]: w["title"] for w in written}
+        assert titles["r-1"].startswith("Reviewer - "), "named at adopt time"
+        assert client.get("/api/adopt").json()["review_runs_to_name"] == 0
+        path = Path(next(w["path"] for w in written if w["session_id"] == "r-1"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["title"] = "You are reviewing another Claude instance's work before it..."
+        data["titleSource"] = "auto"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert client.get("/api/adopt").json()["review_runs_to_name"] == 1
+        answer = client.post("/api/adopt/retitle").json()
+        assert answer["reviews"] == 1 and [r["session_id"] for r in answer["renamed"]] == ["r-1"]
+
     def test_an_unshared_pair_under_sharing_is_409(self, client, machine):
         record(machine / B / ORG_B, "b1")
         record(machine / B / ORG_B, "b2")
@@ -448,3 +462,136 @@ def test_the_module_never_imports_accounts_at_module_level():
     top = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
     assert not any("accounts" in line for line in top)
     assert os.path.exists(ROOT / "c4x" / "accounts.py")
+
+
+L1 = ("The parser now rejects a trailing comma and the three tests that covered it pass again "
+      "after the rewrite")
+L2 = "12 passed in 0.41s, nothing skipped, and the fixture directory was removed on the way out"
+L3 = "A line that only the second Delta chat ever said, long enough to be a snippet all by itself"
+L4 = "Both Delta chats said this exact sentence once, so a run quoting only it ties to neither"
+PREAMBLE = ("You are reviewing another Claude instance's work before it is allowed to finish its "
+            "turn.\n\nLook for a claim wider than its evidence.\n\n--- THE WORK ---\n")
+
+
+@pytest.fixture
+def reviewed(machine, tmp_path):
+    """Four one-shot chats under Delta, beside s3-0 (which has typed prompts) and s3-1:
+
+        r-1  quotes two lines of s3-0                        tied to s3-0
+        r-2  quotes nothing                                  not a review
+        r-3  quotes the one line both s3-0 and s3-1 said     a tie, so tied to neither
+        r-4  quotes s3-0 too, past a line with an accent     tied to s3-0
+    """
+    db = tmp_path / "data" / "context.db"
+    home = tmp_path / "home" / ".claude" / "projects" / "slug"
+    con = sqlite3.connect(str(db))
+
+    def message(uuid_, sid, ts, role, kind, text):
+        con.execute("""INSERT INTO messages (uuid, session_id, ts, role, type, text, chars,
+                         is_sidechain, file_path, line_no)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'f', 1)""",
+                    (uuid_, sid, ts, role, kind, text, len(text)))
+    message("s3-0-a1", "s3-0", "2026-08-04T12:00:30Z", "assistant", "assistant", L1)
+    message("s3-0-o1", "s3-0", "2026-08-04T12:00:40Z", "user", "tool_result", L2)
+    message("s3-0-a2", "s3-0", "2026-08-04T12:00:50Z", "assistant", "assistant", L4)
+    message("s3-1-a1", "s3-1", "2026-08-04T12:00:30Z", "assistant", "assistant", L3)
+    message("s3-1-a2", "s3-1", "2026-08-04T12:00:50Z", "assistant", "assistant", L4)
+    prompts = {
+        "r-1": PREAMBLE + "CLAUDE SAID: " + L1 + "\n\nOUTPUT WAS: " + L2 + "\n",
+        "r-2": "hello, one short line",
+        "r-3": PREAMBLE + "CLAUDE SAID: " + L4 + "\n",
+        "r-4": (PREAMBLE + "CLAUDE SAID: café " + L1 + "\n\nCLAUDE SAID: " + L1
+                + "\n\nOUTPUT WAS: " + L2 + "\n"),
+    }
+    for i, (sid, prompt) in enumerate(prompts.items()):
+        path = home / f"{sid}.jsonl"
+        path.write_text('{"type":"summary"}\n', encoding="utf-8")
+        ts = f"2026-08-04T12:1{i}:00Z"
+        con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
+                    (sid, "slug-2", DELTA, "main", "2.1.263", "claude-desktop", ts, ts, str(path)))
+        con.execute("""INSERT INTO turns (uuid, session_id, ts, model, request_id, output_tokens,
+                         file_path, line_no)
+                       VALUES (?, ?, ?, 'claude-sonnet-5', ?, 1, 'f', 0)""",
+                    (f"{sid}-t0", sid, ts, f"req-{sid}"))
+        message(f"{sid}-p", sid, ts, "user", "typed", prompt)
+        message(f"{sid}-a", sid, ts.replace(":00Z", ":30Z"), "assistant", "assistant",
+                "APPROVED\nchecked the claim against the output")
+    con.commit()
+    con.close()
+    forget_cached_rows()
+    reviews.forget()
+    yield machine
+    reviews.forget()
+
+
+class TestReviewRuns:
+    def test_snippets_are_ascii_line_tails_with_the_label_dropped_newest_first(self):
+        prompt = ("short\nCLAUDE SAID: " + L1 + "\nOUTPUT WAS: café " + L2 + "\nUSER: " + L3
+                  + "\n")
+        assert reviews.snippets(prompt) == [L3[-120:], L1[-120:]], "accented line skipped"
+        assert reviews.snippets("") == [] and reviews.snippets(None) == []
+        long = "x" * 300
+        assert reviews.snippets("A LABEL: " + long) == [long[-120:]]
+        assert reviews.snippets("Not a label: " + long) == [("Not a label: " + long)[-120:]]
+        assert len(reviews.snippets("\n".join([L1] * 20))) == reviews.WANT
+
+    def test_a_run_that_quotes_a_chat_is_tied_to_it_and_nothing_else_is(self, reviewed):
+        rows = adopt._sessions()
+        ids = [r["session_id"] for r in rows]
+        assert reviews.one_shots(ids) == {"r-1", "r-2", "r-3", "r-4"}, "s3-0 typed three times"
+        assert reviews.reviewed_by(rows, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
+        assert reviews.reviewed_by(rows, ["s3-0", "r-2", "r-3"]) == {}, "only what was asked"
+
+    def test_the_run_is_offered_under_the_name_of_the_chat_it_read(self, reviewed):
+        delta = next(g for g in adopt.state()["groups"] if g["cwd"] == DELTA)
+        titles = {s["session_id"]: s["title"] for s in delta["sessions"]}
+        assert titles["r-1"].startswith("Reviewer - Please refactor the parser"), titles["r-1"]
+        assert titles["r-1"] == titles["r-4"]
+        assert len(titles["r-1"]) <= adopt.TITLE_MAX and titles["r-1"].endswith("...")
+        assert titles["r-2"] == "hello, one short line"
+        assert titles["r-3"].startswith("You are reviewing another Claude"), titles["r-3"]
+
+    def test_the_form_and_who_wins(self):
+        assert adopt.review_title("T01") == "Reviewer - T01"
+        long = adopt.review_title("a name " * 20)
+        assert len(long) <= adopt.TITLE_MAX and long.startswith("Reviewer - a name")
+        assert long.endswith("...")
+        assert adopt.title_for({"custom": "My run"}, "p", None, reviewed="T01") == (
+            "My run", "user")
+        assert adopt.title_for({"ai": "Its own"}, "p", None, reviewed="T01") == (
+            "Its own", "auto")
+        assert adopt.title_for({"last-prompt": "the prompt"}, "p", None, reviewed="T01") == (
+            "Reviewer - T01", "auto")
+        assert adopt.title_for({"last-prompt": "the prompt"}, "p", None, reviewed=" ") == (
+            "the prompt", "auto")
+
+    def test_retitle_renames_an_auto_named_run_and_leaves_a_persons_name(self, reviewed):
+        report = adopt.adopt([DELTA])
+        paths = {w["session_id"]: Path(w["path"]) for w in report["written"]}
+
+        def rename(sid, title, source):
+            data = json.loads(paths[sid].read_text(encoding="utf-8"))
+            data["title"], data["titleSource"] = title, source
+            paths[sid].write_text(json.dumps(data), encoding="utf-8")
+        # What a first build wrote for a run: its own opening line, as an automatic name.
+        rename("r-1", "You are reviewing another Claude instance's work before it...", "auto")
+        rename("r-4", "Mine", "user")
+        assert adopt.state()["review_runs_to_name"] == 1
+        result = adopt.retitle()
+        assert [r["session_id"] for r in result["renamed"]] == ["r-1"] and result["reviews"] == 1
+        assert result["renamed"][0]["title"].startswith("Reviewer - Please refactor")
+        assert result["restart_required"] is True
+        assert json.loads(paths["r-1"].read_text(encoding="utf-8"))["titleSource"] == "auto"
+        assert json.loads(paths["r-4"].read_text(encoding="utf-8"))["title"] == "Mine"
+        assert adopt.state()["review_runs_to_name"] == 0
+        again = adopt.retitle()
+        assert again["renamed"] == [] and again["reviews"] == 0
+
+    def test_a_nameless_run_record_is_named_after_the_chat_too(self, reviewed):
+        report = adopt.adopt([DELTA])
+        paths = {w["session_id"]: Path(w["path"]) for w in report["written"]}
+        nameless(paths["r-1"])
+        assert adopt.state()["untitled_adopted"] == 1
+        result = adopt.retitle()
+        assert result["renamed"][0]["title"].startswith("Reviewer - ") and result["reviews"] == 0
+        assert result["renamed"][0]["session_id"] == "r-1"
