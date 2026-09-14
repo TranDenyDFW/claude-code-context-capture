@@ -264,7 +264,8 @@ class TestAStoreHarvestedBeforeThisExisted:
     def test_every_reader_answers_empty_rather_than_raising(self, work_store, store):
         """The Python package never creates a table, so an older store simply has none of these."""
         con = sqlite3.connect(str(work_store))
-        for table in ("plans", "agent_runs", "workflow_runs", "task_events", "changes"):
+        for table in ("plans", "agent_runs", "workflow_runs", "task_events", "changes",
+                      "review_links"):
             con.execute(f"DROP TABLE {table}")
         con.commit()
         con.close()
@@ -276,6 +277,7 @@ class TestAStoreHarvestedBeforeThisExisted:
         assert store.chat_changed_files(HEAD).empty
         assert store.chat_changes(HEAD).empty
         assert store.change_detail("ch-1").empty
+        assert store.chat_reviews(HEAD).empty
         counts = store.chat_work_counts(HEAD)
         assert counts["plans"] == 0 and not any(counts["harvested"].values())
         assert store.chat_exists(HEAD), "the chat is still a chat"

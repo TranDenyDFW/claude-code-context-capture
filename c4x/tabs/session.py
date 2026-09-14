@@ -537,7 +537,8 @@ def session_view(session_id, scope="main", budget_pct=None, mark=None, with_card
     # One session, so the population match is exact and needs no derivation.
     # The whole chat. Claude Code's cost ledger stays owned by the session that opened it, so a
     # resumed chat's figure sits under an earlier member and the head alone reads "not recorded".
-    _measured = measured_cost(chat_members(session_id))
+    # Its review runs too, under the subagent scope, which is the scope the estimate above used.
+    _measured = measured_cost(chat_members(session_id, reviews=(scope == "all")))
     cost_usd = cost_usd if cost_calls else None
     cache_total = int(cdf.iloc[0]["churn"] or 0) if not cdf.empty else 0
     churn_peak = int(cdf.iloc[0]["peak"] or 0) if not cdf.empty else 0
