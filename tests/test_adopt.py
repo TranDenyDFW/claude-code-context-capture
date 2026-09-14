@@ -469,6 +469,11 @@ L1 = ("The parser now rejects a trailing comma and the three tests that covered 
 L2 = "12 passed in 0.41s, nothing skipped, and the fixture directory was removed on the way out"
 L3 = "A line that only the second Delta chat ever said, long enough to be a snippet all by itself"
 L4 = "Both Delta chats said this exact sentence once, so a run quoting only it ties to neither"
+L5 = "And both said this second sentence too, word for word, which makes the tie an even one"
+# The first line is a snippet in its own right (89 ASCII characters), which is what makes the
+# minimum-hits rule bite: a run quoting ONE shared line has one hit of two snippets and is
+# rejected before uniqueness is even asked. r-3 quotes two shared lines so that only uniqueness
+# stands between it and a wrong name; a mutation that drops that rule ties it.
 PREAMBLE = ("You are reviewing another Claude instance's work before it is allowed to finish its "
             "turn.\n\nLook for a claim wider than its evidence.\n\n--- THE WORK ---\n")
 
@@ -479,7 +484,7 @@ def reviewed(machine, tmp_path):
 
         r-1  quotes two lines of s3-0                        tied to s3-0
         r-2  quotes nothing                                  not a review
-        r-3  quotes the one line both s3-0 and s3-1 said     a tie, so tied to neither
+        r-3  quotes the two lines both s3-0 and s3-1 said    an even tie, so tied to neither
         r-4  quotes s3-0 too, past a line with an accent     tied to s3-0
     """
     db = tmp_path / "data" / "context.db"
@@ -494,12 +499,14 @@ def reviewed(machine, tmp_path):
     message("s3-0-a1", "s3-0", "2026-08-04T12:00:30Z", "assistant", "assistant", L1)
     message("s3-0-o1", "s3-0", "2026-08-04T12:00:40Z", "user", "tool_result", L2)
     message("s3-0-a2", "s3-0", "2026-08-04T12:00:50Z", "assistant", "assistant", L4)
+    message("s3-0-a3", "s3-0", "2026-08-04T12:00:55Z", "assistant", "assistant", L5)
     message("s3-1-a1", "s3-1", "2026-08-04T12:00:30Z", "assistant", "assistant", L3)
     message("s3-1-a2", "s3-1", "2026-08-04T12:00:50Z", "assistant", "assistant", L4)
+    message("s3-1-a3", "s3-1", "2026-08-04T12:00:55Z", "assistant", "assistant", L5)
     prompts = {
         "r-1": PREAMBLE + "CLAUDE SAID: " + L1 + "\n\nOUTPUT WAS: " + L2 + "\n",
         "r-2": "hello, one short line",
-        "r-3": PREAMBLE + "CLAUDE SAID: " + L4 + "\n",
+        "r-3": PREAMBLE + "CLAUDE SAID: " + L4 + "\n\nCLAUDE SAID: " + L5 + "\n",
         "r-4": (PREAMBLE + "CLAUDE SAID: café " + L1 + "\n\nCLAUDE SAID: " + L1
                 + "\n\nOUTPUT WAS: " + L2 + "\n"),
     }
