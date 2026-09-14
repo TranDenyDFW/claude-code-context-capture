@@ -1,14 +1,22 @@
 """Build the dashboard into an executable, and prove the build serves a page.
 
-    python tools/build_exe.py                        # dist/c4x-api/c4x-api(.exe)
+    python tools/build_exe.py                        # dist/c4x/c4x(.exe)
     python tools/build_exe.py --smoke --db <store>   # run the built exe against a store
+    python tools/build_exe.py --check-icon           # the exe's icon is the app's (Windows)
     python tools/build_exe.py --self-test            # the argv builder and the smoke plan, no build
 
 WHAT THE EXE REPLACES: Python. Not node, and not the checkout. The hooks and the harvester are
 node, the store they write is under the checkout's data/, and c4x/store.py shells out to the
-checkout's tools/*.mjs for window math. The exe runs from inside an install (dist/c4x-api/ under
+checkout's tools/*.mjs for window math. The exe runs from inside an install (dist/c4x/ under
 the checkout is where the SessionStart hook looks for it) and refuses to run anywhere else; see
 c4x/paths.py. It is for a machine that has node and no Python.
+
+THE ICON IS THE APP'S, READ AT BUILD TIME. The user wants the exe to match the Claude desktop app
+in a folder listing, and that icon is Anthropic's, so it is not committed to this public repo:
+`find_app_icon` reads it out of the app installed on the building machine (PyInstaller's --icon
+takes FILE.exe,N), the Store build first, then the non-Store one, then `C4X_ICON` for anything
+else, and a build with no app gets PyInstaller's own icon, which is what CI gets. A version
+resource names the file for Explorer and Task Manager.
 
 WHY A SMOKE, NOT A BUILD LOG. PyInstaller reports success when it wrote an exe, and an exe that
 imports dash lazily through `import app` (c4x/api/main.py, `_app()`) can be missing half of
@@ -20,6 +28,8 @@ PYINSTALLER IS IMPORTED INSIDE build() ONLY. The suite runs --self-test on every
 legs install requirements.txt and requirements-dev.txt, not requirements-build.txt; a module-level
 import would fail all three for a package only the build job needs. The self-test asserts that.
 """
+import base64
+import glob
 import hashlib
 import json
 import os
@@ -31,11 +41,19 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-NAME = "c4x-api"
+NAME = "c4x"
+DESCRIPTION = "c4x dashboard (Claude Code context capture)"
 ENTRY = Path("c4x") / "api" / "__main__.py"
+# Where the desktop app's exe is, per install kind; the icon is read out of it.
+APP_EXES = (
+    r"C:\Program Files\WindowsApps\Claude_*\app\Claude.exe",
+    r"%LOCALAPPDATA%\Programs\Claude\Claude.exe",
+    r"%LOCALAPPDATA%\Programs\claude-desktop\Claude.exe",
+)
 # Packages the dashboard never imports that PyInstaller would still walk into on a machine that
 # happens to have them: plotly and pandas import several of these optionally, and the analysis
 # follows an optional import as far as the interpreter allows. Measured here: an interpreter
@@ -64,7 +82,95 @@ def exe_path(root: Path = ROOT, platform: str = sys.platform) -> Path:
     return root / "dist" / NAME / (f"{NAME}.exe" if platform.startswith("win") else NAME)
 
 
-def pyinstaller_args(root: Path = ROOT, platform: str = sys.platform) -> list[str]:
+APPX_QUERY = "(Get-AppxPackage -Name 'Claude*' | Select-Object -First 1).InstallLocation"
+
+
+def store_package_dir() -> str | None:
+    """Where the Store build of the app is installed, from the package registry.
+
+    NOT A GLOB. `C:\\Program Files\\WindowsApps` refuses to be LISTED by an ordinary process
+    (PermissionError 5 here), so a pattern with the package name as a wildcard finds nothing, while
+    the package directory itself, once named, opens and reads fine. Windows only; None elsewhere or
+    when no package answers.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", APPX_QUERY],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    where = (r.stdout or "").strip().splitlines()
+    return where[-1].strip() if r.returncode == 0 and where and where[-1].strip() else None
+
+
+def find_app_icon(env: Mapping[str, str] | None = None,
+                  exists: Callable[[str], bool] = os.path.exists,
+                  glob_fn: Callable[[str], list[str]] = glob.glob,
+                  appx: Callable[[], str | None] = store_package_dir) -> list[str]:
+    """Icon sources to try, in order: `C4X_ICON`, the installed app's exe (as `path,0`, the
+    first icon group; the Store package by its registered location first, then the glob, then the
+    non-Store installs), then the tray icon beside it. Empty when there is no app on this machine.
+
+    A LIST, because the exe under `WindowsApps` can be listed and still refuse to be opened by an
+    ordinary process; `build()` tries each source in turn and falls back to none.
+    """
+    env = os.environ if env is None else env
+    out: list[str] = []
+    override = env.get("C4X_ICON")
+    if override:
+        if exists(override):
+            out.append(f"{override},0" if override.lower().endswith(".exe") else override)
+        return out
+    package = appx()
+    patterns = ([os.path.join(package, "app", "Claude.exe")] if package else []) + list(APP_EXES)
+    for pattern in patterns:
+        expanded = pattern.replace("%LOCALAPPDATA%", env.get("LOCALAPPDATA", ""))
+        hits = glob_fn(expanded) if "*" in expanded else ([expanded] if exists(expanded) else [])
+        for exe in sorted(hits):
+            if not exists(exe):
+                continue
+            out.append(f"{exe},0")
+            tray = os.path.join(os.path.dirname(exe), "resources", "Tray-Win32.ico")
+            if exists(tray):
+                out.append(tray)
+            return out
+    return out
+
+
+def describe_to_version(text: str) -> str:
+    """`git describe --tags --always` folded to the four numbers a version resource takes:
+    `v0.1.0-12-gabc` -> `0.1.0.12`, the exact tag `v0.1.0` -> `0.1.0.0`, a hash -> `0.1.0.0`."""
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?$", str(text or "").strip())
+    if not m:
+        return "0.1.0.0"
+    major, minor, patch, ahead = m.groups()
+    return f"{int(major)}.{int(minor)}.{int(patch)}.{int(ahead or 0)}"
+
+
+def version_file_text(version: str, name: str = NAME, description: str = DESCRIPTION) -> str:
+    """The `VSVersionInfo` block PyInstaller's --version-file reads (an eval'd Python literal)."""
+    numbers = ", ".join(version.split("."))
+    return f"""VSVersionInfo(
+  ffi=FixedFileInfo(filevers=({numbers}), prodvers=({numbers}), mask=0x3f, flags=0x0, OS=0x40004,
+                    fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+      StringStruct('CompanyName', ''),
+      StringStruct('FileDescription', '{description}'),
+      StringStruct('FileVersion', '{version}'),
+      StringStruct('InternalName', '{name}'),
+      StringStruct('OriginalFilename', '{name}.exe'),
+      StringStruct('ProductName', '{name}'),
+      StringStruct('ProductVersion', '{version}')])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+
+
+def pyinstaller_args(root: Path = ROOT, platform: str = sys.platform, icon: str | None = None,
+                     version_file: str | None = None) -> list[str]:
     """The whole PyInstaller command line, pure, so the self-test reads it without a build.
 
     `--add-data` separates source and destination with `;` on Windows and `:` elsewhere, which is
@@ -76,6 +182,8 @@ def pyinstaller_args(root: Path = ROOT, platform: str = sys.platform) -> list[st
     work = root / "tmp" / "pyinstaller"
     return [
         "--noconfirm", "--clean", "--onedir", "--console", "--name", NAME,
+        *(["--icon", icon] if icon else []),
+        *(["--version-file", version_file] if version_file else []),
         "--paths", str(root),
         "--collect-submodules", "c4x",
         "--hidden-import", "app",
@@ -101,20 +209,38 @@ def build(root: Path = ROOT) -> int:
 
     from PyInstaller.__main__ import run as pyinstaller_run
     started = time.monotonic()
-    pyinstaller_run(pyinstaller_args(root))
+    sha, described = "unknown", ""
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                             cwd=root, timeout=20).stdout.strip() or sha
+        described = subprocess.run(["git", "describe", "--tags", "--always"], capture_output=True,
+                                   text=True, cwd=root, timeout=20).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    work = root / "tmp" / "pyinstaller"
+    work.mkdir(parents=True, exist_ok=True)
+    version_path = work / "version.txt"
+    version_path.write_text(version_file_text(describe_to_version(described)), encoding="utf-8")
+    # The icon sources, each tried in turn: the app's exe under WindowsApps can refuse to open
+    # to an ordinary process, and PyInstaller opens it with no handler of its own.
+    icon_used: str | None = None
+    for source in [*find_app_icon(), None]:
+        try:
+            pyinstaller_run(pyinstaller_args(root, icon=source, version_file=str(version_path)))
+            icon_used = source
+            break
+        except OSError as exc:
+            if source is None:
+                raise
+            print(f"icon source {source} could not be used ({exc}); trying the next")
     exe = exe_path(root)
     if not exe.is_file():
         print(f"PyInstaller returned and {exe} does not exist")
         return 1
-    sha = "unknown"
-    try:
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
-                             cwd=root, timeout=20).stdout.strip() or sha
-    except (OSError, subprocess.SubprocessError):
-        pass
     total = sum(p.stat().st_size for p in exe.parent.rglob("*") if p.is_file())
     stamp = {
-        "name": NAME, "git": sha, "python": sys.version.split()[0],
+        "name": NAME, "git": sha, "version": describe_to_version(described),
+        "icon": icon_used, "python": sys.version.split()[0],
         "pyinstaller": version("pyinstaller"),
         "index_sha256": hashlib.sha256(shell.read_bytes()).hexdigest(),
         "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -123,6 +249,61 @@ def build(root: Path = ROOT) -> int:
     (exe.parent / "BUILD.json").write_text(json.dumps(stamp, indent=1) + "\n", encoding="utf-8")
     print(f"built {exe} ({total / (1 << 20):.0f} MB, {stamp['seconds']} s); BUILD.json beside it")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# The icon check: the built exe's icon is the app's, pixel for pixel.
+# ---------------------------------------------------------------------------
+# The path is spelled INTO the command: with -Command there are no $args, and a first version that
+# read $args[0] extracted nothing from either exe while reporting a tidy failure.
+ICON_PS = (
+    "Add-Type -AssemblyName System.Drawing; "
+    "$i = [System.Drawing.Icon]::ExtractAssociatedIcon('{path}'); "
+    "$m = New-Object System.IO.MemoryStream; "
+    "$i.ToBitmap().Save($m, [System.Drawing.Imaging.ImageFormat]::Png); "
+    "[Convert]::ToBase64String($m.ToArray())"
+)
+
+
+def icon_png(path: str) -> bytes | None:
+    """The 32 by 32 icon of an exe as PNG bytes, through PowerShell; None when it cannot be read."""
+    try:
+        if "'" in path:
+            return None
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ICON_PS.format(path=path)],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    try:
+        return base64.b64decode(r.stdout.strip().splitlines()[-1])
+    except ValueError:
+        return None
+
+
+def check_icon(root: Path = ROOT) -> int:
+    """PASS when the built exe's icon and the app's are the same image."""
+    if not sys.platform.startswith("win"):
+        print("ICON CHECK SKIPPED: Windows only (exe icons)")
+        return 0
+    exe = exe_path(root)
+    sources = [s for s in find_app_icon() if s.lower().endswith(",0")]
+    if not exe.is_file():
+        print(f"ICON CHECK FAIL: no exe at {exe}")
+        return 1
+    if not sources:
+        print("ICON CHECK SKIPPED: no Claude desktop app on this machine to compare with")
+        return 0
+    app = sources[0][:-2]
+    ours, theirs = icon_png(str(exe)), icon_png(app)
+    if not ours or not theirs:
+        print(f"ICON CHECK FAIL: could not read an icon (exe: {bool(ours)}, app: {bool(theirs)})")
+        return 1
+    same = hashlib.sha256(ours).hexdigest() == hashlib.sha256(theirs).hexdigest()
+    print(f"ICON CHECK {'PASS' if same else 'FAIL'}: {exe.name} against {app} "
+          f"({len(ours)} and {len(theirs)} PNG bytes)")
+    return 0 if same else 1
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +454,12 @@ def self_test() -> int:
     """The argv builder, the smoke plan and the helpers. No build, no PyInstaller."""
     win = pyinstaller_args(Path("X:/r"), platform="win32")
     nix = pyinstaller_args(Path("/r"), platform="linux")
+    with_icon = pyinstaller_args(Path("X:/r"), "win32", icon="X:/a.exe,0")
+    # Paths the finder builds with os.path.join carry the platform's separator; the checks read
+    # them with forward slashes so the same assertions hold on every leg.
+    STORE_EXE = "X:/wa/Claude_1_x64__abc/app/Claude.exe"
+    USER_EXE = "X:/la/Programs/Claude/Claude.exe"
+    slashed = lambda found: [f.replace(chr(92), "/") for f in found]  # noqa: E731
     source = Path(__file__).read_text(encoding="utf-8")
     top_level = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
     checks = [
@@ -288,7 +475,7 @@ def self_test() -> int:
         ("root app.py is a hidden import",
          "app" in win and win[win.index("app") - 1] == "--hidden-import"),
         ("every c4x submodule is collected",
-         "c4x" in win and win[win.index("c4x") - 1] == "--collect-submodules"),
+         win[win.index("--collect-submodules") + 1] == "c4x"),
         ("the work and spec paths are under tmp/, which every gate skips",
          all("tmp" in Path(win[win.index(f) + 1]).parts for f in ("--workpath", "--specpath"))),
         ("the output lands in dist/", win[win.index("--distpath") + 1].endswith("dist")),
@@ -299,8 +486,40 @@ def self_test() -> int:
          not any(name in EXCLUDES
                  for name in ("pandas", "numpy", "plotly", "dash", "fastapi", "uvicorn",
                               "psutil"))),
-        ("the exe path follows the platform", exe_path(Path("X:/r"), "win32").name == "c4x-api.exe"
-         and exe_path(Path("/r"), "linux").name == "c4x-api"),
+        ("the exe path follows the platform", exe_path(Path("X:/r"), "win32").name == "c4x.exe"
+         and exe_path(Path("/r"), "linux").name == "c4x"),
+        ("the name is c4x and the directory dist/c4x",
+         NAME == "c4x" and exe_path(Path("X:/r"), "win32").parent.name == "c4x"),
+        ("an icon source is added as --icon and only when found",
+         "--icon" not in win and with_icon[with_icon.index("--icon") + 1] == "X:/a.exe,0"),
+        ("the version file rides in the same way",
+         "--version-file" in pyinstaller_args(Path("X:/r"), "win32", version_file="X:/v.txt")),
+        ("the app's exe is found by glob, first, as path,0, with the tray icon after it",
+         slashed(find_app_icon({"LOCALAPPDATA": "X:/la"}, exists=lambda p: True, appx=lambda: None,
+                               glob_fn=lambda pat: [STORE_EXE] if "*" in pat else []))
+         == [STORE_EXE + ",0", "X:/wa/Claude_1_x64__abc/app/resources/Tray-Win32.ico"]),
+        ("the Store package's registered location is tried before the glob, which cannot list it",
+         slashed(find_app_icon({"LOCALAPPDATA": "X:/la"}, exists=lambda p: True,
+                               appx=lambda: "X:/wa/Claude_1_x64__abc", glob_fn=lambda pat: []))[0]
+         == STORE_EXE + ",0"),
+        ("the non-Store install is found when the Store one is not, and no tray beside it",
+         slashed(find_app_icon({"LOCALAPPDATA": "X:/la"}, glob_fn=lambda pat: [], appx=lambda: None,
+                               exists=lambda p: p.replace(chr(92), "/") == USER_EXE))
+         == [USER_EXE + ",0"]),
+        ("C4X_ICON wins, bare for an .ico",
+         find_app_icon({"C4X_ICON": "X:/mine.ico"}, exists=lambda p: True, appx=lambda: "z",
+                       glob_fn=lambda pat: ["z"]) == ["X:/mine.ico"]),
+        ("and no app means no icon",
+         find_app_icon({"LOCALAPPDATA": "X:/la"}, exists=lambda p: False, appx=lambda: None,
+                       glob_fn=lambda pat: []) == []),
+        ("git describe folds to four numbers in all three shapes",
+         describe_to_version("v0.1.0-12-gabc1234") == "0.1.0.12"
+         and describe_to_version("v0.1.0") == "0.1.0.0"
+         and describe_to_version("abc1234") == "0.1.0.0"),
+        ("the version text carries the name, the description and the version",
+         all(s in version_file_text("0.1.0.12") for s in
+             ("FileDescription', 'c4x dashboard", "OriginalFilename', 'c4x.exe'",
+              "filevers=(0, 1, 0, 12)", "ProductVersion', '0.1.0.12'"))),
         # The plan pins the routes that prove the bundle: the tab list (dash) and a rendered pane
         # (plotly). Without these two a smoke could pass on an exe that serves a page over nothing.
         ("the smoke plan asks for the tab list", any(p[1] == "/api/tabs" for p in SMOKE_PLAN)),
@@ -330,6 +549,8 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--self-test" in argv:
         return self_test()
+    if "--check-icon" in argv:
+        return check_icon()
     if "--smoke" in argv:
         db = ""
         if "--db" in argv and argv.index("--db") + 1 < len(argv):

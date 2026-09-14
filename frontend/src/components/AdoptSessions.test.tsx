@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { AdoptSessions } from './AdoptSessions'
 import { api, ApiError } from '@/api'
-import type { AdoptReport, AdoptState } from '@/api'
+import type { AdoptReport, AdoptState, RetitleReport } from '@/api'
 
 /**
  * The control that gives Claude a record for the chats it has no record of.
@@ -27,6 +27,7 @@ function state(over: Partial<AdoptState> = {}): AdoptState {
     cli_candidates: 4,
     other_account: 1,
     deleted_markers: 0,
+    untitled_adopted: 0,
     app_running: false,
     sharing: 'current',
     ...over,
@@ -49,15 +50,41 @@ function report(over: Partial<AdoptReport> = {}): AdoptReport {
   }
 }
 
+function named(over: Partial<RetitleReport> = {}): RetitleReport {
+  return { renamed: [{ session_id: 's1', path: 'p1', title: 'raw prompt' }], kept: 0, missing: 0,
+           restart_required: true, ...over }
+}
+
 beforeEach(() => {
   vi.restoreAllMocks()
 })
 
 async function opened() {
-  fireEvent.click(await screen.findByRole('button', { name: /no record of/ }))
+  fireEvent.click(await screen.findByRole('button', { name: /no record of|without a name/ }))
 }
 
 describe('AdoptSessions', () => {
+  it('names the nameless records a first build wrote, then asks for a restart', async () => {
+    const stateCall = vi.spyOn(api.adopt, 'state')
+      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, untitled_adopted: 64 }))
+      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, untitled_adopted: 0 }))
+    const retitle = vi.spyOn(api.adopt, 'retitle').mockResolvedValue(named({
+      renamed: Array.from({ length: 64 }, (_, i) => ({ session_id: `s${i}`, path: `p${i}`, title: `t${i}` })),
+    }))
+    const onChanged = vi.fn()
+    render(<AdoptSessions writesEnabled onChanged={onChanged} />)
+    expect((await screen.findByRole('button', { name: /without a name/ })).textContent)
+      .toContain('64 adopted chats without a name')
+    await opened()
+    expect(screen.getByText(/64 adopted chats have no name yet/).textContent)
+      .toContain('General coding session')
+    fireEvent.click(screen.getByRole('button', { name: 'Name them' }))
+    await waitFor(() => expect(retitle).toHaveBeenCalled())
+    expect(await screen.findByText(/Restart Claude to see the 64 names/)).not.toBeNull()
+    expect(onChanged).toHaveBeenCalled()
+    expect(stateCall).toHaveBeenCalledTimes(2)
+  })
+
   it('shows nothing when every chat already has a record', async () => {
     vi.spyOn(api.adopt, 'state').mockResolvedValue(state({ groups: [], cli_candidates: 0 }))
     const { container } = render(<AdoptSessions writesEnabled />)

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '@/api'
-import type { AdoptReport, AdoptState } from '@/api'
+import type { AdoptReport, AdoptState, RetitleReport } from '@/api'
 
 /**
  * Give Claude a record for the chats it has no record of.
@@ -47,6 +47,7 @@ export function AdoptSessions({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
   const [report, setReport] = useState<AdoptReport | null>(null)
+  const [named, setNamed] = useState<RetitleReport | null>(null)
 
   const refresh = useCallback(
     (cli: boolean) =>
@@ -72,7 +73,10 @@ export function AdoptSessions({
   // account to file a record under, gets no control at all.
   if (!state || !state.supported) return null
   const total = state.groups.reduce((n, g) => n + g.count, 0)
-  if (total === 0 && state.cli_candidates === 0) return null
+  const unnamed = state.untitled_adopted ?? 0
+  // STAYS while a result is showing: after the last folder is adopted or the last record named the
+  // refreshed state has nothing left, and the restart notice is the one thing the reader needs.
+  if (total === 0 && state.cli_candidates === 0 && unnamed === 0 && !report && !named) return null
 
   const selected = state.groups
     .filter((g) => chosen.includes(g.cwd))
@@ -80,6 +84,25 @@ export function AdoptSessions({
 
   function toggle(cwd: string) {
     setChosen((now) => (now.includes(cwd) ? now.filter((c) => c !== cwd) : [...now, cwd]))
+  }
+
+  // Records a first build wrote without a name. The app shows each as "General coding session",
+  // and the store has always had a real name for them.
+  async function nameThem() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setNamed(null)
+    try {
+      const answer = await api.adopt.retitle()
+      setNamed(answer)
+      await refresh(includeCli)
+      onChanged?.()
+    } catch (problem) {
+      setError(problem)
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function adoptNow() {
@@ -110,11 +133,37 @@ export function AdoptSessions({
           onClick={() => setOpen((now) => !now)}
           className="rounded-md border border-edge bg-page px-2.5 py-1.5 text-sm text-ink-dim hover:text-ink"
         >
-          {plural(total, 'chat')} on this machine that Claude has no record of
+          {total > 0
+            ? `${plural(total, 'chat')} on this machine that Claude has no record of`
+            : unnamed > 0
+              ? `${plural(unnamed, 'adopted chat')} without a name`
+              : 'Adopted chats'}
         </button>
       </div>
       {open ? (
         <div className="flex flex-col gap-2 rounded-md border border-edge bg-page px-3 py-2">
+          {unnamed > 0 ? (
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-ink-dim">
+                {plural(unnamed, 'adopted chat')} {unnamed === 1 ? 'has' : 'have'} no name yet and{' '}
+                {unnamed === 1 ? 'shows' : 'show'} as General coding session.
+              </span>
+              <button
+                type="button"
+                disabled={!writesEnabled || busy}
+                onClick={() => void nameThem()}
+                className="rounded-md border border-edge bg-panel px-2.5 py-1 text-sm text-ink disabled:opacity-50"
+              >
+                Name {unnamed === 1 ? 'it' : 'them'}
+              </button>
+            </div>
+          ) : null}
+          {named && named.restart_required ? (
+            <p className="rounded-md border border-edge bg-page px-3 py-2 text-sm text-ink-dim">
+              Restart Claude to see the {plural(named.renamed.length, 'name')}. It reads these
+              records when it starts.
+            </p>
+          ) : null}
           {state.deleted_markers > 0 ? (
             <p className="text-xs text-ink-faint">
               Claude has deleted {plural(state.deleted_markers, 'chat')} from this account; their

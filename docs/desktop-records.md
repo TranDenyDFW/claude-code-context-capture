@@ -197,15 +197,41 @@ or `POST /api/adopt`. A candidate is a session in the store whose transcript is 
 subagent's, that has at least one turn, whose entrypoint is `claude-desktop` (or unset), and that
 has no record under any records root. CLI and SDK sessions never had a record and are offered only
 behind a checkbox. `createdAt` and `lastActivityAt` come from the first and last turn; `model`
-from the newest; a `title` only from the store's `custom` or `ai` kind, never the raw last prompt,
-and omitted otherwise so the app names the record itself.
+from the newest.
+
+**Every record carries a name, and where it comes from was learned the hard way.** The first build
+wrote `title` only from the store's `custom` or `ai` kinds, on the theory that the app would name
+the rest by its own rule. It does: a record with no title shows as "General coding session", a
+string that is in neither the app bundle, its locale files nor the CLI, so it is generated at
+render, and on the test laptop that was 64 of 82. The store has a name for every session, in this
+order: `custom` (a person typed it; `titleSource` `user`), `ai`, the opening request that the
+titles table keeps as `last-prompt` (cut to 200 by harvest, cut again here at 60 on a word
+boundary), the first typed prompt in `messages` (`role='user', type='typed'`), and failing all of
+those the date. Everything but `custom` is written with `titleSource` `auto`, the app's own value
+for a name it made. Records a first build left nameless are named after the fact through the
+ledger: `POST /api/adopt/retitle`, or the page's "Name them", touches only c4x's own records and
+only the ones with no name.
+
+**"No folder" is the app's rule, not a defect.** Fifty of the laptop's 82 adopted sessions had a
+scratch-workspace working directory (`AppData\Roaming\Claude\scratch-workspaces\<account>\
+<org>\scratch-<date>-<hash>`), and the app's own bundle says of such a session that it "shows this
+session as 'No folder' and never shows the workspace's location". They are listed, under that
+heading, by design.
+
+**"Other" is cloud-side.** The sidebar's Other section holds sessions the account has on the
+server: some reachable without any device (they open), the rest pointing at the old device
+identity ("Can't reach your computer"), which after adoption are ghosts of chats that now exist
+locally under their folders. c4x can see neither kind; archiving the ghosts in the app is the fix.
 
 **Never across pairs.** The record goes into the signed-in account's pair, the one an import writes
 to (`appstate.desktop_pair`); a session whose record sits under another account's pair is counted
 and left alone. Under sharing All that pair is a junction and the bytes land in its target, which
 is the shared list; the report names both directories and says the records stay there if sharing
 is turned off. A signed-in pair that sharing does not cover is refused rather than started as a
-second list. Every record c4x wrote is named in `data/adopted-records.json`.
+second list. Every record c4x wrote is named in `data/adopted-records.json`, with the path as the
+writer saw it: on a packaged install the server is a descendant of the app, its `%APPDATA%` writes
+are redirected into the package's `LocalCache`, and a reader outside that container resolves the
+same `<account>/<org>/<name>` under every records root instead.
 
 **Why nothing is preselected.** The app leaves a `deleted_<record uuid>` marker in the pair when a
 chat is deleted on purpose and removes the record; the store never learns a record's uuid, so a

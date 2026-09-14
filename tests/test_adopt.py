@@ -24,7 +24,7 @@ from tests.test_projects import build_store, forget_cached_rows  # noqa: E402
 
 A, B = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
 ORG_A, ORG_B = "11111111-3333-4333-8333-111111111111", "22222222-4444-4444-8444-222222222222"
-ALPHA, BETA, GAMMA = r"P:\Alpha", r"P:\Beta", r"P:\Gamma"
+ALPHA, BETA, GAMMA, DELTA = r"P:\Alpha", r"P:\Beta", r"P:\Gamma", r"P:\Delta"
 
 
 def record(folder, name, title="a chat"):
@@ -91,20 +91,37 @@ def machine(tmp_path, monkeypatch):
         ("s2-0", GAMMA, None, transcript("s2-0")),
         ("s2-1", GAMMA, "claude-desktop", transcript("s2-1")),
         ("s2-2", GAMMA, "claude-desktop", transcript("s2-2", sub="slash")),
+        ("s3-0", DELTA, "claude-desktop", transcript("s3-0")),
+        ("s3-1", DELTA, "claude-desktop", transcript("s3-1")),
     ):
         con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)",
                     (sid, "slug-2", cwd, "main", "2.1.229", entrypoint,
                      "2026-08-03T00:00:00Z", "2026-08-03T00:00:00Z", path))
-    for sid in ("s2-0", "s2-2"):
+    # Delta's two sessions are a day newer than Gamma's, so "newest first" has an order to show.
+    for sid in ("s2-0", "s2-2", "s3-0", "s3-1"):
+        day = "04" if sid.startswith("s3") else "03"
         for i in range(2):
             con.execute("""INSERT INTO turns (uuid, session_id, ts, model, request_id,
                              output_tokens, file_path, line_no)
                            VALUES (?,?,?,'claude-sonnet-5',?,1,'f',?)""",
-                        (f"{sid}-t{i}", sid, f"2026-08-03T12:0{i}:00Z", f"req-{sid}-{i}", i))
+                        (f"{sid}-t{i}", sid, f"2026-08-{day}T12:0{i}:00Z", f"req-{sid}-{i}", i))
     con.execute("UPDATE session_titles SET kind = 'last-prompt', title = 'the whole prompt text' "
                 "WHERE session_id = 's0-0' AND kind = 'custom'")
     con.execute("INSERT INTO session_titles VALUES ('s0-0', 'custom', 'Alpha work', 'f', 1)")
     con.execute("INSERT INTO session_titles VALUES ('s2-0', 'last-prompt', 'raw prompt', 'f', 1)")
+    # s3-0 has no title of any kind, only what was typed: the name comes from messages. A tool
+    # result and a sidechain prompt sit earlier and must not win.
+    typed = "  Please   refactor the\n parser and the tests around it, then run them all twice more"
+    for uuid_, ts, kind, text, side in (
+        ("s3-0-r", "2026-08-04T11:59:00Z", "tool_result", "ignored", 0),
+        ("s3-0-s", "2026-08-04T11:59:30Z", "typed", "a subagent prompt", 1),
+        ("s3-0-m", "2026-08-04T12:00:00Z", "typed", typed, 0),
+        ("s3-0-n", "2026-08-04T12:01:00Z", "typed", "later", 0),
+    ):
+        con.execute("""INSERT INTO messages (uuid, session_id, ts, role, type, text, chars,
+                         is_sidechain, file_path, line_no)
+                       VALUES (?, 's3-0', ?, 'user', ?, ?, ?, ?, 'f', 1)""",
+                    (uuid_, ts, kind, text, len(text), side))
     con.commit()
     con.close()
 
@@ -127,17 +144,18 @@ class TestWhatIsOffered:
     def test_the_candidate_rule_one_clause_at_a_time(self, machine):
         state = adopt.state()
         assert state["supported"] is True
-        assert candidate_ids(state) == ["s0-0", "s2-0"]
-        assert state["candidates"] == 2
+        assert candidate_ids(state) == ["s0-0", "s2-0", "s3-0", "s3-1"]
+        assert state["candidates"] == 4
         assert state["cli_candidates"] == 1, "s1-1 is counted, not offered"
         assert state["other_account"] == 1, "s0-2 belongs to the other account"
         assert state["pair"]["account"] == A and state["pair"]["org"] == ORG_A
 
     def test_cli_sessions_are_offered_only_when_asked(self, machine):
         state = adopt.state(include_cli=True)
-        assert candidate_ids(state) == ["s0-0", "s1-1", "s2-0"]
+        assert candidate_ids(state) == ["s0-0", "s1-1", "s2-0", "s3-0", "s3-1"]
         flagged = {s["session_id"]: s["cli"] for g in state["groups"] for s in g["sessions"]}
-        assert flagged == {"s0-0": False, "s1-1": True, "s2-0": False}
+        assert flagged == {"s0-0": False, "s1-1": True, "s2-0": False, "s3-0": False,
+                           "s3-1": False}
 
     def test_a_subagent_path_is_excluded_in_both_spellings(self, machine):
         assert adopt.is_subagent_path(r"C:\t\s\subagents\agent-x.jsonl")
@@ -148,9 +166,9 @@ class TestWhatIsOffered:
 
     def test_groups_are_by_folder_newest_first(self, machine):
         state = adopt.state()
-        assert [g["cwd"] for g in state["groups"]] == [GAMMA, ALPHA]
-        assert [g["project"] for g in state["groups"]] == ["Gamma", "Alpha"]
-        assert [g["count"] for g in state["groups"]] == [1, 1]
+        assert [g["cwd"] for g in state["groups"]] == [DELTA, GAMMA, ALPHA]
+        assert [g["project"] for g in state["groups"]] == ["Delta", "Gamma", "Alpha"]
+        assert [g["count"] for g in state["groups"]] == [2, 1, 1]
 
     def test_deleted_markers_are_counted_for_the_signed_in_pair(self, machine):
         assert adopt.state()["deleted_markers"] == 2
@@ -182,11 +200,12 @@ class TestTheWrite:
         path = Path(report["written"][0]["path"])
         assert path.parent == machine / A / ORG_A
         data = json.loads(path.read_text(encoding="utf-8"))
-        assert set(data) == set(adopt.FIELDS) | {"cliSessionId", "title"}
+        assert set(data) == set(adopt.FIELDS) | {"cliSessionId", "title", "titleSource"}
         assert data["cliSessionId"] == "s0-0"
         assert data["sessionId"].startswith("local_") and path.name == f"{data['sessionId']}.json"
         assert data["cwd"] == ALPHA and data["originCwd"] == ALPHA
         assert data["title"] == "Alpha work", "the custom title, never the last prompt"
+        assert data["titleSource"] == "user", "a person typed it"
         assert data["model"] == "claude-opus-5"
         assert data["isArchived"] is False and data["permissionMode"] == "default"
         assert data["remoteMcpServersConfig"] == []
@@ -196,11 +215,21 @@ class TestTheWrite:
         assert data["lastActivityAt"] > data["createdAt"]
         assert report["restart_required"] is True and report["note"] is None
 
-    def test_a_last_prompt_title_is_not_written(self, machine):
+    def test_a_last_prompt_becomes_the_name(self, machine):
         report = adopt.adopt([GAMMA])
         data = json.loads(Path(report["written"][0]["path"]).read_text(encoding="utf-8"))
-        assert "title" not in data
+        assert data["title"] == "raw prompt" and data["titleSource"] == "auto"
         assert data["model"] == "claude-sonnet-5"
+
+    def test_the_opening_typed_prompt_names_a_session_the_titles_table_does_not(self, machine):
+        report = adopt.adopt([DELTA])
+        by_id = {w["session_id"]: json.loads(Path(w["path"]).read_text(encoding="utf-8"))
+                 for w in report["written"]}
+        assert by_id["s3-0"]["title"] == ("Please refactor the parser and the tests around it, "
+                                          "then...")
+        assert by_id["s3-0"]["titleSource"] == "auto"
+        assert by_id["s3-1"]["title"] == "Chat from 2026-08-04", "nothing typed, so the date"
+        assert all(w["title"] for w in report["written"]), "the report carries the names too"
 
     def test_adopting_twice_finds_nothing_the_second_time(self, machine):
         adopt.adopt([ALPHA])
@@ -228,6 +257,84 @@ class TestTheWrite:
     def test_the_milliseconds_are_the_apps(self):
         assert adopt.to_ms("2026-08-01T00:00:00Z") == 1785542400000
         assert adopt.to_ms("2026-08-01T00:00:00+00:00") == adopt.to_ms("2026-08-01T00:00:00Z")
+
+
+class TestTheName:
+    def test_the_order_is_custom_ai_opening_request_typed_prompt_date(self):
+        kinds = {"custom": "Mine", "ai": "Theirs", "last-prompt": "the opening request"}
+        assert adopt.title_for(kinds, "typed", "2026-08-03T12:00:00Z") == ("Mine", "user")
+        del kinds["custom"]
+        assert adopt.title_for(kinds, "typed", None) == ("Theirs", "auto")
+        del kinds["ai"]
+        assert adopt.title_for(kinds, "typed", None) == ("the opening request", "auto")
+        assert adopt.title_for({}, "typed", None) == ("typed", "auto")
+        assert adopt.title_for({}, None, "2026-08-03T12:00:00Z") == ("Chat from 2026-08-03", "auto")
+        assert adopt.title_for({"custom": "   "}, "  ", None)[0].startswith("Chat from")
+
+    def test_a_prompt_is_cut_on_a_word_boundary_and_marked(self):
+        long = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen"
+        cut = adopt.cut(long)
+        assert len(cut) <= adopt.TITLE_MAX + 3 and cut.endswith("...")
+        assert not cut[:-3].endswith(" ") and " " in cut, cut
+        assert cut == "one two three four five six seven eight nine ten eleven..."
+        assert adopt.cut("short  and   spaced\n out") == "short and spaced out", "collapsed"
+        assert adopt.cut("x" * 70) == "x" * 60 + "...", "no space to break on: a hard cut"
+
+    def test_a_custom_title_is_never_cut(self):
+        long = "a title a person typed that runs on past sixty characters without stopping at all"
+        assert adopt.title_for({"custom": long}, None, None) == (long, "user")
+
+
+def nameless(path):
+    """A record the first build wrote: the nine fields and the link, no title at all."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("title", None)
+    data.pop("titleSource", None)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+class TestRetitle:
+    def test_only_the_nameless_ledger_records_are_named(self, machine):
+        report = adopt.adopt([ALPHA, GAMMA, DELTA])
+        paths = {w["session_id"]: Path(w["path"]) for w in report["written"]}
+        nameless(paths["s2-0"])
+        nameless(paths["s3-1"])
+        mine = json.loads(paths["s0-0"].read_text(encoding="utf-8"))
+        mine["title"], mine["titleSource"] = "My own name", "user"
+        paths["s0-0"].write_text(json.dumps(mine), encoding="utf-8")
+        assert adopt.state()["untitled_adopted"] == 2
+        result = adopt.retitle()
+        assert sorted(r["session_id"] for r in result["renamed"]) == ["s2-0", "s3-1"]
+        assert result["kept"] == 2 and result["missing"] == 0 and result["restart_required"] is True
+        assert json.loads(paths["s2-0"].read_text(encoding="utf-8"))["title"] == "raw prompt"
+        dated = json.loads(paths["s3-1"].read_text(encoding="utf-8"))["title"]
+        assert dated == "Chat from 2026-08-04"
+        after = json.loads(paths["s0-0"].read_text(encoding="utf-8"))
+        assert (after["title"], after["titleSource"]) == ("My own name", "user"), "a person's"
+        assert adopt.state()["untitled_adopted"] == 0
+        assert adopt.retitle()["renamed"] == [], "nothing left to name"
+
+    def test_a_missing_record_is_counted_not_invented(self, machine):
+        report = adopt.adopt([ALPHA])
+        Path(report["written"][0]["path"]).unlink()
+        result = adopt.retitle()
+        assert result["missing"] == 1 and result["renamed"] == []
+        assert not list((machine / A / ORG_A).glob("local_*.json"))[1:], "nothing recreated"
+
+    def test_a_ledger_path_is_resolved_under_another_root(self, tmp_path, monkeypatch, machine):
+        """The writer saw `%APPDATA%`; the reader sees the package container. Same pair, same
+        file name, a different root."""
+        report = adopt.adopt([GAMMA])
+        written = Path(report["written"][0]["path"])
+        nameless(written)
+        other = tmp_path / "container" / "Claude" / "claude-code-sessions"
+        target = other / A / ORG_A / written.name
+        target.parent.mkdir(parents=True)
+        written.replace(target)
+        monkeypatch.setattr(appstate, "sessions_roots", lambda: [str(machine), str(other)])
+        result = adopt.retitle()
+        assert [r["path"] for r in result["renamed"]] == [str(target)]
+        assert json.loads(target.read_text(encoding="utf-8"))["title"] == "raw prompt"
 
 
 class TestTheToggleIsUntouched:
@@ -297,8 +404,9 @@ class TestTheRoutes:
 
     def test_get_lists_the_groups(self, client):
         body = client.get("/api/adopt").json()
-        assert body["supported"] is True and [g["cwd"] for g in body["groups"]] == [GAMMA, ALPHA]
-        assert client.get("/api/adopt", params={"include_cli": "true"}).json()["candidates"] == 2
+        assert body["supported"] is True
+        assert [g["cwd"] for g in body["groups"]] == [DELTA, GAMMA, ALPHA]
+        assert client.get("/api/adopt", params={"include_cli": "true"}).json()["candidates"] == 4
 
     def test_post_writes_and_asks_for_a_restart(self, client, machine):
         answer = client.post("/api/adopt", json={"cwds": [ALPHA]})
@@ -315,6 +423,16 @@ class TestTheRoutes:
     def test_no_writes_is_403(self, client, monkeypatch):
         monkeypatch.setenv("C4X_NO_WRITES", "1")
         assert client.post("/api/adopt", json={"cwds": [ALPHA]}).status_code == 403
+
+    def test_retitle_names_the_nameless_and_needs_writes(self, client, machine, monkeypatch):
+        report = client.post("/api/adopt", json={"cwds": [GAMMA]}).json()
+        nameless(Path(report["written"][0]["path"]))
+        assert client.get("/api/adopt").json()["untitled_adopted"] == 1
+        answer = client.post("/api/adopt/retitle")
+        assert answer.status_code == 200, answer.text
+        assert [r["session_id"] for r in answer.json()["renamed"]] == ["s2-0"]
+        monkeypatch.setenv("C4X_NO_WRITES", "1")
+        assert client.post("/api/adopt/retitle").status_code == 403
 
     def test_an_unshared_pair_under_sharing_is_409(self, client, machine):
         record(machine / B / ORG_B, "b1")

@@ -515,7 +515,8 @@ export interface SharingReport {
 /** One chat the desktop app has no record of. */
 export interface AdoptSession {
   session_id: string
-  title: string | null
+  title: string
+  title_source: 'user' | 'auto'
   first_ts: string
   last_ts: string
   turns: number
@@ -549,8 +550,18 @@ export interface AdoptState {
   cli_candidates: number
   other_account: number
   deleted_markers: number
+  /** Records c4x wrote that carry no name; the app shows each as "General coding session". */
+  untitled_adopted: number
   app_running: boolean
   sharing: 'all' | 'current' | null
+}
+
+/** What `POST /api/adopt/retitle` answers. */
+export interface RetitleReport {
+  renamed: { session_id: string; path: string; title: string }[]
+  kept: number
+  missing: number
+  restart_required: boolean
 }
 
 /** What a POST to `/api/adopt` answers. `note` is set when the bytes live in a shared directory. */
@@ -770,6 +781,7 @@ export const api = {
       get<AdoptState>('/api/adopt', { include_cli: includeCli ? 'true' : undefined }),
     run: (body: { cwds: string[]; include_cli: boolean; dry_run: boolean }) =>
       post<AdoptReport>('/api/adopt', body),
+    retitle: () => post<RetitleReport>('/api/adopt/retitle', {}),
   },
 
   project: {
