@@ -303,6 +303,12 @@ def selector_options(cohort=None) -> list:
                   key=lambda r: (str(r.project).lower(), str(r.title).lower()))
     opts = []
     for r in rows:
+        # THE REVIEWS A CHAT RECEIVED ARE PART OF ITS NAME HERE. A review run is listed nowhere
+        # on its own, so this is what a search for "review" in the picker finds: the chat. Read
+        # as a plain attribute, not through getattr: tools/table_audit.py reads every getattr
+        # call as a callee it cannot name, and the frame always carries the column.
+        reviews = int(r.reviews or 0)
+        tail = f"  ·  {reviews} review{'' if reviews == 1 else 's'}" if reviews else ""
         # The date is the LAST UPDATE, not the creation. It carried that word for a while, which
         # was worth the width only until the question it answered had been asked once. It refreshes
         # on the 5s tick, bounded by the 45s cache behind session_rows().
@@ -315,7 +321,7 @@ def selector_options(cohort=None) -> list:
         # day was never enough precision for any row; the generated names are just where it showed.
         when = str(r.last_ts or "")[:16].replace("T", " ")
         opts.append({
-            "label": f"{r.project}  ·  {r.title[:60]}  ·  {when}",
+            "label": f"{r.project}  ·  {r.title[:60]}  ·  {when}{tail}",
             "value": r.session_id,
         })
     return opts

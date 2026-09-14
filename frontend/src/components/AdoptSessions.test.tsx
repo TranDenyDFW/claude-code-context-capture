@@ -28,7 +28,8 @@ function state(over: Partial<AdoptState> = {}): AdoptState {
     other_account: 1,
     deleted_markers: 0,
     untitled_adopted: 0,
-    review_runs_to_name: 0,
+    review_runs: 0,
+    review_records: 0,
     app_running: false,
     sharing: 'current',
     ...over,
@@ -53,7 +54,7 @@ function report(over: Partial<AdoptReport> = {}): AdoptReport {
 
 function named(over: Partial<RetitleReport> = {}): RetitleReport {
   return { renamed: [{ session_id: 's1', path: 'p1', title: 'raw prompt' }], kept: 0, missing: 0,
-           reviews: 0, restart_required: true, ...over }
+           restart_required: true, ...over }
 }
 
 beforeEach(() => {
@@ -61,7 +62,9 @@ beforeEach(() => {
 })
 
 async function opened() {
-  fireEvent.click(await screen.findByRole('button', { name: /no record of|without a name|to name/ }))
+  fireEvent.click(await screen.findByRole('button', {
+    name: /no record of|without a name|still in Claude/,
+  }))
 }
 
 describe('AdoptSessions', () => {
@@ -108,25 +111,25 @@ describe('AdoptSessions', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
-  it('says how many adopted chats are a reviewer\'s reading of another chat, and names them', async () => {
+  it('offers to take back the records a first build wrote for review runs, then asks for a restart', async () => {
     vi.spyOn(api.adopt, 'state')
-      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, untitled_adopted: 1,
-                                     review_runs_to_name: 54 }))
-      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0 }))
-    const retitle = vi.spyOn(api.adopt, 'retitle').mockResolvedValue(named({
-      renamed: Array.from({ length: 55 }, (_, i) => ({ session_id: `s${i}`, path: `p${i}`, title: `t${i}` })),
-      reviews: 54,
-    }))
+      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, review_records: 58,
+                                     review_runs: 3 }))
+      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, review_runs: 61 }))
+    const unadopt = vi.spyOn(api.adopt, 'unadoptReviews').mockResolvedValue({
+      removed: Array.from({ length: 58 }, (_, i) => ({ session_id: `r${i}`, path: `p${i}`, reviewed: 'c' })),
+      missing: 0, kept: 24, restart_required: true,
+    })
     render(<AdoptSessions writesEnabled />)
-    expect((await screen.findByRole('button', { name: /to name/ })).textContent)
-      .toContain('55 adopted chats to name')
+    expect((await screen.findByRole('button', { name: /still in Claude/ })).textContent)
+      .toContain('58 review runs still in Claude')
     await opened()
-    const line = screen.getByText(/1 adopted chat has no name yet/).textContent ?? ''
-    expect(line).toContain('54 adopted chats are a reviewer\'s reading of another chat')
-    expect(line).toContain('Reviewer - <that chat>')
-    fireEvent.click(screen.getByRole('button', { name: 'Name them' }))
-    await waitFor(() => expect(retitle).toHaveBeenCalled())
-    expect(await screen.findByText(/Restart Claude to see the 55 names/)).not.toBeNull()
+    expect(screen.getByText(/58 review runs are listed in Claude as a chat/)).not.toBeNull()
+    expect(screen.getByText(/3 review runs on this machine are folded/)).not.toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove them from Claude' }))
+    await waitFor(() => expect(unadopt).toHaveBeenCalled())
+    expect(await screen.findByText(/Restart Claude to drop the 58 review runs/)).not.toBeNull()
+    expect(screen.queryByRole('button', { name: /Remove them/ })).toBeNull()
   })
 
   it('shows nothing when every chat already has a record', async () => {

@@ -20,11 +20,15 @@
 //                                    link each resumed session to the chat it belongs to and
 //                                    return copied rows to the session that produced them;
 //                                    --dry-run reports without writing
+//   node harvest.mjs --backfill-reviews [--dry-run]
+//                                    tie each one-shot session that quotes another session (a
+//                                    hook's headless reviewer) to the session it read;
+//                                    --dry-run reports without writing
 
 import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, appendFileSync, readFileSync, writeFileSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
-import { join, dirname, sep } from 'node:path';
+import { join, dirname, basename, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
@@ -387,6 +391,38 @@ CREATE TABLE IF NOT EXISTS session_links (
   CHECK (head_id <> session_id)
 );
 CREATE INDEX IF NOT EXISTS session_links_head ON session_links(head_id);
+-- WHICH ONE-SHOT SESSIONS ARE REVIEW RUNS OF ANOTHER SESSION. A Stop hook on the test laptop ran
+-- a headless claude -p after each turn with a prompt quoting the last 250 records of the
+-- transcript under review. Each run left a one-prompt session in the reviewed session's folder,
+-- carrying the app's own entrypoint and no session id, and the store held 58 of them as chats.
+-- Quotation is the only evidence and it is exact: long ASCII lines from the prompt's tail occur
+-- in the reviewed session's assistant text and tool results, and in no other session's. A
+-- session whose assistant text or tool results contain none of them is out, whatever its typed
+-- prompts say: a one-shot that repeats a PERSON'S prompt word for word (a test harness running
+-- the same command in seven sessions) matches typed rows alone and is not a review. Among the
+-- sessions that pass, every quoted line counts, typed ones included.
+-- head_id is the reviewed session, and every reader folds a run into it beside the chain map
+-- above: out of the lists, into the chat's numbers under the subagent scope. hits and snippets
+-- are the evidence; verdict is the run's first word when it is APPROVED or PROBLEMS. Derived after
+-- every harvest pass for the directories it touched, and by --backfill-reviews. A found link is
+-- permanent. review_misses remembers a run that tied to nothing together with the sessions that
+-- were its pool, so it is asked again only when a session joins that pool.
+CREATE TABLE IF NOT EXISTS review_links (
+  session_id TEXT PRIMARY KEY,
+  head_id TEXT NOT NULL,
+  hits INTEGER NOT NULL,
+  snippets INTEGER NOT NULL,
+  verdict TEXT,
+  method TEXT NOT NULL,
+  linked_at TEXT NOT NULL,
+  CHECK (head_id <> session_id)
+);
+CREATE INDEX IF NOT EXISTS review_links_head ON review_links(head_id);
+CREATE TABLE IF NOT EXISTS review_misses (
+  session_id TEXT PRIMARY KEY,
+  pool_key TEXT NOT NULL,
+  checked_at TEXT NOT NULL
+);
 -- A project the user deleted and asked to stop capturing. Keyed on cwd, not on the transcript
 -- directory: the mapping is many-to-many, the 'subagents' slug alone covers 30 different working
 -- directories, and excluding one of those by slug would silently stop capturing the other 29.
@@ -1784,6 +1820,213 @@ export async function backfillSidecars(dbPath = DB_PATH, { quiet = false, write 
   return report;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Review runs. See the review_links comment in the schema for the finding. Everything below is
+// SQL over rows the ingest already wrote, which is why it runs AFTER the ingest, per directory,
+// and never inside it.
+// ---------------------------------------------------------------------------------------------
+export const REVIEW = {
+  WANT: 8,               // snippets taken from a prompt, newest first
+  MIN_LINE: 80,          // a line shorter than this is too common to be evidence
+  TAIL: 120,             // what is kept of a line: a substring of a truncated line is still a substring
+  ONE_SHOT_MESSAGES: 3,  // one typed prompt and at most three messages: the only sessions tested
+  SLACK_MS: 3600 * 1000, // how long a session may have been quiet before a run that read it began
+  CHUNK: 900,            // parameters per query, under SQLite's limit with room for the others
+};
+// CLAUDE SAID: / OUTPUT WAS: / USER:, the label the excerpt's writer put in front of a copied line.
+// Dropped, so the line matches what the reviewed session actually said.
+const REVIEW_LABEL = /^[A-Z][A-Z ]{1,20}: /;
+
+const isAscii = (s) => {
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) > 127) return false;
+  return true;
+};
+
+/**
+ * The lines of a run's prompt worth searching for, newest first: 80 or more characters, pure
+ * ASCII (the excerpt crossed a shell pipe and the store holds U+FFFD where the transcript had
+ * anything else, so such a line can never match), the label dropped, the last 120 kept.
+ *
+ * `c4x/reviews.py` `snippets()` is the Python twin; tests on both sides pin the same inputs.
+ */
+export function reviewSnippets(prompt, { want = REVIEW.WANT, minLen = REVIEW.MIN_LINE, tail = REVIEW.TAIL } = {}) {
+  const out = [];
+  const lines = String(prompt ?? '').split('\n');
+  for (let i = lines.length - 1; i >= 0 && out.length < want; i--) {
+    const line = lines[i].trim().replace(REVIEW_LABEL, '');
+    if (line.length >= minLen && isAscii(line)) out.push(line.slice(-tail));
+  }
+  return out;
+}
+
+const reviewChunks = (items, size = REVIEW.CHUNK) => {
+  const all = [...items];
+  const out = [];
+  for (let i = 0; i < all.length; i += size) out.push(all.slice(i, i + size));
+  return out;
+};
+const reviewMarks = (n) => Array(n).fill('?').join(',');
+
+/** The sessions among `ids` with exactly one typed prompt and at most three messages. */
+export function reviewOneShots(db, ids) {
+  const out = new Set();
+  for (const chunk of reviewChunks(ids)) {
+    const rows = db.prepare(`SELECT session_id FROM messages WHERE session_id IN (${reviewMarks(chunk.length)})
+      GROUP BY session_id
+      HAVING SUM(CASE WHEN type = 'typed' AND role = 'user' THEN 1 ELSE 0 END) = 1 AND COUNT(*) <= ?`)
+      .all(...chunk, REVIEW.ONE_SHOT_MESSAGES);
+    for (const r of rows) out.add(r.session_id);
+  }
+  return out;
+}
+
+/** APPROVED or PROBLEMS when the reply begins with either, the way the hook itself read it. */
+export function reviewVerdict(text) {
+  const head = String(text ?? '').trim().split(/\s+/)[0] ?? '';
+  return /^(APPROVED|PROBLEMS)$/i.test(head) ? head.toUpperCase() : null;
+}
+
+/**
+ * Tie every one-shot among `sessionIds` (one directory's sessions) to the session it quotes.
+ *
+ * The pool for a run is the sessions of the same cwd that were alive when it started: begun no
+ * later, last active within SLACK before it, and not one-shots themselves, so a run is never tied
+ * to a run. One query per run counts, per pool session, how many of the snippets appear in its
+ * messages; a session with none of them in its assistant text or tool results is out; among the
+ * rest the unique top with at least min(2, snippets) is the head.
+ *
+ * `write:false` computes and writes nothing. A run already linked is never asked again; a run
+ * that missed is asked again only when its pool is a different set of sessions.
+ */
+export function deriveReviews(db, sessionIds, { write = true, method = 'harvest', now = null } = {}) {
+  const result = { sessions: 0, one_shots: 0, already: 0, unchanged: 0, linked: [], misses: 0, hit_queries: 0 };
+  const ids = [...new Set(sessionIds.filter(Boolean).map(String))];
+  result.sessions = ids.length;
+  if (!ids.length) return result;
+  const shots = reviewOneShots(db, ids);
+  result.one_shots = shots.size;
+  if (!shots.size) return result;
+  const known = new Set();
+  const missed = new Map();
+  for (const chunk of reviewChunks(shots)) {
+    const m = reviewMarks(chunk.length);
+    for (const r of db.prepare(`SELECT session_id FROM review_links WHERE session_id IN (${m})`).all(...chunk)) known.add(r.session_id);
+    for (const r of db.prepare(`SELECT session_id, pool_key FROM review_misses WHERE session_id IN (${m})`).all(...chunk)) missed.set(r.session_id, r.pool_key);
+  }
+  // Every session's place in time, read once.
+  const when = new Map();
+  for (const chunk of reviewChunks(ids)) {
+    const rows = db.prepare(`SELECT session_id, cwd, first_ts, last_ts FROM sessions WHERE session_id IN (${reviewMarks(chunk.length)})`).all(...chunk);
+    for (const r of rows) {
+      const first = Date.parse(r.first_ts ?? '');
+      const last = Date.parse(r.last_ts ?? r.first_ts ?? '');
+      when.set(r.session_id, { cwd: r.cwd ?? null, first, last: Number.isNaN(last) ? first : last });
+    }
+  }
+  const stamp = now ?? new Date().toISOString();
+  const putLink = db.prepare(`INSERT OR REPLACE INTO review_links
+    (session_id, head_id, hits, snippets, verdict, method, linked_at) VALUES (?,?,?,?,?,?,?)`);
+  const putMiss = db.prepare('INSERT OR REPLACE INTO review_misses (session_id, pool_key, checked_at) VALUES (?,?,?)');
+  const dropMiss = db.prepare('DELETE FROM review_misses WHERE session_id = ?');
+  const promptOf = db.prepare(`SELECT text FROM messages WHERE session_id = ? AND type = 'typed' AND role = 'user'
+                               ORDER BY ts LIMIT 1`);
+  const replyOf = db.prepare(`SELECT text FROM messages WHERE session_id = ? AND role = 'assistant' ORDER BY ts LIMIT 1`);
+  for (const shot of shots) {
+    if (known.has(shot)) { result.already++; continue; }
+    const r = when.get(shot);
+    if (!r || Number.isNaN(r.first)) continue;
+    const pool = [];
+    for (const [sid, s] of when) {
+      if (sid === shot || shots.has(sid) || s.cwd !== r.cwd) continue;
+      if (Number.isNaN(s.first) || s.first > r.first) continue;
+      if (s.last + REVIEW.SLACK_MS < r.first) continue;
+      pool.push(sid);
+    }
+    pool.sort();
+    const key = pool.join(',');
+    if (missed.get(shot) === key) { result.unchanged++; continue; }
+    const snips = reviewSnippets(promptOf.get(shot)?.text ?? '');
+    let head = null;
+    let best = 0;
+    if (snips.length && pool.length) {
+      // TWO COUNTS PER POOL SESSION. `said` is how many snippets its assistant text or tool
+      // results contain; `any` counts its typed prompts too. A reviewer quotes what the session
+      // said and what came back, and often the prompt it was answering as well; a one-shot that
+      // merely repeats a person's prompt matches typed rows and nothing else. So a session with
+      // no said line is out, and among the rest every quoted line counts: a tiny session's
+      // reviewer shared one said line and one typed line with it, and lost on the said count.
+      const hits = new Map();
+      const saidSum = snips.map(() =>
+        "MAX(CASE WHEN (role = 'assistant' OR type = 'tool_result') AND instr(text, ?) > 0 THEN 1 ELSE 0 END)").join(' + ');
+      const anySum = snips.map(() => 'MAX(CASE WHEN instr(text, ?) > 0 THEN 1 ELSE 0 END)').join(' + ');
+      for (const chunk of reviewChunks(pool)) {
+        result.hit_queries++;
+        const rows = db.prepare(`SELECT session_id, ${saidSum} AS said, ${anySum} AS any
+          FROM messages WHERE session_id IN (${reviewMarks(chunk.length)}) GROUP BY session_id`)
+          .all(...snips, ...snips, ...chunk);
+        for (const row of rows) if (row.said > 0) hits.set(row.session_id, (hits.get(row.session_id) ?? 0) + row.any);
+      }
+      if (hits.size) {
+        const top = Math.max(...hits.values());
+        const tops = [...hits].filter(([, n]) => n === top).map(([sid]) => sid);
+        if (tops.length === 1 && top >= Math.min(2, snips.length)) { head = tops[0]; best = top; }
+      }
+    }
+    if (head) {
+      const verdict = reviewVerdict(replyOf.get(shot)?.text);
+      result.linked.push({ session_id: shot, head_id: head, hits: best, snippets: snips.length, verdict });
+      if (write) { putLink.run(shot, head, best, snips.length, verdict, method, stamp); dropMiss.run(shot); }
+    } else {
+      result.misses++;
+      if (write) putMiss.run(shot, key, stamp);
+    }
+  }
+  return result;
+}
+
+/** --backfill-reviews: every directory the store knows, one transaction each. */
+export async function backfillReviews(dbPath = DB_PATH, { quiet = false, write = true } = {}) {
+  if (!existsSync(dbPath)) { if (!quiet) console.error(`no store at ${dbPath}`); return null; }
+  const t0 = Date.now();
+  const db = openDb(dbPath);
+  const count = () => db.prepare('SELECT COUNT(*) n FROM review_links').get().n;
+  const slugs = db.prepare('SELECT project_slug FROM sessions GROUP BY project_slug').all().map((r) => r.project_slug);
+  const report = { db: posix(dbPath), directories: slugs.length, sessions: 0, one_shots: 0, already: 0,
+                   unchanged: 0, linked: 0, misses: 0, by_verdict: {}, heads: 0,
+                   links_before: count(), links_after: 0, wrote: write, ms: 0 };
+  const heads = new Set();
+  const bySlug = db.prepare('SELECT session_id FROM sessions WHERE project_slug IS ?');
+  for (const slug of slugs) {
+    const ids = bySlug.all(slug).map((r) => r.session_id);
+    if (write) db.exec('BEGIN');
+    let r;
+    try {
+      r = deriveReviews(db, ids, { write, method: 'backfill-reviews' });
+      if (write) db.exec('COMMIT');
+    } catch (e) {
+      if (write) { try { db.exec('ROLLBACK'); } catch { /* nothing to roll back */ } }
+      throw e;
+    }
+    report.sessions += r.sessions;
+    report.one_shots += r.one_shots;
+    report.already += r.already;
+    report.unchanged += r.unchanged;
+    report.linked += r.linked.length;
+    report.misses += r.misses;
+    for (const l of r.linked) {
+      heads.add(l.head_id);
+      const v = l.verdict ?? 'none';
+      report.by_verdict[v] = (report.by_verdict[v] ?? 0) + 1;
+    }
+  }
+  report.heads = heads.size;
+  report.links_after = count();
+  report.ms = Date.now() - t0;
+  if (!quiet) console.log(JSON.stringify(report, null, 2));
+  db.close();
+  return report;
+}
+
 export async function backfillChains(dbPath = DB_PATH, { quiet = false, write = true, recordsRoots = null,
                                                         projects = PROJECTS, threshold = 0.9 } = {}) {
   if (!existsSync(dbPath)) { if (!quiet) console.error(`no store at ${dbPath}`); return null; }
@@ -3006,7 +3249,7 @@ async function run({ full, recordsRoots = null }) {
   // transcript in a directory that already holds its predecessor; deriving links for that one
   // directory is what folds it into its chat on the next render without anyone running anything.
   // Bounded by the directory, which is why it is affordable on every hook-driven harvest.
-  const chains = { directories: touched.size, links: 0, failed: [],
+  const chains = { directories: touched.size, links: 0, reviews: 0, failed: [],
                    rows_moved: { turns: 0, messages: 0, compactions: 0, tool_calls: 0 },
                    rows_repaired: { cwd: 0, project_slug: 0, transcript_path: 0 } };
   if (touched.size) {
@@ -3028,8 +3271,14 @@ async function run({ full, recordsRoots = null }) {
         try {
           const r = await reconcileDirectory(db, dir, records,
             { write: true, method: 'harvest', excludedCwds: h.excludedCwds });
+          // THE REVIEW RUNS OF THIS DIRECTORY, in the same transaction: the reconcile above has
+          // just put every session's slug right, so the directory's name finds them all.
+          const ids = db.prepare('SELECT session_id FROM sessions WHERE project_slug = ?')
+            .all(basename(dir)).map((row) => row.session_id);
+          const rv = deriveReviews(db, ids, { write: true, method: 'harvest' });
           db.exec('COMMIT');
           chains.links += r.links;
+          chains.reviews += rv.linked.length;
           for (const k of Object.keys(chains.rows_moved)) chains.rows_moved[k] += r.moved[k];
           for (const k of Object.keys(chains.rows_repaired)) chains.rows_repaired[k] += r.repaired[k];
         } catch (e) {
@@ -3199,6 +3448,7 @@ function stats() {
     by_trigger: q('SELECT trigger, COUNT(*) n, AVG(pre_tokens) avg_pre, AVG(post_tokens) avg_post FROM compactions GROUP BY trigger'),
     record_types: q('SELECT type, n FROM record_types ORDER BY n DESC LIMIT 20'),
     session_links: q('SELECT COUNT(*) n, COUNT(DISTINCT head_id) chains FROM session_links')[0],
+    review_links: q('SELECT COUNT(*) n, COUNT(DISTINCT head_id) heads FROM review_links')[0],
     top_attachments: q('SELECT type, SUM(n) n FROM attachments GROUP BY type ORDER BY n DESC LIMIT 12'),
     runs: q('SELECT ts, mode, files_read, turns, compactions, ms FROM harvest_runs ORDER BY ts DESC LIMIT 5'),
   };
@@ -3266,6 +3516,8 @@ async function selfTest() {
   // is used only where the behaviour is genuinely out of reach.
   const src = readFileSync(new URL(import.meta.url), 'utf8');
   checks.push(['CLI: --backfill-chains is dispatched', src.includes("argv.includes('--backfill-chains')")]);
+  checks.push(['CLI: --backfill-reviews is dispatched and documented',
+    src.includes("argv.includes('--backfill-reviews')") && src.includes('node harvest.mjs --backfill-reviews [--dry-run]')]);
   // The refusal runs in a child process, because it is the entry-point dispatch under test and
   // this process was entered with --self-test.
   {
@@ -4199,6 +4451,108 @@ async function selfTest() {
     cdb4.close();
   }
 
+  // Review runs: a one-shot that quotes what another session SAID and what its tools RETURNED is a
+  // review of it; one that repeats a person's prompt word for word is not; an even tie names
+  // nobody. Through the same ingest as the chains fixtures, then the derivation over the store.
+  {
+    const vdir = join(tmp, 'reviews', 'projects', 'P--review');
+    mkdirSync(vdir, { recursive: true });
+    const sid = (tag) => `${tag}-0000-4000-8000-00000000000a`;
+    const V = { P: sid('aaaa000a'), R1: sid('bbbb000a'), R2: sid('cccc000a'),
+                P2: sid('dddd000a'), P3: sid('eeee000a'), R3: sid('ffff000a'), R4: sid('abab000a') };
+    const CWD = 'P:\\review';
+    const at = (m) => `2026-05-01T10:${String(m).padStart(2, '0')}:00.000Z`;
+    const L1 = 'The parser now rejects a trailing comma and the three tests that covered it pass again after the rewrite';
+    const L2 = '12 passed in 0.41s, nothing skipped, and the fixture directory was removed on the way out cleanly';
+    const T = 'Run this exact command with the Bash tool, then state the first and last lines of its output verbatim';
+    const L4 = 'Both Delta chats said this exact sentence once, so a run quoting only it ties to neither of them';
+    const L5 = 'And both said this second sentence too, word for word, which makes the tie an even one to break';
+    const PREAMBLE = "You are reviewing another Claude instance's work before it is allowed to finish its turn.\n\n"
+      + 'Look for a claim wider than its evidence.\n\n--- THE WORK ---\n';
+    let vn = 0;
+    const user = (s, ts, content) => JSON.stringify({ type: 'user', uuid: `v${++vn}`, sessionId: s, timestamp: ts,
+      cwd: CWD, message: { role: 'user', content } });
+    const said = (s, ts, text) => JSON.stringify({ type: 'assistant', uuid: `v${++vn}`, sessionId: s, timestamp: ts,
+      cwd: CWD, message: { model: 'm', usage: { input_tokens: 1, cache_creation_input_tokens: 0,
+                                                 cache_read_input_tokens: 0, output_tokens: 1 },
+                           content: [{ type: 'text', text }] } });
+    const ran = (s, ts, id) => JSON.stringify({ type: 'assistant', uuid: `v${++vn}`, sessionId: s, timestamp: ts,
+      cwd: CWD, message: { model: 'm', usage: { input_tokens: 1, output_tokens: 1 },
+                           content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'pytest' } }] } });
+    const got = (s, ts, id, text) => JSON.stringify({ type: 'user', uuid: `v${++vn}`, sessionId: s, timestamp: ts,
+      cwd: CWD, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: text }] } });
+    const put = (s, lines) => writeFileSync(join(vdir, s + '.jsonl'), lines.join('\n') + '\n');
+    put(V.P, [user(V.P, at(0), T), said(V.P, at(1), L1), ran(V.P, at(2), 'toolu_rv1'),
+              got(V.P, at(3), 'toolu_rv1', L2), said(V.P, at(4), 'done')]);
+    put(V.R1, [user(V.R1, at(6), PREAMBLE + 'CLAUDE SAID: ' + L1 + '\n\nOUTPUT WAS: ' + L2 + '\n'),
+               said(V.R1, at(7), 'APPROVED\nchecked the claim against the output')]);
+    put(V.R2, [user(V.R2, at(8), T), said(V.R2, at(9), 'done again')]);
+    // Two typed prompts each, so neither parent is a one-shot itself.
+    put(V.P2, [user(V.P2, at(0), 'first'), said(V.P2, at(1), L4), said(V.P2, at(2), L5), user(V.P2, at(3), 'more')]);
+    put(V.P3, [user(V.P3, at(0), 'second'), said(V.P3, at(1), L4), said(V.P3, at(2), L5), user(V.P3, at(3), 'more')]);
+    put(V.R3, [user(V.R3, at(10), PREAMBLE + 'CLAUDE SAID: ' + L4 + '\n\nCLAUDE SAID: ' + L5 + '\n'),
+               said(V.R3, at(11), 'PROBLEMS\n- which one')]);
+    // One said line and one typed line: the typed one counts once a said one matched.
+    put(V.R4, [user(V.R4, at(12), PREAMBLE + 'USER: ' + T + '\n\nCLAUDE SAID: ' + L1 + '\n'),
+               said(V.R4, at(13), 'fine')]);
+    const vdb = new DatabaseSync(':memory:');
+    vdb.exec(SCHEMA);
+    const vh = new Harvest(vdb);
+    for (const s of Object.values(V)) await vh.file(join(vdir, s + '.jsonl'), true);
+    const vids = Object.values(V);
+    checks.push(['reviews: snippets are ASCII line tails with the label dropped, newest first',
+      JSON.stringify(reviewSnippets('short\nCLAUDE SAID: ' + L1 + '\nOUTPUT WAS: caf\u00e9 ' + L2 + '\nUSER: ' + L4 + '\n'))
+        === JSON.stringify([L4.slice(-120), L1.slice(-120)])
+      && reviewSnippets('').length === 0
+      && JSON.stringify(reviewSnippets('A LABEL: ' + 'x'.repeat(300))) === JSON.stringify(['x'.repeat(120)])
+      && reviewSnippets(Array(20).fill(L1).join('\n')).length === REVIEW.WANT]);
+    checks.push(['reviews: the verdict is the reply\'s first word, APPROVED or PROBLEMS or nothing',
+      reviewVerdict('APPROVED\nfine') === 'APPROVED' && reviewVerdict('problems\n- x') === 'PROBLEMS'
+      && reviewVerdict('Looking at this') === null && reviewVerdict(null) === null]);
+    const dry = deriveReviews(vdb, vids, { write: false });
+    checks.push(['reviews: write:false writes nothing and still reports the links (gate can fail)',
+      vdb.prepare('SELECT COUNT(*) n FROM review_links').get().n === 0
+      && vdb.prepare('SELECT COUNT(*) n FROM review_misses').get().n === 0 && dry.linked.length === 2]);
+    const rv = deriveReviews(vdb, vids, { write: true, now: '2026-05-01T12:00:00.000Z' });
+    const link = (s) => vdb.prepare('SELECT * FROM review_links WHERE session_id = ?').get(s);
+    checks.push(['reviews: four one-shots seen, the parents are not', rv.one_shots === 4, String(rv.one_shots)]);
+    checks.push(['reviews: a run quoting what the session said and what its tool returned is tied to it (gate can fail)',
+      link(V.R1)?.head_id === V.P && link(V.R1)?.hits === 2 && link(V.R1)?.snippets === 3
+      && link(V.R1)?.verdict === 'APPROVED' && link(V.R1)?.method === 'harvest'
+      && link(V.R1)?.linked_at === '2026-05-01T12:00:00.000Z', JSON.stringify(link(V.R1))]);
+    checks.push(['reviews: a run repeating a typed prompt word for word is NOT a review (gate can fail)', !link(V.R2)]);
+    checks.push(['reviews: a typed line counts once a said line matched (gate can fail)',
+      link(V.R4)?.head_id === V.P && link(V.R4)?.hits === 2 && link(V.R4)?.verdict === null, JSON.stringify(link(V.R4))]);
+    checks.push(['reviews: an even tie names nobody', !link(V.R3) && rv.misses === 2, String(rv.misses)]);
+    checks.push(['reviews: a miss remembers its pool',
+      vdb.prepare('SELECT pool_key FROM review_misses WHERE session_id = ?').get(V.R2)?.pool_key
+        === [V.P, V.P2, V.P3].sort().join(',')]);
+    const again = deriveReviews(vdb, vids, { write: true });
+    checks.push(['reviews: a second pass asks nothing again',
+      again.already === 2 && again.unchanged === 2 && again.hit_queries === 0 && again.linked.length === 0]);
+    // A session joining the pools makes the two misses worth asking again, and the answer holds.
+    const P4 = sid('a4a4000a');
+    put(P4, [user(P4, at(5), 'late'), said(P4, at(6), 'nothing to do with it'), user(P4, at(7), 'still')]);
+    await vh.file(join(vdir, P4 + '.jsonl'), true);
+    const third = deriveReviews(vdb, vids.concat(P4), { write: true });
+    checks.push(['reviews: a session joining the pool reopens the misses, and they stay misses',
+      third.hit_queries === 2 && third.misses === 2 && third.already === 2 && third.unchanged === 0]);
+    // The backfill, on a file, both ways.
+    const vpath = join(tmp, 'reviews', 'store.db');
+    const fdb = openDb(vpath);
+    const fh = new Harvest(fdb);
+    for (const s of Object.values(V)) await fh.file(join(vdir, s + '.jsonl'), true);
+    fdb.close();
+    const dryRep = await backfillReviews(vpath, { quiet: true, write: false });
+    const fcount = () => { const d = new DatabaseSync(vpath); const n = d.prepare('SELECT COUNT(*) n FROM review_links').get().n; d.close(); return n; };
+    checks.push(['backfill-reviews: --dry-run reports and writes nothing (gate can fail)',
+      dryRep.linked === 2 && dryRep.wrote === false && fcount() === 0]);
+    const rep = await backfillReviews(vpath, { quiet: true, write: true });
+    checks.push(['backfill-reviews: the links land, with their verdicts counted',
+      rep.linked === 2 && rep.by_verdict.APPROVED === 1 && rep.by_verdict.none === 1 && rep.heads === 1
+      && fcount() === 2 && rep.links_after === 2 && rep.links_before === 0]);
+  }
+
   // Chains, fourth directory: a project this machine IMPORTED. The transcript is byte identical to
   // the one on the machine it came from, so every line still names THAT directory, and the session
   // row is the only place the move is recorded. Two things must hold: a harvest pass leaves the row
@@ -5039,6 +5393,9 @@ const USAGE = `harvest.mjs
   node harvest.mjs --self-test     prove the parser detects what it claims to detect
   node harvest.mjs --stats         print store contents, harvest nothing
   node harvest.mjs --backfill-chains [--dry-run] [--records <dir>]
+  node harvest.mjs --backfill-reviews [--dry-run]
+                                          tie each one-shot session that quotes another (a hook's
+                                          headless reviewer) to the session it read
   node harvest.mjs --backfill-sidecars    read the agent and workflow files beside transcripts
   node harvest.mjs --backfill-work        re-read transcripts for plans and task notifications
   node harvest.mjs --backfill-changes     re-read transcripts for the file changes Claude made
@@ -5046,7 +5403,7 @@ const USAGE = `harvest.mjs
                    | --backfill-tool-outcomes | --backfill-message-source
   any of the above with --db <path> to name the store`;
 const KNOWN_FLAGS = new Set(['--full', '--yes', '--dry-run', '--self-test', '--stats', '--db', '--records',
-  '--backfill-chains', '--backfill-sidecars', '--backfill-work', '--backfill-changes', '--backfill-survivors', '--backfill-titles', '--backfill-agents',
+  '--backfill-chains', '--backfill-reviews', '--backfill-sidecars', '--backfill-work', '--backfill-changes', '--backfill-survivors', '--backfill-titles', '--backfill-agents',
   '--backfill-tool-outcomes', '--backfill-message-source', '--help', '-h']);
 
 const argv = process.argv.slice(2);
@@ -5076,6 +5433,11 @@ else if (argv.includes('--backfill-tool-outcomes'))
   code = await backfillToolOutcomes(resolveDbPath(argv));
 else if (argv.includes('--backfill-message-source'))
   code = await backfillMessageSource(resolveDbPath(argv));
+// BEFORE --dry-run, so that --backfill-reviews --dry-run reaches it and reports without writing.
+else if (argv.includes('--backfill-reviews')) {
+  const r = await backfillReviews(resolveDbPath(argv), { write: !argv.includes('--dry-run') });
+  code = r ? 0 : 1;
+}
 // BEFORE --dry-run, so that --backfill-chains --dry-run reaches it and reports without writing.
 else if (argv.includes('--backfill-chains')) {
   const r = await backfillChains(resolveDbPath(argv), {

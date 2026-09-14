@@ -141,22 +141,14 @@ def cut(text: Any, limit: int = TITLE_MAX) -> str:
     return head.rstrip(" ,;:.") + "..."
 
 
-def title_for(kinds: dict, first_prompt: Any = None, last_ts: Any = None,
-              reviewed: Any = None) -> tuple[str, str]:
-    """(title, titleSource) for a record: a name a person or a model chose, else the name of the
-    chat this one read when it is a review run, else the opening request cut short, else the
-    date. The source is `user` for a `custom` title, which a person typed, and `auto` for
-    everything else, which is what the app writes for names it made itself.
-
-    `reviewed` is the reviewed chat's own name (see `c4x/reviews.py`). It outranks the opening
-    prompt, which for such a run is the reviewer's instructions and says nothing about the chat,
-    and never a name a person or a model gave the run itself."""
+def title_for(kinds: dict, first_prompt: Any = None, last_ts: Any = None) -> tuple[str, str]:
+    """(title, titleSource) for a record: a name a person or a model chose, else the opening
+    request cut short, else the date. The source is `user` for a `custom` title, which a person
+    typed, and `auto` for everything else, which is what the app writes for names it made itself."""
     for kind, source in (("custom", "user"), ("ai", "auto")):
         text = kinds.get(kind)
         if isinstance(text, str) and text.strip():
             return " ".join(text.split()), source
-    if isinstance(reviewed, str) and reviewed.strip():
-        return review_title(reviewed), "auto"
     text = kinds.get("last-prompt")
     if isinstance(text, str) and text.strip():
         return cut(text), "auto"
@@ -165,38 +157,9 @@ def title_for(kinds: dict, first_prompt: Any = None, last_ts: Any = None,
     return f"Chat from {str(last_ts or '')[:10] or 'an unknown date'}", "auto"
 
 
-def review_title(name: Any) -> str:
-    """"Reviewer - <the chat it read>", never longer than TITLE_MAX, the `...` of a cut name
-    counted (`cut` itself appends it past the limit it is given)."""
-    from c4x import reviews
-    return reviews.PREFIX + cut(name, TITLE_MAX - len(reviews.PREFIX) - 3)
-
-
-def _review_names(rows: list, titles: dict, session_ids) -> dict:
-    """run id -> the name of the chat it read, for the review runs among `session_ids`."""
-    from c4x import reviews
-    by_id = {r["session_id"]: r for r in rows}
-    out: dict = {}
-    for run, read in reviews.reviewed_by(rows, session_ids).items():
-        r = by_id.get(read)
-        if r is not None:
-            out[run] = title_for(titles.get(read, {}), r.get("first_prompt"), r.get("last_ts"))[0]
-    return out
-
-
-def _needs_review_name(record: dict, reviewed: Any) -> bool:
-    """An auto-named record of a review run whose name is not yet the chat it read. A name a
-    person gave the run (`titleSource` `user`) is theirs and is never replaced."""
-    if not isinstance(reviewed, str) or not reviewed.strip():
-        return False
-    if record.get("titleSource") != "auto":
-        return False
-    return record.get("title") != review_title(reviewed)
-
-
 def state(root=None, include_cli=False) -> dict:
     """What could be adopted, grouped by folder, and where a record would land."""
-    from c4x import accounts, appstate, store
+    from c4x import accounts, appstate, reviews, store
     root = str(root or appstate.sessions_root())
     pair = appstate.desktop_pair(root)
     base: dict[str, Any] = {"supported": False, "why_not": "", "pair": None, "physical": None,
@@ -244,15 +207,17 @@ def state(root=None, include_cli=False) -> dict:
             if not include_cli:
                 continue
         eligible.append((r, cli))
-    # A REVIEW RUN TAKES THE NAME OF THE CHAT IT READ, both when it is offered here and when its
-    # record is checked below; asked once, for the candidates and the ledger's sessions together.
-    names = _review_names(rows, titles, [r["session_id"] for r, _cli in eligible]
-                          + [str(e.get("session_id")) for e, _rec, _p in ledger])
+    # A REVIEW RUN IS NEVER OFFERED. It folds into the chat it reviewed (harvest's `review_links`,
+    # read through `c4x.reviews`), and a record for it would put a reviewer's reading of a chat
+    # in the app's sidebar as a chat of its own, which is what the first build did 58 times on
+    # the test laptop. Counted, so the page can say how many were left out and why.
+    runs = reviews.reviewed_by([r["session_id"] for r, _cli in eligible])
+    eligible = [(r, cli) for r, cli in eligible if r["session_id"] not in runs]
+    every_run = reviews.reviewed_by()
     by_cwd: dict[str, list] = {}
     for r, cli in eligible:
         sid = r["session_id"]
-        title, source = title_for(titles.get(sid, {}), r.get("first_prompt"), r["last_ts"],
-                                  reviewed=names.get(sid))
+        title, source = title_for(titles.get(sid, {}), r.get("first_prompt"), r["last_ts"])
         by_cwd.setdefault(str(r["cwd"] or ""), []).append({
             "session_id": sid, "title": title, "title_source": source, "last_ts": r["last_ts"],
             "first_ts": r["first_ts"], "turns": r["turns"], "model": r["model"], "cli": cli,
@@ -273,9 +238,11 @@ def state(root=None, include_cli=False) -> dict:
             "deleted_markers": len(list(pair_dir.glob("deleted_*"))) if pair_dir.is_dir() else 0,
             "untitled_adopted": sum(1 for _e, rec, _p in ledger
                                     if rec is not None and not _titled(rec)),
-            "review_runs_to_name": sum(
-                1 for e, rec, _p in ledger if rec is not None
-                and _needs_review_name(rec, names.get(str(e.get("session_id"))))),
+            # The runs among what would otherwise be offered, and the records a first build
+            # wrote for runs that are still on disk: the page offers to take those back.
+            "review_runs": len(runs),
+            "review_records": sum(1 for e, rec, _p in ledger
+                                  if rec is not None and str(e.get("session_id")) in every_run),
             "app_running": accounts.app_running(), "sharing": accounts.intended_mode()}
 
 
@@ -304,37 +271,52 @@ def _titled(record: dict) -> bool:
     return isinstance(text, str) and bool(text.strip())
 
 
-def _ledger_records(roots=None) -> list:
-    """(entry, record or None, path or None) for every ledger entry, the file resolved.
-
-    THE LEDGER PATH IS THE WRITER'S VIEW. On a packaged install the server is a descendant of the
-    app and its `%APPDATA%` writes are redirected into the package's `LocalCache`, so the path it
-    recorded need not exist for a reader outside that container. The file is then looked for under
-    the same `<account>/<org>/<name>` below every records root this machine has.
-    """
-    from c4x import appstate
+def _load_ledger() -> list:
+    """The ledger's entries, or an empty list for a missing or unreadable file."""
     try:
         entries = json.loads(ledger_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        entries = []
-    if not isinstance(entries, list):
-        entries = []
+        return []
+    return entries if isinstance(entries, list) else []
+
+
+def _save_ledger(entries: list) -> None:
+    path = ledger_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entries, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def _resolve_record(entry: dict, roots: list) -> tuple:
+    """(record or None, path or None): the ledger's path when it exists, else the same file name
+    under the same pair below every records root this machine has.
+
+    THE LEDGER PATH IS THE WRITER'S VIEW. On a packaged install the server is a descendant of the
+    app and its `%APPDATA%` writes are redirected into the package's `LocalCache`, so the path it
+    recorded need not exist for a reader outside that container.
+    """
+    written = Path(str(entry["path"]))
+    candidates = [written] + [root / written.parent.parent.name / written.parent.name
+                              / written.name for root in roots]
+    found = next((c for c in candidates if c.is_file()), None)
+    if found is None:
+        return None, None
+    try:
+        loaded = json.loads(found.read_text(encoding="utf-8"))
+        return (loaded if isinstance(loaded, dict) else None), found
+    except (OSError, ValueError):
+        return None, found
+
+
+def _ledger_records(roots=None) -> list:
+    """(entry, record or None, path or None) for every ledger entry still in force, the file
+    resolved. An entry stamped `removed_at` was taken back and is no record of c4x's any more."""
+    from c4x import appstate
     roots = [Path(r) for r in (roots if roots is not None else appstate.sessions_roots())]
     out = []
-    for entry in entries:
-        if not isinstance(entry, dict) or not entry.get("path"):
+    for entry in _load_ledger():
+        if not isinstance(entry, dict) or not entry.get("path") or entry.get("removed_at"):
             continue
-        written = Path(str(entry["path"]))
-        candidates = [written] + [root / written.parent.parent.name / written.parent.name
-                                  / written.name for root in roots]
-        found = next((c for c in candidates if c.is_file()), None)
-        record = None
-        if found is not None:
-            try:
-                loaded = json.loads(found.read_text(encoding="utf-8"))
-                record = loaded if isinstance(loaded, dict) else None
-            except (OSError, ValueError):
-                record = None
+        record, found = _resolve_record(entry, roots)
         out.append((entry, record, found))
     return out
 
@@ -346,29 +328,22 @@ def retitle(root=None) -> dict:
     `user`) or any non-blank title is left alone and counted as kept. Read, written, read back.
     """
     from c4x import store
-    report: dict[str, Any] = {"renamed": [], "kept": 0, "missing": 0, "reviews": 0,
-                              "restart_required": False}
+    report: dict[str, Any] = {"renamed": [], "kept": 0, "missing": 0, "restart_required": False}
     resolved = _ledger_records()
     wanted = {str(e.get("session_id")) for e, _r, _p in resolved}
-    rows = _sessions()
-    by_id = {r["session_id"]: r for r in rows if r["session_id"] in wanted}
-    # Every session's titles, not only the ledger's: the chat a review run read is named from its
-    # own titles, and it need not be in the ledger.
-    titles = store.titles_for([r["session_id"] for r in rows]) if rows else {}
-    names = _review_names(rows, titles, list(wanted))
+    by_id = {r["session_id"]: r for r in _sessions() if r["session_id"] in wanted}
+    titles = store.titles_for(list(wanted)) if wanted else {}
     for entry, record, path in resolved:
         if record is None or path is None:
             report["missing"] += 1
             continue
-        sid = str(entry.get("session_id"))
-        review = _needs_review_name(record, names.get(sid))
-        if _titled(record) and not review:
+        if _titled(record):
             report["kept"] += 1
             continue
+        sid = str(entry.get("session_id"))
         session = by_id.get(sid)
         title, source = title_for(titles.get(sid, {}), (session or {}).get("first_prompt"),
-                                  (session or {}).get("last_ts") or record.get("lastActivityAt"),
-                                  reviewed=names.get(sid))
+                                  (session or {}).get("last_ts") or record.get("lastActivityAt"))
         record["title"], record["titleSource"] = title, source
         blob = json.dumps(record, ensure_ascii=False).encode("utf-8")
         try:
@@ -379,9 +354,56 @@ def retitle(root=None) -> dict:
             report.setdefault("failed", []).append({"session_id": sid, "why": str(exc)})
             continue
         report["renamed"].append({"session_id": sid, "path": str(path), "title": title})
-        if review:
-            report["reviews"] += 1
     report["restart_required"] = bool(report["renamed"])
+    return report
+
+
+def unadopt_reviews() -> dict:
+    """Take back the records c4x wrote for review runs.
+
+    A run folds into the chat it reviewed (harvest's `review_links`) and is no chat of its own, in
+    this store or in the app; the first build adopted 58 of them on the test laptop. Only the
+    ledger's records and only the runs: the file is removed, the ledger entry is stamped
+    `removed_at` and kept, so what was written and taken back stays on record, and a stamped entry
+    is out of every later count. The app reads the directory when it starts, hence the restart.
+
+    WHAT THE APP ITSELF WRITES ON A DELETE is not mimicked beyond the removal, because it has not
+    been measured: docs/desktop-records.md records that a `deleted_<record uuid>` marker appears
+    and nothing about its content. It is measured on the laptop before this runs there.
+    """
+    from c4x import appstate, reviews
+    report: dict[str, Any] = {"removed": [], "missing": 0, "kept": 0, "restart_required": False}
+    runs = reviews.reviewed_by()
+    roots = [Path(r) for r in appstate.sessions_roots()]
+    entries = _load_ledger()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    changed = False
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("path") or entry.get("removed_at"):
+            continue
+        sid = str(entry.get("session_id"))
+        if sid not in runs:
+            report["kept"] += 1
+            continue
+        _record, path = _resolve_record(entry, roots)
+        if path is None:
+            # Nothing left to remove; the entry is closed all the same, so it is never counted
+            # again as a record c4x holds.
+            report["missing"] += 1
+            entry["removed_at"] = stamp
+            changed = True
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            report.setdefault("failed", []).append({"session_id": sid, "why": str(exc)})
+            continue
+        entry["removed_at"] = stamp
+        changed = True
+        report["removed"].append({"session_id": sid, "path": str(path), "reviewed": runs[sid]})
+    if changed:
+        _save_ledger(entries)
+    report["restart_required"] = bool(report["removed"])
     return report
 
 
@@ -401,16 +423,9 @@ def _check_sharing(root: str, pair_dir: Path) -> None:
 
 
 def _append_ledger(entries: list) -> None:
-    path = ledger_path()
-    try:
-        current = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(current, list):
-            current = []
-    except (OSError, ValueError):
-        current = []
+    current = _load_ledger()
     current.extend(entries)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(current, indent=1, ensure_ascii=False), encoding="utf-8")
+    _save_ledger(current)
 
 
 def adopt(cwds, root=None, include_cli=False, dry_run=False) -> dict:

@@ -26,13 +26,21 @@ removed and nothing here said so.
   it the containing block for a fixed descendant: measured in the live page, a fixed element inside
   the header was clipped to the header's box, and the project mover's `inset-0` backdrop covered
   only the header strip while its dialog declared `aria-modal`. Both now cover what they claim.
-- **A review run is named after the chat it read.** A Stop hook's `claude -p` left 58 one-prompt
+- **A review run folds into the chat it reviewed.** A Stop hook's `claude -p` left 58 one-prompt
   sessions on the test laptop, each quoting the last 250 records of the transcript it reviewed,
-  and Adopt named every one after the reviewer's own prompt. `c4x/reviews.py` ties a one-shot
-  session to the session it quotes (same folder, alive when the run started, the most snippets
-  said, unique, at least two): 55 of 58 there, to 16 chats, in 1.4 s. A tied run is offered and written as
-  "Reviewer - <the chat's own name>"; "Name them" renames the records that still carry the old
-  automatic name and reports how many (`reviews`), and never a name a person gave.
+  and the store held them as chats: adopted into the app, listed in the pickers, their tokens
+  their own. Harvest now derives `review_links` (a one-shot whose prompt's long ASCII lines occur
+  in one session's assistant text and tool results, same folder, alive when the run started, at
+  least two lines, unique; a one-shot that merely repeats a person's prompt matches typed rows
+  alone and is not a review) after every pass and by `--backfill-reviews`: 54 of 58 there, to 16
+  chats; 3 sdk-py security reviews of one chat here. The store folds a run into that chat beside
+  the chain map: out of the Sessions list, the pickers and the Summary's session count; counted
+  on the chat (`reviews`, in the work column and the picker's label); into the chat's numbers and
+  measured cost under "Including Subagents" only, which the Cost tab always uses; never into its
+  Messages. The chat's page and the drawer list each review with its verdict, its round, the
+  prompt the chat was answering when it started, and its cost. Adopt never offers a run and takes
+  back the records an earlier build wrote for them (`POST /api/adopt/unadopt-reviews`); the
+  "Reviewer - <chat>" naming of the previous entry is withdrawn with it.
 - **Every adopted record carries a name, and the ones a first build left nameless can be named.**
   The desktop app shows a record with no `title` as "General coding session", every one of them,
   and the first build wrote a title only from the store's `custom` or `ai` kinds: 64 of 82 on the

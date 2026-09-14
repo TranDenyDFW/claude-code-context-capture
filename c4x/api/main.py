@@ -1233,6 +1233,7 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
         chat_exists,
         chat_members,
         chat_plans,
+        chat_reviews,
         chat_task_events,
         chat_work_counts,
         chat_workflow_runs,
@@ -1246,6 +1247,7 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
     workflows = chat_workflow_runs(session_id, limit=limit)
     tasks = chat_task_events(session_id, limit=limit)
     changed = chat_changed_files(session_id, limit=limit)
+    reviews = chat_reviews(session_id, limit=limit)
     unresolved = 0
     if not tasks.empty and "resolved_to" in tasks.columns:
         unresolved = int(tasks["resolved_to"].isna().sum())
@@ -1272,6 +1274,11 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
         "changed_files": records(changed) if not changed.empty else [],
         "changed_files_total": counts["changed_files"],
         "changes_total": counts["changes"],
+        # THE REVIEWS THIS CHAT RECEIVED: one-shot sessions a hook's headless reviewer left,
+        # tied to the chat by quotation and listed nowhere on their own. Each says when it ran,
+        # what it decided, which prompt the chat was answering, and what it cost.
+        "reviews": records(reviews) if not reviews.empty else [],
+        "reviews_total": counts["reviews"],
     })
 
 
@@ -1773,6 +1780,15 @@ def adopt_retitle():
     from c4x import adopt
     _require_writes()
     return adopt.retitle()
+
+
+@api.post("/api/adopt/unadopt-reviews")
+def adopt_unadopt_reviews():
+    """Take back the records c4x wrote for review runs: a run folds into the chat it reviewed
+    and is no chat of its own in the app either. The ledger's records only, the runs only."""
+    from c4x import adopt
+    _require_writes()
+    return adopt.unadopt_reviews()
 
 
 @api.post("/api/project/include")

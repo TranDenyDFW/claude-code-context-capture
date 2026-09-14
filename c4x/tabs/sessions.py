@@ -43,7 +43,10 @@ WORK_KINDS = (("plans", "plan", "plans"),
               ("agent_runs", "agent", "agents"),
               ("workflow_runs", "workflow", "workflows"),
               ("task_events", "task", "tasks"),
-              ("changes", "change", "changes"))
+              ("changes", "change", "changes"),
+              # A reviewer's reading of the chat: a one-shot session tied to it by quotation,
+              # listed nowhere on its own. Said here so a search for "review" finds the chat.
+              ("reviews", "review", "reviews"))
 
 
 def work_summary(counts) -> str:

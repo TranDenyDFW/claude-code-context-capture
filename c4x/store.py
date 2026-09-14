@@ -433,8 +433,13 @@ def overview_stats() -> dict:
     # read 24,386 over a store holding 8,775, and its GB caption would have counted bytes that are
     # not transcript bytes. A number under the wrong word is a wrong number.
     kind = "WHERE kind IS NULL" if column_present("files", "kind") else ""
+    # SESSIONS, NOT REVIEW RUNS. A run is a session row, and it is also a review of another one;
+    # the card is headed "sessions" and a reader takes that as the chats this store holds.
+    runs = ("SELECT session_id FROM review_links" if tables_present("review_links")
+            else "SELECT NULL WHERE 0")
     small = q(f"""
-        SELECT (SELECT COUNT(*) FROM sessions)                     AS sessions,
+        SELECT (SELECT COUNT(*) FROM sessions
+                 WHERE session_id NOT IN ({runs}))                 AS sessions,
                (SELECT COUNT(*) FROM turns)                        AS turn_rows,
                (SELECT COUNT(*) FROM compactions)                  AS compactions,
                (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
@@ -549,6 +554,7 @@ def invalidate():
     # The chain map, which a delete or an import can change: a removed prefix must stop folding
     # into its head, and an imported chain must start to.
     _links_cache.update({"at": 0.0, "head_of": None, "members_of": None})
+    _reviews_cache.update({"at": 0.0, "parent_of": None, "runs_of": None})
     # Derived from that map and from five tables harvest writes, so it is stale for both reasons a
     # removal makes the map stale, and cleared beside it rather than left to its own ttl.
     _work_cache.update({"at": 0.0, "totals": None})
@@ -575,6 +581,12 @@ _links_cache: dict = {"at": 0.0, "head_of": None, "members_of": None}
 # Every chat's work counts in one dict, for the Sessions column. Keyed on the chain map above, so
 # it is cleared by the same `invalidate`: a delete that re-heads a chat moves these counts with it.
 _work_cache: dict = {"at": 0.0, "totals": None}
+# REVIEW RUNS: which one-shot sessions read another session. Harvest derives `review_links` (the
+# schema comment there records the finding and the rule); this package only reads it. A run folds
+# into the chat it reviewed the way a chain prefix folds into its head, with one difference the
+# user chose: it is out of every list and every picker, and it counts toward the chat's numbers
+# only under the subagent scope, since its tokens were never part of the chat's own context.
+_reviews_cache: dict = {"at": 0.0, "parent_of": None, "runs_of": None}
 
 
 def _read_links() -> tuple[dict, dict]:
@@ -630,25 +642,70 @@ def chat_links(ttl: float = 45.0) -> tuple[dict, dict]:
     return head_of, members_of
 
 
+def _read_reviews() -> tuple[dict, dict]:
+    """{run: the session it reviewed} and {session: [its runs, newest first]}, or two empty dicts.
+
+    Empty on a store from before the table existed and on one harvest has not derived yet, so
+    with no links every one-shot is an ordinary session, which is what the page showed before.
+    """
+    if not tables_present("review_links"):
+        return {}, {}
+    df = q("""SELECT r.session_id, r.head_id, COALESCE(s.first_ts, '') AS first_ts
+              FROM review_links r LEFT JOIN sessions s ON s.session_id = r.session_id""")
+    if df.empty:
+        return {}, {}
+    parent_of = {s: h for s, h in zip(df["session_id"], df["head_id"], strict=True) if s != h}
+    started = dict(zip(df["session_id"], df["first_ts"], strict=True))
+    runs_of: dict = {}
+    for run in sorted(parent_of, key=lambda sid: str(started.get(sid) or ""), reverse=True):
+        runs_of.setdefault(parent_of[run], []).append(run)
+    return parent_of, runs_of
+
+
+def review_links(ttl: float = 45.0) -> tuple[dict, dict]:
+    """The review map, cached the way `chat_links` is and cleared by the same `invalidate`."""
+    now = _time.time()
+    if _reviews_cache["parent_of"] is not None and now - _reviews_cache["at"] < ttl:
+        return _reviews_cache["parent_of"], _reviews_cache["runs_of"]
+    seen = _generation["n"]
+    parent_of, runs_of = _read_reviews()
+    if seen == _generation["n"]:
+        _reviews_cache.update({"at": now, "parent_of": parent_of, "runs_of": runs_of})
+    return parent_of, runs_of
+
+
 def chat_head(session_id):
     """The session a selection resolves to: the newest of its chat, or itself when unlinked.
 
+    A review run resolves to the chat it reviewed, so a link that names the run opens that chat.
     Identity for None and for an id the store has never seen, so every caller can apply it
     unconditionally rather than guarding first.
     """
     if not session_id:
         return session_id
     head_of, _members = chat_links()
-    return head_of.get(session_id, session_id)
+    parent_of, _runs = review_links()
+    base = parent_of.get(session_id, session_id)
+    return head_of.get(base, base)
 
 
-def chat_members(session_id) -> list:
-    """Every session of the chat this id belongs to, head first. `[id]` when unlinked."""
+def chat_members(session_id, reviews: bool = False) -> list:
+    """Every session of the chat this id belongs to, head first. `[id]` when unlinked.
+
+    `reviews=True` appends the chat's review runs after its own sessions. The default leaves them
+    out: a transcript reader wants what the chat itself said, and a reviewer's 60 KB prompt is
+    not something a person typed in it. `scoped()` opts in under the subagent scope.
+    """
     if not session_id:
         return []
     head_of, members_of = chat_links()
-    head = head_of.get(session_id, session_id)
-    return list(members_of.get(head, [head]))
+    parent_of, runs_of = review_links()
+    base = parent_of.get(session_id, session_id)
+    head = head_of.get(base, base)
+    members = list(members_of.get(head, [head]))
+    if reviews:
+        members.extend(run for m in list(members) for run in runs_of.get(m, []))
+    return members
 
 
 def chat_members_sql(column: str) -> tuple[str, tuple]:
@@ -674,14 +731,14 @@ def chat_members_sql(column: str) -> tuple[str, tuple]:
             f"SELECT s FROM chat WHERE h = {head} UNION SELECT {head}", params)
 
 
-def chain_where(session_id, column: str = "session_id") -> tuple[str, tuple]:
+def chain_where(session_id, column: str = "session_id", reviews: bool = False) -> tuple[str, tuple]:
     """`column = ?` or `column IN (...)` over the whole chat, with its params.
 
     One home for the expansion every direct reader needs, so a table keyed by the CLI session that
     wrote each row still answers for the chat: the head's own rows are only what happened after
-    the last resume.
+    the last resume. `reviews` as in `chat_members`.
     """
-    members = chat_members(session_id)
+    members = chat_members(session_id, reviews=reviews)
     if len(members) <= 1:
         return f"{column} = ?", (members[0] if members else session_id,)
     return f"{column} IN ({','.join('?' * len(members))})", tuple(members)
@@ -1288,6 +1345,11 @@ def _session_rows_uncached() -> pd.DataFrame:
     """
     linked = ("SELECT session_id FROM session_links UNION SELECT head_id FROM session_links"
               if tables_present("session_links") else "SELECT NULL WHERE 0")
+    # A REVIEW RUN IS NOT A CHAT. It is listed nowhere on its own; the chat it reviewed carries it
+    # as a count, and its rows reach that chat's numbers through `scoped()` under the subagent
+    # scope. Left out of the frame here, before the floor and the collapse ever see it.
+    runs = ("SELECT session_id FROM review_links" if tables_present("review_links")
+            else "SELECT NULL WHERE 0")
     df = q(f"""
         SELECT t.session_id,
                s.cwd, s.project_slug, s.entrypoint, s.transcript_path,
@@ -1308,6 +1370,7 @@ def _session_rows_uncached() -> pd.DataFrame:
                           ELSE 2 END LIMIT 1) AS title_kind
         FROM turns t
         LEFT JOIN sessions s ON s.session_id = t.session_id
+        WHERE t.session_id NOT IN ({runs})
         -- Where the window sits NOW, which is what the header reports; peak is the high-water
         -- mark. Showing only peak made the two disagree for one session with nothing saying which
         -- was which, and the gap between them is what a compaction took out.
@@ -1338,6 +1401,11 @@ def _session_rows_uncached() -> pd.DataFrame:
     df = df[df["turns"] >= SESSION_TURN_FLOOR].copy()
     if df.empty:
         return df
+    # How many review runs read this chat, over every session it spans. A count, the way
+    # `cli_sessions` is one: the runs themselves are not rows here.
+    _parent_of, runs_of = review_links(ttl=0)
+    df["reviews"] = [sum(len(runs_of.get(m, [])) for m in members_of.get(sid, [sid]))
+                     for sid in df["session_id"]]
 
     def classify(r):
         """Which section a session belongs to. Every test is answerable from disk.
@@ -1599,12 +1667,13 @@ def cohort_named(cohort) -> bool:
     return bool(cohort) and cohort != COHORT_ALL and bool(cohort_parts(cohort)[0])
 
 
-def cohort_sessions(cohort, ttl: float = 45.0) -> list:
+def cohort_sessions(cohort, ttl: float = 45.0, reviews: bool = False) -> list:
     """Resolve a cohort to the session ids it contains. Empty list means 'no restriction'.
 
     `ttl` is passed through to `session_rows`. A page render wants the cache; anything about to
     WRITE wants `ttl=0`, because a set that predates the last import would export or delete the
-    wrong sessions while looking entirely ordinary.
+    wrong sessions while looking entirely ordinary. `reviews=True` adds each chat's review runs,
+    which `scoped()` asks for under the subagent scope and nothing else does.
     """
     if not cohort or cohort == COHORT_ALL:
         return []
@@ -1620,9 +1689,13 @@ def cohort_sessions(cohort, ttl: float = 45.0) -> list:
     # by the CLI session that wrote each row, so a list of heads alone would drop every prefix's
     # rows from a scoped tab and, worse, from a backup.
     _head_of, members_of = chat_links(ttl)
+    _parent_of, runs_of = review_links(ttl)
     out: list = []
     for head in df.loc[df[col] == value, "session_id"]:
-        out.extend(members_of.get(head, [head]))
+        members = members_of.get(head, [head])
+        out.extend(members)
+        if reviews:
+            out.extend(run for m in members for run in runs_of.get(m, []))
     return out
 
 
@@ -1740,14 +1813,18 @@ def scoped(session_id, scope="main", alias="", cohort=None):
     a = f"{alias}." if alias else ""
     bits: list[str] = []
     args: list[str] = []
+    # A REVIEW RUN COUNTS UNDER THE SUBAGENT SCOPE AND NOWHERE ELSE. It ran beside the chat, like a
+    # subagent turn, and its tokens were never in the chat's own context; the Cost tab asks for
+    # scope "all", so cost always includes it, and "Main Thread Only" never does.
+    with_reviews = scope == "all"
     if session_id:
         # A session id names the CHAT it belongs to. The head's own rows are only what happened
         # after the last resume; the rest sit under the sessions it superseded.
-        clause, params = chain_where(session_id, f"{a}session_id")
+        clause, params = chain_where(session_id, f"{a}session_id", reviews=with_reviews)
         bits.append(f"AND {clause}")
         args.extend(params)
     else:
-        ids = cohort_sessions(cohort)
+        ids = cohort_sessions(cohort, reviews=with_reviews)
         if ids:
             bits.append(f"AND {a}session_id IN ({','.join('?' * len(ids))})")
             args.extend(ids)
@@ -2139,6 +2216,71 @@ def change_detail(tool_use_id: str) -> pd.DataFrame:
     )
 
 
+def chat_reviews(session_id: str, limit: int = 200) -> pd.DataFrame:
+    """The review runs that read this chat, newest first: when, the verdict, the round, the prompt
+    the chat was answering when the run started, and what the run cost.
+
+    WHERE IT WAS DISPATCHED is derived from time, since the prompt carries no session id and c4x
+    wired no Stop hook: the chat's newest typed prompt before the run's first turn is the exchange
+    it reviewed. `round` counts the chat's runs in time order, the way the hook counted rounds.
+    """
+    if not tables_present("review_links"):
+        return pd.DataFrame()
+    from c4x.pricing import cost_of_rows
+    members = chat_members(session_id)
+    _parent_of, runs_of = review_links()
+    runs = [run for m in members for run in runs_of.get(m, [])]
+    if not runs:
+        return pd.DataFrame()
+    marks = ",".join("?" * len(runs))
+    df = q(f"""
+        SELECT r.session_id, r.head_id, r.verdict, r.hits, r.snippets,
+               -- The run's first turn, or the session row's own start for a run whose transcript
+               -- carries no usage at all (an sdk-py review here has messages and no turns).
+               COALESCE((SELECT MIN(t.ts) FROM turns t WHERE t.session_id = r.session_id),
+                        s.first_ts) AS ts,
+               (SELECT COUNT(*) FROM api_calls a WHERE a.session_id = r.session_id) AS calls,
+               (SELECT SUM(COALESCE(input_tokens,0)) FROM api_calls a
+                 WHERE a.session_id = r.session_id) AS input_tokens,
+               (SELECT SUM(COALESCE(cache_read_input_tokens,0)) FROM api_calls a
+                 WHERE a.session_id = r.session_id) AS cache_read,
+               (SELECT SUM(COALESCE(cache_creation_input_tokens,0)) FROM api_calls a
+                 WHERE a.session_id = r.session_id) AS cache_creation,
+               (SELECT SUM(COALESCE(output_tokens,0)) FROM api_calls a
+                 WHERE a.session_id = r.session_id) AS output_tokens
+        FROM review_links r LEFT JOIN sessions s ON s.session_id = r.session_id
+        WHERE r.session_id IN ({marks})
+        ORDER BY ts ASC
+    """, tuple(runs))
+    if df.empty:
+        return df
+    rounds, prompts, prompt_ts, costs = [], [], [], []
+    for i, row in enumerate(df.itertuples(index=False), 1):
+        rounds.append(i)
+        before = q("""SELECT ts,
+                             substr(replace(replace(text, char(10), ' '), char(13), ' '), 1, 120)
+                               AS preview
+                      FROM messages WHERE session_id = ? AND type = 'typed' AND role = 'user'
+                        AND ts <= ? ORDER BY ts DESC LIMIT 1""", (row.head_id, str(row.ts or "")))
+        prompt_ts.append(before.iloc[0]["ts"] if not before.empty else None)
+        prompts.append(before.iloc[0]["preview"] if not before.empty else None)
+        by_model = q("""SELECT model, COUNT(*) AS calls,
+                               SUM(COALESCE(input_tokens,0)) AS input_tokens,
+                               SUM(COALESCE(output_tokens,0)) AS output_tokens,
+                               SUM(COALESCE(cache_read_input_tokens,0)) AS cache_read_input_tokens,
+                               SUM(COALESCE(cache_creation_input_tokens,0))
+                                 AS cache_creation_input_tokens
+                        FROM api_calls WHERE session_id = ? GROUP BY model""", (row.session_id,))
+        usd, priced, _unpriced = cost_of_rows(by_model.to_dict("records"))
+        costs.append(round(usd, 4) if priced else None)
+    df["round"] = rounds
+    df["after_prompt_ts"] = prompt_ts
+    df["after_prompt"] = prompts
+    df["cost_usd"] = costs
+    df = df.sort_values("ts", ascending=False, kind="mergesort").head(int(limit))
+    return df.drop(columns=["head_id"]).reset_index(drop=True)
+
+
 def chat_work_counts(session_id: str) -> dict:
     """How much of each kind this chat has, for a column and for the panel's header.
 
@@ -2146,12 +2288,15 @@ def chat_work_counts(session_id: str) -> dict:
     tables this store actually has, so an empty answer can be told from an unharvested one.
     """
     out: dict[str, Any] = {"plans": 0, "agent_runs": 0, "workflow_runs": 0, "task_events": 0,
-           "changes": 0, "changed_files": 0,
+           "changes": 0, "changed_files": 0, "reviews": 0,
            "harvested": {"plans": tables_present("plans"),
                          "agent_runs": tables_present("agent_runs"),
                          "workflow_runs": tables_present("workflow_runs"),
                          "task_events": tables_present("task_events"),
-                         "changes": tables_present("changes")}}
+                         "changes": tables_present("changes"),
+                         "reviews": tables_present("review_links")}}
+    if out["harvested"]["reviews"]:
+        out["reviews"] = len(chat_members(session_id, reviews=True)) - len(chat_members(session_id))
     if out["harvested"]["plans"]:
         where, params = chain_where(session_id, "session_id")
         out["plans"] = int(q(f"SELECT COUNT(*) n FROM plans WHERE {where}", params)["n"].iloc[0])
@@ -2244,6 +2389,11 @@ def chat_work_totals(ttl: float = 45.0) -> dict:
         rows = q("SELECT session_id s, COUNT(*) n FROM changes GROUP BY session_id")
         for sid, n in rows.itertuples(index=False, name=None):
             add("changes", sid, n)
+    # The runs that read each chat, counted under the chat: `add` folds the reviewed session to
+    # its chain head like every other kind.
+    _parent_of, runs_of = review_links()
+    for parent, runs in runs_of.items():
+        add("reviews", parent, len(runs))
     if seen == _generation["n"]:
         _work_cache.update({"at": now, "totals": totals})
     return totals

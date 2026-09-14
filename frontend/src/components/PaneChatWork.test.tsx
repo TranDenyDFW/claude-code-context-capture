@@ -28,12 +28,14 @@ const SESSIONS: TabPayload = {
 function work(over: Partial<ChatWork> = {}): ChatWork {
   return {
     session: 'sess-1', chat: ['sess-1'],
-    harvested: { plans: true, agent_runs: true, workflow_runs: true, task_events: true, changes: true },
+    harvested: { plans: true, agent_runs: true, workflow_runs: true, task_events: true, changes: true,
+                 reviews: true },
     plans: [], plans_total: 0,
     agent_runs: [], agent_runs_total: 0,
     workflow_runs: [], workflow_runs_total: 0,
     task_events: [], task_events_total: 0, task_events_unresolved: 0,
     changed_files: [], changed_files_total: 0, changes_total: 0,
+    reviews: [], reviews_total: 0,
     ...over,
   }
 }
@@ -136,5 +138,25 @@ describe('a row of the Sessions list', () => {
     await waitFor(() => expect(dialog.textContent).toContain('1 of 3 edits'))
     expect(dialog.textContent).toContain('Files changed')
     expect(dialog.textContent).toContain('Changes')
+  })
+
+  it('lists the reviews a chat received as a sixth table: verdict, round, and the prompt it followed', async () => {
+    answer(work({
+      reviews: [{
+        session_id: 'run-1111-2222', ts: '2026-08-02T10:20:00Z', verdict: 'PROBLEMS', round: 2,
+        after_prompt_ts: '2026-08-02T10:10:00Z', after_prompt: 'please fix the parser',
+        calls: 1, input_tokens: 15000, cache_read: 0, cache_creation: 0, output_tokens: 120,
+        cost_usd: 0.0456, hits: 3, snippets: 8,
+      }],
+      reviews_total: 2,
+    }))
+    render(<Pane payload={SESSIONS} onRowClick={vi.fn()} />)
+    fireEvent.click(screen.getAllByLabelText('plans and background work')[0])
+    const dialog = screen.getByRole('dialog')
+    await waitFor(() => expect(dialog.textContent).toContain('PROBLEMS'))
+    expect(dialog.textContent).toContain('Reviews')
+    expect(dialog.textContent).toContain('please fix the parser')
+    // The table renders numbers with thousands separators: the run's tokens, summed.
+    expect(dialog.textContent).toContain('15,120')
   })
 })
