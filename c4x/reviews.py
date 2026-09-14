@@ -11,32 +11,36 @@ Claude instance's work before it...". The prompt carries no session id and no tr
 WHAT TIES A RUN TO THE CHAT IT READ IS QUOTATION. The excerpt is verbatim, so long lines of the
 run's prompt occur in the reviewed session's messages and in no other session's. Measured on
 that laptop before this was written: ASCII lines from the excerpt's tail name exactly one session
-for 54 of the 58 runs; timing does not (a run approving a session starts after that session's last
-turn, and five long sessions overlap in one folder), and the verdict fed back into the reviewed
-session covers only the runs that blocked.
+for 54 of the 58 runs; timing alone does not (a run approving a session starts after that
+session's last turn, and five long sessions overlap in one folder), and the verdict fed back into
+the reviewed session covers only the runs that blocked.
 
 THE RULE, all of it:
   - Only ONE-SHOTS are ever tested: a session with exactly one typed prompt and at most three
     messages. Nothing else is read for this.
   - The pool is the sessions in the run's own folder (the hook's child inherited its cwd) that
-    started no later than the run and are not one-shots themselves.
+    were alive when the run started: begun no later than the run and last active no more than
+    SLACK (an hour) before it. A reviewer reads a session that was just running, and a session
+    that stopped long before is never the one, however much it shares the folder. Not one-shots
+    themselves, so a run is never tied to a run.
   - Up to eight snippets from the prompt, newest first: lines of 80 or more characters that are
     pure ASCII (the excerpt crossed a shell pipe and the store holds U+FFFD where the transcript
     had anything else, so such a line can never match), an all-caps label such as `CLAUDE SAID: `
     dropped, and the LAST 120 characters kept (a substring of a line the hook truncated is still a
     substring of the original).
-  - One `instr` query per snippet over the pool; hits are summed per session; the run is tied to
-    the session with the most hits when that session is unique and its hits reach
+  - ONE query per run: how many of the snippets each pool session says at least once. The run is
+    tied to the session with the most when that session is unique and its count reaches
     `min(2, snippets)`. A tie, no snippet or no hit ties nothing, and the run keeps whatever name
     it would have had.
 
-Answers are cached per store and run. A tie, once found, is kept for good: quotation does not
-go away when the store grows. A run that tied to nothing is asked again only after the store
-changed, since a new session in its folder could be the one it quotes. Measured on the test
-laptop: 60 one-shots cost 4.0 s cold and 0.02 s from the cache, and every hook run changes the
-store, which is why a found tie must not depend on its mtime.
+WHAT IT COSTS, measured, because this runs behind every load of the page. With every session in
+the folder as the pool and a query per snippet, the author's store (908 candidates, 705 one-shots)
+took 26.5 s cold. The pool above is a handful of sessions, the prompts are read in one query and
+the hits in one per run. Answers are cached per store and run: a tie, once found, is kept for good
+(quotation does not go away as the store grows); a miss is kept while the run's pool is the same
+set of sessions, and asked again only when a session joins it.
 """
-import os
+import datetime as _dt
 import re
 from collections import Counter
 from typing import Any
@@ -46,6 +50,7 @@ WANT = 8
 MIN_LINE = 80
 TAIL = 120
 ONE_SHOT_MESSAGES = 3
+SLACK = 3600.0   # seconds a session may have been quiet before a run that read it started
 # `CLAUDE SAID: `, `OUTPUT WAS: `, `USER: `: an all-caps label the excerpt's writer put in front
 # of a line it copied. Dropped, so that the line matches what the reviewed session actually said.
 LABEL = re.compile(r"^[A-Z][A-Z ]{1,20}: ")
@@ -77,6 +82,22 @@ def _chunks(items, size: int = _CHUNK):
         yield items[i:i + size]
 
 
+def _seconds(ts: Any):
+    """An ISO timestamp as seconds, or None when it is not one."""
+    text = str(ts or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.UTC)
+    return parsed.timestamp()
+
+
 def one_shots(session_ids) -> set:
     """The sessions among `session_ids` with exactly one typed prompt and at most three messages."""
     from c4x import store
@@ -92,30 +113,39 @@ def one_shots(session_ids) -> set:
     return out
 
 
-def _prompt(run: str) -> str:
+def _prompts(runs) -> dict:
+    """run id -> its typed prompt, read in one query per chunk rather than one per run."""
     from c4x import store
-    df = store.q("""SELECT text FROM messages WHERE session_id = ? AND type = 'typed'
-                     AND role = 'user' ORDER BY ts LIMIT 1""", (run,))
-    return str(df["text"].iloc[0] or "") if len(df) else ""
+    out: dict = {}
+    for chunk in _chunks(runs):
+        marks = ",".join("?" * len(chunk))
+        df = store.q(f"""SELECT session_id, text FROM messages
+                          WHERE session_id IN ({marks}) AND type = 'typed' AND role = 'user'
+                          ORDER BY ts""", tuple(chunk))
+        for sid, text in zip(df["session_id"], df["text"], strict=True):
+            out.setdefault(str(sid), str(text or ""))
+    return out
 
 
 def _hits(snips: list, pool: list) -> Counter:
+    """session id -> how many of the snippets it says at least once. One query per pool chunk."""
     from c4x import store
     hits: Counter = Counter()
-    for snip in snips:
-        for chunk in _chunks(pool):
-            marks = ",".join("?" * len(chunk))
-            df = store.q(f"""SELECT DISTINCT session_id FROM messages
-                              WHERE session_id IN ({marks}) AND instr(text, ?) > 0""",
-                         (*chunk, snip))
-            for sid in df["session_id"]:
-                hits[str(sid)] += 1
+    said = " + ".join("MAX(CASE WHEN instr(text, ?) > 0 THEN 1 ELSE 0 END)" for _s in snips)
+    for chunk in _chunks(pool):
+        marks = ",".join("?" * len(chunk))
+        df = store.q(f"""SELECT session_id, {said} AS n FROM messages
+                          WHERE session_id IN ({marks}) GROUP BY session_id""",
+                     (*snips, *chunk))
+        for sid, n in zip(df["session_id"], df["n"], strict=True):
+            if int(n or 0) > 0:
+                hits[str(sid)] += int(n)
     return hits
 
 
-def _tie(run: str, pool: list):
-    """The one session in `pool` the run quotes, or None."""
-    snips = snippets(_prompt(run))
+def _tie(prompt: str, pool: list):
+    """The one session in `pool` the prompt quotes, or None."""
+    snips = snippets(prompt)
     if not snips or not pool:
         return None
     hits = _hits(snips, pool)
@@ -128,44 +158,50 @@ def _tie(run: str, pool: list):
     return best[0]
 
 
-def _stamp() -> tuple:
-    from c4x import store
-    try:
-        return (str(store.DB_PATH), os.stat(store.DB_PATH).st_mtime_ns)
-    except OSError:
-        return (str(store.DB_PATH), 0)
-
-
 def reviewed_by(sessions: list, session_ids) -> dict:
     """run id -> the id of the session it quotes, for the review runs among `session_ids`.
 
-    `sessions` are `adopt._sessions()` rows (session_id, cwd, first_ts); `session_ids` are the ones
-    worth asking about, the candidates and the ledger's. Everything else is only ever a pool entry.
+    `sessions` are `adopt._sessions()` rows (session_id, cwd, first_ts, last_ts); `session_ids`
+    are the ones worth asking about, the candidates and the ledger's. Everything else is only ever
+    a pool entry.
     """
+    from c4x import store
     by_id = {str(r["session_id"]): r for r in sessions}
     wanted = [sid for sid in dict.fromkeys(str(s) for s in session_ids) if sid in by_id]
     runs = one_shots(wanted)
     if not runs:
         return {}
-    stamp = _stamp()
+    db = str(store.DB_PATH)
 
     def pool_for(run: str) -> list:
         r = by_id[run]
-        start = str(r.get("first_ts") or "")
-        return [str(s["session_id"]) for s in sessions
-                if str(s["session_id"]) != run and s.get("cwd") == r.get("cwd")
-                and s.get("first_ts") and str(s["first_ts"]) <= start]
+        start = _seconds(r.get("first_ts"))
+        if start is None:
+            return []
+        out = []
+        for s in sessions:
+            sid = str(s["session_id"])
+            if sid == run or s.get("cwd") != r.get("cwd"):
+                continue
+            begun, last = _seconds(s.get("first_ts")), _seconds(s.get("last_ts"))
+            if begun is None or begun > start:
+                continue
+            if (last if last is not None else begun) + SLACK < start:
+                continue
+            out.append(sid)
+        return out
 
+    alive = {run: pool_for(run) for run in runs}
     # ONE query says which pool entries are one-shots themselves, so a run is never tied to a run.
-    pool_runs = one_shots({sid for run in runs for sid in pool_for(run)})
-    out: dict = {}
+    pool_runs = one_shots({sid for pool in alive.values() for sid in pool})
+    pools: dict = {run: tuple(sorted(sid for sid in pool if sid not in pool_runs))
+                   for run, pool in alive.items()}
+    fresh = []
     for run in runs:
-        key = (stamp[0], run)
-        known = _cache.get(key)
-        # A found tie is kept whatever the store's mtime; a miss is retried once the store changed.
-        if known is None or (not known[1] and known[0] != stamp[1]):
-            known = (stamp[1], _tie(run, [sid for sid in pool_for(run) if sid not in pool_runs]))
-            _cache[key] = known
-        if known[1]:
-            out[run] = known[1]
-    return out
+        known = _cache.get((db, run))
+        if known is None or (not known[1] and known[0] != pools[run]):
+            fresh.append(run)
+    prompts = _prompts(fresh) if fresh else {}
+    for run in fresh:
+        _cache[(db, run)] = (pools[run], _tie(prompts.get(run, ""), list(pools[run])))
+    return {run: _cache[(db, run)][1] for run in runs if _cache[(db, run)][1]}

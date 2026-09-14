@@ -542,22 +542,51 @@ class TestReviewRuns:
         assert reviews.reviewed_by(rows, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
         assert reviews.reviewed_by(rows, ["s3-0", "r-2", "r-3"]) == {}, "only what was asked"
 
-    def test_a_found_tie_outlives_a_store_change_and_a_miss_does_not(self, reviewed, monkeypatch):
-        """Every hook run changes the store; a tie, once found, must not be bought again."""
+    def test_a_found_tie_is_kept_and_a_miss_is_retried_only_when_its_pool_changes(
+            self, reviewed, monkeypatch):
+        """Every hook run changes the store; a tie, once found, must not be bought again, and a
+        miss is worth asking again only when a session joins the run's pool."""
         rows = adopt._sessions()
         ids = [r["session_id"] for r in rows]
         assert reviews.reviewed_by(rows, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
         asked: list = []
 
-        def counting(run, pool):
-            asked.append(run)
+        def counting(prompt, pool):
+            asked.append(len(pool))
             return None
         monkeypatch.setattr(reviews, "_tie", counting)
         assert reviews.reviewed_by(rows, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
-        assert asked == [], "the store did not change: nothing is asked again"
-        monkeypatch.setattr(reviews, "_stamp", lambda: (str(store.DB_PATH), 999))
-        assert reviews.reviewed_by(rows, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
-        assert sorted(asked) == ["r-2", "r-3"], "only the misses are retried after a change"
+        assert asked == [], "the pools did not change: nothing is asked again"
+        joined = rows + [{"session_id": "s3-9", "cwd": DELTA, "first_ts": "2026-08-04T12:00:00Z",
+                          "last_ts": "2026-08-04T13:00:00Z"}]
+        assert reviews.reviewed_by(joined, ids) == {"r-1": "s3-0", "r-4": "s3-0"}
+        assert asked == [3, 3], "the two misses, each against a pool of three now"
+
+    def test_the_pool_is_the_folder_s_sessions_alive_when_the_run_started(self, reviewed):
+        rows = adopt._sessions()
+        r1 = next(r for r in rows if r["session_id"] == "r-1")
+        # A copy of s3-0 that went quiet two hours before the run is not a candidate; one quiet
+        # for half an hour is; one begun after the run is not.
+        stale = dict(next(r for r in rows if r["session_id"] == "s3-0"))
+        stale.update(session_id="s3-stale", first_ts="2026-08-04T08:00:00Z",
+                     last_ts="2026-08-04T10:00:00Z")
+        recent = dict(stale, session_id="s3-recent", last_ts="2026-08-04T11:45:00Z")
+        later = dict(stale, session_id="s3-later", first_ts="2026-08-04T12:30:00Z",
+                     last_ts="2026-08-04T12:40:00Z")
+        reviews.forget()
+        seen: dict = {}
+        real = reviews._tie
+
+        def spy(prompt, pool):
+            seen["pool"] = sorted(pool)
+            return real(prompt, pool)
+        try:
+            reviews._tie = spy
+            assert reviews.reviewed_by(rows + [stale, recent, later], [r1["session_id"]]) == {
+                "r-1": "s3-0"}
+        finally:
+            reviews._tie = real
+        assert seen["pool"] == ["s3-0", "s3-1", "s3-recent"], seen
 
     def test_the_run_is_offered_under_the_name_of_the_chat_it_read(self, reviewed):
         delta = next(g for g in adopt.state()["groups"] if g["cwd"] == DELTA)
