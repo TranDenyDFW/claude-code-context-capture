@@ -66,6 +66,11 @@ frontend/node_modules/
 # npm is needed to CHANGE the frontend, not to run it. The Plotly chunk is content-hashed and only
 # rewrites when Plotly's version does, so ordinary edits add roughly 240 KB per build.
 
+# The executable build (tools/build_exe.py): a few hundred megabytes of PyInstaller output that
+# CI produces as an artifact. Root only: frontend/dist is tracked, see above. The work and spec
+# paths land under tmp/, which is already ignored.
+/dist/
+
 # Generated documentation. `tools/docgen/` is source and IS tracked; these are what it produces.
 # 17 MB of PNG and JSON plus a 6.2 MB .docx, rebuildable from the source beside them, and a git
 # history is a poor place for a 23 MB artifact that changes wholesale on every run.

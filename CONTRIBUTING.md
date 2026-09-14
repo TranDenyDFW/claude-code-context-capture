@@ -53,6 +53,12 @@ the first of every month and opens a pull request when something moved. Do not e
 suite fails on a set that no longer covers the requirements, and pip fails on one that no longer
 resolves.
 
+`requirements-build.txt` is the one set outside that union, on purpose: it pins what builds the
+executable (`tools/build_exe.py`), exactly, and only the Windows build job installs it. It moves
+as a set too, when someone rebuilds with newer versions and the smoke in
+`.github/workflows/build-exe.yml` still passes; the file's header says why it is not in
+`constraints-ci.txt`.
+
 `node tools/run_tests.mjs` runs everything, pytest included, and reports one total. Running pytest
 directly works too, but note that the runner reads pytest's `N passed` summary line to know the
 suite executed at all: an entry that exits 0 without printing its marker is treated as not having

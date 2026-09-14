@@ -260,6 +260,11 @@ const PY = [
   // binding on top, which Windows would allow. Real sockets, no store.
   ['-m', ['c4x.api', '--self-test'], 'API entry: flags and the already-running probe',
    'SELF-TEST PASS', { noStore: true }],
+  // The exe build. The self-test reads the PyInstaller argv and the smoke plan without a build
+  // and without PyInstaller, which the matrix legs never install; the build itself runs in
+  // .github/workflows/build-exe.yml and is proven by the smoke there.
+  ['tools/build_exe.py', ['--self-test'], 'exe build argv and smoke plan', 'SELF-TEST PASS',
+   { noStore: true }],
   ['tools/table_audit.py', [], 'audit of the live app', 'AUDIT PASS'],
   // The same DATA rules, applied to the API payload instead of a Dash component tree, so they
   // outlive Dash. Store-dependent, and not marked noStore: importing table_audit for its rule
