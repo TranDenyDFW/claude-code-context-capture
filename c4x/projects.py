@@ -105,7 +105,10 @@ BY_TRANSCRIPT = ("files",)
 # module can answer rather than a thing to check by eye.
 STORE_WIDE = ("probes", "probe_categories", "probe_details", "probe_message_breakdown",
               "context_baselines", "record_types", "harvest_runs", "excluded_projects",
-              "sqlite_sequence")
+              "sqlite_sequence",
+              # Which account the desktop app was signed in as, over time, on THIS machine: a
+              # switch here says nothing about a project and nothing about another machine.
+              "account_log")
 
 MANIFEST_TABLE = "c4x_export"
 
@@ -1170,8 +1173,20 @@ def import_(path, into=None, dry_run=False):
                 verb = ("INSERT OR REPLACE"
                         if table in ("session_links", "review_links", "desktop_records")
                         else "INSERT OR IGNORE")
-                con.execute(f"{verb} INTO main.{table} ({listed}) "
-                            f"SELECT {listed} FROM src.{table}")
+                if table == "desktop_records" and "owner_source" in shared:
+                    # THE TAG THIS STORE HOLDS WINS. A record's owner is the account it first
+                    # appeared under HERE, decided once (docs/desktop-records.md section 6); an
+                    # export from a store that never tagged it, or tagged it as another machine's
+                    # signed-in account, must not replace a known owner with NULL or with theirs.
+                    picked = ",".join(
+                        f'COALESCE(main.{table}."{c}", src.{table}."{c}") AS "{c}"'
+                        if c.startswith("owner_") else f'src.{table}."{c}"' for c in shared)
+                    con.execute(f"{verb} INTO main.{table} ({listed}) SELECT {picked} "
+                                f"FROM src.{table} LEFT JOIN main.{table} "
+                                f"ON main.{table}.record_uuid = src.{table}.record_uuid")
+                else:
+                    con.execute(f"{verb} INTO main.{table} ({listed}) "
+                                f"SELECT {listed} FROM src.{table}")
                 after = con.execute(f"SELECT COUNT(*) FROM main.{table}").fetchone()[0]
                 offered = con.execute(f"SELECT COUNT(*) FROM src.{table}").fetchone()[0]
                 report["inserted"][table] = after - before

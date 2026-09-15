@@ -303,6 +303,33 @@ def own_records(pair, pairs, owners):
     return len(mine)
 
 
+def _tag_counts():
+    """({account: live tagged records}, untagged live records) from harvest's owner columns, or
+    (None, 0) on a store without the columns, without the table, or without a store at all.
+
+    Keyed on the ACCOUNT: under sharing every organisation of an account lists the same
+    directory, so the organisation harvest wrote beside the account is a best guess and the
+    account is not (docs/desktop-records.md section 6).
+    """
+    from c4x import store
+    try:
+        if not store.tables_present("desktop_records") \
+                or not store.column_present("desktop_records", "owner_account"):
+            return None, 0
+        df = store.q("SELECT owner_account AS account, COUNT(*) AS n FROM desktop_records "
+                     "WHERE gone_at IS NULL AND deleted_at IS NULL GROUP BY owner_account")
+    except Exception:  # noqa: BLE001 - no store answers the way a store without the columns does
+        return None, 0
+    counts: dict = {}
+    untagged = 0
+    for account, n in zip(df["account"], df["n"], strict=True):
+        if account is None or (isinstance(account, float) and account != account):
+            untagged += int(n)
+        else:
+            counts[str(account)] = int(n)
+    return (counts or None), untagged
+
+
 def signed_in_pair():
     """{account, org} for the pair the desktop app is writing, or None when nothing says."""
     from c4x import appstate
@@ -348,6 +375,17 @@ def state():
     current = next((p["own"] for p in every
                     if signed and p["account"] == signed["account"] and p["org"] == signed["org"]),
                    None)
+    current_source = (None if (linked and owners is None)
+                      else ("manifest" if linked else "directory"))
+    # THE TAGS, once harvest has written any: the account each chat was made under, counted over
+    # live records. Truer than the manifest, which only knows where a record sat before sharing
+    # began, and the only answer that stays true as chats are made under sharing.
+    counts, untagged = _tag_counts()
+    if counts is not None:
+        for p in every:
+            p["own"] = counts.get(p["account"], 0)
+        current = counts.get(signed["account"], 0) if signed else None
+        current_source = "tags"
     meant = intent(linked=bool(linked))
     # THE PAIRS SHARING DOES NOT COVER YET, while sharing is meant: the ones the app created
     # since. The page says how many, and `reconcile` folds them in when Claude next closes.
@@ -361,6 +399,9 @@ def state():
         "roots": roots, "pairs": len(every), "linked": len(sharing),
         "chats_visible": sum(p["records"] for p in every if not p["link_to"]),
         "signed_in": signed, "current_chats": current, "uncovered": uncovered,
+        # WHERE THE CURRENT NUMBER CAME FROM: the tags, the sharing backup's manifest, or the
+        # directories themselves; None when links exist and nothing can say.
+        "current_source": current_source, "untagged": untagged,
     }
 
 

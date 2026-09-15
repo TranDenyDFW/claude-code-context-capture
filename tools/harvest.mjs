@@ -25,7 +25,7 @@
 //                                    hook's headless reviewer) to the session it read;
 //                                    --dry-run reports without writing
 
-import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, appendFileSync, readFileSync, writeFileSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, appendFileSync, readFileSync, writeFileSync, rmSync, openSync, readSync, closeSync, readlinkSync, symlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { join, dirname, basename, sep } from 'node:path';
@@ -439,6 +439,13 @@ CREATE TABLE IF NOT EXISTS review_misses (
 -- with a marker is stamped deleted_at (the app deleted the chat), one gone without is stamped
 -- gone_at only (c4x took it back, a move, a reinstall: not a delete). Rows are never removed; a
 -- record that returns has both stamps cleared. Readers hide a chat whose record is deleted_at.
+-- THE ACCOUNT A CHAT WAS MADE UNDER. dir is where the record is now; owner_account and owner_org
+-- are the pair it first appeared under, written once and never updated: the app itself moves
+-- records between pairs at an account switch, and under sharing every pair lists the same
+-- directory, so dir says nothing about who made a chat. owner_source says which evidence answered: the ledger
+-- (c4x wrote it into the adopting account's pair), an unshared directory, the account signed
+-- in when the record was first seen, a sharing backup's manifest, or unknown. Also listed in
+-- ADDED_COLUMNS for a store made before them; the two must agree.
 CREATE TABLE IF NOT EXISTS desktop_records (
   record_uuid TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -449,9 +456,24 @@ CREATE TABLE IF NOT EXISTS desktop_records (
   last_seen TEXT NOT NULL,
   gone_at TEXT,
   deleted_at TEXT,
-  source TEXT NOT NULL
+  source TEXT NOT NULL,
+  owner_account TEXT,
+  owner_org TEXT,
+  owner_source TEXT
 );
 CREATE INDEX IF NOT EXISTS desktop_records_session ON desktop_records(session_id);
+-- WHICH ACCOUNT WAS SIGNED IN, over time. One row per change, as harvest saw it: seen_at is the
+-- harvest, switched_at is when the app rewrote config.json (its lastKnownAccountUuid), so a
+-- switch made while no session ran is still dated. The Summary tab reads this to say which API
+-- calls rewrote their whole context right after a switch (caches are isolated between
+-- organisations, and never carried across one).
+CREATE TABLE IF NOT EXISTS account_log (
+  seen_at TEXT NOT NULL,
+  switched_at TEXT,
+  account TEXT NOT NULL,
+  org TEXT,
+  source TEXT
+);
 -- A project the user deleted and asked to stop capturing. Keyed on cwd, not on the transcript
 -- directory: the mapping is many-to-many, the 'subagents' slug alone covers 30 different working
 -- directories, and excluding one of those by slug would silently stop capturing the other 29.
@@ -565,6 +587,10 @@ export const ADDED_COLUMNS = {
   // pass writes 'sidecar' for the small JSON files beside them, so a reader that means transcripts
   // can say so: the census, the dry run and the Diagnostics tab all count rows in this table.
   files: ['first_ts', 'kind'],
+  // The account a chat was made under; see the table's comment. NULL on every row from before,
+  // and reconcileDesktopRecords fills what the ledger, the sharing backup or an unshared
+  // directory can answer, stamping the rest 'unknown' so the next pass has nothing to try.
+  desktop_records: ['owner_account', 'owner_org', 'owner_source'],
 };
 const BOOLEAN_EVENT_COLUMNS = new Set(['probe', 'known', 'truncated']);
 
@@ -1232,9 +1258,11 @@ export function listDesktopRecords(roots) {
           try { rec = JSON.parse(readFileSync(join(dir, f), 'utf8')); } catch { continue; }
           if (!rec || typeof rec !== 'object' || typeof rec.cliSessionId !== 'string') continue;
           const named = RECORD_FILE.exec(f);
+          let mtime = 0;
+          try { mtime = statSync(join(dir, f)).mtimeMs; } catch { mtime = 0; }
           out.push({
             uuid: named ? named[1].toLowerCase() : null,
-            session_id: rec.cliSessionId, dir, file: f,
+            session_id: rec.cliSessionId, dir, file: f, mtime,
             title: typeof rec.title === 'string' ? rec.title : null,
             archived: rec.isArchived === true ? 1 : rec.isArchived === false ? 0 : null,
             fork: typeof rec.forkedFromSessionId === 'string' && rec.forkedFromSessionId.length > 0,
@@ -1244,6 +1272,119 @@ export function listDesktopRecords(roots) {
     }
   }
   return out;
+}
+
+/** `<account>/<org>` for a pair directory, the two trailing components. */
+export function pairKey(dir) {
+  return `${basename(dirname(dir))}/${basename(dir)}`;
+}
+
+/**
+ * Which pairs share one directory: {links: Map<pair, target pair>, shared: Set<pair>}.
+ *
+ * A junction is a link to readdir (isSymbolicLink true, isDirectory false, measured), so the walk
+ * above never reads through one and a record's `dir` is always a real directory. The one question
+ * left for an owner is whether that real directory is the target of some other pair's link, and
+ * the answer is read from the links' substitute names, trailing two components only: the target
+ * may be spelled the virtual way or the package way and both end in the same `<account>/<org>`.
+ * No realpath: inside the Store build's process tree it lands on a physical leftover
+ * (docs/desktop-records.md section 6).
+ */
+export function sharedPairs(roots) {
+  const links = new Map();
+  const shared = new Set();
+  for (const root of roots) {
+    let accounts = [];
+    try { accounts = readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const a of accounts) {
+      if (!a.isDirectory() && !a.isSymbolicLink()) continue;
+      let orgs = [];
+      try { orgs = readdirSync(join(root, a.name), { withFileTypes: true }); } catch { continue; }
+      for (const o of orgs) {
+        if (!o.isSymbolicLink()) continue;
+        let target = '';
+        try { target = readlinkSync(join(root, a.name, o.name)); } catch { continue; }
+        const parts = target.split(/[\\/]+/).filter((p) => p && p !== '?' && p !== '??');
+        if (parts.length < 2) continue;
+        const to = `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+        const from = `${a.name}/${o.name}`;
+        links.set(from, to);
+        shared.add(from);
+        shared.add(to);
+      }
+    }
+  }
+  return { links, shared };
+}
+
+/**
+ * The pair the desktop app is signed in as, the way c4x/appstate.py desktop_pair reads it:
+ * config.json's lastKnownAccountUuid decides the account; the organisation is the newest listed
+ * record's under that account, else the newest sample in plan-usage-history.json. Under sharing
+ * every org of an account lists the same records, so the org is best effort and the account is
+ * not. `switched_at` is config.json's mtime: the app rewrites it at the switch, so a switch made
+ * while no session ran is still dated. Null when no root has a config naming an account.
+ */
+export function signedInPair(roots, listed = []) {
+  for (const root of roots) {
+    const appdata = dirname(root);
+    const configPath = join(appdata, 'config.json');
+    let account = null;
+    let switchedAt = null;
+    try {
+      const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
+      if (cfg && typeof cfg.lastKnownAccountUuid === 'string' && cfg.lastKnownAccountUuid) account = cfg.lastKnownAccountUuid;
+      switchedAt = new Date(statSync(configPath).mtimeMs).toISOString();
+    } catch { continue; }
+    if (!account) continue;
+    let historyOrg = null;
+    try {
+      const h = JSON.parse(readFileSync(join(appdata, 'plan-usage-history.json'), 'utf8'));
+      const samples = Array.isArray(h && h.samples) ? h.samples.filter((s) => s && typeof s === 'object' && s.org) : [];
+      if (samples.length) historyOrg = String(samples.reduce((a, b) => ((Number(b.t) || 0) > (Number(a.t) || 0) ? b : a)).org);
+    } catch { historyOrg = null; }
+    let newest = null;
+    for (const r of listed) {
+      if (basename(dirname(r.dir)) !== account) continue;
+      if (!newest || (r.mtime || 0) > (newest.mtime || 0)) newest = r;
+    }
+    const org = newest ? basename(newest.dir) : historyOrg;
+    return {
+      account, org, switched_at: switchedAt,
+      source: newest ? 'config.json and the newest record under the account'
+        : historyOrg ? 'config.json and plan-usage-history.json' : 'config.json',
+    };
+  }
+  return null;
+}
+
+/** {uuid: {account, org}} from the newest sharing backup's manifest, the pair each record was filed under before sharing; empty without one. */
+export function manifestOwners(backupsDir) {
+  let stamps = [];
+  try { stamps = readdirSync(backupsDir).filter((n) => /^\d{14,20}$/.test(n)).sort(); } catch { return new Map(); }
+  const out = new Map();
+  for (let i = stamps.length - 1; i >= 0; i--) {
+    let manifest;
+    try { manifest = JSON.parse(readFileSync(join(backupsDir, stamps[i], 'manifest.json'), 'utf8')); } catch { continue; }
+    for (const f of (manifest && Array.isArray(manifest.files)) ? manifest.files : []) {
+      const parts = String(f && f.rel ? f.rel : '').split(/[\\/]+/).filter(Boolean);
+      if (parts.length !== 3) continue;
+      const named = RECORD_FILE.exec(parts[2]);
+      if (named) out.set(named[1].toLowerCase(), { account: parts[0], org: parts[1] });
+    }
+    return out;
+  }
+  return out;
+}
+
+/** Append the signed-in pair to account_log when the account differs from the newest row. Returns true when a row was written. */
+export function logAccount(db, pair, now) {
+  if (!pair || !pair.account) return false;
+  const last = db.prepare('SELECT account FROM account_log ORDER BY seen_at DESC, rowid DESC LIMIT 1').get();
+  if (last && last.account === pair.account) return false;
+  db.prepare('INSERT INTO account_log (seen_at, switched_at, account, org, source) VALUES (?, ?, ?, ?, ?)')
+    .run(now, pair.switched_at ?? null, pair.account, pair.org ?? null, pair.source ?? null);
+  return true;
 }
 
 /**
@@ -1275,12 +1416,44 @@ export function markerTime(dir, uuid, now, roots = []) {
  * the caller's transaction. Returns counts; never removes a row.
  */
 export function reconcileDesktopRecords(db, roots, { ledgerPath = join(ROOT, 'data', 'adopted-records.json'),
-                                                     now = new Date().toISOString(), listed = null } = {}) {
-  const result = { seen: 0, ledger: 0, deleted: 0, gone: 0, returned: 0 };
+                                                     backupsDir = join(ROOT, 'data', 'record-backups'),
+                                                     now = new Date().toISOString(), listed = null,
+                                                     signedIn = undefined } = {}) {
+  const result = { seen: 0, ledger: 0, deleted: 0, gone: 0, returned: 0,
+                   owners: { tagged: 0, unknown: 0 }, account_logged: false };
   const records = listed ?? listDesktopRecords(roots);
+  // THE OWNER, DECIDED ONCE. The ledger first (c4x wrote that record into the adopting account's
+  // pair, which under sharing is a stronger answer than the shared directory it now sits in),
+  // then an unshared directory (the app wrote it there for that account), then the account
+  // signed in now (the app writes a chat's record before its first prompt, and this runs at
+  // that prompt). The ledger is read BEFORE the disk loop: an adopted record is on disk too,
+  // and the disk upsert would otherwise settle the owner without it.
+  let entries = [];
+  try { entries = JSON.parse(readFileSync(ledgerPath, 'utf8')); } catch { entries = []; }
+  if (!Array.isArray(entries)) entries = [];
+  const ledgerOwner = new Map();
+  for (const e of entries) {
+    if (!e || typeof e !== 'object') continue;
+    const named = LEDGER_RECORD.exec(String(e.record || ''));
+    if (!named || typeof e.session_id !== 'string' || typeof e.path !== 'string') continue;
+    const dir = dirname(e.path);
+    ledgerOwner.set(named[1].toLowerCase(), { account: basename(dirname(dir)), org: basename(dir) });
+  }
+  const { shared } = sharedPairs(roots);
+  const signed = signedIn === undefined ? signedInPair(roots, records) : signedIn;
+  const ownerOf = (uuid, dir) => {
+    const fromLedger = ledgerOwner.get(uuid);
+    if (fromLedger) return { ...fromLedger, source: 'ledger' };
+    if (!shared.has(pairKey(dir))) return { account: basename(dirname(dir)), org: basename(dir), source: 'dir' };
+    if (signed && signed.account) return { account: signed.account, org: signed.org ?? null, source: 'signed-in' };
+    return null;
+  };
+  // THE OWNER COLUMNS ARE IN THE INSERT AND NOT IN THE UPDATE, so the first answer stands: SQLite
+  // discards the excluded values on conflict. `dir`, `title` and the stamps follow the disk.
   const upsert = db.prepare(`INSERT INTO desktop_records
-      (record_uuid, session_id, dir, title, archived, first_seen, last_seen, gone_at, deleted_at, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'disk')
+      (record_uuid, session_id, dir, title, archived, first_seen, last_seen, gone_at, deleted_at, source,
+       owner_account, owner_org, owner_source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'disk', ?, ?, ?)
     ON CONFLICT(record_uuid) DO UPDATE SET session_id = excluded.session_id, dir = excluded.dir,
       title = excluded.title, archived = excluded.archived, last_seen = excluded.last_seen,
       gone_at = NULL, deleted_at = NULL, source = 'disk'`);
@@ -1291,26 +1464,51 @@ export function reconcileDesktopRecords(db, roots, { ledgerPath = join(ROOT, 'da
     present.add(r.uuid);
     const before = was.get(r.uuid);
     if (before && (before.gone_at || before.deleted_at)) result.returned++;
-    upsert.run(r.uuid, r.session_id, r.dir, r.title, r.archived, now, now);
+    const owner = before ? null : ownerOf(r.uuid, r.dir);
+    upsert.run(r.uuid, r.session_id, r.dir, r.title, r.archived, now, now,
+               owner ? owner.account : null, owner ? owner.org : null, owner ? owner.source : null);
     result.seen++;
   }
   // THE LEDGER: the records c4x wrote, uuid and session together, so a record the app deleted
   // before this table existed still maps to its chat. On the laptop that was 19 of the 20 chats
   // deleted by hand. A row already known is left as it is.
-  let entries = [];
-  try { entries = JSON.parse(readFileSync(ledgerPath, 'utf8')); } catch { entries = []; }
   const seed = db.prepare(`INSERT OR IGNORE INTO desktop_records
-      (record_uuid, session_id, dir, title, archived, first_seen, last_seen, gone_at, deleted_at, source)
-    VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, 'ledger')`);
-  if (Array.isArray(entries)) {
-    for (const e of entries) {
-      if (!e || typeof e !== 'object') continue;
-      const named = LEDGER_RECORD.exec(String(e.record || ''));
-      if (!named || typeof e.session_id !== 'string' || typeof e.path !== 'string') continue;
-      const at = typeof e.at === 'string' && e.at ? e.at : now;
-      if (seed.run(named[1].toLowerCase(), e.session_id, dirname(e.path), at, at).changes) result.ledger++;
+      (record_uuid, session_id, dir, title, archived, first_seen, last_seen, gone_at, deleted_at, source,
+       owner_account, owner_org, owner_source)
+    VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, 'ledger', ?, ?, 'ledger')`);
+  for (const e of entries) {
+    if (!e || typeof e !== 'object') continue;
+    const named = LEDGER_RECORD.exec(String(e.record || ''));
+    if (!named || typeof e.session_id !== 'string' || typeof e.path !== 'string') continue;
+    const at = typeof e.at === 'string' && e.at ? e.at : now;
+    const dir = dirname(e.path);
+    if (seed.run(named[1].toLowerCase(), e.session_id, dir, at, at, basename(dirname(dir)), basename(dir)).changes) result.ledger++;
+  }
+  // THE ROWS FROM BEFORE THE COLUMNS, and any row nothing above could answer: the ledger, then the
+  // newest sharing backup's manifest (where each record was filed before sharing), then an
+  // unshared directory; what none of them answers is stamped 'unknown' so the next pass has
+  // nothing left to try. A row is never re-decided once stamped.
+  const blank = db.prepare('SELECT record_uuid, dir FROM desktop_records WHERE owner_source IS NULL').all();
+  if (blank.length) {
+    const fromManifest = manifestOwners(backupsDir);
+    const fill = db.prepare('UPDATE desktop_records SET owner_account = ?, owner_org = ?, owner_source = ? WHERE record_uuid = ?');
+    for (const b of blank) {
+      const fromLedger = ledgerOwner.get(b.record_uuid);
+      const filed = fromManifest.get(b.record_uuid);
+      const owner = fromLedger ? { ...fromLedger, source: 'ledger' }
+        : filed ? { ...filed, source: 'manifest' }
+        : !shared.has(pairKey(b.dir)) ? { account: basename(dirname(b.dir)), org: basename(b.dir), source: 'dir' }
+        : null;
+      if (owner) {
+        fill.run(owner.account, owner.org, owner.source, b.record_uuid);
+        result.owners.tagged++;
+      } else {
+        fill.run(null, null, 'unknown', b.record_uuid);
+        result.owners.unknown++;
+      }
     }
   }
+  result.account_logged = logAccount(db, signed, now);
   // EVERYTHING NOT ON DISK NOW. A marker says the app deleted it; nothing says it merely went.
   const rows = db.prepare('SELECT record_uuid, dir, gone_at, deleted_at FROM desktop_records').all();
   const stamp = db.prepare(`UPDATE desktop_records
@@ -4650,14 +4848,32 @@ async function selfTest() {
       const rroot = join(tmp, 'records-reconcile', 'root');
       const rdir = join(rroot, 'acct-1', 'org-1');
       mkdirSync(rdir, { recursive: true });
+      // THE SIGNED-IN ACCOUNT, as the app records it beside the roots; a second account whose pair
+      // is a link to the first (sharing, a junction on Windows and a symlink elsewhere); a third
+      // that is a plain directory of its own.
+      const rconfig = join(tmp, 'records-reconcile', 'config.json');
+      writeFileSync(rconfig, JSON.stringify({ lastKnownAccountUuid: 'acct-2' }));
+      writeFileSync(join(tmp, 'records-reconcile', 'plan-usage-history.json'),
+        JSON.stringify({ samples: [{ t: 1, org: 'org-old' }, { t: 2, org: 'org-2' }] }));
+      mkdirSync(join(rroot, 'acct-2'), { recursive: true });
+      symlinkSync(rdir, join(rroot, 'acct-2', 'org-2'), 'junction');
+      const rdir3 = join(rroot, 'acct-3', 'org-3');
+      mkdirSync(rdir3, { recursive: true });
+      const rbackups = join(tmp, 'records-reconcile', 'record-backups');
       const U1 = '11111111-1111-4111-8111-111111111111';
       const U2 = '22222222-2222-4222-8222-222222222222';
       const U3 = '33333333-3333-4333-8333-333333333333';
+      const U4 = '44444444-4444-4444-8444-444444444444';
+      const U5 = '55555555-5555-4555-8555-555555555555';
+      const U6 = '66666666-6666-4666-8666-666666666666';
+      const U7 = '77777777-7777-4777-8777-777777777777';
       const U9 = '99999999-9999-4999-8999-999999999999';
-      const recAt = (u, sid, title) => writeFileSync(join(rdir, `local_${u}.json`),
+      const recAt = (u, sid, title, dir = rdir) => writeFileSync(join(dir, `local_${u}.json`),
         JSON.stringify({ cliSessionId: sid, title, isArchived: false }));
       recAt(U1, 'sess-1', 'One');
       recAt(U2, 'sess-2', 'Two');
+      recAt(U4, 'sess-4', 'Four', rdir3);
+      recAt(U7, 'sess-7', 'Seven');   // stays on disk across the switch below
       writeFileSync(join(rdir, 'scheduled-tasks.json'), '{"scheduledTasks": []}');
       const ledger = join(tmp, 'records-reconcile', 'adopted-records.json');
       writeFileSync(ledger, JSON.stringify([
@@ -4671,11 +4887,32 @@ async function selfTest() {
       rdb.exec(SCHEMA);
       const row = (u) => rdb.prepare('SELECT * FROM desktop_records WHERE record_uuid = ?').get(u);
       const T1 = '2026-09-15T00:00:00.000Z';
-      const first = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: T1 });
+      const first = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: T1, backupsDir: rbackups });
       checks.push(['records: every record on disk is remembered with its session, title and flag',
-        first.seen === 2 && row(U1)?.session_id === 'sess-1' && row(U1)?.title === 'One' && row(U1)?.archived === 0
+        first.seen === 4 && row(U1)?.session_id === 'sess-1' && row(U1)?.title === 'One' && row(U1)?.archived === 0
         && row(U1)?.source === 'disk' && row(U1)?.deleted_at === null && row(U1)?.gone_at === null,
         JSON.stringify(first)]);
+      checks.push(['records: a linked pair is not walked, and sharedPairs names the link and its target',
+        (() => { const s = sharedPairs([rroot]);
+                 return s.links.get('acct-2/org-2') === 'acct-1/org-1' && s.shared.has('acct-1/org-1')
+                   && s.shared.has('acct-2/org-2') && !s.shared.has('acct-3/org-3'); })(),
+        JSON.stringify([...sharedPairs([rroot]).links])]);
+      checks.push(['records: the owner is the ledger pair for an adopted record, the signed-in account under sharing, the directory when unshared, the ledger for a seeded row (gate can fail)',
+        row(U1)?.owner_source === 'ledger' && row(U1)?.owner_account === 'acct-1' && row(U1)?.owner_org === 'org-1'
+        && row(U2)?.owner_source === 'signed-in' && row(U2)?.owner_account === 'acct-2' && row(U2)?.owner_org === 'org-2'
+        && row(U4)?.owner_source === 'dir' && row(U4)?.owner_account === 'acct-3' && row(U4)?.owner_org === 'org-3'
+        && row(U3)?.owner_source === 'ledger' && row(U3)?.owner_account === 'acct-1',
+        JSON.stringify([U1, U2, U4, U3].map((u) => { const r = row(u); return r && [r.owner_account, r.owner_org, r.owner_source]; }))]);
+      checks.push(['records: the signed-in pair is read the way appstate.desktop_pair reads it, dated by config.json',
+        (() => { const p = signedInPair([rroot], listDesktopRecords([rroot]));
+                 return !!p && p.account === 'acct-2' && p.org === 'org-2'
+                   && p.switched_at === new Date(statSync(rconfig).mtimeMs).toISOString(); })(),
+        JSON.stringify(signedInPair([rroot], listDesktopRecords([rroot])))]);
+      checks.push(['records: the account log gains one row on the first pass',
+        first.account_logged === true && rdb.prepare('SELECT COUNT(*) n FROM account_log').get().n === 1
+        && rdb.prepare('SELECT account, org FROM account_log').get().account === 'acct-2']);
+      // A switch before the next pass: the log grows, the owners already written do not move.
+      writeFileSync(rconfig, JSON.stringify({ lastKnownAccountUuid: 'acct-3' }));
       checks.push(['records: the ledger seeds a record harvest never saw, and a known one is left alone',
         first.ledger === 1 && row(U3)?.source === 'ledger' && row(U3)?.session_id === 'sess-3'
         && row(U3)?.first_seen === '2026-09-01T00:00:00Z' && row(U1)?.source === 'disk']);
@@ -4688,20 +4925,41 @@ async function selfTest() {
       writeFileSync(join(rdir, `deleted_${U1}`), '1789434081365');
       rmSync(join(rdir, `local_${U2}.json`));
       const T2 = '2026-09-15T01:00:00.000Z';
-      const second = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: T2 });
+      const second = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: T2, backupsDir: rbackups });
       checks.push(['records: a record gone with a marker beside it is deleted_at (gate can fail)',
         row(U1)?.deleted_at === '2026-09-15T01:01:21.365Z' && row(U1)?.gone_at === T2 && second.deleted === 1,
         JSON.stringify(row(U1))]);
       checks.push(['records: a record gone without a marker is gone_at only, never deleted (gate can fail)',
         row(U2)?.gone_at === T2 && row(U2)?.deleted_at === null && second.gone === 1, JSON.stringify(row(U2))]);
-      checks.push(['records: a second pass leaves the stamps as they were',
-        (() => { const again = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: '2026-09-15T02:00:00.000Z' });
-                 return again.deleted === 0 && again.gone === 0 && row(U1)?.gone_at === T2 && row(U2)?.gone_at === T2; })()]);
-      // A record that returns (a reinstall restoring records) is clean again.
+      checks.push(['records: an owner, once written, is not re-decided by a later signed-in account (gate can fail)',
+        row(U2)?.owner_account === 'acct-2' && row(U2)?.owner_source === 'signed-in' && row(U4)?.owner_account === 'acct-3'
+        && row(U7)?.owner_account === 'acct-2' && row(U7)?.owner_source === 'signed-in'
+        && second.account_logged === true && rdb.prepare('SELECT COUNT(*) n FROM account_log').get().n === 2,
+        JSON.stringify([row(U7), second.account_logged])]);
+      checks.push(['records: a second pass leaves the stamps as they were, and adds no log row under the same account',
+        (() => { const again = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: '2026-09-15T02:00:00.000Z', backupsDir: rbackups });
+                 return again.deleted === 0 && again.gone === 0 && row(U1)?.gone_at === T2 && row(U2)?.gone_at === T2
+                   && again.account_logged === false && rdb.prepare('SELECT COUNT(*) n FROM account_log').get().n === 2; })()]);
+      // A record that returns (a reinstall restoring records) is clean again, and keeps its owner.
       recAt(U2, 'sess-2', 'Two again');
-      const third = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: '2026-09-15T03:00:00.000Z' });
+      const third = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: '2026-09-15T03:00:00.000Z', backupsDir: rbackups });
       checks.push(['records: a record that returns has both stamps cleared and its new title',
-        third.returned === 1 && row(U2)?.gone_at === null && row(U2)?.deleted_at === null && row(U2)?.title === 'Two again']);
+        third.returned === 1 && row(U2)?.gone_at === null && row(U2)?.deleted_at === null && row(U2)?.title === 'Two again'
+        && row(U2)?.owner_account === 'acct-2']);
+      // THE ROWS FROM BEFORE THE COLUMNS: two with no owner, one of them filed by a sharing backup's
+      // manifest under a pair, the other with nothing to say.
+      rdb.prepare(`INSERT INTO desktop_records (record_uuid, session_id, dir, first_seen, last_seen, source)
+        VALUES (?, 'sess-5', ?, ?, ?, 'disk'), (?, 'sess-6', ?, ?, ?, 'disk')`).run(U5, rdir, T1, T1, U6, rdir, T1, T1);
+      mkdirSync(join(rbackups, '20260915000000'), { recursive: true });
+      writeFileSync(join(rbackups, '20260915000000', 'manifest.json'), JSON.stringify({
+        files: [{ root: rroot, rel: `acct-3/org-3/local_${U5}.json` }, { root: rroot, rel: 'acct-3/org-3/scheduled-tasks.json' }] }));
+      const fourth = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: '2026-09-15T04:00:00.000Z', backupsDir: rbackups });
+      checks.push(['records: a row with no owner is filled from the newest backup manifest, and one nothing answers is stamped unknown once (gate can fail)',
+        row(U5)?.owner_source === 'manifest' && row(U5)?.owner_account === 'acct-3' && row(U5)?.owner_org === 'org-3'
+        && row(U6)?.owner_source === 'unknown' && row(U6)?.owner_account === null
+        && fourth.owners.tagged === 1 && fourth.owners.unknown === 1
+        && reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: '2026-09-15T05:00:00.000Z', backupsDir: rbackups }).owners.unknown === 0,
+        JSON.stringify([row(U5), row(U6), fourth.owners])]);
       // The marker's content: digits are epoch ms (or seconds), anything else still means deleted, at now.
       checks.push(['records: a marker in seconds or in prose still dates the delete',
         markerTime(rdir, U1, 'NOW') === '2026-09-15T01:01:21.365Z'

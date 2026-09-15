@@ -741,3 +741,44 @@ def test_every_table_in_the_real_store_is_accounted_for(has_store):
     assert unhandled == [], (
         f"these tables are in the store and in none of the lists in c4x/projects.py: {unhandled}. "
         "Decide whether each belongs to a project before the next export silently omits it.")
+
+
+def test_an_import_keeps_the_tag_this_store_holds(store_at, tmp_path):
+    """A record's owner is the account it first appeared under HERE, decided once. An export from
+    a store that never tagged it must not replace a known owner; a local row with no owner takes
+    the export's. (An export is verified against its manifest, so each case is its own export.)"""
+    uuid = "77777777-7777-4777-8777-777777777777"
+
+    def set_owner(account):
+        con = sqlite3.connect(str(store_at))
+        con.execute("UPDATE desktop_records SET owner_account = ?, owner_org = ?, "
+                    "owner_source = ? WHERE record_uuid = ?",
+                    (account, None if account is None else "org",
+                     None if account is None else "signed-in", uuid))
+        con.commit()
+        con.close()
+
+    def owner():
+        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        got = con.execute("SELECT owner_account FROM desktop_records WHERE record_uuid = ?",
+                          (uuid,)).fetchone()[0]
+        con.close()
+        return got
+
+    con = sqlite3.connect(str(store_at))
+    con.execute("""INSERT INTO desktop_records (record_uuid, session_id, dir, first_seen, last_seen,
+                     source) VALUES (?, 's0-0', 'X:/r/a/o', '2026-09-01T00:00:00Z',
+                     '2026-09-01T00:00:00Z', 'disk')""", (uuid,))
+    con.commit()
+    con.close()
+    untagged = tmp_path / "untagged.db"
+    projects.export(r"P:\Alpha", untagged)
+    set_owner("acct-here")
+    projects.import_(untagged)
+    assert owner() == "acct-here", "the import replaced a known owner with the export's NULL"
+    set_owner("acct-there")
+    tagged = tmp_path / "tagged.db"
+    projects.export(r"P:\Alpha", tagged)
+    set_owner(None)
+    projects.import_(tagged)
+    assert owner() == "acct-there", "a row with no owner takes what the export knows"

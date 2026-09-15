@@ -19,7 +19,8 @@ def table(pane, has_store):
 
 
 def test_the_table_has_the_columns_the_page_promises(table):
-    for column in ("section", "title", "project", "turns", "current", "peak", "compactions"):
+    for column in ("section", "title", "project", "account", "turns", "current", "peak",
+                   "compactions"):
         assert column in table["columns"], f"{column} missing from the table"
 
 
@@ -38,10 +39,19 @@ def test_row_count_matches_the_population_the_page_states(table, q, pane):
     # A store harvest has not chained yet has no session_links table and every session is its own
     # chat, which the plain form counts.
     if store.tables_present("session_links"):
-        expected = int(q("""SELECT COUNT(*) AS n FROM (
-                              SELECT COALESCE(l.head_id, t.session_id) AS chat
-                              FROM turns t LEFT JOIN session_links l ON l.session_id = t.session_id
-                              GROUP BY chat HAVING COUNT(*) >= ?)""",
+        # WITH THE ONE EXEMPTION the floor has: a chat the desktop app holds a live record for is
+        # listed whatever its size (store.live_records_sql), the record naming any of its sessions.
+        expected = int(q(f"""WITH chats AS (
+                                SELECT COALESCE(l.head_id, t.session_id) AS chat, COUNT(*) AS turns
+                                FROM turns t
+                                LEFT JOIN session_links l ON l.session_id = t.session_id
+                                GROUP BY chat),
+                              live AS (
+                                SELECT DISTINCT COALESCE(l.head_id, d.session_id) AS chat
+                                FROM ({store.live_records_sql()}) d
+                                LEFT JOIN session_links l ON l.session_id = d.session_id)
+                              SELECT COUNT(*) AS n FROM chats
+                              WHERE turns >= ? OR chat IN (SELECT chat FROM live)""",
                          (SESSION_TURN_FLOOR,)).iloc[0]["n"])
     else:
         expected = int(q("""SELECT COUNT(*) AS n FROM (

@@ -65,6 +65,10 @@ export function AccountSharing({
   const [busy, setBusy] = useState<'all' | 'current' | 'cover' | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [restart, setRestart] = useState(false)
+  // CURRENT ASKS FIRST. It un-shares the directories, which is the one switch that takes chats
+  // away from every other account on the machine, and a click that lands on the wrong side of a
+  // two-button switch should not do that on its own.
+  const [confirming, setConfirming] = useState(false)
 
   // ONE ACCOUNT IS NOT A CHOICE. With a single pair on the machine there is nothing to share and
   // the control would offer a toggle that changes nothing.
@@ -117,12 +121,20 @@ export function AccountSharing({
   // word that used to carry the restart note is gone, the user's choice: the buttons say what
   // they are.
   const notes = '\n' + QUIT_NOTE + '\n' + RESTART_NOTE
+  // THE CURRENT NUMBER SAYS WHERE IT CAME FROM. From the tags it is the chats made under the
+  // signed-in account, and the untagged remainder is named; from the manifest or the directories
+  // it is what un-sharing would hand that account back.
+  const untagged = state.untagged ?? 0
   const hover = {
     all: `Every account's chats: ${state.chats_visible} across ${state.pairs} account directories${notes}`,
     current:
       (state.current_chats === null || state.current_chats === undefined
         ? "Only the signed-in account's own chats: not known while sharing is on"
-        : `Only the signed-in account's own chats: ${state.current_chats}`) + notes,
+        : state.current_source === 'tags'
+          ? `Only the signed-in account's own chats: ${state.current_chats}, by the account each ` +
+            `chat was made under` +
+            (untagged ? `; ${untagged} of unknown account` : '')
+          : `Only the signed-in account's own chats: ${state.current_chats}`) + notes,
   }
 
   return (
@@ -143,7 +155,11 @@ export function AccountSharing({
               disabled={!writesEnabled || busy !== null}
               aria-pressed={mode === option}
               title={hover[option]}
-              onClick={() => void choose(option)}
+              onClick={() =>
+                option === 'current' && mode !== 'current'
+                  ? setConfirming(true)
+                  : void choose(option)
+              }
               className={
                 'px-2.5 py-1.5 text-sm transition-colors disabled:opacity-50 ' +
                 (mode === option
@@ -155,6 +171,35 @@ export function AccountSharing({
             </button>
           ))}
         </div>
+        {confirming ? (
+          <span
+            role="group"
+            aria-label="Un-share"
+            className="flex flex-wrap items-center gap-2 text-xs text-warn"
+          >
+            <span>Un-share the directories? Each account goes back to its own chats. Quit Claude first.</span>
+            <button
+              type="button"
+              disabled={!writesEnabled || busy !== null}
+              onClick={() => {
+                setConfirming(false)
+                void choose('current')
+              }}
+              className="rounded-md border border-edge bg-page px-2 py-0.5 text-xs text-ink-dim
+                         transition-colors hover:text-ink disabled:opacity-50"
+            >
+              Un-share
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              className="rounded-md border border-edge bg-page px-2 py-0.5 text-xs text-ink-dim
+                         transition-colors hover:text-ink"
+            >
+              Keep sharing
+            </button>
+          </span>
+        ) : null}
       </div>
       {uncovered.length ? (
         <p

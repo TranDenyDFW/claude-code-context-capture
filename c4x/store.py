@@ -557,6 +557,7 @@ def invalidate():
     """
     _generation["n"] += 1
     _rows_cache.update({"at": 0.0, "df": None})
+    _owners_cache.update({"at": 0.0, "map": None})
     _archived_cache.update({"map": None, "at": 0.0, "root": None, "sig": None})
     _transcript_cache.update({"ids": None, "at": 0.0})
     _window_cache.clear()
@@ -736,6 +737,41 @@ def live_record_ids() -> frozenset:
     if not tables_present("desktop_records"):
         return frozenset()
     return frozenset(str(s) for s in q(live_records_sql())["session_id"])
+
+
+_owners_cache: dict = {"at": 0.0, "map": None}
+
+
+def _read_owners() -> dict:
+    """{session id: owner account} for every record harvest tagged: the account the desktop app
+    was signed in as when the chat's record first appeared (docs/desktop-records.md section 6).
+    A live row wins over a gone one for the same session. Empty on a store from before the
+    columns, so every reader degrades to "no account known"."""
+    if (not tables_present("desktop_records")
+            or not column_present("desktop_records", "owner_account")):
+        return {}
+    df = q("SELECT session_id, owner_account, (gone_at IS NULL AND deleted_at IS NULL) AS live "
+           "FROM desktop_records WHERE owner_account IS NOT NULL ORDER BY live ASC, last_seen ASC")
+    return {str(s): str(a) for s, a in zip(df["session_id"], df["owner_account"], strict=True)}
+
+
+def record_owners(ttl: float = 45.0) -> dict:
+    """The owner map, cached the way `deleted_in_app` is and cleared by the same `invalidate`."""
+    now = _time.time()
+    if _owners_cache["map"] is not None and now - _owners_cache["at"] < ttl:
+        return _owners_cache["map"]
+    seen = _generation["n"]
+    owners = _read_owners()
+    if seen == _generation["n"]:
+        _owners_cache.update({"at": now, "map": owners})
+    return owners
+
+
+def signed_in_account():
+    """The account the desktop app is signed in as, or None: what `account::signed-in` means."""
+    from c4x import accounts
+    pair = accounts.signed_in_pair()
+    return pair["account"] if pair else None
 
 
 def hidden_sessions_sql() -> str:
@@ -1516,6 +1552,13 @@ def _session_rows_uncached() -> pd.DataFrame:
     _parent_of, runs_of = review_links(ttl=0)
     df["reviews"] = [sum(len(runs_of.get(m, [])) for m in members_of.get(sid, [sid]))
                      for sid in df["session_id"]]
+    # THE ACCOUNT A CHAT WAS MADE UNDER, from harvest's tag on any of its sessions' records. A
+    # record names the session a chat started with, which is often a prefix rather than the head,
+    # so a SQL column would have been dropped by the collapse above. None where no record of the
+    # chat carries a tag.
+    owners = record_owners(ttl=0)
+    df["account"] = [next((owners[m] for m in members_of.get(sid, [sid]) if m in owners), None)
+                     for sid in df["session_id"]]
 
     def classify(r):
         """Which section a session belongs to. Every test is answerable from disk.
@@ -1675,6 +1718,28 @@ def cohort_options() -> list:
     for sec, n in df["section"].value_counts().items():
         opts.append({"label": f"Section: {sec} ({n:,})", "value": f"section::{sec}",
                      "path": f"Every listed chat filed under {sec}"})
+    # THE ACCOUNT A CHAT WAS MADE UNDER (docs/desktop-records.md section 6): the signed-in
+    # account's own chats first, then each account seen, then the chats no evidence tags. The
+    # value names the ACCOUNT, never the organisation: under sharing the organisation is a guess.
+    # Offered only once harvest has tagged something, so a store from before the tag reads as it
+    # did.
+    if "account" in df.columns and df["account"].notna().any():
+        signed = signed_in_account()
+        mine = int((df["account"] == signed).sum()) if signed else 0
+        opts.append({"label": f"Signed-in account's chats ({mine:,})",
+                     "value": "account::signed-in",
+                     "path": "Every listed chat made under the account the desktop app is "
+                             "signed in as"
+                             + (f": {signed[:8]}" if signed else "; nothing is signed in")})
+        for account, n in df["account"].value_counts().items():
+            opts.append({"label": f"Account {str(account)[:8]} ({n:,})",
+                         "value": f"account::{account}",
+                         "path": f"Every listed chat made under account {account}"})
+        unknown = int(df["account"].isna().sum())
+        if unknown:
+            opts.append({"label": f"No account known ({unknown:,})", "value": "account::unknown",
+                         "path": "Chats whose record predates the tag, or that the app never "
+                                 "recorded"})
     # RANKED BY WORK DONE, not by how many sessions a directory happens to hold.
     #
     # Session count put a benchmark harness in charge of this list. It spawned one short run per
@@ -1765,7 +1830,7 @@ def cohort_parts(cohort) -> tuple:
     A delete cannot afford the same mistake.
     """
     kind, sep, value = str(cohort or "").partition("::")
-    if not sep or kind not in ("section", "project") or not value:
+    if not sep or kind not in ("section", "project", "account") or not value:
         return "", ""
     return kind, value
 
@@ -1820,9 +1885,19 @@ def cohort_sessions(cohort, ttl: float = 45.0, reviews: bool = False) -> list:
     if df.empty:
         return []
     kind, value = cohort_parts(cohort)
-    col = {"section": "section", "project": "project"}.get(kind)
-    if not col:
+    col = {"section": "section", "project": "project", "account": "account"}.get(kind)
+    if not col or col not in df.columns:
         return []
+    if kind == "account":
+        # `signed-in` is resolved NOW, not when the option was built: the answer changes at every
+        # switch. Nothing signed in means an empty population, never everything.
+        if value == "signed-in":
+            value = signed_in_account()
+            if not value:
+                return []
+        mask = df[col].isna() if value == "unknown" else (df[col] == value)
+    else:
+        mask = df[col] == value
     # EVERY MEMBER OF EVERY CHAT, head first. The frame holds one row per chat, but the tables this
     # list is applied to (turns, compactions, tool calls, and the delete and export sets) are keyed
     # by the CLI session that wrote each row, so a list of heads alone would drop every prefix's
@@ -1830,7 +1905,7 @@ def cohort_sessions(cohort, ttl: float = 45.0, reviews: bool = False) -> list:
     _head_of, members_of = chat_links(ttl)
     _parent_of, runs_of = review_links(ttl)
     out: list = []
-    for head in df.loc[df[col] == value, "session_id"]:
+    for head in df.loc[mask, "session_id"]:
         members = members_of.get(head, [head])
         out.extend(members)
         if reviews:
@@ -1899,6 +1974,8 @@ def cohort_label(cohort, ids=None) -> str:
     reader sees changes.
     """
     kind, _, value = str(cohort or "").partition("::")
+    if kind == "account" and len(value) == 36:
+        return value[:8]                    # an account id, the way the option list shows it
     if kind != "project" or not value:
         return value
     if not is_folderless(value):

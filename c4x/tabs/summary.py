@@ -10,7 +10,7 @@ from dash import dcc, html
 from c4x.breakdown import latest_baseline
 from c4x.dash_compat import DataTable
 from c4x.labels import is_folderless, titled_path
-from c4x.store import cohort_sessions, overview_stats, q, titles_for
+from c4x.store import cohort_sessions, overview_stats, q, tables_present, titles_for
 from c4x.theme import (
     ACCENT,
     BORDER,
@@ -217,6 +217,84 @@ def project_totals_fig() -> go.Figure:
     return fig
 
 
+REWRITE_FLOOR = 10_000      # tokens resident before the switch; below it nothing is worth naming
+REWRITE_SHARE = 0.9         # of the previous call's resident context written again: a rewrite
+
+
+def switch_rewrites() -> dict:
+    """The API calls that wrote their whole context again right after an account switch.
+
+    A REWRITE is a call that read no cache and wrote at least 0.9 x what the same session had
+    resident on its previous call (a compaction writes a fraction of the old context and is not
+    one). AFTER A SWITCH: the previous call came before the switch harvest logged (`account_log`,
+    dated by the app's own config.json, docs/desktop-records.md section 6) and this one came after
+    it, the first of its session to do so. WITHIN THE LIFETIME: this call is within the previous
+    call's own cache lifetime, one hour when it asked for one (eph_1h) and five minutes otherwise,
+    so an expired cache is not blamed on the switch. Measured before this was written: 161
+    whole-context rewrites on the author's store, every one after a gap longer than five minutes.
+
+    Read from `turns` per switch window, never through the api_calls view with a window function
+    (22 s on that store, against 0.1 s here); nothing is read at all without two log rows.
+    """
+    empty = {"calls": 0, "tokens": 0, "sessions": [], "worst": None, "switches": 0}
+    if not tables_present("account_log"):
+        return empty
+    log = q("SELECT seen_at, switched_at, account FROM account_log ORDER BY seen_at, rowid")
+    if len(log) < 2:
+        return empty
+    hits: list = []
+    for i in range(1, len(log)):
+        if log.iloc[i]["account"] == log.iloc[i - 1]["account"]:
+            continue
+        at = pd.to_datetime(log.iloc[i]["switched_at"] or log.iloc[i]["seen_at"], utc=True)
+        if pd.isna(at):
+            continue
+        # THE FIRST CALL OF EVERY SESSION IN THE HOUR AFTER THE SWITCH. An hour is the longest
+        # lifetime a cache can have, so nothing later could still have been a live cache.
+        after = q("""
+            SELECT session_id, request_id, ts, cache_read_input_tokens AS cread,
+                   cache_creation_input_tokens AS ccreate
+            FROM turns WHERE request_id IS NOT NULL AND (is_sidechain = 0 OR is_sidechain IS NULL)
+              AND ts >= ? AND ts <= ? ORDER BY ts
+        """, (at.isoformat().replace("+00:00", "Z"),
+              (at + pd.Timedelta(hours=1)).isoformat().replace("+00:00", "Z")))
+        if after.empty:
+            continue
+        first = after.drop_duplicates("request_id").drop_duplicates("session_id", keep="first")
+        marks = ",".join("?" * len(first))
+        before = q(f"""
+            SELECT session_id, request_id, ts, total_resident, eph_1h
+            FROM turns WHERE request_id IS NOT NULL AND (is_sidechain = 0 OR is_sidechain IS NULL)
+              AND session_id IN ({marks}) AND ts < ? ORDER BY ts
+        """, (*first["session_id"].tolist(), at.isoformat().replace("+00:00", "Z")))
+        if before.empty:
+            continue
+        last = before.drop_duplicates("request_id").drop_duplicates("session_id", keep="last")
+        last = last.set_index("session_id")
+        for row in first.itertuples():
+            if row.session_id not in last.index:
+                continue
+            prev = last.loc[row.session_id]
+            resident = float(prev["total_resident"] or 0)
+            if resident < REWRITE_FLOOR:
+                continue
+            if float(row.cread or 0) != 0 or float(row.ccreate or 0) < REWRITE_SHARE * resident:
+                continue
+            gap = pd.to_datetime(row.ts, utc=True) - pd.to_datetime(prev["ts"], utc=True)
+            lifetime = (pd.Timedelta(hours=1) if int(prev["eph_1h"] or 0)
+                        else pd.Timedelta(minutes=5))
+            if gap > lifetime:
+                continue
+            hits.append({"session_id": str(row.session_id), "tokens": int(row.ccreate),
+                         "switch": i})
+    if not hits:
+        return empty
+    worst = max(hits, key=lambda h: h["tokens"])
+    return {"calls": len(hits), "tokens": sum(h["tokens"] for h in hits),
+            "sessions": sorted({h["session_id"] for h in hits}), "worst": worst["session_id"],
+            "switches": len({h["switch"] for h in hits})}
+
+
 def decisions() -> list:
     """Findings that name an action, computed from this store.
 
@@ -378,6 +456,29 @@ def decisions() -> list:
                        "session count. Sort All sessions by transcript rows to find the few that "
                        "matter.",
             "goes to": "tab-sessions",
+        })
+
+    # 7. A chat continued under another account pays for its whole context again. Caches are
+    #    isolated between organisations and never carried across one (the prompt-caching docs),
+    #    and each account on a machine is its own account and organisation pair. Counted only
+    #    where harvest's account log says a switch happened and the previous call's cache was
+    #    still alive, so an ordinary expiry is not blamed on a switch. Absent when nothing was.
+    switched = switch_rewrites()
+    if switched["calls"]:
+        chats = len(switched["sessions"])
+        out.append({
+            "finding": "The cache was rewritten after an account switch",
+            "evidence": f"{switched['calls']} call(s) in {chats} chat(s) wrote "
+                        f"{fmt_tokens(switched['tokens'])} again with no cache read, each the "
+                        f"first call after one of {switched['switches']} account switch(es) and "
+                        f"within "
+                        f"the previous call's cache lifetime; the largest: "
+                        f"{str(switched['worst'])[:8]}",
+            "do this": "Finish a chat under the account it started with. Caches are isolated "
+                       "between organisations, so the first call after a switch writes the whole "
+                       "context again; switch between chats, not inside one.",
+            "session_id": str(switched["worst"]),
+            "goes to": "tab-session",
         })
 
     return out

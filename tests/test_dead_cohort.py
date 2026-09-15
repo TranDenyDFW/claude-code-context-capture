@@ -97,3 +97,18 @@ def test_a_live_cohort_is_unaffected(has_store):
         pytest.skip("this store lists no project cohort")
     assert len(store.restrict_to_cohort(store.session_rows(), project)) > 0
     assert store.scoped(None, "all", cohort=project)[0].startswith("AND session_id IN")
+
+
+def test_a_dead_account_cohort_is_empty_everywhere(has_store):
+    """The third kind, same rule: an account nobody has, and the signed-in account when nothing
+    is signed in, are empty populations at every site, never everything."""
+    from c4x.cli import extract
+    from c4x.tabs.sessions import sessions_table_layout
+    from c4x.ui.header import selector_options
+
+    dead = "account::nobody"
+    assert store.cohort_named(dead) is True
+    assert len(store.restrict_to_cohort(store.session_rows(), dead)) == 0
+    assert selector_options(dead) == []
+    assert extract.tables(sessions_table_layout(cohort=dead))[0]["rows"] == []
+    assert store.cohort_sessions("account::signed-in") == []

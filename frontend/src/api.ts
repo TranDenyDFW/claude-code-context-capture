@@ -525,6 +525,14 @@ export interface AccountsState {
   /** What Current shows the signed-in account: its own chats, or null when that cannot be told. */
   current_chats: number | null
   /**
+   * Where that number came from: harvest's tags (the account each chat was made under), the
+   * sharing backup's manifest (where each record sat before sharing), the directories themselves
+   * (nothing shared), or null when links exist and nothing can say.
+   */
+  current_source?: 'tags' | 'manifest' | 'directory' | null
+  /** Live records no tag names an account for; only meaningful with `current_source` tags. */
+  untagged?: number
+  /**
    * What says `intended`: the marker a switch wrote, the links on the disk when the marker is
    * gone (a reset of `data/` takes it; the junctions stay), or nothing.
    */
