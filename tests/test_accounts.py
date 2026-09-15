@@ -11,6 +11,7 @@ the link the platform's own instead, a junction on Windows and a directory symli
 every test runs on every leg.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -46,6 +47,10 @@ def machine(tmp_path, monkeypatch):
     (root / B / ORG_B / "scheduled-tasks.json").write_text('{"scheduledTasks": ["theirs"]}',
                                                            encoding="utf-8")
     monkeypatch.setattr(store, "sessions_roots", lambda: [str(root)])
+    # THE FIXTURE'S OWN CANDIDATES, so `_spellings` re-roots under them and never stats the
+    # developer's profile.
+    monkeypatch.setattr(store, "_claude_appdata_candidates",
+                        lambda: [str(tmp_path / "appdata" / "Claude")])
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "data" / "context.db")
     (tmp_path / "data").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(accounts, "app_running", lambda: False)
@@ -391,7 +396,7 @@ class TestCoveringAPairThatAppearsLater:
         accounts.share_all()
         (machine / A / ORG_C).mkdir(parents=True)
         answer = accounts.verify()
-        assert not answer["ok"] and any("not covered" in p for p in answer["problems"])
+        assert not answer["ok"] and any("not linked" in p for p in answer["problems"])
         assert [p["org"] for p in answer["uncovered"]] == [ORG_C]
         assert [p["org"] for p in accounts.state()["uncovered"]] == [ORG_C]
         accounts.reconcile()
@@ -406,3 +411,184 @@ class TestCoveringAPairThatAppearsLater:
         assert accounts.link_target(machine / A / ORG_C) is None, "and moves nothing"
         assert accounts.main(["--reconcile"]) == 0
         assert accounts.link_target(machine / A / ORG_C)
+
+
+class TestLinksTheKernelResolvesElsewhere:
+    """A junction's substitute name is a string the kernel resolves physically. Made from inside the
+    Store build's virtualised process tree with the virtual spelling, it lands somewhere else (a
+    leftover directory holding one record on the author's machine, nothing on the laptop), while
+    `link_target` reads the right string back. Identity is the only comparison that can see it."""
+
+    def _alias(self, tmp_path):
+        """Another spelling of the fixture's `Claude` directory, as the package spelling is."""
+        alias = tmp_path / "alias"
+        accounts._make_link(alias, tmp_path / "appdata" / "Claude")
+        return alias
+
+    def test_same_path_is_by_identity_not_by_string(self, machine, tmp_path):
+        alias = self._alias(tmp_path)
+        assert accounts._same_path(alias / "claude-code-sessions" / A / ORG_A, machine / A / ORG_A)
+        assert not accounts._same_path(machine / A / ORG_A, machine / B / ORG_B)
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        accounts._make_link(tmp_path / "dangling", gone)
+        gone.rmdir()
+        assert not accounts._same_path(tmp_path / "dangling", machine / A / ORG_A), "no raise"
+        assert accounts._same_path(tmp_path / "nowhere", tmp_path / "nowhere"), (
+            "strings when neither is there")
+
+    def test_resolves_to_follows_the_link(self, machine, tmp_path):
+        accounts._make_link(tmp_path / "healthy", machine / A / ORG_A)
+        assert accounts.resolves_to(tmp_path / "healthy", machine / A / ORG_A)
+        decoy = tmp_path / "decoy"
+        record(decoy, "d0")
+        accounts._make_link(tmp_path / "elsewhere", decoy)
+        assert not accounts.resolves_to(tmp_path / "elsewhere", machine / A / ORG_A)
+        assert accounts.resolves_to(tmp_path / "elsewhere", decoy)
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        accounts._make_link(tmp_path / "dangling", gone)
+        gone.rmdir()
+        assert not accounts.resolves_to(tmp_path / "dangling", machine / A / ORG_A)
+
+    def test_spellings_lists_every_identical_spelling_once(self, machine, tmp_path, monkeypatch):
+        from c4x import store
+        alias = self._alias(tmp_path)
+        monkeypatch.setattr(store, "_claude_appdata_candidates",
+                            lambda: [str(alias), str(tmp_path / "appdata" / "Claude")])
+        given = str(machine / A / ORG_A)
+        spellings = accounts._spellings(given)
+        assert len(spellings) == 2 and spellings[-1] == given
+        other = spellings[0]
+        assert other.startswith(str(alias)) and accounts._same_path(other, given)
+        assert len({os.path.normcase(s) for s in spellings}) == 2, "each spelling once"
+
+    def test_spellings_never_re_roots_by_a_partial_component(self, machine, tmp_path,
+                                                             monkeypatch):
+        from c4x import store
+        beta = tmp_path / "appdata" / "ClaudeBeta" / "claude-code-sessions"
+        beta.mkdir(parents=True)
+        monkeypatch.setattr(store, "_claude_appdata_candidates",
+                            lambda: [str(tmp_path / "appdata" / "ClaudeBeta"),
+                                     str(tmp_path / "appdata" / "Claude")])
+        assert accounts._spellings(machine / A / ORG_A) == [str(machine / A / ORG_A)]
+
+    def test_make_link_keeps_the_first_spelling_that_resolves(self, machine, tmp_path,
+                                                              monkeypatch):
+        real = str(machine / A / ORG_A)
+        bogus = str(tmp_path / "bogus" / "x")
+        monkeypatch.setattr(accounts, "_spellings", lambda path: [bogus, real])
+        written = accounts._make_link(tmp_path / "L", real)
+        assert written == real
+        assert accounts.resolves_to(tmp_path / "L", real)
+        assert os.path.normcase(accounts.link_target(tmp_path / "L")) == os.path.normcase(real)
+        monkeypatch.setattr(accounts, "_spellings", lambda path: [bogus, bogus + "2"])
+        with pytest.raises(RuntimeError, match="bogus"):
+            accounts._make_link(tmp_path / "M", real)
+        assert not os.path.lexists(tmp_path / "M"), "nothing left behind"
+
+    def test_remove_link_removes_the_link_and_only_the_link(self, machine, tmp_path):
+        accounts._make_link(tmp_path / "L", machine / A / ORG_A)
+        accounts._remove_link(tmp_path / "L")
+        assert not os.path.lexists(tmp_path / "L")
+        assert len(list((machine / A / ORG_A).glob("local_*.json"))) == 3, "the target is intact"
+        with pytest.raises(RuntimeError, match="not a link"):
+            accounts._remove_link(machine / A / ORG_A)
+        assert (machine / A / ORG_A).is_dir()
+        with pytest.raises(RuntimeError, match="not a link"):
+            accounts._remove_link(tmp_path / "nowhere")
+
+    def _repoint(self, machine, target):
+        accounts._remove_link(machine / B / ORG_B)
+        accounts._make_link(machine / B / ORG_B, target)
+
+    def test_a_link_that_points_elsewhere_is_reported_and_re_pointed(self, machine, tmp_path,
+                                                                    monkeypatch):
+        accounts.share_all()
+        decoy = tmp_path / "decoy"
+        record(decoy, "d0")
+        self._repoint(machine, decoy)
+        answer = accounts.verify()
+        assert not answer["ok"] and any("points elsewhere" in p for p in answer["problems"])
+        assert [p["why"] for p in answer["uncovered"]] == ["points elsewhere"]
+        state = accounts.state()
+        assert state["mode"] == accounts.MIXED and state["linked"] == 0
+        assert [(p["account"], p["why"]) for p in state["uncovered"]] == [(B, "points elsewhere")]
+        monkeypatch.setattr(accounts, "app_running", lambda: True)
+        refused = accounts.reconcile()
+        assert refused["ran"] is False
+        assert [p["why"] for p in refused["pending"]] == ["points elsewhere"]
+        assert accounts.resolves_to(machine / B / ORG_B, decoy), "nothing moved while the app runs"
+        monkeypatch.setattr(accounts, "app_running", lambda: False)
+        report = accounts.reconcile()
+        assert report["ran"] is True and report["restart_required"] is True
+        assert "re-pointed 1 link(s)" in report["why"]
+        done = report["roots"][0]["relinked"]
+        assert len(done) == 1 and done[0]["why"] == "points elsewhere" and not done[0]["restored"]
+        assert accounts.resolves_to(machine / B / ORG_B, machine / A / ORG_A)
+        assert sorted(p.name for p in (machine / B / ORG_B).glob("local_*.json")) == [
+            "local_a0.json", "local_a1.json", "local_a2.json", "local_b0.json", "local_d0.json"]
+        assert (Path(report["backup"]) / "through-link" / B[:8] / "local_d0.json").is_file()
+        assert [Path(c["to"]).name for c in done[0]["copied"]] == ["local_d0.json"]
+        assert (decoy / "local_d0.json").is_file(), "copied, never moved"
+        assert accounts.verify()["ok"]
+        after = accounts.state()
+        assert after["mode"] == accounts.ALL and after["uncovered"] == []
+        marker = json.loads(accounts.marker_path().read_text(encoding="utf-8"))
+        assert marker["by"] == "reconcile"
+        assert [Path(link["link"]) for link in marker["links"]] == [machine / B / ORG_B]
+
+    def test_a_colliding_name_seen_through_the_link_is_kept_in_the_backup_only(self, machine,
+                                                                              tmp_path):
+        accounts.share_all()
+        decoy = tmp_path / "decoy"
+        record(decoy, "a0", title="the stale one")
+        self._repoint(machine, decoy)
+        report = accounts.reconcile()
+        done = report["roots"][0]["relinked"][0]
+        assert done["copied"] == []
+        assert [Path(s["path"]).name for s in done["set_aside"]] == ["local_a0.json"]
+        assert "stale" not in (machine / A / ORG_A / "local_a0.json").read_text(encoding="utf-8")
+        kept = Path(report["backup"]) / "through-link" / B[:8] / "local_a0.json"
+        assert "stale" in kept.read_text(encoding="utf-8")
+
+    def test_a_dangling_link_is_re_pointed(self, machine, tmp_path):
+        accounts.share_all()
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        self._repoint(machine, gone)
+        gone.rmdir()
+        assert [p["why"] for p in accounts.state()["uncovered"]] == ["dangling"]
+        assert any("dangling" in p for p in accounts.verify()["problems"])
+        report = accounts.reconcile()
+        assert report["roots"][0]["relinked"][0]["why"] == "dangling"
+        assert accounts.resolves_to(machine / B / ORG_B, machine / A / ORG_A)
+        assert accounts.verify()["ok"]
+
+    def test_a_relink_that_fails_puts_the_old_link_back(self, machine, tmp_path, monkeypatch):
+        accounts.share_all()
+        decoy = tmp_path / "decoy"
+        record(decoy, "d0")
+        self._repoint(machine, decoy)
+
+        def refuse(link, target):
+            raise RuntimeError("no spelling resolves")
+        monkeypatch.setattr(accounts, "_make_link", refuse)
+        with pytest.raises(RuntimeError, match="put back"):
+            accounts.reconcile()
+        assert accounts.resolves_to(machine / B / ORG_B, decoy), "the old link is back"
+        assert os.path.normcase(accounts.link_target(machine / B / ORG_B)) == os.path.normcase(
+            str(decoy))
+
+    def test_a_dry_run_names_the_relink_and_moves_nothing(self, machine, tmp_path):
+        accounts.share_all()
+        decoy = tmp_path / "decoy"
+        record(decoy, "d0")
+        self._repoint(machine, decoy)
+        before = sorted(p.name for p in accounts.backups_dir().iterdir())
+        report = accounts.reconcile(dry_run=True)
+        assert report["ran"] is True and report["backup"] is None
+        assert report["roots"][0]["relinked"][0]["to"] == str(machine / A / ORG_A)
+        assert accounts.resolves_to(machine / B / ORG_B, decoy)
+        assert not (machine / A / ORG_A / "local_d0.json").exists()
+        assert sorted(p.name for p in accounts.backups_dir().iterdir()) == before

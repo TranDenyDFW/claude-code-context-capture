@@ -70,25 +70,127 @@ def supported():
     return True, ""
 
 
-def _make_link(link, target):
-    """Point `link` at `target`, using whatever this platform calls that. Raises on failure."""
+def _stat_fails(path) -> bool:
+    try:
+        os.stat(str(path))
+    except OSError:
+        return True
+    return False
+
+
+def resolves_to(link, target) -> bool:
+    """Does the kernel land `link` on `target`? By identity, never by the string it was made with.
+
+    `os.stat` follows a junction, so this compares the directory BEHIND the link with the target,
+    which `link_target()` cannot do: it reads the substitute name back, and that string opened
+    from inside the app's process tree is the one directory this code sees, whatever the kernel
+    does with it. False for a dangling link (the stat raises) and for an inaccessible directory
+    (Windows answers inode 0 there, and two of those would compare equal).
+    """
+    try:
+        a, b = os.stat(str(link)), os.stat(str(target))
+    except OSError:
+        return False
+    if not a.st_ino or not b.st_ino:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _spellings(path) -> list:
+    """Every spelling of `path` that opens the same directory, the package's own spelling first.
+
+    THE KERNEL RESOLVES A JUNCTION TARGET PHYSICALLY. The Store build of the desktop app
+    virtualises `%APPDATA%\\Claude` into its package's `LocalCache` for itself and for every process
+    it spawns, this server included: from inside, both spellings open one directory, `realpath`
+    answers the virtual one, and nothing in the process can tell them apart. Measured 2026-09-15 on
+    two machines: a junction made from inside with the virtual spelling as its substitute name
+    resolved to a leftover physical directory holding one record on one machine and to nothing on
+    the other, and every account but the shared one listed one chat, or none. So a target is
+    re-rooted under every candidate the store knows, each spelling kept only when it opens the same
+    directory (`store._identity`), the spelling under `Packages` first; off Windows, and on a
+    machine with one spelling, the answer is the path it was given.
+    """
+    from c4x import store
+    given = os.path.abspath(str(path))
+    key = store._identity(given)
+    found: list[str] = []
+    if key is not None:
+        roots = [os.path.join(c, "claude-code-sessions")
+                 for c in store._claude_appdata_candidates()]
+        for a in roots:
+            try:
+                rel = os.path.relpath(given, a)
+            except ValueError:
+                continue                    # another drive
+            if rel == os.curdir or rel.startswith(os.pardir):
+                continue                    # not under this root, whole components only
+            for b in roots:
+                other = os.path.join(b, rel)
+                if store._identity(other) == key:
+                    found.append(other)
+
+    def packaged(spelling):
+        return "packages" in os.path.normcase(spelling).replace("/", os.sep).lower().split(os.sep)
+
+    ordered = [s for s in found if packaged(s)] + [s for s in found if not packaged(s)] + [given]
+    out: list[str] = []
+    seen: set[str] = set()
+    for spelling in ordered:
+        norm = os.path.normcase(spelling)
+        if norm not in seen:
+            seen.add(norm)
+            out.append(spelling)
+    return out
+
+
+def _raw_link(link, spelling):
+    """Make `link` point at `spelling`, checking only that a link now exists. Raises on failure."""
     if platform.system() == "Windows":
         from c4x import proc
-        run = proc.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        run = proc.run(["cmd", "/c", "mklink", "/J", str(link), str(spelling)],
                        capture_output=True, text=True)
         if run.returncode != 0 or link_target(link) is None:
             raise RuntimeError((run.stderr or run.stdout).strip() or "mklink failed")
         return
-    os.symlink(str(target), str(link), target_is_directory=True)
+    os.symlink(str(spelling), str(link), target_is_directory=True)
+
+
+def _make_link(link, target) -> str:
+    """Point `link` at `target` so that the kernel lands on it. Returns the spelling written.
+
+    Each spelling `_spellings` offers is written and then checked by identity (`resolves_to`); a
+    link that was made and does not resolve is removed and the next spelling tried, so nothing is
+    left behind. A spelling that cannot be written at all raises at once.
+    """
+    target = os.path.abspath(str(target))
+    tried: list[str] = []
+    for spelling in _spellings(target):
+        tried.append(spelling)
+        _raw_link(link, spelling)
+        if resolves_to(link, target):
+            return spelling
+        _remove_link(link)
+    raise RuntimeError(f"no spelling of {target} resolves through {link}; tried {tried}")
 
 
 def _remove_link(link):
-    """Remove the LINK and never what it points at, which is what `rmdir` does to a junction."""
-    if platform.system() == "Windows":
-        from c4x import proc
-        proc.run(["cmd", "/c", "rmdir", str(link)], capture_output=True, text=True)
-        return
-    os.unlink(link)
+    """Remove the LINK and never what it points at. Raises when it is not a link or stays.
+
+    `os.unlink` removes a directory junction on Windows (CPython routes a directory reparse point
+    to `RemoveDirectoryW`, and its own `test_unlink_removes_junction` says so) and a symlink
+    elsewhere, and raises when it cannot; the `rmdir` this used to spawn discarded its exit code,
+    and a removal that silently failed is the one path by which `share_current` would have moved
+    records THROUGH the junction into the directory behind it.
+    """
+    link = str(link)
+    if link_target(link) is None:
+        raise RuntimeError(f"{link} is not a link; nothing removed")
+    try:
+        os.unlink(link)
+    except OSError as exc:
+        raise RuntimeError(f"could not remove the link {link}: {exc}") from exc
+    if os.path.lexists(link):
+        raise RuntimeError(f"the link {link} is still there after its removal")
 
 
 def app_running():
@@ -155,12 +257,18 @@ def pairs_on(root):
 
 
 def _same_path(a, b) -> bool:
-    """Two spellings of one directory: a junction's target is read back in whatever form the
-    platform gives it, which need not be the string the pair list holds."""
+    """Two spellings of one directory, by identity: a junction's target is read back in whatever
+    form the platform gives it, and the Store build's virtual spelling and its package spelling
+    open one directory. Strings are compared only when a side cannot be stat'ed, or when Windows
+    answers inode 0 (an inaccessible directory; two of those would otherwise compare equal)."""
+    a, b = str(a), str(b)
     try:
-        return Path(str(a)).resolve() == Path(str(b)).resolve()
+        sa, sb = os.stat(a), os.stat(b)
     except OSError:
-        return str(a) == str(b)
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+    if sa.st_ino and sb.st_ino:
+        return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
 def own_records(pair, pairs, owners):
@@ -218,9 +326,17 @@ def state():
     roots = [{"root": r, "pairs": pairs_on(r)} for r in store.sessions_roots()]
     every = [p for r in roots for p in r["pairs"]]
     linked = [p for p in every if p["link_to"]]
+    # ONLY A LINK THE KERNEL LANDS ON THE SHARED DIRECTORY COUNTS AS SHARING. One that resolves
+    # elsewhere (the Store build's virtual spelling, see `_spellings`) reads as MIXED, and the
+    # `uncovered` list below says which and why.
+    sharing: list = []
+    for r in roots:
+        head = canonical_pair(r["pairs"])
+        sharing += [p for p in r["pairs"]
+                    if p["link_to"] and head and resolves_to(p["path"], head["path"])]
     mode = CURRENT
     if linked:
-        mode = ALL if len(linked) == len([p for p in every if p["records"] or p["link_to"]]) - 1 \
+        mode = ALL if len(sharing) == len([p for p in every if p["records"] or p["link_to"]]) - 1 \
             else MIXED
     owners: dict | None = {}
     if linked:
@@ -235,16 +351,14 @@ def state():
     meant = intent(linked=bool(linked))
     # THE PAIRS SHARING DOES NOT COVER YET, while sharing is meant: the ones the app created
     # since. The page says how many, and `reconcile` folds them in when Claude next closes.
-    uncovered = ([{"root": p["root"], "account": p["account"], "org": p["org"],
-                   "path": p["path"], "records": p["records"]}
-                  for r in roots for p in uncovered_pairs(r["pairs"])]
+    uncovered = ([_brief(p) for r in roots for p in uncovered_pairs(r["pairs"])]
                  if meant["mode"] == ALL else [])
     return {
         "supported": ok, "why_not": why, "app_running": app_running(),
         # WHAT WAS ASKED FOR, beside what is on disk. They disagree when a migration has undone the
         # sharing, and that difference is the whole of what `verify` reports.
         "mode": mode, "intended": meant["mode"], "intended_source": meant["source"],
-        "roots": roots, "pairs": len(every), "linked": len(linked),
+        "roots": roots, "pairs": len(every), "linked": len(sharing),
         "chats_visible": sum(p["records"] for p in every if not p["link_to"]),
         "signed_in": signed, "current_chats": current, "uncovered": uncovered,
     }
@@ -388,23 +502,46 @@ def canonical_pair(pairs):
     if not real:
         return None
     targets = [p["link_to"] for p in pairs if p["link_to"]]
-    pointed = [p for p in real if any(_same_path(p["path"], t) for t in targets)]
+    # EVERY SPELLING OF A TARGET, so the CLI run from a plain terminal (where the virtual spelling
+    # opens something else) picks the same head the server does.
+    pointed = [p for p in real
+               if any(_same_path(p["path"], s) for t in targets for s in _spellings(t))]
     return max(pointed or real, key=lambda p: (p["records"], p["path"]))
 
 
-def uncovered_pairs(pairs) -> list:
-    """The real pairs beside the canonical one on a root: what sharing does not cover yet.
+NOT_LINKED, ELSEWHERE, DANGLING = "not linked", "points elsewhere", "dangling"
 
-    With or without records. The app creates `<account>/<org>` when an account signs in with
-    that organisation, before any chat is written, and an empty directory it holds open is
-    still a directory it reads instead of the shared one. Empty when the root has one pair.
+
+def uncovered_pairs(pairs) -> list:
+    """The pairs on a root that do not read the shared directory, each with a `why`.
+
+    `not linked`: a real pair beside the canonical one, with or without records (the app creates
+    `<account>/<org>` when an account signs in with that organisation, before any chat is
+    written, and an empty directory it holds open is still a directory it reads instead of the
+    shared one). `points elsewhere`: a link the kernel lands somewhere other than the shared
+    directory (a substitute name in the Store build's virtual spelling, see `_spellings`).
+    `dangling`: a link whose target is not there. Empty when the root has one pair.
     """
     if len(pairs) < 2:
         return []
     head = canonical_pair(pairs)
     if head is None:
         return []
-    return [p for p in pairs if not p["link_to"] and not _same_path(p["path"], head["path"])]
+    out = []
+    for p in pairs:
+        if p["link_to"]:
+            if resolves_to(p["path"], head["path"]):
+                continue
+            out.append(dict(p, why=DANGLING if _stat_fails(p["path"]) else ELSEWHERE))
+        elif not _same_path(p["path"], head["path"]):
+            out.append(dict(p, why=NOT_LINKED))
+    return out
+
+
+def _brief(p) -> dict:
+    """A pair as the page and the reports name it."""
+    return {"root": p["root"], "account": p["account"], "org": p["org"], "path": p["path"],
+            "records": p["records"], "why": p.get("why", NOT_LINKED)}
 
 
 def _fold_pair(pair, head, backup, dry_run=False) -> dict:
@@ -443,10 +580,61 @@ def _fold_pair(pair, head, backup, dry_run=False) -> dict:
             f"nothing else was changed. The backup is at {backup}.")
     here.rmdir()
     try:
-        _make_link(here, head["path"])
+        written = _make_link(here, head["path"])
     except (OSError, RuntimeError) as exc:
         raise RuntimeError(f"could not link {here}: {exc}. The backup is at {backup}.") from exc
-    out["linked"].append({"link": pair["path"], "to": head["path"]})
+    out["linked"].append({"link": pair["path"], "to": written})
+    return out
+
+
+def _relink_pair(pair, head, backup, dry_run=False) -> dict:
+    """Point a link that resolves elsewhere, or nowhere, at the head again.
+
+    WHAT WAS VISIBLE THROUGH IT IS KEPT FIRST: every file the link shows is copied into
+    `<backup>/through-link/<account8>/`, and a record whose name the head does not hold is copied
+    into the head; a colliding name is reported, its copy in the backup being the one kept. Copied,
+    never moved: the directory behind a mispointed link is not this code's, and from inside the
+    app's process tree it has no name of its own. Then the old link is removed and a new one made;
+    a make that fails puts the old link back with its old substitute name and raises, since a pair
+    with no directory at all is the one outcome worse than a mispointed one: the app recreates it
+    as a real directory at the next sign-in and that account starts a private list.
+    """
+    here = Path(pair["path"])
+    was = link_target(here)
+    out: dict[str, Any] = {"link": pair["path"], "was": was, "to": None, "why": pair.get("why"),
+                           "copied": [], "set_aside": [], "restored": False}
+    try:
+        visible = [f for f in sorted(here.iterdir()) if f.is_file()]
+    except OSError:
+        visible = []
+    kept = Path(str(backup)) / "through-link" / pair["account"][:8]
+    for f in visible:
+        target = Path(head["path"]) / f.name
+        if target.exists():
+            out["set_aside"].append({"path": str(f), "kept": str(kept / f.name),
+                                     "why": "a file of that name is already shared"})
+            continue
+        out["copied"].append({"from": str(f), "to": str(target)})
+    if dry_run:
+        out["to"] = head["path"]
+        return out
+    if visible:
+        kept.mkdir(parents=True, exist_ok=True)
+        for f in visible:
+            shutil.copy2(str(f), str(kept / f.name))
+        for c in out["copied"]:
+            shutil.copy2(c["from"], c["to"])
+    _remove_link(here)
+    try:
+        out["to"] = _make_link(here, head["path"])
+    except (OSError, RuntimeError) as exc:
+        if was is not None and not os.path.lexists(here):
+            _raw_link(here, was)
+            out["restored"] = True
+        raise RuntimeError(
+            f"could not re-point {here} at {head['path']}: {exc}; "
+            + (f"the old link to {was} was put back. " if out["restored"] else "")
+            + f"The backup is at {backup}.") from exc
     return out
 
 
@@ -506,13 +694,19 @@ def reconcile(dry_run=False) -> dict:
     whose manifest says which record came from where; a machine with links and no manifest gets
     a manifest even with nothing to fold, since `share_current` and the Current count read it;
     the marker is written back every time, so the page stops saying Current over a shared disk.
+    A link the kernel lands elsewhere, or nowhere (`uncovered_pairs`: a substitute name in the
+    Store build's virtual spelling, or a target that is gone), is re-pointed at the shared
+    directory (`_relink_pair`), what was visible through it copied into the backup first.
     Refused, and nothing moved, while the app runs: the report names the pending pairs instead.
     """
     from c4x import store
     ok, why = supported()
     if not ok:
         raise RuntimeError(why)
-    roots = [str(r) for r in store.sessions_roots()]
+    # KEYED AS `pairs_on` SPELLS ITS ROOT (`str(Path(root))`): an override with a trailing
+    # separator or forward slashes would otherwise match no pair and "cover" nothing while
+    # reporting that it had.
+    roots = [str(Path(r)) for r in store.sessions_roots()]
     pairs_by_root = {r: pairs_on(r) for r in roots}
     linked_any = any(p["link_to"] for ps in pairs_by_root.values() for p in ps)
     meant = intent(linked=linked_any)
@@ -525,8 +719,7 @@ def reconcile(dry_run=False) -> dict:
         report["state"] = state()
         return report
     pending = [p for ps in pairs_by_root.values() for p in uncovered_pairs(ps)]
-    report["pending"] = [{"root": p["root"], "account": p["account"], "org": p["org"],
-                          "path": p["path"], "records": p["records"]} for p in pending]
+    report["pending"] = [_brief(p) for p in pending]
     if app_running():
         report["app_running"] = True
         report["why"] = (
@@ -547,21 +740,31 @@ def reconcile(dry_run=False) -> dict:
         moved: list = []
         aside: list = []
         linked: list = []
+        relinked: list = []
         for pair in todo:
-            folded = _fold_pair(pair, head, report["backup"], dry_run)
-            moved += folded["moved"]
-            aside += folded["set_aside"]
-            linked += folded["linked"]
-        report["roots"].append({"root": root, "canonical": head["path"],
-                                "moved": moved, "set_aside": aside, "linked": linked})
+            if pair["why"] == NOT_LINKED:
+                folded = _fold_pair(pair, head, report["backup"], dry_run)
+                moved += folded["moved"]
+                aside += folded["set_aside"]
+                linked += folded["linked"]
+            else:
+                done = _relink_pair(pair, head, report["backup"], dry_run)
+                aside += done["set_aside"]
+                relinked.append(done)
+        report["roots"].append({"root": root, "canonical": head["path"], "moved": moved,
+                                "set_aside": aside, "linked": linked, "relinked": relinked})
     if not dry_run:
         links = [{"link": p["path"], "to": p["link_to"]}
                  for r in roots for p in pairs_on(r) if p["link_to"]]
         _write_marker(links, by="reconcile")
         report["marker_written"] = True
     report["ran"] = True
-    report["why"] = (f"covered {len(pending)} pair(s)" if pending
-                     else "nothing to cover; the marker and the manifest are in place")
+    folded_n = len([p for p in pending if p["why"] == NOT_LINKED])
+    relinked_n = len(pending) - folded_n
+    report["why"] = ((f"covered {folded_n} pair(s)" if folded_n else "")
+                     + ("; " if folded_n and relinked_n else "")
+                     + (f"re-pointed {relinked_n} link(s)" if relinked_n else "")
+                     or "nothing to cover; the marker and the manifest are in place")
     report["restart_required"] = bool(pending) and not dry_run
     report["pending"] = []
     report["state"] = state()
@@ -644,7 +847,10 @@ def verify():
             out["problems"].append(
                 f"{here} was linked to {link['to']} and is a plain directory now, so that account "
                 "is back to its own chats; an update's migration does exactly this")
-        elif Path(target) != Path(link["to"]):
+        elif _stat_fails(here):
+            out["ok"] = False
+            out["problems"].append(f"{here} points at {target}, which is not there (dangling)")
+        elif not _same_path(target, link["to"]):
             out["ok"] = False
             out["problems"].append(f"{here} points at {target}, not at {link['to']}")
     for root in store.sessions_roots():
@@ -653,19 +859,21 @@ def verify():
         # A PAIR SHARING DOES NOT COVER, records or not: the app creates the directory at sign-in
         # and reads it instead of the shared one from then on.
         missing = uncovered_pairs(pairs) if intended == ALL else []
-        if missing:
+        reported = set()
+        for p in missing:
             out["ok"] = False
-            out["uncovered"] += [{"root": p["root"], "account": p["account"], "org": p["org"],
-                                  "path": p["path"], "records": p["records"]} for p in missing]
+            out["uncovered"].append(_brief(p))
+            reported.add(p["path"])
             out["problems"].append(
-                f"{root}: {len(missing)} pair(s) beside the shared directory are not covered, so "
-                "that account reads a list of its own; reconcile covers them when Claude next "
-                "closes")
+                f"{p['path']}: {p['why']}, so that account does not read the shared list; "
+                "reconcile covers it when Claude next closes")
         if intended == CURRENT and linked:
             out["ok"] = False
             out["problems"].append(
                 f"{root}: sharing is off and {len(linked)} pair(s) are still links")
         for pair in linked:
+            if pair["path"] in reported:
+                continue                    # said once above, with its why
             names = sorted(p.name for p in Path(pair["path"]).glob(f"{RECORD}*.json"))
             theirs = sorted(p.name for p in Path(pair["link_to"]).glob(f"{RECORD}*.json"))
             if names != theirs:

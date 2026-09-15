@@ -541,7 +541,7 @@ def _check_sharing(root: str, pair_dir: Path) -> None:
     if accounts.link_target(pair_dir) is not None:
         return
     head = accounts.canonical_pair(accounts.pairs_on(root))
-    if head and Path(head["path"]).resolve() == pair_dir.resolve():
+    if head and accounts._same_path(head["path"], pair_dir):
         return
     raise SharingMismatch(
         "sharing is on but the signed-in pair is not part of it; turn sharing off and on again, "
