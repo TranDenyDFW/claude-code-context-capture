@@ -86,6 +86,24 @@ removed and nothing here said so.
   restart note and turns amber after a switch; the row's sentence is gone; the numbers refresh on
   focus and after any change. Stop C4X sits behind a divider, Adopted Chats (renamed) after
   Restart C4X behind another.
+- **Sharing keeps itself whole across sign-ins.** Measured on the author's machine: eight of nine
+  account pairs were junctions to one directory from an earlier install, with no marker and no
+  backup beside the store; Account #1 signed in with a newer organisation, the app gave it a real
+  directory outside the sharing and fifteen chats of its own, and at the next account switch the
+  app folded that directory into the shared one, so Account #1 came back to nothing while
+  Account #2 listed everything. `accounts.reconcile()` folds every pair the app created since
+  sharing into the shared directory (the same move `share_all` makes, after a backup whose
+  manifest files each record under its pair) and writes the marker back with every link; the
+  watchdog's stop runs it first (`reconcile_then_stop`, the one moment the server is alive with
+  the app closed), the server's start runs it when the app is not open (`reconcile_at_start`),
+  and `POST /api/accounts/reconcile` runs it on demand (409 with the pending pairs while Claude
+  is open). Intent is read from the links on disk when the marker is gone (`intent()`,
+  `intended_source` on `/api/accounts`), `canonical_pair` keeps the pair the links point at,
+  the backup walks with junctions pruned and stamps microseconds, `state()` lists `uncovered`
+  pairs and `verify()` reports them, and `python -m c4x.accounts --reconcile [--dry-run]` does
+  it from a terminal. The header, under All, names such pairs ("N account pair(s) not yet
+  covered; covered when Claude next closes", paths on hover) with a **Cover now** button that is
+  disabled while Claude runs.
 - **The header, second pass.** A folder holding one chat reads as that chat's title (the frame's,
   the same name the Sessions list shows) and a folder holding several by its name, the folder
   appended only where two rows would read the same; the "Population" word is gone (the label

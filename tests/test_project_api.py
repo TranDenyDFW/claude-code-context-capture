@@ -363,7 +363,50 @@ class TestTheAccountSwitch:
         assert answer.status_code == 409
         assert "Quit Claude" in str(answer.json()["detail"]["error"])
 
-    def test_verify_answers_on_a_machine_that_never_shared(self, client):
+    def test_verify_answers_on_a_machine_that_never_shared(self, client, tmp_path, monkeypatch):
+        # A ROOT OF ITS OWN, empty. Intent is read from the disk when the marker is absent, and
+        # the machine this runs on may well have shared: this test's premise is a machine that
+        # never did, so it gets one.
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(tmp_path / "roots")])
         answer = client.get("/api/accounts/verify")
         assert answer.status_code == 200
         assert answer.json()["intended"] == "current"
+
+    def test_the_state_says_where_the_intent_came_from_and_what_is_uncovered(self, client):
+        body = client.get("/api/accounts").json()
+        assert body["intended_source"] in ("marker", "disk", "none")
+        assert isinstance(body["uncovered"], list)
+
+    def test_cover_now_refuses_without_writes(self, client, monkeypatch):
+        monkeypatch.setenv("C4X_NO_WRITES", "1")
+        answer = client.post("/api/accounts/reconcile")
+        assert answer.status_code in (403, 409, 503), answer.status_code
+
+    def test_cover_now_is_a_409_with_the_pending_pairs_while_the_app_runs(self, client,
+                                                                          monkeypatch):
+        from c4x import accounts
+        pending = [{"root": "R", "account": "a", "org": "o", "path": "R/a/o", "records": 2}]
+        monkeypatch.setattr(accounts, "reconcile", lambda: {
+            "ran": False, "app_running": True, "pending": pending,
+            "why": "Claude is running, and a directory it has open cannot be moved. Quit Claude "
+                   "and try again; nothing has been changed."})
+        answer = client.post("/api/accounts/reconcile")
+        assert answer.status_code == 409
+        detail = answer.json()["detail"]
+        assert "Quit Claude" in detail["error"] and detail["pending"] == pending
+
+    def test_cover_now_returns_the_report(self, client, monkeypatch):
+        from c4x import accounts
+        report = {"ran": True, "app_running": False, "pending": [], "why": "covered 1 pair(s)",
+                  "roots": [], "backup": "B", "marker_written": True, "restart_required": True}
+        monkeypatch.setattr(accounts, "reconcile", lambda: report)
+        answer = client.post("/api/accounts/reconcile")
+        assert answer.status_code == 200 and answer.json() == report
+
+    def test_cover_now_with_nothing_to_do_is_a_200_that_says_so(self, client, monkeypatch):
+        from c4x import accounts
+        monkeypatch.setattr(accounts, "reconcile", lambda: {
+            "ran": False, "app_running": True, "pending": [],
+            "why": "Claude is running; nothing to cover"})
+        answer = client.post("/api/accounts/reconcile")
+        assert answer.status_code == 200 and answer.json()["ran"] is False

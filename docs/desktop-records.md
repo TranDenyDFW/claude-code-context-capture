@@ -163,8 +163,41 @@ it that are still there, plus, for the directory the others point at, every reco
 never saw (written since sharing began, which `share_current` leaves in place). With links but
 no manifest (a junction made by hand) the answer is None, never a guess. The header shows both
 numbers on hover of All and Current.
-`python -m c4x.accounts [--state | --all | --current | --verify]`, or the Account switch in the
-page's header.
+`python -m c4x.accounts [--state | --all | --current | --reconcile | --verify]`, or the Account
+switch in the page's header.
+
+**A pair the app creates later is covered when Claude next closes.** A junction covers the pair it
+was made for. When an account signs in with an organisation the junctions never named, the app
+creates `<account>/<org>` as a real directory beside the shared one, and that account reads its
+own list from then on. Measured on the author's machine on 2026-09-15: Account #1 signed in with a
+newer organisation, wrote fifteen chats into a directory of its own, and at the next account
+switch the app moved those fifteen files into the directory the junctions point at and removed
+the directory; Account #2 saw them, Account #1 came back to nothing. c4x had written nothing: it
+cannot move a directory the app holds open, and neither `share_all` nor `share_current` runs
+while the app is up. So `reconcile()` runs at the one moment the server is alive with the app
+closed: the watchdog's stop, sixty seconds after the last Claude process (`reconcile_then_stop`),
+and the server's start when the app is not running (`reconcile_at_start`), and on demand through
+`POST /api/accounts/reconcile` (the header's **Cover now**, which the server refuses with 409
+while Claude is open). Under intent ALL it folds every real pair beside the canonical one into it
+(`_fold_pair`, the same move `share_all` makes), after a backup whose manifest files each record
+under the pair it came from, and writes the marker back with every link. `state()` lists such
+pairs as `uncovered`, with or without records (the app creates the directory before the first
+chat), and `verify()` reports them. A pair the app creates while it is open stays private to that
+account until it is closed once; the fifteen chats are never lost, only listed under the shared
+directory once the app has moved them there.
+
+**Intent is read from the disk when the marker is gone.** The marker lives beside the store, and a
+reset of `data/` takes it while the junctions stay. Measured: eight of nine pairs linked, no
+marker, and the page said Current while every account read one list. Links are not made by
+accident, so with no marker any linked pair means ALL (`intent()` answers `{"mode", "source"}`,
+`source` being `marker`, `disk` or `none`, and `/api/accounts` carries it as `intended_source`);
+the next reconcile writes the marker back (`by: reconcile`) and takes a manifest if none exists, so
+`current_chats` becomes a number again. `canonical_pair` prefers the pair the links already point
+at over the fullest one: a new real pair can hold more records than the shared directory on a
+quiet day, and folding the shared directory into it would move the one list every account reads.
+The backup walks with links pruned (`os.walk`, not `rglob`, which follows a junction and copied
+the shared directory once per link, filing every record under the pair walked last), and its
+stamp carries microseconds so `share_all` and `reconcile` within one second cannot collide.
 
 **What was measured before it was written**, because the app defends itself against link tricks
 and most of those defences would have made this impossible. Its own reader refuses a file that is

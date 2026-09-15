@@ -1734,6 +1734,26 @@ def accounts_sharing(body: dict):
         raise HTTPException(status_code=409, detail={"error": str(exc), "mode": mode}) from exc
 
 
+@api.post("/api/accounts/reconcile")
+def accounts_reconcile():
+    """Cover now: fold the pairs the app created since sharing into the shared directory.
+
+    The same fold the watchdog runs when Claude closes, on demand. 409 with the pending pairs
+    while Claude is open (a directory it holds cannot be moved; the page says to quit it first),
+    the report otherwise; `ran` is false with `why` when sharing is off.
+    """
+    from c4x import accounts
+    _require_writes()
+    try:
+        report = accounts.reconcile()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+    if report["app_running"] and report["pending"]:
+        raise HTTPException(status_code=409,
+                            detail={"error": report["why"], "pending": report["pending"]})
+    return report
+
+
 @api.get("/api/accounts/verify")
 def accounts_verify():
     """Is the sharing still in place? An app update can migrate these directories away."""

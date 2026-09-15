@@ -1,9 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
-import { AccountSharing, QUIT_NOTE, RESTART_NOTE } from './AccountSharing'
+import { AccountSharing, COVER_HOVER, COVER_NOTE, QUIT_NOTE, RESTART_NOTE } from './AccountSharing'
 import { api, ApiError } from '@/api'
-import type { AccountsState } from '@/api'
+import type { AccountPair, AccountsState } from '@/api'
 
 /**
  * The toggle that decides whether every account signed into this machine reads one chat list.
@@ -28,7 +28,17 @@ function state(over: Partial<AccountsState> = {}): AccountsState {
     linked: 0,
     chats_visible: 187,
     current_chats: 12,
+    intended_source: 'none',
+    uncovered: [],
     ...over,
+  }
+}
+
+function pair(over: Partial<AccountPair> = {}): AccountPair {
+  return {
+    root: 'C:\\r', account: 'ba7ccf25-0000-4000-8000-000000000000',
+    org: 'ebefad6b-0000-4000-8000-000000000000',
+    path: 'C:\\r\\ba7ccf25\\ebefad6b', link_to: null, records: 15, ...over,
   }
 }
 
@@ -157,5 +167,87 @@ describe('AccountSharing', () => {
       focusManager.setFocused(true)
     })
     await waitFor(() => expect(read).toHaveBeenCalledTimes(3))
+  })
+})
+
+describe('the pairs sharing does not cover yet', () => {
+  it('says nothing under Current, and nothing under All with every pair covered', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'current', uncovered: [pair()] }))
+    draw()
+    await screen.findByRole('button', { name: 'All' })
+    expect(screen.queryByText(/not yet covered/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Cover now' })).toBeNull()
+  })
+
+  it('names the count and when it is covered, with the paths on hover', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', mode: 'mixed', uncovered: [pair(), pair({ path: 'C:\\r\\x\\y' })] }))
+    draw()
+    const line = await screen.findByText(/2 account pairs not yet covered/)
+    expect(line.textContent).toContain(COVER_NOTE)
+    const row = line.closest('p') as HTMLElement
+    expect(row.getAttribute('data-uncovered')).toBe('2')
+    expect(row.getAttribute('title')).toContain(COVER_HOVER)
+    expect(row.getAttribute('title')).toContain('C:\\r\\x\\y')
+    const button = screen.getByRole('button', { name: 'Cover now' }) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+  })
+
+  it('cannot cover while Claude is open, and says so on the button', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', app_running: true, uncovered: [pair()] }))
+    const reconcile = vi.spyOn(api.accounts, 'reconcile')
+    draw()
+    expect(await screen.findByText(/1 account pair not yet covered/)).not.toBeNull()
+    const button = screen.getByRole('button', { name: 'Cover now' }) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(button.getAttribute('title')).toContain('Quit Claude first')
+    fireEvent.click(button)
+    expect(reconcile).not.toHaveBeenCalled()
+  })
+
+  it('is disabled on a server that answers no writes', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', uncovered: [pair()] }))
+    draw({ writesEnabled: false })
+    const button = (await screen.findByRole('button', { name: 'Cover now' })) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(button.getAttribute('title')).toContain('without writes')
+  })
+
+  it('covers on a click, replaces the state and marks the restart', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', uncovered: [pair()] }))
+    const after = state({ intended: 'all', mode: 'all', linked: 2, uncovered: [],
+      intended_source: 'marker' })
+    const reconcile = vi.spyOn(api.accounts, 'reconcile').mockResolvedValue({
+      ran: true, why: 'covered 1 pair(s)', app_running: false, pending: [], backup: 'C:\\b\\1',
+      marker_written: true, restart_required: true, state: after,
+    })
+    const onChanged = vi.fn()
+    draw({ onChanged })
+    fireEvent.click(await screen.findByRole('button', { name: 'Cover now' }))
+    await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.queryByText(/not yet covered/)).toBeNull())
+    const group = screen.getByRole('group', { name: 'Account' })
+    expect(group.getAttribute('data-restart')).toBe('true')
+    expect(onChanged).toHaveBeenCalled()
+  })
+
+  it('shows the sentence a 409 carries', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', uncovered: [pair()] }))
+    vi.spyOn(api.accounts, 'reconcile').mockRejectedValue(
+      new ApiError('409 from /api/accounts/reconcile', 409, {
+        error: 'Claude is running, and a directory it has open cannot be moved. Quit Claude and '
+          + 'try again; nothing has been changed.',
+        pending: [pair()],
+      }),
+    )
+    draw()
+    fireEvent.click(await screen.findByRole('button', { name: 'Cover now' }))
+    expect(await screen.findByText(/Quit Claude and try again/)).not.toBeNull()
+    expect(screen.getByText(/not yet covered/)).not.toBeNull()
   })
 })
