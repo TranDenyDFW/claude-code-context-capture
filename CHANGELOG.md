@@ -100,11 +100,13 @@ removed and nothing here said so.
   resident context, within that call's own cache lifetime, so an expiry or a compaction is not
   counted): caches are isolated between organisations, so finish a chat under the account it
   started with. `docs/desktop-records.md` section 6 carries the rules and the measurements.
-- **The README is short, for the beta.** What it is, that it is beta and Windows first, the
-  install, the first three commands, the dashboard in a few sentences with its tabs, privacy in
-  five short points, and links. Every paragraph of detail it used to carry (how the dashboard
-  starts and stops, the header, the Account switch and the junction rule, Adopt and review runs,
-  the exe build, the tabs' fine print, moving a project) moved verbatim to `docs/dashboard.md`.
+- **The README says what c4x does for a person.** Use another account when one runs out and
+  keep every chat; get back the chats the app lost; move a project to another machine; search
+  every chat; a warning before a compaction. Then install, the account switch in plain words
+  (with a header screenshot from the test laptop), Adopt, the two project commands (the export
+  from one machine imported on another was tested end to end before this was written), what it
+  keeps, and links. No token statistics: those live on the dashboard and in `docs/`. Every
+  paragraph of detail the README used to carry moved verbatim to `docs/dashboard.md` first.
 - **Junctions are made with the spelling the kernel resolves to the shared directory, and
   re-pointed when they land elsewhere.** Measured on both machines after the reconcile shipped:
   the Claude app is the Store (MSIX) build, and for it and every process it spawns, the c4x
