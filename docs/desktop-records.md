@@ -153,6 +153,16 @@ the app's own list is cut into slices. The other per-account stores beside the r
 `c4x/accounts.py` makes every pair on a records root resolve to ONE of them, with a junction on
 Windows and a directory symlink elsewhere, so whichever account is signed in reads the same chats,
 and puts it back on request.
+
+**What each side shows, as numbers.** `state()` reports `chats_visible` (what All shows: every
+record in the directories that hold files) and, per pair, `own`, with `current_chats` for the
+signed-in pair (`appstate.desktop_pair`): what Current would show. On an unshared machine that
+is the pair's own file count. Under sharing the files sit in one directory and only the newest
+backup's manifest says whose each was, so a pair's own are the records the manifest filed under
+it that are still there, plus, for the directory the others point at, every record the manifest
+never saw (written since sharing began, which `share_current` leaves in place). With links but
+no manifest (a junction made by hand) the answer is None, never a guess. The header shows both
+numbers on hover of All and Current.
 `python -m c4x.accounts [--state | --all | --current | --verify]`, or the Account switch in the
 page's header.
 
@@ -292,6 +302,27 @@ with `install --no-review-sweep` (the receipt's `reviewSweep`, carried into the 
 `--no-review-sweep`, `--review-sweep` undoes it) or `C4X_NO_REVIEW_SWEEP=1`. The report lands in
 `data/raw/.review-sweep` and in `dashboard.log`; `GET /api/adopt/sweep` reads it and the drawer
 shows it as one line. The drawer keeps its button for a sweep without a restart.
+
+**What the app writes on a delete, measured.** Twenty chats deleted by hand in the app on the
+laptop on 2026-09-15: each delete removes the record and writes `deleted_<record uuid>` beside
+it, 13 ASCII digits, the delete time in epoch milliseconds. Twenty more markers named records
+that never existed locally: the cloud-side ghosts in "Other" that were deleted at the same time
+get one too. The four records the sweep had removed got no marker: the app marks its own deletes
+only. The transcript under `~/.claude/projects` is left alone, which is why a deleted chat stayed
+listed here: the store knew the chat by its transcript and never knew the record's uuid.
+
+**A chat deleted in Claude is hidden everywhere** (the user's choice). Harvest keeps
+`desktop_records`: every record it sees, uuid and cliSessionId together, plus the records c4x
+wrote, seeded from `data/adopted-records.json` so a record the app deleted before the table
+existed still maps (19 of the laptop's 20). A record that is gone with a marker beside it is
+stamped `deleted_at` from the marker; one gone without is stamped `gone_at` only (c4x took it
+back, a move, a reinstall) and hides nothing; a record that returns has both stamps cleared. The
+store hides a deleted chat with every session of its chain, through one subquery the session
+frame and the Summary's count share (`hidden_sessions_sql`), so it leaves the Sessions list, the
+pickers, the cohorts and the counts; Adopt never offers it again and counts it in the drawer; a
+ledger entry whose record the app deleted is no record of c4x's. A raw session id still opens the
+chat page. The one limit: a chat whose record the app itself wrote and deleted before harvest
+ever saw it cannot be mapped and stays listed (the laptop has one).
 
 **"No folder" is the app's rule, not a defect.** Fifty of the laptop's 82 adopted sessions had a
 scratch-workspace working directory (`AppData\Roaming\Claude\scratch-workspaces\<account>\

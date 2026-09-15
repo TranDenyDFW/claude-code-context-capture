@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { AccountSharing } from './AccountSharing'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
+import { AccountSharing, RESTART_NOTE } from './AccountSharing'
 import { api, ApiError } from '@/api'
 import type { AccountsState } from '@/api'
 
@@ -9,7 +10,8 @@ import type { AccountsState } from '@/api'
  *
  * The cases that matter are the ones that stop it: one account has nothing to share, a server that
  * refuses writes cannot move directories, and Claude being open is a refusal the reader has to be
- * able to act on rather than a failure.
+ * able to act on rather than a failure. The numbers live on hover, so what is asserted is the
+ * title attributes and the ABSENCE of the sentence they replaced.
  *
  * PLAIN ASSERTIONS, no `jest-dom`. This suite does not register those matchers, and a test file
  * that assumes them fails on every line at once, which reads as a broken component.
@@ -25,18 +27,30 @@ function state(over: Partial<AccountsState> = {}): AccountsState {
     pairs: 2,
     linked: 0,
     chats_visible: 187,
+    current_chats: 12,
     ...over,
   }
 }
 
+function draw(props: { writesEnabled?: boolean; onChanged?: () => void } = {}) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+  const view = render(
+    <QueryClientProvider client={client}>
+      <AccountSharing writesEnabled={props.writesEnabled ?? true} onChanged={props.onChanged} />
+    </QueryClientProvider>,
+  )
+  return { ...view, client }
+}
+
 beforeEach(() => {
   vi.restoreAllMocks()
+  focusManager.setFocused(undefined)
 })
 
 describe('AccountSharing', () => {
   it('offers nothing when the machine has one account directory', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ pairs: 1 }))
-    const { container } = render(<AccountSharing writesEnabled />)
+    const { container } = draw()
     await waitFor(() => expect(api.accounts.state).toHaveBeenCalled())
     expect(container.innerHTML).toBe('')
   })
@@ -45,7 +59,7 @@ describe('AccountSharing', () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(
       state({ supported: false, why_not: 'junctions are a Windows feature and this is Linux' }),
     )
-    const { container } = render(<AccountSharing writesEnabled />)
+    const { container } = draw()
     await waitFor(() => expect(api.accounts.state).toHaveBeenCalled())
     expect(container.innerHTML).toBe('')
   })
@@ -54,25 +68,52 @@ describe('AccountSharing', () => {
     // The two differ after an app update migrates the directories, and the control has to keep
     // describing the setting rather than the accident.
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ intended: 'all', mode: 'mixed' }))
-    render(<AccountSharing writesEnabled />)
+    draw()
     const all = await screen.findByRole('button', { name: 'All' })
     expect(all.getAttribute('aria-pressed')).toBe('true')
     expect(screen.getByRole('button', { name: 'Current' }).getAttribute('aria-pressed'))
       .toBe('false')
   })
 
-  it('switches, then asks for a restart', async () => {
+  it('says on hover how many chats each side shows, and nothing in the row', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
+    draw()
+    const all = await screen.findByRole('button', { name: 'All' })
+    expect(all.getAttribute('title')).toBe(
+      "Every account's chats: 187 across 2 account directories")
+    expect(screen.getByRole('button', { name: 'Current' }).getAttribute('title')).toBe(
+      "Only the signed-in account's own chats: 12")
+    expect(screen.queryByText(/187/)).toBeNull()
+    expect(screen.queryByText(/shared across/)).toBeNull()
+    expect(screen.queryByText(/each with its own chats/)).toBeNull()
+  })
+
+  it('says the Current number is not known when the server cannot tell', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ current_chats: null }))
+    draw()
+    const current = await screen.findByRole('button', { name: 'Current' })
+    expect(current.getAttribute('title')).toContain('not known while sharing is on')
+  })
+
+  it('carries the restart note on the label, and marks the label after a switch', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
     const share = vi.spyOn(api.accounts, 'share').mockResolvedValue({
       mode: 'all', dry_run: false, restart_required: true, backup: 'C:\\x\\1',
       state: state({ intended: 'all', mode: 'all', linked: 1 }),
     })
     const onChanged = vi.fn()
-    render(<AccountSharing writesEnabled onChanged={onChanged} />)
-    fireEvent.click(await screen.findByRole('button', { name: 'All' }))
+    draw({ onChanged })
+    const label = await screen.findByText('Account')
+    expect(label.getAttribute('title')).toBe(RESTART_NOTE)
+    expect(label.getAttribute('data-restart')).toBe('false')
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
     await waitFor(() => expect(share).toHaveBeenCalledWith('all'))
-    expect(await screen.findByText(/Restart Claude/)).not.toBeNull()
+    await waitFor(() => expect(label.getAttribute('data-restart')).toBe('true'))
+    expect(label.className).toContain('text-warn')
+    expect(screen.queryByText(/Restart Claude/)).toBeNull()
     expect(onChanged).toHaveBeenCalled()
+    // The report's state replaces the one read on mount: All is now the side that is on.
+    expect(screen.getByRole('button', { name: 'All' }).getAttribute('aria-pressed')).toBe('true')
   })
 
   it('says what to do when the server refuses because Claude is open', async () => {
@@ -83,19 +124,33 @@ describe('AccountSharing', () => {
           + 'try again; nothing has been changed.',
       }),
     )
-    render(<AccountSharing writesEnabled />)
+    draw()
     fireEvent.click(await screen.findByRole('button', { name: 'All' }))
     expect(await screen.findByText(/Quit Claude and try again/)).not.toBeNull()
-    expect(screen.queryByText(/Restart Claude/)).toBeNull()
+    expect(screen.getByText('Account').getAttribute('data-restart')).toBe('false')
   })
 
   it('is disabled on a server that answers no writes', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
     const share = vi.spyOn(api.accounts, 'share')
-    render(<AccountSharing writesEnabled={false} />)
+    draw({ writesEnabled: false })
     const button = (await screen.findByRole('button', { name: 'All' })) as HTMLButtonElement
     expect(button.disabled).toBe(true)
     fireEvent.click(button)
     expect(share).not.toHaveBeenCalled()
+  })
+
+  it('reads the state again when a sibling says something changed, and when the page comes back', async () => {
+    const read = vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
+    const { client } = draw()
+    await screen.findByRole('button', { name: 'All' })
+    expect(read).toHaveBeenCalledTimes(1)
+    await act(() => client.invalidateQueries())
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2))
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(3))
   })
 })

@@ -13,7 +13,7 @@ went on rendering two different projects as the same string.
 """
 
 
-def short_path(value, keep=2):
+def short_path(value, keep=2, mark=".../"):
     """A path shortened from the LEFT, keeping the tail that identifies it.
 
     The Summary chart labels its bars with the raw working directory, and on this store those run
@@ -22,6 +22,11 @@ def short_path(value, keep=2):
     shares a long prefix, so the first N characters are the part that is identical between them.
     The last two segments are what tells one project from another.
 
+    `mark` is what stands in for the dropped prefix. The chart keeps ".../" so a bar reads as a
+    cut path; the Population list passes "" and shows the folder alone ("c4x"), its full path on
+    hover, because a reader picks a project by the name they gave its folder, not by the two
+    segments above it. A path with no more segments than `keep` comes back whole either way.
+
     Display only. The full value stays in the hover and in the data, because the shortened form is
     ambiguous by construction and nothing should ever match on it.
     """
@@ -29,10 +34,10 @@ def short_path(value, keep=2):
     parts = [p for p in text.replace(chr(92), '/').split('/') if p]
     if len(parts) <= keep:
         return text
-    return ".../" + "/".join(parts[-keep:])
+    return mark + "/".join(parts[-keep:])
 
 
-def distinct_short_paths(values, keep=2):
+def distinct_short_paths(values, keep=2, mark=".../"):
     """Shortened paths, lengthened only where two of them would otherwise read the same.
 
     SHORTENING ALONE DOES NOT FIX THE REPORTED DEFECT. The complaint was not that the labels were
@@ -54,7 +59,7 @@ def distinct_short_paths(values, keep=2):
     # given more segments than its path has. Two entries that are the SAME path stop it early,
     # because no depth can separate them and `grew` stays False.
     for _ in range(max(segments.values(), default=0) + 1):
-        out = {v: short_path(v, depth[v]) for v in values}
+        out = {v: short_path(v, depth[v], mark) for v in values}
         seen: dict = {}
         for value, label in out.items():
             seen.setdefault(label, []).append(value)
@@ -69,7 +74,7 @@ def distinct_short_paths(values, keep=2):
                     grew = True
         if not grew:
             return out
-    return {v: short_path(v, depth[v]) for v in values}
+    return {v: short_path(v, depth[v], mark) for v in values}
 
 
 def plural(n, one, many=None):
@@ -132,9 +137,19 @@ def titled_path(path, titles, keep=2):
     # the part that does carry meaning, the chat's own name, off the end of the label. The final
     # segment already carries a date and a random suffix, so it stays unique on its own.
     short = short_path(path, 1)
-    # `desktop` leads: it is the name the app is showing the user right now, and unlike the three
-    # below it is read live from the record rather than recovered from a transcript, so it is the
-    # only one that follows a rename. The rest keep the order they had.
+    text = _best_title(titles)
+    return f"{short} - {text}" if text else short
+
+
+def _best_title(titles):
+    """The chat's name as a label, or None when it has none worth showing.
+
+    `desktop` leads: it is the name the app is showing the user right now, and unlike the three
+    below it is read live from the record rather than recovered from a transcript, so it is the
+    only one that follows a rename. The rest keep the order they had: `custom` was typed by a
+    person, `ai` was written to be a title, `last-prompt` is merely what was said first and is cut
+    hard and marked as cut so it cannot be mistaken for a name someone chose.
+    """
     for kind in ("desktop", "custom", "ai", "last-prompt"):
         text = (titles or {}).get(kind)
         if not text:
@@ -144,8 +159,20 @@ def titled_path(path, titles, keep=2):
             continue
         if len(text) > PROMPT_LABEL_MAX:
             text = text[:PROMPT_LABEL_MAX].rstrip() + "..."
-        return f"{short} - {text}"
-    return short
+        return text
+    return None
+
+
+def chat_name(path, titles) -> str:
+    """The name alone, for a chat whose path names nothing: what the Population list shows.
+
+    `titled_path` keeps the scratch segment in front of the name, which is right for the
+    population sentence and Compare's arm labels, where the path is the subject. In the list a
+    reader picks from, "scratch-2026-09-05-1c5113 - " is 28 characters saying nothing before the
+    part that does, and the full path sits on hover; the name stands alone, and a chat with no
+    name shows its scratch segment so the row is never blank.
+    """
+    return _best_title(titles) or short_path(path, 1, mark="")
 
 
 def stamp(value) -> str:

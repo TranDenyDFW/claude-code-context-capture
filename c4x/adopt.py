@@ -184,13 +184,21 @@ def state(root=None, include_cli=False) -> dict:
     ids = [r["session_id"] for r in rows]
     titles = store.titles_for(ids) if ids else {}
     ledger = _ledger_records()
+    # A CHAT DELETED IN THE APP IS NEVER OFFERED AGAIN. Its record is gone, which is exactly what
+    # the rule below would take for "no record yet"; the app's marker, read by harvest into
+    # `desktop_records`, is what tells a delete from a reinstall. Counted, so the drawer can say.
+    gone = store.deleted_in_app(ttl=0)
     eligible: list = []
     counted_cli = 0
     seen_other = 0
+    deleted = 0
     for r in rows:
         sid = r["session_id"]
         path = r["transcript_path"]
         if not isinstance(path, str) or not path or not os.path.exists(path):
+            continue
+        if sid in gone:
+            deleted += 1
             continue
         if is_subagent_path(path):
             continue
@@ -244,6 +252,8 @@ def state(root=None, include_cli=False) -> dict:
             "review_runs": len(runs),
             "review_records": sum(1 for e, rec, _p in ledger
                                   if rec is not None and str(e.get("session_id")) in every_run),
+            # Chats the desktop app deleted, with a transcript still here: left out above.
+            "deleted_in_app": deleted,
             "app_running": accounts.app_running(), "sharing": accounts.intended_mode()}
 
 
@@ -308,9 +318,24 @@ def _resolve_record(entry: dict, roots: list) -> tuple:
         return None, found
 
 
+def _deleted_marker(entry: dict, roots: list) -> bool:
+    """Whether the desktop app deleted this record: its `deleted_<uuid>` marker sits where the
+    record was, under the ledger's path or the same pair below any records root."""
+    name = str(entry.get("record") or "")
+    if not name.startswith("local_"):
+        return False
+    marker = "deleted_" + name[len("local_"):]
+    written = Path(str(entry["path"]))
+    candidates = [written.parent / marker] + [root / written.parent.parent.name
+                                              / written.parent.name / marker for root in roots]
+    return any(c.is_file() for c in candidates)
+
+
 def _ledger_records(roots=None) -> list:
     """(entry, record or None, path or None) for every ledger entry still in force, the file
-    resolved. An entry stamped `removed_at` was taken back and is no record of c4x's any more."""
+    resolved. An entry stamped `removed_at` was taken back and is no record of c4x's any more,
+    and neither is one whose record the app deleted (gone, with the app's marker beside it): the
+    chat is the user's to have removed, and it is out of every count here."""
     from c4x import appstate
     roots = [Path(r) for r in (roots if roots is not None else appstate.sessions_roots())]
     out = []
@@ -318,6 +343,8 @@ def _ledger_records(roots=None) -> list:
         if not isinstance(entry, dict) or not entry.get("path") or entry.get("removed_at"):
             continue
         record, found = _resolve_record(entry, roots)
+        if found is None and _deleted_marker(entry, roots):
+            continue
         out.append((entry, record, found))
     return out
 

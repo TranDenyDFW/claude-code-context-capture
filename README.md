@@ -122,7 +122,16 @@ committed built, so npm is needed only to change the frontend. The same server s
 JSON: `curl 127.0.0.1:8059/api/tab/tab-cost`. The server runs without a console and gives none to
 the programs it runs (`c4x/proc.py`), so nothing flashes when the page loads.
 
-Beside the Account switch, the **Adopt** button opens a drawer listing the chats on this machine
+The header says less and shows it on hover: the **Population** list names a project by its
+folder alone (more of the path only when two folders read the same, a folder-less chat by its
+name) and every row shows its full path on hover, which is why it is drawn by the page rather
+than as a native select; the **Account** switch says on hover how many chats All shows and how
+many the signed-in account would see under Current, and the label's hover carries the restart
+note. A chat deleted in the desktop app is hidden from every list here (the app leaves a
+`deleted_<uuid>` marker beside where its record was; harvest reads it; the transcript is never
+touched and a raw session id still opens the chat).
+
+After Restart C4X, the **Adopted Chats** button opens a drawer listing the chats on this machine
 that the desktop app has no record of, grouped by folder. A reinstall leaves every transcript and
 none of the records, so the app shows a cloud list pointing at a device that no longer exists;
 ticking a folder writes the records into the signed-in account's directory and Claude lists the

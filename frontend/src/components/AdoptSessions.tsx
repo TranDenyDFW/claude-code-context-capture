@@ -191,10 +191,10 @@ export function AdoptSessions({
         ? `${plural(unnamed, 'adopted chat')} without a name`
         : reviewRecords > 0
           ? `${plural(reviewRecords, 'review run')} still in Claude`
-          : 'Adopted chats'
+          : 'Adopted Chats'
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="ml-1 flex items-center gap-2 border-l border-edge pl-3">
       <span className="text-xs uppercase tracking-wide text-ink-faint">Adopt</span>
       <button
         ref={trigger}
@@ -212,14 +212,14 @@ export function AdoptSessions({
             ref={panel}
             id="adopt-drawer"
             role="dialog"
-            aria-label="Adopted chats"
+            aria-label="Adopted Chats"
             tabIndex={-1}
             className="fixed inset-y-0 right-0 z-30 flex w-full max-w-xl flex-col gap-3 overflow-y-auto
                        border-l border-edge bg-panel p-4 shadow-panel outline-none"
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <h2 className="text-md font-semibold text-ink">Adopted chats</h2>
+                <h2 className="text-md font-semibold text-ink">Adopted Chats</h2>
                 <p className="text-2xs text-ink-faint">
                   Records for the chats Claude has no record of, and names for the ones c4x wrote.
                 </p>
@@ -296,6 +296,14 @@ export function AdoptSessions({
                       `${sweep.last.why}.`
                     : 'No startup sweep has run on this store yet. Each server started with ' +
                       'Claude takes back review-run records and restarts Claude when it removed any.'}
+              </p>
+            ) : null}
+            {(state.deleted_in_app ?? 0) > 0 ? (
+              <p className="text-xs text-ink-faint">
+                {plural(state.deleted_in_app ?? 0, 'chat')} you deleted in Claude{' '}
+                {state.deleted_in_app === 1 ? 'is' : 'are'} left out of every list here;{' '}
+                {state.deleted_in_app === 1 ? 'its transcript stays' : 'their transcripts stay'} on
+                disk.
               </p>
             ) : null}
             {state.deleted_markers > 0 ? (

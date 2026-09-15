@@ -23,7 +23,7 @@ from typing import Any, TypedDict
 import pandas as pd
 
 from c4x import proc
-from c4x.labels import distinct_short_paths, is_folderless, plural, titled_path
+from c4x.labels import chat_name, distinct_short_paths, is_folderless, plural, titled_path
 from c4x.paths import install_root
 
 # The install, not this file's directory: they differ once the API is frozen into an exe, and
@@ -433,13 +433,14 @@ def overview_stats() -> dict:
     # read 24,386 over a store holding 8,775, and its GB caption would have counted bytes that are
     # not transcript bytes. A number under the wrong word is a wrong number.
     kind = "WHERE kind IS NULL" if column_present("files", "kind") else ""
-    # SESSIONS, NOT REVIEW RUNS. A run is a session row, and it is also a review of another one;
-    # the card is headed "sessions" and a reader takes that as the chats this store holds.
-    runs = ("SELECT session_id FROM review_links" if tables_present("review_links")
-            else "SELECT NULL WHERE 0")
+    # SESSIONS, NOT REVIEW RUNS AND NOT DELETED CHATS. A run is a session row, and it is also a
+    # review of another one; a chat the desktop app deleted is hidden from every list; the card
+    # is headed "sessions" and a reader takes that as the chats this store holds. The same
+    # subquery the session frame uses, so the two cannot disagree.
+    hidden = hidden_sessions_sql()
     small = q(f"""
         SELECT (SELECT COUNT(*) FROM sessions
-                 WHERE session_id NOT IN ({runs}))                 AS sessions,
+                 WHERE session_id NOT IN ({hidden}))               AS sessions,
                (SELECT COUNT(*) FROM turns)                        AS turn_rows,
                (SELECT COUNT(*) FROM compactions)                  AS compactions,
                (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
@@ -555,6 +556,7 @@ def invalidate():
     # into its head, and an imported chain must start to.
     _links_cache.update({"at": 0.0, "head_of": None, "members_of": None})
     _reviews_cache.update({"at": 0.0, "parent_of": None, "runs_of": None})
+    _deleted_cache.update({"at": 0.0, "ids": None})
     # Derived from that map and from five tables harvest writes, so it is stale for both reasons a
     # removal makes the map stale, and cleared beside it rather than left to its own ttl.
     _work_cache.update({"at": 0.0, "totals": None})
@@ -682,6 +684,60 @@ def review_links(ttl: float = 45.0) -> tuple[dict, dict]:
     if seen == _generation["n"]:
         _reviews_cache.update({"at": now, "parent_of": parent_of, "runs_of": runs_of})
     return parent_of, runs_of
+
+
+_deleted_cache: dict = {"at": 0.0, "ids": None}
+
+
+def _read_deleted() -> frozenset:
+    """The session ids of every chat the desktop app deleted: `desktop_records.deleted_at` set.
+
+    Harvest stamps the row when a record has gone and the app's `deleted_<uuid>` marker sits
+    beside where it was (docs/desktop-records.md section 7). Empty on a store from before the
+    table existed.
+    """
+    if not tables_present("desktop_records"):
+        return frozenset()
+    df = q("SELECT session_id FROM desktop_records WHERE deleted_at IS NOT NULL")
+    return frozenset(str(s) for s in df["session_id"])
+
+
+def deleted_in_app(ttl: float = 45.0) -> frozenset:
+    """The deleted chats' session ids, cached the way `review_links` is and cleared by the same
+    `invalidate`. A raw id still opens its chat page; what this feeds is every LIST."""
+    now = _time.time()
+    if _deleted_cache["ids"] is not None and now - _deleted_cache["at"] < ttl:
+        return _deleted_cache["ids"]
+    seen = _generation["n"]
+    ids = _read_deleted()
+    if seen == _generation["n"]:
+        _deleted_cache.update({"at": now, "ids": ids})
+    return ids
+
+
+def hidden_sessions_sql() -> str:
+    """A subquery naming every session no list shows: the review runs, the chats the desktop app
+    deleted, and every session of a deleted chat's chain.
+
+    ONE PLACE, because two readers count sessions in SQL (`_session_rows_uncached` and
+    `overview_stats`) and they have to agree on what is hidden. A deleted record names ONE
+    session of its chat, which need not be the head (the app keeps the id it started with while
+    the CLI resumes into new ones), so the chain is followed both ways: the head of a deleted
+    session, and every member of that head. `SELECT NULL WHERE 0` when the tables are absent, so
+    a store from before them is the store it was.
+    """
+    parts: list = []
+    if tables_present("review_links"):
+        parts.append("SELECT session_id FROM review_links")
+    if tables_present("desktop_records"):
+        deleted = "SELECT session_id FROM desktop_records WHERE deleted_at IS NOT NULL"
+        parts.append(deleted)
+        if tables_present("session_links"):
+            heads = (f"SELECT head_id FROM session_links WHERE session_id IN ({deleted}) "
+                     f"UNION {deleted}")
+            parts.append(heads)
+            parts.append(f"SELECT session_id FROM session_links WHERE head_id IN ({heads})")
+    return " UNION ".join(parts) if parts else "SELECT NULL WHERE 0"
 
 
 def chat_head(session_id):
@@ -1356,11 +1412,14 @@ def _session_rows_uncached() -> pd.DataFrame:
     """
     linked = ("SELECT session_id FROM session_links UNION SELECT head_id FROM session_links"
               if tables_present("session_links") else "SELECT NULL WHERE 0")
-    # A REVIEW RUN IS NOT A CHAT. It is listed nowhere on its own; the chat it reviewed carries it
-    # as a count, and its rows reach that chat's numbers through `scoped()` under the subagent
-    # scope. Left out of the frame here, before the floor and the collapse ever see it.
-    runs = ("SELECT session_id FROM review_links" if tables_present("review_links")
-            else "SELECT NULL WHERE 0")
+    # A REVIEW RUN IS NOT A CHAT, AND A CHAT DELETED IN THE APP IS NOT LISTED. A run is listed
+    # nowhere on its own; the chat it reviewed carries it as a count, and its rows reach that
+    # chat's numbers through `scoped()` under the subagent scope. A chat the desktop app deleted
+    # (its record gone, the app's marker beside it) is hidden with every session of its chain, the
+    # user's choice: its transcript stays on disk and a raw id still opens it. Both left out of the
+    # frame here, before the floor and the collapse ever see them, through the one subquery the
+    # Summary's count uses too.
+    hidden = hidden_sessions_sql()
     df = q(f"""
         SELECT t.session_id,
                s.cwd, s.project_slug, s.entrypoint, s.transcript_path,
@@ -1381,7 +1440,7 @@ def _session_rows_uncached() -> pd.DataFrame:
                           ELSE 2 END LIMIT 1) AS title_kind
         FROM turns t
         LEFT JOIN sessions s ON s.session_id = t.session_id
-        WHERE t.session_id NOT IN ({runs})
+        WHERE t.session_id NOT IN ({hidden})
         -- Where the window sits NOW, which is what the header reports; peak is the high-water
         -- mark. Showing only peak made the two disagree for one session with nothing saying which
         -- was which, and the gap between them is what a compaction took out.
@@ -1567,11 +1626,15 @@ def cohort_options() -> list:
     df = session_rows()
     # Says what the number counts. "All sessions (317)" beside a Summary card reading 1,325 is
     # two numbers for one word with nothing to reconcile them.
-    opts = [{"label": f"All sessions ({len(df):,} listed)", "value": COHORT_ALL}]
+    # EVERY OPTION CARRIES `path`: the working directory for a project, a sentence for the rest.
+    # It is what the frontend shows on hover, since the label is short by design.
+    opts = [{"label": f"All sessions ({len(df):,} listed)", "value": COHORT_ALL,
+             "path": "Every chat the store lists, in every project and section"}]
     if df.empty:
         return opts
     for sec, n in df["section"].value_counts().items():
-        opts.append({"label": f"Section: {sec} ({n:,})", "value": f"section::{sec}"})
+        opts.append({"label": f"Section: {sec} ({n:,})", "value": f"section::{sec}",
+                     "path": f"Every listed chat filed under {sec}"})
     # RANKED BY WORK DONE, not by how many sessions a directory happens to hold.
     #
     # Session count put a benchmark harness in charge of this list. It spawned one short run per
@@ -1591,19 +1654,23 @@ def cohort_options() -> list:
               .agg(sessions=("session_id", "count"), calls=("_calls", "sum"))
               .sort_values(["calls", "sessions"], ascending=False)
               .head(40))
-    # SHORTENED, AND DISAMBIGUATED. These are working directories, about 150 characters here, and
-    # the control that renders them clips from the right - so two projects under the same scratch
-    # parent arrived as one identical string and the list offered the same choice twice. The chart
-    # axis was given `short_path` for exactly this and the dropdown was not, which is why the
-    # helper now lives in c4x/labels.py with a collision-aware variant beside it.
+    # THE FOLDER'S NAME, AND DISAMBIGUATED. These are working directories, about 150 characters
+    # here, and the control that renders them clips from the right - so two projects under the
+    # same scratch parent arrived as one identical string and the list offered the same choice
+    # twice. The chart axis was given `short_path` for exactly this and the dropdown was not,
+    # which is why the helper lives in c4x/labels.py with a collision-aware variant beside it.
+    # The list shows the leaf alone ("c4x"), no "Project:" and no ".../": a reader picks a project
+    # by the name they gave its folder, and the full path is on hover. Only two leaves that read
+    # the same grow ("ccxe/c4x" beside "other/c4x"); a two-segment drive path shows whole.
     #
     # The VALUE keeps the full path. The label is ambiguous by construction and nothing matches
     # on it; `cohort_parts` below splits the value, and a delete resolves through that.
-    labels = distinct_short_paths(list(work.index))
-    # A CHAT WITH NO FOLDER GETS ITS NAME. distinct_short_paths keeps the tail that tells two
-    # projects apart, which is right when the tail is a directory somebody chose and useless when
-    # it is "scratch-2026-09-05-d67fea" under two generated uuids. For those, the chat's own name is
-    # the only thing that identifies it to a reader.
+    labels = distinct_short_paths(list(work.index), keep=1, mark="")
+    # A CHAT WITH NO FOLDER GETS ITS NAME, and nothing else. distinct_short_paths keeps the tail
+    # that tells two projects apart, which is right when the tail is a directory somebody chose
+    # and useless when it is "scratch-2026-09-05-d67fea" under two generated uuids. For those the
+    # chat's own name is the only thing that identifies it to a reader, so the row is the name
+    # (the scratch segment only when it has none).
     #
     # The VALUE is untouched: cohort_parts splits it, and a delete resolves through that.
     folderless = [p for p in work.index if is_folderless(p)]
@@ -1615,15 +1682,15 @@ def cohort_options() -> list:
         every = titles_for([s for ids in by_project.values() for s in ids])
         for p in folderless:
             ids = by_project.get(p) or []
-            labels[p] = titled_path(p, every.get(ids[0], {}) if ids else {})
+            labels[p] = chat_name(p, every.get(ids[0], {}) if ids else {})
     for proj, row in work.iterrows():
         # "listed", the same qualifier the All sessions option above carries. Without it the
         # number reads as "this project has N sessions", when it is the count the picker will
         # SHOW: a project whose sessions fall below SESSION_TURN_FLOOR offers fewer than it holds,
         # and a reader comparing it against the store has nothing to reconcile the two. Same
         # defect the first option was fixed for, on the option beside it.
-        opts.append({"label": f"Project: {labels[proj]} ({int(row['sessions']):,} listed)",
-                     "value": f"project::{proj}"})
+        opts.append({"label": f"{labels[proj]} ({int(row['sessions']):,} listed)",
+                     "value": f"project::{proj}", "path": str(proj)})
     return opts
 
 

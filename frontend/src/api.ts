@@ -239,6 +239,11 @@ export interface TabInfo {
 export interface Cohort {
   label: string
   value: string
+  /**
+   * What the hover says: a project's full working directory, a sentence for all and sections.
+   * The label names a project by its folder alone. Optional so an older server still answers.
+   */
+  path?: string
 }
 
 export interface SessionRow {
@@ -483,6 +488,12 @@ export interface AccountPair {
   /** The directory this one points at, or null when it is an ordinary directory. */
   link_to: string | null
   records: number
+  /**
+   * What this pair would list on its own (what Current would show it): its files, or under
+   * sharing the records the backup manifest filed under it plus, for the shared directory, the
+   * ones written since. null when links exist and no manifest says whose is whose.
+   */
+  own?: number | null
 }
 
 /**
@@ -500,7 +511,12 @@ export interface AccountsState {
   roots: { root: string; pairs: AccountPair[] }[]
   pairs: number
   linked: number
+  /** What All shows: every record in the directories that hold files. */
   chats_visible: number
+  /** The pair the desktop app is writing, or null when nothing on the machine says. */
+  signed_in?: { account: string; org: string } | null
+  /** What Current shows the signed-in account: its own chats, or null when that cannot be told. */
+  current_chats: number | null
 }
 
 /** What `/api/accounts/sharing` answers. `restart_required` is always true on a change. */
@@ -559,6 +575,8 @@ export interface AdoptState {
   review_runs: number
   /** Records c4x wrote for review runs that are still on disk; the drawer offers to take them back. */
   review_records: number
+  /** Chats deleted in the desktop app whose transcript is still here: hidden, never offered. */
+  deleted_in_app?: number
   app_running: boolean
   sharing: 'all' | 'current' | null
 }
