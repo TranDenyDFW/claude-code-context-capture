@@ -127,7 +127,13 @@ Search) names a folder holding one chat by that chat's title and a folder holdin
 name, more of the path only when two rows would read the same, a folder-less chat by its name,
 and every row shows its full path on hover, which is why it is drawn by the page rather than as
 a native select; the **All** / **Current** switch says on hover how many chats each side shows,
-that Claude must be quit before switching and restarted after. A chat the desktop app holds a
+that Claude must be quit before switching and restarted after. Under All, sharing keeps itself
+whole: an account signing in with an organisation the sharing never saw gets a directory of its
+own from the app, and the server folds it into the shared one a minute after Claude closes (the
+watchdog's stop, or the server's start with Claude closed), so every account reads the same list
+after any sign-in; the header names such a pair while it waits ("not yet covered") with a **Cover
+now** button for a machine where Claude is already closed, and `intended` is read from the links
+on disk when the marker beside the store is gone. A chat the desktop app holds a
 record for is listed whatever its size (the five-row floor keeps only record-less one-shots out).
 A chat deleted in the desktop app is hidden from every list here (the app leaves a
 `deleted_<uuid>` marker beside where its record was; harvest reads it; the transcript is never
