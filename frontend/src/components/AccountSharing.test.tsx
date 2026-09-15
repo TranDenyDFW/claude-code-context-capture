@@ -25,6 +25,7 @@ function state(over: Partial<AccountsState> = {}): AccountsState {
     pairs: 2,
     linked: 0,
     chats_visible: 187,
+    current_chats: 12,
     ...over,
   }
 }

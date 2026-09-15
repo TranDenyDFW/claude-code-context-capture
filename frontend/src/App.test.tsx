@@ -81,7 +81,7 @@ beforeEach(() => {
   // the header they were written for.
   vi.mocked(api.accounts.state).mockResolvedValue({
     supported: true, why_not: '', app_running: false, mode: 'current', intended: 'current',
-    roots: [], pairs: 1, linked: 0, chats_visible: 0,
+    roots: [], pairs: 1, linked: 0, chats_visible: 0, current_chats: 0,
   })
   // Nothing to adopt, so the header shows no adopt control in these tests.
   vi.mocked(api.adopt.state).mockResolvedValue({

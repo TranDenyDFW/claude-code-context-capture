@@ -20,8 +20,9 @@
  * accurate, or whether the page is usable with a screen reader. A pass means no rule was broken.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { findByRole, render, screen } from '@testing-library/react'
+import { findByRole, fireEvent, render, screen } from '@testing-library/react'
 import axe from 'axe-core'
+import { Dropdown } from './components/Dropdown'
 import { Pane } from './components/Pane'
 import { Palette } from './components/Palette'
 import { CompareArms } from './components/CompareArms'
@@ -231,6 +232,23 @@ describe('axe finds no WCAG A or AA violation in', () => {
     // The drawer is a portal at the end of the document, so the whole document is what axe sees.
     await screen.findByRole('checkbox', { name: /SecDb/ })
     expect(await violations(container.ownerDocument.body)).toEqual([])
+  })
+
+  // The population list, open: a select-only combobox whose rows carry the full path a native
+  // select could not show. The listbox is named by the same label as the trigger.
+  it('the population dropdown, open', async () => {
+    const { container } = render(
+      <Dropdown
+        label="Population"
+        value=""
+        onChange={() => {}}
+        options={[{ value: '', label: 'No restriction', title: 'Every chat the store lists' },
+                  { value: `project::${PROJECT}`, label: 'SecDb (12 listed)', title: PROJECT }]}
+      />,
+    )
+    fireEvent.click(screen.getByRole('combobox', { name: 'Population' }))
+    await screen.findByRole('listbox', { name: 'Population' })
+    expect(await violations(container)).toEqual([])
   })
 })
 
