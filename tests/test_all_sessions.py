@@ -43,7 +43,8 @@ def test_row_count_matches_the_population_the_page_states(table, q, pane):
         # listed whatever its size (store.live_records_sql), the record naming any of its sessions.
         expected = int(q(f"""WITH chats AS (
                                 SELECT COALESCE(l.head_id, t.session_id) AS chat, COUNT(*) AS turns
-                                FROM turns t LEFT JOIN session_links l ON l.session_id = t.session_id
+                                FROM turns t
+                                LEFT JOIN session_links l ON l.session_id = t.session_id
                                 GROUP BY chat),
                               live AS (
                                 SELECT DISTINCT COALESCE(l.head_id, d.session_id) AS chat
