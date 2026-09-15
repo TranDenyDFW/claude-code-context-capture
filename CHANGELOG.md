@@ -86,6 +86,11 @@ removed and nothing here said so.
   restart note and turns amber after a switch; the row's sentence is gone; the numbers refresh on
   focus and after any change. Stop C4X sits behind a divider, Adopted Chats (renamed) after
   Restart C4X behind another.
+- **The README is short, for the beta.** What it is, that it is beta and Windows first, the
+  install, the first three commands, the dashboard in a few sentences with its tabs, privacy in
+  five short points, and links. Every paragraph of detail it used to carry (how the dashboard
+  starts and stops, the header, the Account switch and the junction rule, Adopt and review runs,
+  the exe build, the tabs' fine print, moving a project) moved verbatim to `docs/dashboard.md`.
 - **Junctions are made with the spelling the kernel resolves to the shared directory, and
   re-pointed when they land elsewhere.** Measured on both machines after the reconcile shipped:
   the Claude app is the Store (MSIX) build, and for it and every process it spawns, the c4x
