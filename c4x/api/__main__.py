@@ -101,6 +101,83 @@ def _say(message):
     print(message, flush=True)
 
 
+def _reconcile_summary(report) -> str:
+    """One line for the log: what the reconcile did, or why it did nothing."""
+    if not report.get("ran"):
+        return f"skipped: {report.get('why') or 'nothing'}"
+    linked = sum(len(r["linked"]) for r in report.get("roots", []))
+    moved = sum(len(r["moved"]) for r in report.get("roots", []))
+    aside = sum(len(r["set_aside"]) for r in report.get("roots", []))
+    parts = [report.get("why") or "ran"]
+    if linked or moved or aside:
+        parts.append(f"{linked} linked, {moved} moved, {aside} set aside")
+    if report.get("backup"):
+        parts.append(f"backup {report['backup']}")
+    if report.get("marker_written"):
+        parts.append("marker written")
+    return "; ".join(parts)
+
+
+def reconcile_then_stop(reason, *, reconcile=None, stop=None, log=_say):
+    """The watchdog's stop: cover the pairs the app created since sharing, then shut down.
+
+    WHY HERE. Sharing every account's records is done with junctions, and a junction covers the
+    pair it was made for. The app creates `<account>/<org>` fresh when an account signs in with an
+    organisation the junctions never named, and from then on that account reads a private list;
+    at the next switch the app folds that directory into the shared one and the account comes
+    back to nothing (measured 2026-09-15, fifteen chats). c4x cannot move a directory the app
+    holds open, and the watchdog's stop is the one moment the server is alive with the app closed:
+    sixty seconds after the last Claude process. So the reconcile runs first, and the stop runs
+    whatever the reconcile did: a raise in the fold is logged and the server still goes down.
+    Skipped under `C4X_NO_WRITES` (a read-only server moves nothing).
+    """
+    if stop is None:
+        from c4x.server import hardened_shutdown
+        stop = hardened_shutdown
+    try:
+        if os.environ.get("C4X_NO_WRITES"):
+            log("[reconcile] skipped: --no-writes")
+            return
+        if reconcile is None:
+            from c4x import accounts
+            reconcile = accounts.reconcile
+        report = reconcile()
+        log(f"[reconcile] {_reconcile_summary(report)}")
+    except Exception as exc:  # noqa: BLE001 - the stop must run whatever the fold did
+        log(f"[reconcile] failed: {exc}")
+    finally:
+        stop(reason)
+
+
+def reconcile_at_start(*, run=None, running=None, log=_say):
+    """At server start, cover the pairs the app created since sharing, when the app is not open.
+
+    A server started by hand or from a terminal session, with the desktop app closed, is a server
+    alive at the moment the reconcile needs; the watchdog's stop is the other. Logged, never
+    raised: the server starts whatever the reconcile did. Returns the report, or None when it
+    did not run.
+    """
+    if os.environ.get("C4X_NO_WRITES"):
+        log("[reconcile] at start: skipped (--no-writes)")
+        return None
+    try:
+        if running is None:
+            from c4x import accounts
+            running = accounts.app_running
+        if running():
+            log("[reconcile] at start: Claude is running; covered when it next closes")
+            return None
+        if run is None:
+            from c4x import accounts
+            run = accounts.reconcile
+        report = run()
+        log(f"[reconcile] at start: {_reconcile_summary(report)}")
+        return report
+    except Exception as exc:  # noqa: BLE001 - the server starts whatever the fold did
+        log(f"[reconcile] at start: failed: {exc}")
+        return None
+
+
 def start_review_sweep(port, run, db_path, *, probe=None, tries=60, every=0.5, log=_say,
                        sleep=time.sleep):
     """A thread that waits for our own `/__health__` answer, then calls `run()` once.
@@ -370,10 +447,12 @@ def main(argv=None):
     print("  project export/import/delete: "
           + ("OFF (--no-writes)" if os.environ.get("C4X_NO_WRITES") else "on"))
     if wants_watchdog(argv):
-        from c4x.server import hardened_shutdown
         from c4x.watchdog import GRACE, Watchdog
-        Watchdog(stop=hardened_shutdown).start()
-        print(f"  watchdog: stops once no Claude process has been seen for {int(GRACE)} s")
+        Watchdog(stop=reconcile_then_stop).start()
+        print(f"  watchdog: stops once no Claude process has been seen for {int(GRACE)} s, and "
+              "first covers any account pair the app created since sharing")
+    # THE RECONCILE AT START: a server started with the app closed can cover the pairs now.
+    reconcile_at_start()
     if reload:
         print("  reloading on source changes")
     # THE SWEEP AT STARTUP, once the port answers. Exported as an environment variable too, so

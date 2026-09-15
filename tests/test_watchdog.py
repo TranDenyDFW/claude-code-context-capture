@@ -133,3 +133,94 @@ def test_the_real_walk_runs_against_this_machine():
     """No assertion on the answer: this suite may or may not run under Claude. The walk itself must
     complete without raising, with psutil's real process table."""
     assert watchdog.claude_alive() in (True, False)
+
+
+class TestTheStopThatCoversFirst:
+    """The watchdog's stop reconciles the account pairs before the server goes down, and the
+    server's start does the same when the app is not open."""
+
+    def _report(self, **over):
+        base = {"ran": True, "why": "covered 1 pair(s)", "app_running": False, "pending": [],
+                "backup": "B", "marker_written": True,
+                "roots": [{"linked": [1], "moved": [1, 2], "set_aside": []}]}
+        base.update(over)
+        return base
+
+    def test_the_stop_reconciles_then_shuts_down(self, monkeypatch):
+        from c4x.api import __main__ as server_main
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        order, lines = [], []
+        server_main.reconcile_then_stop(
+            "no Claude for 60 s",
+            reconcile=lambda: order.append("reconcile") or self._report(),
+            stop=lambda why: order.append(("stop", why)), log=lines.append)
+        assert order == ["reconcile", ("stop", "no Claude for 60 s")]
+        assert lines == ["[reconcile] covered 1 pair(s); 1 linked, 2 moved, 0 set aside; "
+                         "backup B; marker written"]
+
+    def test_a_reconcile_that_raises_still_stops_once(self, monkeypatch):
+        from c4x.api import __main__ as server_main
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        stops, lines = [], []
+
+        def boom():
+            raise RuntimeError("could not link X")
+        server_main.reconcile_then_stop("why", reconcile=boom, stop=stops.append,
+                                        log=lines.append)
+        assert stops == ["why"]
+        assert lines == ["[reconcile] failed: could not link X"]
+
+    def test_no_writes_skips_the_reconcile_and_still_stops(self, monkeypatch):
+        from c4x.api import __main__ as server_main
+        monkeypatch.setenv("C4X_NO_WRITES", "1")
+        stops, lines, calls = [], [], []
+        server_main.reconcile_then_stop("why", reconcile=lambda: calls.append(1),
+                                        stop=stops.append, log=lines.append)
+        assert calls == [] and stops == ["why"]
+        assert lines == ["[reconcile] skipped: --no-writes"]
+
+    def test_a_skipped_reconcile_is_logged_with_its_reason(self, monkeypatch):
+        from c4x.api import __main__ as server_main
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        lines = []
+        server_main.reconcile_then_stop(
+            "why",
+            reconcile=lambda: self._report(ran=False, why="sharing is off; nothing to cover"),
+            stop=lambda why: None, log=lines.append)
+        assert lines == ["[reconcile] skipped: sharing is off; nothing to cover"]
+
+    def test_the_server_wires_the_watchdog_to_the_covering_stop(self):
+        import inspect
+
+        from c4x.api import __main__ as server_main
+        source = inspect.getsource(server_main.main)
+        assert "Watchdog(stop=reconcile_then_stop)" in source
+        assert "reconcile_at_start()" in source
+
+    def test_at_start_it_runs_only_when_the_app_is_closed(self, monkeypatch):
+        from c4x.api import __main__ as server_main
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        lines, calls = [], []
+        answer = server_main.reconcile_at_start(run=lambda: calls.append(1) or self._report(),
+                                                running=lambda: True, log=lines.append)
+        assert answer is None and calls == []
+        assert lines == ["[reconcile] at start: Claude is running; covered when it next closes"]
+        answer = server_main.reconcile_at_start(run=lambda: calls.append(1) or self._report(),
+                                                running=lambda: False, log=lines.append)
+        assert answer["ran"] is True and calls == [1]
+        assert lines[-1].startswith("[reconcile] at start: covered 1 pair(s)")
+
+    def test_at_start_nothing_raises_into_the_server(self, monkeypatch):
+        from c4x.api import __main__ as server_main
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        lines = []
+
+        def boom():
+            raise OSError("disk gone")
+        assert server_main.reconcile_at_start(run=boom, running=lambda: False,
+                                              log=lines.append) is None
+        assert lines == ["[reconcile] at start: failed: disk gone"]
+        monkeypatch.setenv("C4X_NO_WRITES", "1")
+        assert server_main.reconcile_at_start(run=boom, running=lambda: False,
+                                              log=lines.append) is None
+        assert lines[-1] == "[reconcile] at start: skipped (--no-writes)"
