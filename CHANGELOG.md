@@ -86,6 +86,26 @@ removed and nothing here said so.
   restart note and turns amber after a switch; the row's sentence is gone; the numbers refresh on
   focus and after any change. Stop C4X sits behind a divider, Adopted Chats (renamed) after
   Restart C4X behind another.
+- **Junctions are made with the spelling the kernel resolves to the shared directory, and
+  re-pointed when they land elsewhere.** Measured on both machines after the reconcile shipped:
+  the Claude app is the Store (MSIX) build, and for it and every process it spawns, the c4x
+  server included, `%APPDATA%\Claude` is virtualised into the package's LocalCache; both
+  spellings open one directory from inside and nothing in the process can tell. `share_all` had
+  written the virtual spelling as every junction's substitute name, the kernel resolved it
+  physically, and every junction on the author's machine landed in a leftover directory holding
+  one record (WMI: 1 file under `%APPDATA%`, 224 under LocalCache) while on the laptop it landed on
+  nothing: every account but the shared one listed one chat, or none, with `link_target` reading
+  the right string back from each. `_make_link` now tries each spelling `_spellings` offers (the
+  target re-rooted under every candidate the store knows, identity-filtered, `Packages` first) and
+  keeps the first that `resolves_to` the target by inode; `_same_path` compares by identity;
+  `_remove_link` uses `os.unlink` and raises instead of discarding `rmdir`'s exit code (a silent
+  failure was the path by which `share_current` would have moved records through the junction).
+  `uncovered_pairs` carries `why` (`not linked`, `points elsewhere`, `dangling`), `state()` reads
+  `mixed` and counts only links that resolve, `verify()` names each such pair once by identity,
+  and `reconcile()` re-points them (`relinked` in the report and the watchdog's log line), copying
+  what was visible through the link into `<backup>/through-link/` and into the shared directory
+  for names it lacks; a relink that fails puts the old link back. The header hover names each
+  uncovered pair with its why.
 - **Sharing keeps itself whole across sign-ins.** Measured on the author's machine: eight of nine
   account pairs were junctions to one directory from an earlier install, with no marker and no
   backup beside the store; Account #1 signed in with a newer organisation, the app gave it a real
