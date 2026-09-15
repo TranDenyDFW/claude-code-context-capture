@@ -38,6 +38,10 @@ function Problem({ error }: { error: unknown }) {
 export const RESTART_NOTE =
   'Restart Claude for this to take effect. It reads these directories when it starts.'
 export const QUIT_NOTE = 'Quit Claude before switching: a directory it has open cannot be moved.'
+export const COVER_NOTE = 'covered when Claude next closes'
+export const COVER_HOVER =
+  'A pair the app created at a sign-in since sharing began. That account reads a list of its ' +
+  'own until it is covered. The server covers it a minute after Claude closes, or now.'
 
 export function AccountSharing({
   writesEnabled,
@@ -58,7 +62,7 @@ export function AccountSharing({
     retry: false,
   })
   const state = query.data ?? null
-  const [busy, setBusy] = useState<'all' | 'current' | null>(null)
+  const [busy, setBusy] = useState<'all' | 'current' | 'cover' | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [restart, setRestart] = useState(false)
 
@@ -67,6 +71,12 @@ export function AccountSharing({
   if (!state || !state.supported || state.pairs < 2) return null
 
   const mode = state.intended === 'all' ? 'all' : 'current'
+  // THE PAIRS SHARING DOES NOT COVER YET. The app creates `<account>/<org>` at a sign-in with an
+  // organisation the links never named, and that account reads its own list from then on; at the
+  // next switch the app folds it into the shared directory and the account comes back to nothing
+  // (measured: fifteen chats). The server covers such a pair a minute after Claude closes; the
+  // line says so, and the button does it now, with Claude closed.
+  const uncovered = mode === 'all' ? (state.uncovered ?? []) : []
 
   async function choose(next: 'all' | 'current') {
     if (next === mode || busy) return
@@ -75,6 +85,23 @@ export function AccountSharing({
     setRestart(false)
     try {
       const report = await api.accounts.share(next)
+      client.setQueryData(['accounts'], report.state)
+      setRestart(report.restart_required)
+      onChanged?.()
+    } catch (problem) {
+      setError(problem)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function cover() {
+    if (busy) return
+    setBusy('cover')
+    setError(null)
+    setRestart(false)
+    try {
+      const report = await api.accounts.reconcile()
       client.setQueryData(['accounts'], report.state)
       setRestart(report.restart_required)
       onChanged?.()
@@ -129,6 +156,34 @@ export function AccountSharing({
           ))}
         </div>
       </div>
+      {uncovered.length ? (
+        <p
+          data-uncovered={uncovered.length}
+          title={COVER_HOVER + '\n' + uncovered.map((p) => p.path).join('\n')}
+          className="flex items-center gap-2 text-xs text-warn"
+        >
+          <span>
+            {uncovered.length} account pair{uncovered.length === 1 ? '' : 's'} not yet covered;{' '}
+            {COVER_NOTE}
+          </span>
+          <button
+            type="button"
+            disabled={!writesEnabled || state.app_running || busy !== null}
+            title={
+              !writesEnabled
+                ? 'This server was started without writes'
+                : state.app_running
+                  ? 'Quit Claude first: a directory it has open cannot be moved'
+                  : 'Move these into the shared directory now and link them'
+            }
+            onClick={() => void cover()}
+            className="rounded-md border border-edge bg-page px-2 py-0.5 text-xs text-ink-dim
+                       transition-colors hover:text-ink disabled:opacity-50"
+          >
+            Cover now
+          </button>
+        </p>
+      ) : null}
       {error ? <Problem error={error} /> : null}
     </div>
   )

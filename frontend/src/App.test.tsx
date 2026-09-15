@@ -27,7 +27,7 @@ vi.mock('@/api', async (importOriginal) => {
       // not a smaller mock: `AccountSharing` asks on mount, and with `accounts` missing the whole
       // header threw and four tests about the population chip failed for a reason none of them
       // named.
-      accounts: { state: vi.fn(), share: vi.fn(), verify: vi.fn() },
+      accounts: { state: vi.fn(), share: vi.fn(), verify: vi.fn(), reconcile: vi.fn() },
       adopt: { state: vi.fn(), run: vi.fn(), retitle: vi.fn(), sweep: vi.fn() },
       server: { stop: vi.fn(), restart: vi.fn() },
     },
@@ -82,6 +82,7 @@ beforeEach(() => {
   vi.mocked(api.accounts.state).mockResolvedValue({
     supported: true, why_not: '', app_running: false, mode: 'current', intended: 'current',
     roots: [], pairs: 1, linked: 0, chats_visible: 0, current_chats: 0,
+    intended_source: 'none', uncovered: [],
   })
   // Nothing to adopt, so the header shows no adopt control in these tests.
   vi.mocked(api.adopt.state).mockResolvedValue({

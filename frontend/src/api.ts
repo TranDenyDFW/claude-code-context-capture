@@ -517,6 +517,17 @@ export interface AccountsState {
   signed_in?: { account: string; org: string } | null
   /** What Current shows the signed-in account: its own chats, or null when that cannot be told. */
   current_chats: number | null
+  /**
+   * What says `intended`: the marker a switch wrote, the links on the disk when the marker is
+   * gone (a reset of `data/` takes it; the junctions stay), or nothing.
+   */
+  intended_source: 'marker' | 'disk' | 'none'
+  /**
+   * Under All: the real directories beside the shared one, which the app created at a sign-in
+   * since sharing began. That account reads a list of its own until the server covers them,
+   * which it does when Claude next closes, or on `reconcile` now.
+   */
+  uncovered: AccountPair[]
 }
 
 /** What `/api/accounts/sharing` answers. `restart_required` is always true on a change. */
@@ -525,6 +536,18 @@ export interface SharingReport {
   dry_run: boolean
   restart_required: boolean
   backup?: string | null
+  state: AccountsState
+}
+
+/** What `/api/accounts/reconcile` answers: the fold of the uncovered pairs, or why it did not run. */
+export interface ReconcileReport {
+  ran: boolean
+  why: string
+  app_running: boolean
+  pending: AccountPair[]
+  backup?: string | null
+  marker_written: boolean
+  restart_required: boolean
   state: AccountsState
 }
 
@@ -851,6 +874,8 @@ export const api = {
     verify: () =>
       get<{ ok: boolean; intended: string; problems: string[] }>('/api/accounts/verify'),
     share: (mode: 'all' | 'current') => post<SharingReport>('/api/accounts/sharing', { mode }),
+    /** Cover now: the fold the server runs when Claude closes, on demand. 409 while it is open. */
+    reconcile: () => post<ReconcileReport>('/api/accounts/reconcile', {}),
   },
 
   /**
