@@ -216,6 +216,41 @@ the old link back and raises: a pair with no directory is the one outcome worse 
 one. The CLI is meant to run where the server runs; from a plain terminal the virtual spelling
 opens the leftover, which is why `canonical_pair` matches every spelling of a link's target.
 
+**Each chat is tagged with the account it was made under.** A record file carries no account
+field, and under sharing every pair lists one directory, so the directory a record sits in says
+nothing about who made the chat. Harvest tags each record ONCE, when it first sees it, in
+`desktop_records.owner_account`, `owner_org` and `owner_source`, from the first of these that
+answers: the ledger (`data/adopted-records.json`: c4x wrote that record into the adopting
+account's pair, `ledger`); the record's own directory when no other pair links to it (`dir`);
+the account the app is signed in as right now (`signed-in`: `config.json`'s
+`lastKnownAccountUuid`, which the app rewrites at a switch; harvest runs at the chat's first
+prompt, seconds after the app wrote the record). Rows from before the tag are filled from the
+ledger, from the newest sharing backup's manifest (where each record was filed before sharing,
+`manifest`) or from an unshared directory, and the rest are stamped `unknown` once. A tag is never
+re-decided: `dir` follows the record when the app moves it, `owner_*` does not. The organisation
+is a best guess under sharing (every organisation of an account lists the same directory), so
+every reader keys on the account. Limits: a chat created and switched away from before its first
+prompt is tagged with the next account; an adopted chat is tagged with the adopting account. The
+page reads the tag on the All sessions `account` column, in the population list ("Signed-in
+account's chats", one entry per account, "No account known"), and in the header's Current hover,
+whose number is the live records tagged with the signed-in account (`current_source: tags` on
+`/api/accounts`, else `manifest` or `directory` as before).
+
+**Account switches are logged, and the cache cost of one is measured.** Every harvest appends a
+row to `account_log` when the signed-in account differs from the last row: `seen_at` is the
+harvest, `switched_at` is `config.json`'s mtime, so a switch made while no session ran is still
+dated. The prompt-caching docs say caches are isolated between organizations and per workspace
+within one, and each account on a machine is its own account and organisation pair, so a chat
+continued under another organisation cannot read its cache and writes its whole context again.
+The Summary tab names such calls: the first call of a session after a logged switch that read no
+cache and wrote at least 0.9 x what the session had resident on its previous call, that previous
+call being within its own cache lifetime (one hour when it asked for one, five minutes otherwise),
+so an ordinary expiry is not counted, and a compaction (a fraction of the old context) is not
+either. Measured on the author's store before this was written: 161 whole-context rewrites, 68M
+tokens, every one after a gap longer than five minutes and none around that day's switches; the
+five-minute lifetime cost more than any switch had. Nothing on the machine can carry a cache
+across organisations; what c4x can do is say what a switch cost.
+
 **Intent is read from the disk when the marker is gone.** The marker lives beside the store, and a
 reset of `data/` takes it while the junctions stay. Measured: eight of nine pairs linked, no
 marker, and the page said Current while every account read one list. Links are not made by

@@ -47,6 +47,20 @@ A chat deleted in the desktop app is hidden from every list here (the app leaves
 `deleted_<uuid>` marker beside where its record was; harvest reads it; the transcript is never
 touched and a raw session id still opens the chat).
 
+**Current asks first.** It un-shares the directories, which takes chats away from every other
+account on the machine, so a click on it opens a confirmation in the header ("Un-share the
+directories? Each account goes back to its own chats. Quit Claude first."): only **Un-share**
+does it; **Keep sharing** closes it. All still switches in one click. The Current hover says where
+its number came from: the account each chat was made under (harvest's tag, with the count of chats
+no tag names an account for), or the sharing backup's manifest, or the directories themselves.
+
+**The account a chat was made under.** The population list offers "Signed-in account's chats
+(N)", one "Account <id>" entry per account seen, and "No account known"; All sessions carries an
+`account` column; `docs/desktop-records.md` section 6 says how the tag is decided and what it
+cannot know. The Summary tab names the calls that rewrote their whole context right after an
+account switch ("The cache was rewritten after an account switch"), from harvest's account log,
+and says what to do: finish a chat under the account it started with.
+
 ## Adopt, and review runs
 
 After Restart C4X, the **Adopt (N)** button (the hover says what N is) opens a drawer listing the

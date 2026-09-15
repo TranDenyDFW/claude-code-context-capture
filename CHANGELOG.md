@@ -86,6 +86,20 @@ removed and nothing here said so.
   restart note and turns amber after a switch; the row's sentence is gone; the numbers refresh on
   focus and after any change. Stop C4X sits behind a divider, Adopted Chats (renamed) after
   Restart C4X behind another.
+- **Each chat is tagged with the account it was made under; Current asks first; account switches
+  are logged and their cache cost measured.** Under sharing nothing said which account made a
+  chat, and the header's Current number came from the sharing backup, which only knows where a
+  record sat before sharing began (it read 0 for the signed-in account). Harvest now tags each
+  record once, at first sight (`desktop_records.owner_account`, `owner_org`, `owner_source`: the
+  ledger, an unshared directory, the account signed in now, the backup's manifest for older rows,
+  else unknown), and appends `account_log` rows dated by the app's own `config.json`. The frame,
+  the population list ("Signed-in account's chats", one entry per account, "No account known"),
+  All sessions (an `account` column) and the header's Current hover read the tag; an import keeps
+  the local tag. Current opens a confirmation before un-sharing. The Summary tab names the calls
+  that rewrote their whole context right after a switch (no cache read, 0.9 x the previous call's
+  resident context, within that call's own cache lifetime, so an expiry or a compaction is not
+  counted): caches are isolated between organisations, so finish a chat under the account it
+  started with. `docs/desktop-records.md` section 6 carries the rules and the measurements.
 - **The README is short, for the beta.** What it is, that it is beta and Windows first, the
   install, the first three commands, the dashboard in a few sentences with its tabs, privacy in
   five short points, and links. Every paragraph of detail it used to carry (how the dashboard
