@@ -1,28 +1,29 @@
 # c4x: context window capture
 
-Claude Code shows you one number: a percentage in the context bar. Everything behind it is
-discarded at render time, so when a compaction fires you cannot see what it dropped, and you cannot
-see it coming.
+Claude Code shows you one number: the percentage in the context bar. Everything behind it is
+discarded at render time, so you cannot see what a compaction dropped, or see the next one coming.
 
 **c4x** records that state into a local SQLite store as you work, and mirrors Claude Code's own
 window arithmetic closely enough to say when the next compaction will fire. Install is three
 commands and pulls nothing from npm.
 
+**Status: beta.** Built and used on Windows 11 with the Claude desktop app; the checks also run on
+Ubuntu in CI. The desktop-app features (accounts, Adopt) are Windows only. What changed and when
+is in [CHANGELOG.md](CHANGELOG.md).
+
 ![One session's context growth, with compaction markers, the predicted trigger line, the model's warn and blocked zones, and a rolling band marking calls unlike the rest of the session](docs/images/session.png)
+
+<sub>A real store of 1,409 sessions, with working directories, file names and message text replaced
+by <code>tools/redact.py</code>. Every number, chart and finding is untouched.</sub>
 
 > **Everything stays on your disk** under `data/`: the store, the raw capture logs, and a copy of
 > each transcript taken just before it is compacted. The store keeps the TEXT of your
 > conversations, not just their sizes. While it is installed it captures, and there is no off
 > switch short of uninstalling. [What that means.](#privacy)
 
-<sub>Every screenshot is a real store of 1,409 sessions with working directories, file names and
-message text replaced by <code>tools/redact.py</code>. Every number, chart and finding is
-untouched.</sub>
-
 ## Install
 
-Needs **Node 24+** (the tools open the store through the built-in `node:sqlite`) and, for the
-dashboard and CLI only, **Python 3.12+**. Capture itself needs no Python and nothing from npm.
+Needs **Node 24+** and, for the dashboard and CLI only, **Python 3.12+**. Nothing from npm.
 
 ```bash
 git clone https://github.com/TranDenyDFW/claude-code-context-capture
@@ -32,22 +33,16 @@ pip install -r requirements.txt        # dashboard and CLI only
 ```
 
 That writes this checkout's hooks and status line into `~/.claude/settings.json` and records what
-it changed in `data/install-receipt.json`. It converges rather than overwrites, so running it twice
-changes nothing and running it over a broken config repairs it. If there is no store yet it runs
-one harvest, so your existing transcripts are already in it.
+it changed in `data/install-receipt.json`. Running it twice changes nothing; running it over a
+broken config repairs it. If there is no store yet it runs one harvest.
 
-**Check it worked.** Worth not skipping: this hooks into another program's lifecycle, and a silent
-failure there looks exactly like a quiet week.
+**Check it worked.** This hooks into another program's lifecycle, and a silent failure there looks
+exactly like a quiet week. `node tools/install.mjs status` exits 0 healthy, 1 drifted, 2 misuse.
 
-```bash
-node tools/install.mjs status          # exit 0 healthy, 1 drifted, 2 misuse
-```
+`install --dry-run` prints the diff and writes nothing. `uninstall` removes only this tool's entries
+and keeps the store; `--purge` deletes it too. [What capture costs, and how to read `status`.](docs/performance.md)
 
-`node tools/install.mjs install --dry-run` prints the exact diff and writes nothing.
-`uninstall` removes only this tool's entries and keeps the store; `--purge` deletes the store too.
-[What capture costs, and how to read `status`.](docs/performance.md)
-
-## Usage
+## Use it
 
 Everything below runs against transcripts you already have.
 
@@ -57,16 +52,8 @@ python -m c4x.cli sessions --limit 5         # your sessions, largest first
 python -m c4x.api                            # the dashboard, on 127.0.0.1:8059 (starts with Claude by itself, see below)
 ```
 
-```
-session_id  title                                         project        turns  current   peak   compactions
-928cf7e5    Status line documentation accuracy            /work/c4x       7425   670569   997078           4
-ed1902c7    Economic policy impact on prices and markets  /work/secdb     5986   744642   997778           2
-```
-
-`current` is the last reading, `peak` is the high-water mark. A session can sit at 670k having
-touched 997k earlier, which is the difference the context bar alone cannot show you.
-
-**When does the next compaction fire?**
+In the session list, `current` is the last reading and `peak` the high-water mark. When does the
+next compaction fire?
 
 ```bash
 node tools/mirror.mjs --predict 850000 --window 1000000
@@ -80,22 +67,6 @@ node tools/mirror.mjs --predict 850000 --window 1000000
 The arithmetic comes from `tools/mirror-core.mjs`, the same module the dashboard draws its
 threshold lines from, so the number here and the line on the chart cannot drift apart.
 
-**What did you pay for twice?**
-
-```bash
-node tools/waste.mjs --duplicates
-```
-
-```
-duplicate reads (>= 3 reads of one file in one session)
-  groups: 1129   re-reads beyond the first: 7323   bytes in the repeats: 72778.4 KB
-
-    614x     297.1 KB  identical     582a3e1c  /work/categories.json
-    340x    8819.3 KB  42 variants   7fe4cdc8  /books/_standards_catalog.md
-```
-
-`variants` is how a re-read hides: the same file reached by 42 different spellings of its path.
-
 **Query it yourself.** Every table on the page prints the query that produced it, and so does the
 dump. Add `--json` for the same content machine-readably.
 
@@ -106,71 +77,11 @@ sqlite3 data/context.db
 
 ## The dashboard
 
-`http://127.0.0.1:8059/`. It starts with Claude: the SessionStart hook asks the port who is there
-and, when nobody is, starts the server detached; the server watches for Claude processes and stops
-itself about a minute after the last one exits. `node tools/install.mjs status` says whether it is
-up and how to stop it by hand; `install --no-dashboard` turns the autostart off (`--dashboard` turns
-it back on), as does `C4X_NO_DASHBOARD=1`. `python -m c4x.api` by hand still works and does not
-stop itself unless asked to with `--watchdog`. The header's **Stop C4X** stops the server from the
-page (it asks first; the next Claude session starts one again) and **Restart C4X** starts a fresh
-one with the same flags and reloads the page once a different process answers. Once the server is
-up it runs one sweep: the records c4x wrote for review runs (below) are taken back and, when that
-removed any, Claude is restarted so its sidebar reflects it; never twice within ten minutes, only
-while Claude is running, off with `install --no-review-sweep` (`--review-sweep` undoes it) or
-`C4X_NO_REVIEW_SWEEP=1`. Closing the page does not stop capture. The page is
-committed built, so npm is needed only to change the frontend. The same server serves every tab as
-JSON: `curl 127.0.0.1:8059/api/tab/tab-cost`. The server runs without a console and gives none to
-the programs it runs (`c4x/proc.py`), so nothing flashes when the page loads.
-
-The header says less and shows it on hover: the population list (the unlabelled dropdown after
-Search) names a folder holding one chat by that chat's title and a folder holding several by its
-name, more of the path only when two rows would read the same, a folder-less chat by its name,
-and every row shows its full path on hover, which is why it is drawn by the page rather than as
-a native select; the **All** / **Current** switch says on hover how many chats each side shows,
-that Claude must be quit before switching and restarted after. Under All, sharing keeps itself
-whole: an account signing in with an organisation the sharing never saw gets a directory of its
-own from the app, and the server folds it into the shared one a minute after Claude closes (the
-watchdog's stop, or the server's start with Claude closed), so every account reads the same list
-after any sign-in; the header names such a pair while it waits ("not yet covered") with a **Cover
-now** button for a machine where Claude is already closed, and `intended` is read from the links
-on disk when the marker beside the store is gone. A junction is written with the spelling the
-kernel resolves to the shared directory (the Store build virtualises `%APPDATA%\Claude` into its
-package's LocalCache for everything it spawns, this server included, and a junction made with the
-virtual spelling lands somewhere else), pairs are compared by identity, and a link that lands
-elsewhere or nowhere is re-pointed the same way, what was visible through it copied into the
-backup first. A chat the desktop app holds a
-record for is listed whatever its size (the five-row floor keeps only record-less one-shots out).
-A chat deleted in the desktop app is hidden from every list here (the app leaves a
-`deleted_<uuid>` marker beside where its record was; harvest reads it; the transcript is never
-touched and a raw session id still opens the chat).
-
-After Restart C4X, the **Adopt (N)** button (the hover says what N is) opens a drawer listing the
-chats on this machine that the desktop app has no record of, grouped by folder. A reinstall leaves every transcript and
-none of the records, so the app shows a cloud list pointing at a device that no longer exists;
-ticking a folder writes the records into the signed-in account's directory and Claude lists the
-chats after a restart. Nothing is preselected: a chat you deleted in the app looks the same to
-this rule as one a reinstall orphaned, and the page says how many of those the app has deleted.
-The same drawer names the records c4x wrote that carry no name, after the store's name for each.
-A review run (a hook's `claude -p` that read another chat) is never offered: harvest ties it to
-the chat it read by quotation (`docs/desktop-records.md` §7), it is listed nowhere on its own,
-the chat's page lists it with its verdict and the prompt it followed, and its tokens count toward
-the chat under "Including Subagents" (the Cost tab always). A run whose lines are said somewhere
-in the store but by no session in its folder, and whose reply is a bare verdict, is a review the
-store cannot place: recorded with no chat, listed nowhere, never offered. The drawer offers to take
-back the records an earlier build wrote for such runs (`POST /api/adopt/unadopt-reviews`), which
-the server does on its own at startup (`GET /api/adopt/sweep` says what the last sweep did).
-
-**Without Python.** `tools/build_exe.py` builds the server into `dist/c4x/` (`c4x.exe`) with
-PyInstaller, and the `build-exe` workflow attaches that directory to every release as
-`c4x-windows.zip`. Unpack it into `dist/c4x/` under the checkout and the hook uses it when no
-Python imports the dashboard. It replaces Python only: the hooks and the harvester are node, and
-the exe runs from inside a checkout, never on its own. Built on a machine with the Claude desktop
-app installed, the exe carries the app's icon, read out of the installed app at build time and
-never committed (`C4X_ICON=<file.ico or file.exe>` names another source); the release build has
-PyInstaller's icon.
-
-The CLI renders the same callbacks the browser does, so a dump is what the page shows rather than a
-parallel implementation of it.
+`http://127.0.0.1:8059/`. It starts with Claude and stops itself about a minute after the last
+Claude process exits; closing the page does not stop capture. **Stop C4X** in the header stops the
+server, **Restart C4X** starts a fresh one, and `install --no-dashboard` turns the autostart off.
+The CLI renders the same callbacks the browser does, so a dump is what the page shows, and every
+table prints the query that produced it.
 
 | Tab | What it answers | Dump it |
 |---|---|---|
@@ -183,96 +94,56 @@ parallel implementation of it.
 | Compare | two populations, measured the same way | `--tab tab-compare --compare-with <id>` |
 | Diagnostics | is the capture healthy | `--tab tab-diagnostics` |
 
-![The Summary tab: findings that each name a session and an action, store totals, and tool bytes by working directory](docs/images/summary.png)
-
-Every finding is clickable: it selects the session it names and jumps to the tab that proves it, so
-a claim on the front page is one click from its evidence.
-
-![The Cost tab: re-read groups, the concentration curve, and how each tool call turned out](docs/images/cost.png)
-
-Cost is an estimate and says so, from a price table at `c4x/prices.json` refreshed by CI against
-two published sources that have to agree. A model with no entry renders blank, never zero.
-
-**`errors` counts what failed, not what was refused.** Claude Code sets one flag on a tool that ran
-and failed and on a tool that was stopped before it ran. Measured on this store, 26.9% of what was
-called an error never ran. The `outcome` column reports the two apart, and says `unknown` where the
-transcript cannot prove which it was.
-
-![The Compactions tab: every compaction with its predicted trigger, its overshoot, and the survivors it kept](docs/images/compactions.png)
-
-`overshoot` is how far past the predicted trigger the session actually got. Clicking a row opens the
-summary the compaction wrote, in full, plus the messages absent from its survivor list, recovered
-from the store rather than reconstructed.
-
 **Two tabs need a reading the install does not take.** Window and Diagnostics stay empty until you
-record one, and say so on the page rather than looking broken. Nothing else depends on either,
-which is why the install does not run something that costs money on your behalf.
+record one. Nothing else depends on either, so the install does not run something that costs money.
 
 ```bash
 node tools/probe.mjs                  # one billable session, about 12 seconds
 node tools/breakdown.mjs --calibrate  # your configuration's fixed overhead
 ```
 
-![The Window tab: what is in the context window right now, as area, grouped into configuration, messages and free space](docs/images/window.png)
+The header, accounts, Adopt, review runs and the exe build: [docs/dashboard.md](docs/dashboard.md).
 
-## Moving a project between machines
+## Several accounts, and moving a project
+
+The header's **All** / **Current** switch decides whether every account on the machine reads the
+same chat list; [docs/desktop-records.md](docs/desktop-records.md) section 6 explains the sharing.
 
 ```bash
 python -m c4x.projects export "P:\Work\Thing" --out thing.db
 python -m c4x.projects import thing.db --into "D:\Elsewhere\Thing"
 ```
 
-The export carries the conversations, not only the rows: the transcripts, project memory, tasks,
-the trust setting, and the desktop app's own record, so the project opens in Claude Code on the
-other machine. Everything is rebuilt from the destination you choose, on the importing user's own
-paths. `--dry-run` names every destination and writes nothing; `verify-mirror` re-hashes what
-landed and exits non-zero on a difference.
-
-It moves CHATS. A chat resumed four times is five CLI sessions and one entry in the app, and the
-export says so, carries every session it spans, and names any chat whose record it could not find
-under a session it carries. The import checks the store afterwards and reports any chat whose
-sessions landed here as more than one. Records are read from, and removed from, every root the app
-uses, which on a packaged install can be two.
+The export carries the transcripts, project memory, tasks, the trust setting and the desktop app's
+own record, so the project opens in Claude Code on the other machine; `--dry-run` writes nothing.
 
 ## Privacy
 
-**Nothing leaves the machine.** There is no network call in the capture path, and `data/` is
-gitignored.
+**Nothing leaves the machine.** No network call in the capture path; `data/` is gitignored.
 
 **The store keeps the text of your conversations**, not just their sizes. That is what makes a
-compaction summary readable instead of a character count, and a dropped message recoverable at all.
-It is the thing to know before you install rather than after.
+compaction summary readable and a dropped message recoverable. Know it before you install.
 
 **There is a second copy.** On every compaction, `hooks/compact-hook.mjs` copies the whole
-transcript into `data/snapshots/` before Claude Code drops the messages, because a compaction is the
-one event after which the original cannot be recovered from anywhere else. A long-lived session
+transcript into `data/snapshots/` before Claude Code drops the messages. A long-lived session
 accumulates several. A transcript over 250 MB is skipped rather than copied, and the skip is
 recorded with its reason. `C4X_SNAPSHOT=0` turns the copies off; capture continues.
 
-**There is no off switch on purpose.** A capture tool you can quietly disable still produces a store
-that looks complete, with nothing in it saying which sessions were recorded and which were not.
-`node tools/install.mjs uninstall` is the way to stop it, and it prints what it is keeping.
+**There is no off switch on purpose.** A tool you can quietly disable still produces a store that
+looks complete. `node tools/install.mjs uninstall` stops it and prints what it keeps.
 
-**Who else can read it.** The installer restricts `data/` to your account and SYSTEM. A checkout on
-a data volume would otherwise inherit that volume's permissions, which on a stock Windows data drive
-lets every local account read the conversation text. `install status` warns if it finds that state
-and prints the command that fixes it.
+**Who else can read it.** The installer restricts `data/` to your account and SYSTEM; a checkout on
+a data volume would otherwise inherit that volume's permissions, which on a stock Windows data
+drive lets every local account read the text. `install status` warns and prints the fix.
 
 ## Docs
 
-The dashboard explains itself as you use it: every column carries a tooltip saying what it means,
-every table carries the SQL behind it, and every derived figure says on the page that it is derived
-rather than measured.
-
-- [docs/architecture.md](docs/architecture.md): the three stages, where the data lives, the one
-  invariant that catches everyone, and why the category breakdown is derived rather than read.
-- [docs/performance.md](docs/performance.md): what the hook costs and how to measure it here.
-- Every tool prints its own usage. `node tools/install.mjs --help` explains why the installer
-  converges instead of scripting.
-- With the server running, `/api/docs` is the generated API reference and `/api/openapi.json` is the
-  schema. `GET /api/health` answers without touching the store, for a readiness check. Neither is
-  authenticated and neither needs to be: the server binds to `127.0.0.1` only, and the routes that
-  can change anything refuse a cross-origin request.
+- [docs/architecture.md](docs/architecture.md): the three stages and where the data lives.
+- [docs/performance.md](docs/performance.md): what the hook costs and how to measure it.
+- [docs/desktop-records.md](docs/desktop-records.md): the desktop app's chat records.
+- [docs/dashboard.md](docs/dashboard.md): the dashboard in detail.
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to run the checks.
+- With the server running, `/api/docs` is the generated API reference and `/api/openapi.json` is the schema.
 
 ## License
 
