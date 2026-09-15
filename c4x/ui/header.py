@@ -285,6 +285,18 @@ def context_bar(live) -> html.Div:
 
 
 
+def dash_cohort_options() -> list:
+    """`cohort_options` in the shape `dcc.Dropdown` accepts.
+
+    Every option the store builds carries `path` for the hover. Dash's option shape is closed
+    (label, value, disabled, title, search) and an unknown key is a prop-type error in the debug
+    overlay, so `path` travels as `title`, which is the same hover the React list shows.
+    """
+    from c4x.store import cohort_options
+    return [{"label": o["label"], "value": o["value"], "title": o.get("path", "")}
+            for o in cohort_options()]
+
+
 def selector_options(cohort=None) -> list:
     """Options for the global selector: the path first, then the title, then when it last ran.
 

@@ -189,3 +189,51 @@ def test_an_empty_or_missing_title_leaves_the_path_alone():
     assert titled_path(SCRATCH, {}) == ".../scratch-2026-09-07-433162"
     assert titled_path(SCRATCH, {"last-prompt": "   "}) == ".../scratch-2026-09-07-433162"
     assert titled_path(SCRATCH, None) == ".../scratch-2026-09-07-433162"
+
+
+# --- the Population list: the folder's name, the full path on hover ---------------------------
+
+def test_the_marker_is_a_parameter_and_the_chart_keeps_its_default():
+    """The chart reads ".../c/d" as before; the list asks for the tail alone."""
+    assert short_path("/a/b/c/d") == ".../c/d"
+    assert short_path("/a/b/c", 1, mark="") == "c"
+    assert short_path("P:/ClaudeExt/ccxe/c4x", 1, mark="") == "c4x"
+
+
+def test_leaf_labels_grow_without_a_marker_when_two_leaves_read_the_same():
+    """A collision at the leaf shows the parent too, and only for the two that collide."""
+    one, two, lonely = "P:/ClaudeExt/ccxe/c4x", "P:/other/c4x", "P:/WorkNotes/Claude-Access"
+    out = distinct_short_paths([one, two, lonely], keep=1, mark="")
+    assert out[one] == "ccxe/c4x" and out[two] == "other/c4x"
+    assert out[lonely] == "Claude-Access"
+
+
+def test_a_two_segment_drive_path_that_collides_shows_whole():
+    """P:/Books and L:/Books have nothing above the leaf but the drive; the whole path is what
+    tells them apart, spelled as the store spells it (backslashes)."""
+    p, l_ = f"P:{BACKSLASH}Books", f"L:{BACKSLASH}Books"
+    out = distinct_short_paths([p, l_], keep=1, mark="")
+    assert out[p] == p and out[l_] == l_
+
+
+def test_a_folderless_chat_is_named_by_its_chat_alone():
+    from c4x.labels import chat_name
+    assert chat_name(SCRATCH, {"last-prompt": "how to create mcp server"}) == (
+        "how to create mcp server")
+    assert chat_name(SCRATCH, {"desktop": "Creating MCP server", "last-prompt": "x"}) == (
+        "Creating MCP server")
+
+
+def test_a_nameless_folderless_chat_falls_back_to_its_scratch_segment():
+    """Never a blank row: the segment carries a date and a suffix and is unique on its own."""
+    from c4x.labels import chat_name
+    assert chat_name(SCRATCH, {}) == "scratch-2026-09-07-433162"
+    assert chat_name(SCRATCH, {"last-prompt": "   "}) == "scratch-2026-09-07-433162"
+
+
+def test_the_population_sentence_still_keeps_the_scratch_segment():
+    """THE NEGATIVE CONTROL for `chat_name`: `titled_path` is unchanged, since the sentence and
+    Compare's arm labels name the path as their subject."""
+    from c4x.labels import titled_path
+    assert titled_path(SCRATCH, {"last-prompt": "how to create mcp server"}) == (
+        ".../scratch-2026-09-07-433162 - how to create mcp server")

@@ -592,7 +592,7 @@ def test_the_page_says_how_many_sessions_it_is_listing(client):
     # frame and omitted the qualifier, so a project holding two sessions offered "(1)" with
     # nothing saying which of the two numbers that was.
     unqualified = [o["label"] for o in options
-                   if o["label"].startswith("Project: ") and "listed" not in o["label"]]
+                   if o["value"].startswith("project::") and "listed" not in o["label"]]
     assert not unqualified, f"project options do not say what their count counts: {unqualified[:3]}"
 
     from c4x.theme import tab_help
@@ -897,3 +897,32 @@ def test_no_api_route_discloses_the_shutdown_token(client, tab_ids):
     from c4x import server
     for path in ("/api/health", "/__health__", "/api/tabs"):
         assert server.SHUTDOWN_TOKEN not in client.get(path).text, f"{path} discloses the token"
+
+
+def test_a_project_option_is_its_leaf_folder_and_carries_its_path(client):
+    """The Population list names a project by its folder and shows the full path on hover.
+
+    "Project: .../ccxe/c4x" spent a prefix and two segments on what a reader does not pick by;
+    the leaf is the name they gave the folder. Every option carries `path` for the hover, and a
+    project's is exactly the value's own path, so the hover and the filter cannot disagree.
+    """
+    from c4x.labels import is_folderless, short_path
+    from c4x.store import cohort_options
+    options = cohort_options()
+    projects = [o for o in options if o["value"].startswith("project::")]
+    assert projects, "the fixture store offers no project at all"
+    for o in options:
+        assert isinstance(o.get("path"), str) and o["path"], f"no path on {o['label']!r}"
+    for o in projects:
+        path = o["value"].split("::", 1)[1]
+        assert o["path"] == path
+        assert not o["label"].startswith("Project: ") and not o["label"].startswith(".../")
+        if not is_folderless(path):
+            leaf = short_path(path, 1, mark="")
+            assert o["label"].endswith(" listed)") and leaf in o["label"], (o["label"], leaf)
+    assert client.get("/api/cohorts").json() == options
+    # The Dash surface gets the same hover as `title`, the one key its option shape has for it.
+    from c4x.ui.header import dash_cohort_options
+    dashed = dash_cohort_options()
+    assert [o["value"] for o in dashed] == [o["value"] for o in options]
+    assert all(set(o) == {"label", "value", "title"} and o["title"] for o in dashed)

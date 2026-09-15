@@ -12,7 +12,6 @@ from c4x.panels import (
 )
 from c4x.store import (
     chat_head,
-    cohort_options,
     population_label,
     session_name,
 )
@@ -20,7 +19,7 @@ from c4x.theme import (
     SECTION_NOTE,
     population_note,
 )
-from c4x.ui.header import selector_options
+from c4x.ui.header import dash_cohort_options, selector_options
 
 
 @callback(
@@ -31,7 +30,7 @@ from c4x.ui.header import selector_options
 def _cmp_targets(kind, cohort):
     """Arm B's choices. Sessions are NOT narrowed to arm A's cohort: comparing a project against
     a different project is the point, and narrowing would make that impossible."""
-    return cohort_options() if kind == "cohort" else selector_options(None)
+    return dash_cohort_options() if kind == "cohort" else selector_options(None)
 
 @callback(
     Output("cmp-out", "children"),

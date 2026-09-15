@@ -23,7 +23,7 @@ from typing import Any, TypedDict
 import pandas as pd
 
 from c4x import proc
-from c4x.labels import distinct_short_paths, is_folderless, plural, titled_path
+from c4x.labels import chat_name, distinct_short_paths, is_folderless, plural, titled_path
 from c4x.paths import install_root
 
 # The install, not this file's directory: they differ once the API is frozen into an exe, and
@@ -1567,11 +1567,15 @@ def cohort_options() -> list:
     df = session_rows()
     # Says what the number counts. "All sessions (317)" beside a Summary card reading 1,325 is
     # two numbers for one word with nothing to reconcile them.
-    opts = [{"label": f"All sessions ({len(df):,} listed)", "value": COHORT_ALL}]
+    # EVERY OPTION CARRIES `path`: the working directory for a project, a sentence for the rest.
+    # It is what the frontend shows on hover, since the label is short by design.
+    opts = [{"label": f"All sessions ({len(df):,} listed)", "value": COHORT_ALL,
+             "path": "Every chat the store lists, in every project and section"}]
     if df.empty:
         return opts
     for sec, n in df["section"].value_counts().items():
-        opts.append({"label": f"Section: {sec} ({n:,})", "value": f"section::{sec}"})
+        opts.append({"label": f"Section: {sec} ({n:,})", "value": f"section::{sec}",
+                     "path": f"Every listed chat filed under {sec}"})
     # RANKED BY WORK DONE, not by how many sessions a directory happens to hold.
     #
     # Session count put a benchmark harness in charge of this list. It spawned one short run per
@@ -1591,19 +1595,23 @@ def cohort_options() -> list:
               .agg(sessions=("session_id", "count"), calls=("_calls", "sum"))
               .sort_values(["calls", "sessions"], ascending=False)
               .head(40))
-    # SHORTENED, AND DISAMBIGUATED. These are working directories, about 150 characters here, and
-    # the control that renders them clips from the right - so two projects under the same scratch
-    # parent arrived as one identical string and the list offered the same choice twice. The chart
-    # axis was given `short_path` for exactly this and the dropdown was not, which is why the
-    # helper now lives in c4x/labels.py with a collision-aware variant beside it.
+    # THE FOLDER'S NAME, AND DISAMBIGUATED. These are working directories, about 150 characters
+    # here, and the control that renders them clips from the right - so two projects under the
+    # same scratch parent arrived as one identical string and the list offered the same choice
+    # twice. The chart axis was given `short_path` for exactly this and the dropdown was not,
+    # which is why the helper lives in c4x/labels.py with a collision-aware variant beside it.
+    # The list shows the leaf alone ("c4x"), no "Project:" and no ".../": a reader picks a project
+    # by the name they gave its folder, and the full path is on hover. Only two leaves that read
+    # the same grow ("ccxe/c4x" beside "other/c4x"); a two-segment drive path shows whole.
     #
     # The VALUE keeps the full path. The label is ambiguous by construction and nothing matches
     # on it; `cohort_parts` below splits the value, and a delete resolves through that.
-    labels = distinct_short_paths(list(work.index))
-    # A CHAT WITH NO FOLDER GETS ITS NAME. distinct_short_paths keeps the tail that tells two
-    # projects apart, which is right when the tail is a directory somebody chose and useless when
-    # it is "scratch-2026-09-05-d67fea" under two generated uuids. For those, the chat's own name is
-    # the only thing that identifies it to a reader.
+    labels = distinct_short_paths(list(work.index), keep=1, mark="")
+    # A CHAT WITH NO FOLDER GETS ITS NAME, and nothing else. distinct_short_paths keeps the tail
+    # that tells two projects apart, which is right when the tail is a directory somebody chose
+    # and useless when it is "scratch-2026-09-05-d67fea" under two generated uuids. For those the
+    # chat's own name is the only thing that identifies it to a reader, so the row is the name
+    # (the scratch segment only when it has none).
     #
     # The VALUE is untouched: cohort_parts splits it, and a delete resolves through that.
     folderless = [p for p in work.index if is_folderless(p)]
@@ -1615,15 +1623,15 @@ def cohort_options() -> list:
         every = titles_for([s for ids in by_project.values() for s in ids])
         for p in folderless:
             ids = by_project.get(p) or []
-            labels[p] = titled_path(p, every.get(ids[0], {}) if ids else {})
+            labels[p] = chat_name(p, every.get(ids[0], {}) if ids else {})
     for proj, row in work.iterrows():
         # "listed", the same qualifier the All sessions option above carries. Without it the
         # number reads as "this project has N sessions", when it is the count the picker will
         # SHOW: a project whose sessions fall below SESSION_TURN_FLOOR offers fewer than it holds,
         # and a reader comparing it against the store has nothing to reconcile the two. Same
         # defect the first option was fixed for, on the option beside it.
-        opts.append({"label": f"Project: {labels[proj]} ({int(row['sessions']):,} listed)",
-                     "value": f"project::{proj}"})
+        opts.append({"label": f"{labels[proj]} ({int(row['sessions']):,} listed)",
+                     "value": f"project::{proj}", "path": str(proj)})
     return opts
 
 

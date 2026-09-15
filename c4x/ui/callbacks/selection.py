@@ -12,14 +12,13 @@ from dash.exceptions import PreventUpdate
 
 from c4x.store import (
     chat_head,
-    cohort_options,
 )
 from c4x.theme import (
     DANGER,
     MONO,
 )
 from c4x.ui import header
-from c4x.ui.header import quick_view, selector_options
+from c4x.ui.header import dash_cohort_options, quick_view, selector_options
 
 
 @callback(
@@ -45,7 +44,7 @@ def _selector_options(cohort, _n):
 def _cohort_options(_n, existing):
     if existing:
         raise PreventUpdate
-    return cohort_options()
+    return dash_cohort_options()
 
 @callback(
     Output("sel-session", "value", allow_duplicate=True),
