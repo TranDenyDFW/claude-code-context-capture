@@ -65,7 +65,7 @@ store cannot place: recorded with no chat, listed nowhere, never offered. The dr
 back the records an earlier build wrote for such runs (`POST /api/adopt/unadopt-reviews`), which
 the server does on its own at startup (`GET /api/adopt/sweep` says what the last sweep did).
 
-## Without Python
+## Running without Python
 
 **Without Python.** `tools/build_exe.py` builds the server into `dist/c4x/` (`c4x.exe`) with
 PyInstaller, and the `build-exe` workflow attaches that directory to every release as
@@ -123,6 +123,26 @@ node tools/breakdown.mjs --calibrate  # your configuration's fixed overhead
 ```
 
 ![The Window tab: what is in the context window right now, as area, grouped into configuration, messages and free space](images/window.png)
+
+### What did you pay for twice?
+
+The Cost tab's question, from the command line, with a sample from the redacted store.
+
+**What did you pay for twice?**
+
+```bash
+node tools/waste.mjs --duplicates
+```
+
+```
+duplicate reads (>= 3 reads of one file in one session)
+  groups: 1129   re-reads beyond the first: 7323   bytes in the repeats: 72778.4 KB
+
+    614x     297.1 KB  identical     582a3e1c  /work/categories.json
+    340x    8819.3 KB  42 variants   7fe4cdc8  /books/_standards_catalog.md
+```
+
+`variants` is how a re-read hides: the same file reached by 42 different spellings of its path.
 
 ## Moving a project between machines
 

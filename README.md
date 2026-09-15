@@ -7,7 +7,7 @@ discarded at render time, so you cannot see what a compaction dropped, or see th
 window arithmetic closely enough to say when the next compaction will fire. Install is three
 commands and pulls nothing from npm.
 
-**Status: beta.** Built and used on Windows 11 with the Claude desktop app; the checks also run on
+**Status: beta.** Built and used on Windows with the Claude desktop app; the checks also run on
 Ubuntu in CI. The desktop-app features (accounts, Adopt) are Windows only. What changed and when
 is in [CHANGELOG.md](CHANGELOG.md).
 
