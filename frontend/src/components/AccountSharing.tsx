@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError } from '@/api'
-import type { AccountsState } from '@/api'
 
 /**
  * Show every account's chats, or only the signed-in account's.
@@ -9,10 +9,16 @@ import type { AccountsState } from '@/api'
  * listing IS the session list. All makes every one of those directories on this machine resolve to
  * one of them, so whichever account is signed in reads the same chats. Current puts them back.
  *
+ * THE NUMBERS ARE ON HOVER, not in the row. "33 chat(s) shared across 2 account directories" sat
+ * beside the switch as a sentence; the user asked for the row to say less. All's hover carries
+ * what All shows (every record in the shared directory), Current's what Current would show the
+ * signed-in account (its own chats, derived on the server from the sharing backup), and the
+ * label's hover carries the one instruction a switch needs: restart Claude, which reads these
+ * directories when it starts. After a switch the label turns amber so the hover is noticed.
+ *
  * NOTHING HAPPENS WHILE CLAUDE IS OPEN. A directory the app holds cannot be moved, and half a move
  * leaves an account pointing at an empty directory: the server answers 409 and the message below
- * is the one instruction that resolves it. A change that does land needs Claude restarted, because
- * the app reads these directories when it starts.
+ * is the one instruction that resolves it.
  */
 function Problem({ error }: { error: unknown }) {
   const detail = error instanceof ApiError ? error.detail : undefined
@@ -29,6 +35,9 @@ function Problem({ error }: { error: unknown }) {
   )
 }
 
+export const RESTART_NOTE =
+  'Restart Claude for this to take effect. It reads these directories when it starts.'
+
 export function AccountSharing({
   writesEnabled,
   onChanged,
@@ -36,21 +45,21 @@ export function AccountSharing({
   writesEnabled: boolean
   onChanged?: () => void
 }) {
-  const [state, setState] = useState<AccountsState | null>(null)
+  const client = useQueryClient()
+  // READ AGAIN when the page comes back and whenever a sibling says something changed. The count
+  // was read once on mount, so a sweep or a delete while the page sat open left it stale until a
+  // reload. `refetchOnWindowFocus` overrides the app's global false for this one cheap call, and
+  // every `client.invalidateQueries()` the other header controls fire reaches this key too.
+  const query = useQuery({
+    queryKey: ['accounts'],
+    queryFn: api.accounts.state,
+    refetchOnWindowFocus: true,
+    retry: false,
+  })
+  const state = query.data ?? null
   const [busy, setBusy] = useState<'all' | 'current' | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [restart, setRestart] = useState(false)
-
-  useEffect(() => {
-    let live = true
-    api.accounts
-      .state()
-      .then((answer) => live && setState(answer))
-      .catch(() => live && setState(null))
-    return () => {
-      live = false
-    }
-  }, [])
 
   // ONE ACCOUNT IS NOT A CHOICE. With a single pair on the machine there is nothing to share and
   // the control would offer a toggle that changes nothing.
@@ -65,7 +74,7 @@ export function AccountSharing({
     setRestart(false)
     try {
       const report = await api.accounts.share(next)
-      setState(report.state)
+      client.setQueryData(['accounts'], report.state)
       setRestart(report.restart_required)
       onChanged?.()
     } catch (problem) {
@@ -75,10 +84,24 @@ export function AccountSharing({
     }
   }
 
+  const hover = {
+    all: `Every account's chats: ${state.chats_visible} across ${state.pairs} account directories`,
+    current:
+      state.current_chats === null || state.current_chats === undefined
+        ? "Only the signed-in account's own chats: not known while sharing is on"
+        : `Only the signed-in account's own chats: ${state.current_chats}`,
+  }
+
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-2">
-        <span className="text-xs uppercase tracking-wide text-ink-faint">Account</span>
+        <span
+          title={RESTART_NOTE}
+          data-restart={restart ? 'true' : 'false'}
+          className={`text-xs uppercase tracking-wide ${restart ? 'text-warn' : 'text-ink-faint'}`}
+        >
+          Account
+        </span>
         <div className="inline-flex overflow-hidden rounded-md border border-edge">
           {(['all', 'current'] as const).map((option) => (
             <button
@@ -86,6 +109,7 @@ export function AccountSharing({
               type="button"
               disabled={!writesEnabled || busy !== null}
               aria-pressed={mode === option}
+              title={hover[option]}
               onClick={() => void choose(option)}
               className={
                 'px-2.5 py-1.5 text-sm transition-colors disabled:opacity-50 ' +
@@ -98,20 +122,10 @@ export function AccountSharing({
             </button>
           ))}
         </div>
-        <span className="text-xs text-ink-faint">
-          {mode === 'all'
-            ? `${state.chats_visible} chat(s) shared across ${state.pairs} account directories`
-            : `${state.pairs} account directories, each with its own chats`}
-        </span>
       </div>
       {state.app_running && writesEnabled ? (
         <p className="text-xs text-ink-faint">
           Quit Claude before switching: a directory it has open cannot be moved.
-        </p>
-      ) : null}
-      {restart ? (
-        <p className="rounded-md border border-edge bg-page px-3 py-2 text-sm text-ink-dim">
-          Restart Claude for this to take effect. It reads these directories when it starts.
         </p>
       ) : null}
       {error ? <Problem error={error} /> : null}

@@ -222,3 +222,38 @@ describe('what a view says about itself', () => {
     expect(screen.queryByText(/capture machinery/)).toBeNull()
   })
 })
+
+describe('the header, as the user asked for it', () => {
+  it('puts Adopted Chats after the server controls, set apart by a divider', async () => {
+    vi.mocked(api.adopt.state).mockResolvedValue({
+      supported: true, why_not: '', pair: { account: 'a', org: 'o', root: 'R', source: 's' },
+      physical: 'R/a/o', candidates: 1, cli_candidates: 0, other_account: 0, deleted_markers: 0,
+      untitled_adopted: 0, review_runs: 0, review_records: 0, app_running: false, sharing: null,
+      groups: [{ cwd: 'P:/Alpha', project: 'Alpha', count: 1, newest: '2026-08-01T00:04:00Z', sessions: [] }],
+    })
+    show('/')
+    const adopt = await screen.findByRole('button', { name: /no record of/ })
+    const server = screen.getByRole('group', { name: 'C4X server' })
+    expect(server.compareDocumentPosition(adopt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(server.className).toContain('border-l')
+    expect(adopt.parentElement?.className).toContain('border-l')
+  })
+
+  it('offers the populations as a combobox whose rows name their full path on hover', async () => {
+    vi.mocked(api.cohorts).mockResolvedValue([
+      { value: '__all__', label: 'All sessions (2 listed)', path: 'Every chat the store lists' },
+      { value: 'project::P:/ClaudeExt/ccxe/c4x', label: 'c4x (1 listed)', path: 'P:/ClaudeExt/ccxe/c4x' },
+    ])
+    show('/')
+    const control = await screen.findByRole('combobox', { name: 'Population' })
+    expect(screen.queryByRole('option')).toBeNull()
+    fireEvent.click(control)
+    // The cohorts arrive after the first paint; the open list picks them up as they do.
+    await screen.findByRole('option', { name: /c4x/ })
+    const rows = screen.getAllByRole('option')
+    expect(rows.map((r) => r.getAttribute('title'))).toEqual(
+      ['Every chat the store lists', 'Every chat the store lists', 'P:/ClaudeExt/ccxe/c4x'])
+    fireEvent.click(rows[2])
+    expect(window.location.search).toContain('cohort=')
+  })
+})

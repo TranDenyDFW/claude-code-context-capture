@@ -239,6 +239,11 @@ export interface TabInfo {
 export interface Cohort {
   label: string
   value: string
+  /**
+   * What the hover says: a project's full working directory, a sentence for all and sections.
+   * The label names a project by its folder alone. Optional so an older server still answers.
+   */
+  path?: string
 }
 
 export interface SessionRow {

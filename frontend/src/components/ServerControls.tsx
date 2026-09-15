@@ -99,7 +99,7 @@ export function ServerControls({
 
   if (phase === 'confirm') {
     return (
-      <div role="group" aria-label="C4X server" className="flex flex-wrap items-center gap-2 text-sm">
+      <div role="group" aria-label="C4X server" className="ml-1 border-l border-edge pl-3 flex flex-wrap items-center gap-2 text-sm">
         <span className="text-ink-dim">
           Stop C4X? This page stops answering until the next Claude session starts it again.
         </span>
@@ -114,13 +114,13 @@ export function ServerControls({
   }
   if (phase === 'stopped') {
     return (
-      <div role="group" aria-label="C4X server" className="text-sm text-ink-dim">
+      <div role="group" aria-label="C4X server" className="ml-1 border-l border-edge pl-3 text-sm text-ink-dim">
         C4X stopped. The next Claude session starts it again.
       </div>
     )
   }
   return (
-    <div role="group" aria-label="C4X server" className="flex flex-wrap items-center gap-2">
+    <div role="group" aria-label="C4X server" className="ml-1 border-l border-edge pl-3 flex flex-wrap items-center gap-2">
       <button
         type="button"
         disabled={busy}

@@ -68,6 +68,24 @@ removed and nothing here said so.
   Both routes are JSON-bodied, so a foreign page's request meets the preflight the middleware
   refuses. `tokenFrom` in `tools/dashboard.mjs` takes the newest token in the log, since a restart
   appends its replacement's.
+- **A chat deleted in the desktop app leaves every list.** Measured on the laptop: a delete
+  removes the record and writes `deleted_<record uuid>` beside it (13 digits, epoch ms), leaves
+  the transcript alone, and marks nothing c4x removed. Harvest keeps `desktop_records` (every
+  record it sees, uuid and cliSessionId, seeded from the ledger for the records c4x wrote) and
+  stamps a gone record `deleted_at` from the marker or `gone_at` without one. The store hides a
+  deleted chat with its whole chain through `hidden_sessions_sql`, shared by the session frame
+  and the Summary's count; Adopt never offers it again (`deleted_in_app` in the drawer) and a
+  ledger entry the app deleted is no record of c4x's. A raw session id still opens the chat.
+- **The header says less and shows it on hover.** The Population list names a project by its
+  folder alone (more of the path only when two folders read the same; a folder-less chat by its
+  name; no "Project:" prefix) and every option carries `path` on `/api/cohorts`; the control is a
+  select-only combobox drawn by the page (`Dropdown.tsx`), because a native select's open list
+  cannot show a hover. The Account switch says on hover how many chats All shows and how many
+  the signed-in account would see under Current (`own` per pair and `current_chats` on
+  `/api/accounts`, derived from the newest sharing backup manifest); the label's hover carries the
+  restart note and turns amber after a switch; the row's sentence is gone; the numbers refresh on
+  focus and after any change. Stop C4X sits behind a divider, Adopted Chats (renamed) after
+  Restart C4X behind another.
 - **Every adopted record carries a name, and the ones a first build left nameless can be named.**
   The desktop app shows a record with no `title` as "General coding session", every one of them,
   and the first build wrote a title only from the store's `custom` or `ai` kinds: 64 of 82 on the

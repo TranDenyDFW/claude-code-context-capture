@@ -12,6 +12,7 @@ import { CompareArms } from '@/components/CompareArms'
 import { ProjectMoves } from '@/components/ProjectMoves'
 import { AccountSharing } from '@/components/AccountSharing'
 import { AdoptSessions } from '@/components/AdoptSessions'
+import { Dropdown } from '@/components/Dropdown'
 import { ServerControls } from '@/components/ServerControls'
 import { Sidebar, useCollapsed } from '@/components/Sidebar'
 
@@ -399,7 +400,7 @@ export default function App() {
                 </button>
               </span>
             )}
-            <Picker
+            <Dropdown
               label="Population"
               value={selection.cohort ?? ''}
               // CHANGING THE POPULATION CLEARS THE SESSION, because the two can contradict each
@@ -418,10 +419,11 @@ export default function App() {
               onChange={(value) => setSelection((was) => (
                 { ...was, cohort: value || null, session: null }))}
               // Labels and values straight through. Taking a value apart to prettify it is how the
-              // filter broke the first time.
+              // filter broke the first time. `path` is the hover: the label names a project by its
+              // folder alone, and the rest of the path is what a reader hovers for.
               options={[
-                { value: '', label: 'No restriction' },
-                ...(cohorts.data ?? []).map((c) => ({ value: c.value, label: c.label })),
+                { value: '', label: 'No restriction', title: 'Every chat the store lists' },
+                ...(cohorts.data ?? []).map((c) => ({ value: c.value, label: c.label, title: c.path })),
               ]}
             />
             <AccountSharing
@@ -430,14 +432,6 @@ export default function App() {
               writesEnabled={health.data?.writes_enabled ?? false}
               // Sharing changes which chats exist as far as the desktop app is concerned, and the
               // store's own view of them is read from those same directories.
-              onChanged={() => {
-                void client.invalidateQueries()
-              }}
-            />
-            <AdoptSessions
-              // New records under the signed-in account's directory: the store's view of which
-              // chats exist is read from those same directories, so everything refetches.
-              writesEnabled={health.data?.writes_enabled ?? false}
               onChanged={() => {
                 void client.invalidateQueries()
               }}
@@ -454,12 +448,13 @@ export default function App() {
               // than reload, so the open tab refetches and nothing else is thrown away.
               // THE COHORT GOES TOO, not only the session. The project just deleted IS the
               // selected cohort, by construction: ProjectMoves acts on `selection.cohort`. Keeping
-              // it left the app filtering by a population with no sessions left, and the Picker
-              // below is a plain controlled select, so a value absent from its options renders the
-              // FIRST option and fires no onChange: the control read "No restriction" while a dead
-              // cohort was still set. The backend now answers such a cohort with an empty
-              // population rather than the whole store, so this is no longer a wrong-data bug, but
-              // a control that disagrees with the state it represents is still a lie.
+              // it left the app filtering by a population with no sessions left, and the native
+              // select this control used to be rendered its FIRST option for a value absent from
+              // its options and fired no onChange: the control read "No restriction" while a dead
+              // cohort was still set. The Dropdown shows such a value as itself, and the backend
+              // answers such a cohort with an empty population rather than the whole store, so
+              // this is no longer a wrong-data bug, but a control that disagrees with the state it
+              // represents is still a lie.
               onChanged={() => {
                 void client.invalidateQueries()
                 setSelection((was) => ({ ...was, session: null, cohort: null }))
@@ -493,6 +488,14 @@ export default function App() {
               // A fresh server has an empty cache and may be running newer code: everything the
               // page holds is refetched once the replacement answers.
               onRestarted={() => {
+                void client.invalidateQueries()
+              }}
+            />
+            <AdoptSessions
+              // New records under the signed-in account's directory: the store's view of which
+              // chats exist is read from those same directories, so everything refetches.
+              writesEnabled={health.data?.writes_enabled ?? false}
+              onChanged={() => {
                 void client.invalidateQueries()
               }}
             />
@@ -551,36 +554,6 @@ export default function App() {
           write, which is the form in which that fact matters to a reader. */}
       </div>
     </div>
-  )
-}
-
-function Picker({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string
-  value: string
-  onChange: (value: string) => void
-  options: { value: string; label: string }[]
-}) {
-  return (
-    <label className="flex items-center gap-1.5 text-xs text-ink-faint">
-      {label}
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="max-w-[22rem] rounded-md border border-edge bg-panel px-2 py-1.5 text-sm
-                   text-ink outline-none focus:border-accent"
-      >
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
   )
 }
 

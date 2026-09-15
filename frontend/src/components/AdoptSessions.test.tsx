@@ -96,7 +96,7 @@ describe('AdoptSessions', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(trigger)
-    const drawer = screen.getByRole('dialog', { name: 'Adopted chats' })
+    const drawer = screen.getByRole('dialog', { name: 'Adopted Chats' })
     // Not inside the header's subtree: a fixed element there is clipped to the header's box.
     expect(container.contains(drawer)).toBe(false)
     expect(drawer.parentElement).toBe(document.body)
@@ -114,7 +114,7 @@ describe('AdoptSessions', () => {
   it('offers to take back the records a first build wrote for review runs, then asks for a restart', async () => {
     vi.spyOn(api.adopt, 'state')
       .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, review_records: 58,
-                                     review_runs: 3 }))
+                                     review_runs: 3, deleted_in_app: 2 }))
       .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, review_runs: 61 }))
     const unadopt = vi.spyOn(api.adopt, 'unadoptReviews').mockResolvedValue({
       removed: Array.from({ length: 58 }, (_, i) => ({ session_id: `r${i}`, path: `p${i}`, reviewed: 'c' })),
@@ -132,6 +132,8 @@ describe('AdoptSessions', () => {
     await opened()
     expect(screen.getByText(/58 review runs are listed in Claude as a chat/)).not.toBeNull()
     expect(screen.getByText(/3 review runs on this machine are folded/)).not.toBeNull()
+    expect(screen.getByText(/2 chats you deleted in Claude are left out/).textContent)
+      .toContain('their transcripts stay on disk')
     expect((await screen.findByTestId('startup-sweep')).textContent)
       .toBe('Startup sweep at 2026-09-14 22:24:05 UTC: removed 4 review-run record(s); Claude restarted.')
     fireEvent.click(screen.getByRole('button', { name: 'Remove them from Claude' }))

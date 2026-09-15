@@ -80,3 +80,17 @@ describe('ServerControls', () => {
     expect(onRestarted).not.toHaveBeenCalled()
   })
 })
+
+describe('its place in the header', () => {
+  it('is set apart from the controls before it, in every state', async () => {
+    vi.spyOn(api.server, 'stop').mockResolvedValue({ stopped: true })
+    render(<ServerControls />)
+    const group = () => screen.getByRole('group', { name: 'C4X server' })
+    expect(group().className).toContain('border-l')
+    fireEvent.click(screen.getByRole('button', { name: 'Stop C4X' }))
+    expect(group().className).toContain('border-l')
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
+    await screen.findByText(/C4X stopped/)
+    expect(group().className).toContain('border-l')
+  })
+})
