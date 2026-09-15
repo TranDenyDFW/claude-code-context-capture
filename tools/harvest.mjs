@@ -4866,12 +4866,14 @@ async function selfTest() {
       const U4 = '44444444-4444-4444-8444-444444444444';
       const U5 = '55555555-5555-4555-8555-555555555555';
       const U6 = '66666666-6666-4666-8666-666666666666';
+      const U7 = '77777777-7777-4777-8777-777777777777';
       const U9 = '99999999-9999-4999-8999-999999999999';
       const recAt = (u, sid, title, dir = rdir) => writeFileSync(join(dir, `local_${u}.json`),
         JSON.stringify({ cliSessionId: sid, title, isArchived: false }));
       recAt(U1, 'sess-1', 'One');
       recAt(U2, 'sess-2', 'Two');
       recAt(U4, 'sess-4', 'Four', rdir3);
+      recAt(U7, 'sess-7', 'Seven');   // stays on disk across the switch below
       writeFileSync(join(rdir, 'scheduled-tasks.json'), '{"scheduledTasks": []}');
       const ledger = join(tmp, 'records-reconcile', 'adopted-records.json');
       writeFileSync(ledger, JSON.stringify([
@@ -4887,7 +4889,7 @@ async function selfTest() {
       const T1 = '2026-09-15T00:00:00.000Z';
       const first = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: T1, backupsDir: rbackups });
       checks.push(['records: every record on disk is remembered with its session, title and flag',
-        first.seen === 3 && row(U1)?.session_id === 'sess-1' && row(U1)?.title === 'One' && row(U1)?.archived === 0
+        first.seen === 4 && row(U1)?.session_id === 'sess-1' && row(U1)?.title === 'One' && row(U1)?.archived === 0
         && row(U1)?.source === 'disk' && row(U1)?.deleted_at === null && row(U1)?.gone_at === null,
         JSON.stringify(first)]);
       checks.push(['records: a linked pair is not walked, and sharedPairs names the link and its target',
@@ -4931,8 +4933,9 @@ async function selfTest() {
         row(U2)?.gone_at === T2 && row(U2)?.deleted_at === null && second.gone === 1, JSON.stringify(row(U2))]);
       checks.push(['records: an owner, once written, is not re-decided by a later signed-in account (gate can fail)',
         row(U2)?.owner_account === 'acct-2' && row(U2)?.owner_source === 'signed-in' && row(U4)?.owner_account === 'acct-3'
+        && row(U7)?.owner_account === 'acct-2' && row(U7)?.owner_source === 'signed-in'
         && second.account_logged === true && rdb.prepare('SELECT COUNT(*) n FROM account_log').get().n === 2,
-        JSON.stringify([row(U2), second.account_logged])]);
+        JSON.stringify([row(U7), second.account_logged])]);
       checks.push(['records: a second pass leaves the stamps as they were, and adds no log row under the same account',
         (() => { const again = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: '2026-09-15T02:00:00.000Z', backupsDir: rbackups });
                  return again.deleted === 0 && again.gone === 0 && row(U1)?.gone_at === T2 && row(U2)?.gone_at === T2
