@@ -133,7 +133,12 @@ own from the app, and the server folds it into the shared one a minute after Cla
 watchdog's stop, or the server's start with Claude closed), so every account reads the same list
 after any sign-in; the header names such a pair while it waits ("not yet covered") with a **Cover
 now** button for a machine where Claude is already closed, and `intended` is read from the links
-on disk when the marker beside the store is gone. A chat the desktop app holds a
+on disk when the marker beside the store is gone. A junction is written with the spelling the
+kernel resolves to the shared directory (the Store build virtualises `%APPDATA%\Claude` into its
+package's LocalCache for everything it spawns, this server included, and a junction made with the
+virtual spelling lands somewhere else), pairs are compared by identity, and a link that lands
+elsewhere or nowhere is re-pointed the same way, what was visible through it copied into the
+backup first. A chat the desktop app holds a
 record for is listed whatever its size (the five-row floor keeps only record-less one-shots out).
 A chat deleted in the desktop app is hidden from every list here (the app leaves a
 `deleted_<uuid>` marker beside where its record was; harvest reads it; the transcript is never

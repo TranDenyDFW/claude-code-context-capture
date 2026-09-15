@@ -186,6 +186,36 @@ chat), and `verify()` reports them. A pair the app creates while it is open stay
 account until it is closed once; the fifteen chats are never lost, only listed under the shared
 directory once the app has moved them there.
 
+**A junction's target is a string the kernel resolves physically, and the Store build's process
+tree does not see physical paths.** Measured 2026-09-15 on both machines: the app is the Store
+(MSIX) build, and for it and every process it spawns (the hook, node, the c4x server the hook
+starts) `%APPDATA%\Claude\claude-code-sessions` is virtualised into
+`%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code-sessions`: both
+spellings open one directory (same inode), neither shows a reparse tag, `realpath` answers the
+virtual one, and `GetCurrentPackageFullName` reports no package. `share_all` ran inside that server
+and wrote the virtual spelling as every junction's substitute name; the kernel resolved it to the
+physical `%APPDATA%` directory, a leftover of an earlier install holding one record here (WMI, which
+runs outside the app's tree, counts 1 file there and 224 under LocalCache), and to nothing on the
+laptop. `link_target()` read the right string back from every junction while every account but
+the shared one listed one chat, or none. The rule, measured with junctions made beside the app's
+directories: a junction opened through the virtual spelling is redirected once, and its reparse
+target is then opened as written, so a virtual target lands on the physical leftover while a
+`Packages` target lands on the shared directory; the same junction opened through its `Packages`
+spelling resolves either target to the shared directory, and so does one placed on another drive,
+which is why a check outside the virtualised tree proves nothing. So `_make_link` now writes the
+spelling the kernel lands
+on the target: `_spellings()` re-roots the target under every candidate directory the store knows,
+keeps the spellings that open the same directory (`store._identity`), tries the one under
+`Packages` first, and `resolves_to()` (an `os.stat` of the link against the target, by inode)
+decides which is kept; `_same_path` compares by identity too. A link that resolves elsewhere or
+nowhere is an `uncovered` pair with `why` `points elsewhere` or `dangling`: `state()` reads
+`mixed`, `verify()` names it, and `reconcile()` re-points it at the shared directory, after copying
+what was visible through it into `<backup>/through-link/<account8>/` (and into the shared directory
+for a name it does not hold; a colliding name stays in the backup only). A relink that fails puts
+the old link back and raises: a pair with no directory is the one outcome worse than a mispointed
+one. The CLI is meant to run where the server runs; from a plain terminal the virtual spelling
+opens the leftover, which is why `canonical_pair` matches every spelling of a link's target.
+
 **Intent is read from the disk when the marker is gone.** The marker lives beside the store, and a
 reset of `data/` takes it while the junctions stay. Measured: eight of nine pairs linked, no
 marker, and the page said Current while every account read one list. Links are not made by

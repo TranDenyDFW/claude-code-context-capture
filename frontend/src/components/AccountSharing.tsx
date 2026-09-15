@@ -159,7 +159,11 @@ export function AccountSharing({
       {uncovered.length ? (
         <p
           data-uncovered={uncovered.length}
-          title={COVER_HOVER + '\n' + uncovered.map((p) => p.path).join('\n')}
+          title={
+            COVER_HOVER +
+            '\n' +
+            uncovered.map((p) => (p.why ? p.path + ': ' + p.why : p.path)).join('\n')
+          }
           className="flex items-center gap-2 text-xs text-warn"
         >
           <span>

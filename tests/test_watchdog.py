@@ -224,3 +224,11 @@ class TestTheStopThatCoversFirst:
         assert server_main.reconcile_at_start(run=boom, running=lambda: False,
                                               log=lines.append) is None
         assert lines[-1] == "[reconcile] at start: skipped (--no-writes)"
+
+    def test_the_summary_counts_the_links_re_pointed(self):
+        from c4x.api import __main__ as server_main
+        report = self._report(why="re-pointed 2 link(s)", roots=[{
+            "linked": [], "moved": [], "set_aside": [],
+            "relinked": [{"copied": [1], "restored": False}, {"copied": [], "restored": False}]}])
+        assert server_main._reconcile_summary(report) == (
+            "re-pointed 2 link(s); 2 re-pointed, 1 copied through; backup B; marker written")
