@@ -12,9 +12,8 @@ c4x keeps lives under `data/` in this folder. [What it keeps.](#what-it-keeps)
 - **Use another account when one runs out, and keep every chat.** Sign into your second
   account and the chat list is the same: the same chats, the same history, in the desktop app
   and here. Each chat remembers which account made it, so you can still see only yours.
-- **Get chats back the app lost.** After a reinstall, or a sign-in that went wrong, the desktop
-  app forgets chats that are still on your disk. c4x lists them and puts them back, folder by
-  folder.
+- **Get chats back the app lost.** After a reinstall the desktop app forgets chats that are
+  still on your disk. c4x lists them and puts them back, folder by folder.
 - **Move a project to another machine.** One file carries a folder's chats, their memory and
   the app's own records, and the project opens in Claude Code over there.
 - **Search every chat you ever had**, across accounts and folders, and open any of them.
