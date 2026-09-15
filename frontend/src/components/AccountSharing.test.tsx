@@ -253,3 +253,65 @@ describe('the pairs sharing does not cover yet', () => {
     expect(screen.getByText(/not yet covered/)).not.toBeNull()
   })
 })
+
+
+describe('Current asks before un-sharing, and says where its number came from', () => {
+  it('opens a confirm on Current and calls nothing until Un-share', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ intended: 'all', mode: 'all' }))
+    const share = vi.spyOn(api.accounts, 'share').mockResolvedValue({
+      mode: 'current', dry_run: false, restart_required: true, backup: null,
+      state: state({ intended: 'current', mode: 'current' }),
+    })
+    draw()
+    fireEvent.click(await screen.findByRole('button', { name: 'Current' }))
+    expect(share).not.toHaveBeenCalled()
+    const ask = screen.getByRole('group', { name: 'Un-share' })
+    expect(ask.textContent).toContain('Quit Claude first')
+    fireEvent.click(screen.getByRole('button', { name: 'Un-share' }))
+    await waitFor(() => expect(share).toHaveBeenCalledTimes(1))
+    expect(share).toHaveBeenCalledWith('current')
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Un-share' })).toBeNull())
+  })
+
+  it('keeps sharing when told to', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ intended: 'all', mode: 'all' }))
+    const share = vi.spyOn(api.accounts, 'share')
+    draw()
+    fireEvent.click(await screen.findByRole('button', { name: 'Current' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Keep sharing' }))
+    expect(screen.queryByRole('group', { name: 'Un-share' })).toBeNull()
+    expect(share).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'All' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('switches to All in one click, as before', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
+    const share = vi.spyOn(api.accounts, 'share').mockResolvedValue({
+      mode: 'all', dry_run: false, restart_required: true, backup: null,
+      state: state({ intended: 'all', mode: 'all' }),
+    })
+    draw()
+    fireEvent.click(await screen.findByRole('button', { name: 'All' }))
+    await waitFor(() => expect(share).toHaveBeenCalledWith('all'))
+    expect(screen.queryByRole('group', { name: 'Un-share' })).toBeNull()
+  })
+
+  it('says the Current number is by the account each chat was made under, with the untagged', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', mode: 'all', current_chats: 12, current_source: 'tags', untagged: 3 }))
+    draw()
+    const current = await screen.findByRole('button', { name: 'Current' })
+    expect(current.getAttribute('title')).toContain(
+      "Only the signed-in account's own chats: 12, by the account each chat was made under; 3 of unknown account")
+    expect(current.getAttribute('title')).toContain(RESTART_NOTE)
+  })
+
+  it('keeps the manifest wording when the number came from the manifest', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', mode: 'all', current_chats: 12, current_source: 'manifest' }))
+    draw()
+    const current = await screen.findByRole('button', { name: 'Current' })
+    expect(current.getAttribute('title')).toContain("Only the signed-in account's own chats: 12\n")
+    expect(current.getAttribute('title')).not.toContain('made under')
+  })
+})
