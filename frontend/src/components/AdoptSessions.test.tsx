@@ -61,10 +61,10 @@ beforeEach(() => {
   vi.restoreAllMocks()
 })
 
+const ADOPT = /^Adopt \(\d+\)$/
+
 async function opened() {
-  fireEvent.click(await screen.findByRole('button', {
-    name: /no record of|without a name|still in Claude/,
-  }))
+  fireEvent.click(await screen.findByRole('button', { name: ADOPT }))
 }
 
 describe('AdoptSessions', () => {
@@ -77,8 +77,9 @@ describe('AdoptSessions', () => {
     }))
     const onChanged = vi.fn()
     render(<AdoptSessions writesEnabled onChanged={onChanged} />)
-    expect((await screen.findByRole('button', { name: /without a name/ })).textContent)
-      .toContain('64 adopted chats without a name')
+    const button = await screen.findByRole('button', { name: ADOPT })
+    expect(button.textContent).toBe('Adopt (0)')
+    expect(button.getAttribute('title')).toBe('64 adopted chats without a name')
     await opened()
     expect(screen.getByText(/64 adopted chats have no name yet/).textContent)
       .toContain('General coding session')
@@ -92,7 +93,7 @@ describe('AdoptSessions', () => {
   it('opens as a drawer at the end of the document, with focus in and back out again', async () => {
     vi.spyOn(api.adopt, 'state').mockResolvedValue(state())
     const { container } = render(<AdoptSessions writesEnabled />)
-    const trigger = await screen.findByRole('button', { name: /no record of/ })
+    const trigger = await screen.findByRole('button', { name: ADOPT })
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(trigger)
@@ -127,8 +128,8 @@ describe('AdoptSessions', () => {
               restart: { restarted: true, killed: 6, launch: ['explorer.exe'], why: 'relaunched' } },
     })
     render(<AdoptSessions writesEnabled />)
-    expect((await screen.findByRole('button', { name: /still in Claude/ })).textContent)
-      .toContain('58 review runs still in Claude')
+    expect((await screen.findByRole('button', { name: ADOPT })).getAttribute('title'))
+      .toBe('58 review runs still in Claude')
     await opened()
     expect(screen.getByText(/58 review runs are listed in Claude as a chat/)).not.toBeNull()
     expect(screen.getByText(/3 review runs on this machine are folded/)).not.toBeNull()
@@ -159,8 +160,9 @@ describe('AdoptSessions', () => {
   it('offers the folders with NOTHING preselected and the button off until one is ticked', async () => {
     vi.spyOn(api.adopt, 'state').mockResolvedValue(state())
     render(<AdoptSessions writesEnabled />)
-    expect((await screen.findByRole('button', { name: /no record of/ })).textContent)
-      .toContain('3 chats on this machine')
+    const button = await screen.findByRole('button', { name: ADOPT })
+    expect(button.textContent).toBe('Adopt (3)')
+    expect(button.getAttribute('title')).toBe('3 chats on this machine that Claude has no record of')
     await opened()
     const boxes = screen.getAllByRole('checkbox', { name: /Gamma|Alpha/ }) as HTMLInputElement[]
     expect(boxes.map((b) => b.checked)).toEqual([false, false])

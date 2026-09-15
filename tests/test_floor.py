@@ -56,3 +56,63 @@ def test_the_floor_is_a_small_positive_integer():
     """Not a tautology on the value: a floor of 0 would list every probe and a float would break
     the sentence the tab prints, and either is a change that should fail loudly here first."""
     assert isinstance(SESSION_TURN_FLOOR, int) and 1 <= SESSION_TURN_FLOOR <= 50
+
+
+# --- the one exemption: a chat the desktop app lists is listed here ------------------------
+
+def _tiny_store(tmp_path, monkeypatch):
+    """The real schema; `s0-0` cut to ONE transcript row, well under the floor."""
+    import sqlite3
+
+    from c4x import store
+    from tests.test_projects import build_store, forget_cached_rows
+    path = build_store(tmp_path / "store.db")
+    con = sqlite3.connect(str(path))
+    con.execute("DELETE FROM turns WHERE session_id = 's0-0' AND line_no > 0")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(store, "DB_PATH", path)
+    forget_cached_rows()
+    return path
+
+
+def _record_row(path, sid, gone_at=None, deleted_at=None):
+    import sqlite3
+    con = sqlite3.connect(str(path))
+    con.execute("""INSERT INTO desktop_records (record_uuid, session_id, dir, title, archived,
+                     first_seen, last_seen, gone_at, deleted_at, source)
+                   VALUES (?, ?, 'X:/r/a/o', 'T02', 0, '2026-09-01T00:00:00Z',
+                           '2026-09-01T00:00:00Z', ?, ?, 'disk')""",
+                (f"u-{sid}", sid, gone_at, deleted_at))
+    con.commit()
+    con.close()
+
+
+def test_a_chat_below_the_floor_is_not_listed_without_a_record(tmp_path, monkeypatch):
+    from c4x import store
+    _tiny_store(tmp_path, monkeypatch)
+    assert "s0-0" not in set(store.session_rows(ttl=0)["session_id"])
+
+
+def test_a_chat_the_desktop_app_holds_a_live_record_for_is_listed_whatever_its_size(
+        tmp_path, monkeypatch):
+    """Measured on the laptop: T02 (one row), T09 (three) and T14-A (four) sat in the sidebar and
+    nowhere on this page. The app lists them, so this page does too."""
+    from c4x import store
+    from tests.test_projects import forget_cached_rows
+    path = _tiny_store(tmp_path, monkeypatch)
+    _record_row(path, "s0-0")
+    forget_cached_rows()
+    rows = store.session_rows(ttl=0)
+    assert "s0-0" in set(rows["session_id"])
+    assert int(rows.loc[rows["session_id"] == "s0-0", "turns"].iloc[0]) == 1
+    assert store.overview_stats()["listed"] == len(rows), "the card counts what the list draws"
+
+
+def test_a_record_that_went_or_was_deleted_exempts_nothing(tmp_path, monkeypatch):
+    from c4x import store
+    from tests.test_projects import forget_cached_rows
+    path = _tiny_store(tmp_path, monkeypatch)
+    _record_row(path, "s0-0", gone_at="2026-09-15T01:05:00Z")
+    forget_cached_rows()
+    assert "s0-0" not in set(store.session_rows(ttl=0)["session_id"])

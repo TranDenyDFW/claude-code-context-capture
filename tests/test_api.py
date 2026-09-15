@@ -917,12 +917,45 @@ def test_a_project_option_is_its_leaf_folder_and_carries_its_path(client):
         path = o["value"].split("::", 1)[1]
         assert o["path"] == path
         assert not o["label"].startswith("Project: ") and not o["label"].startswith(".../")
-        if not is_folderless(path):
+        assert o["label"].endswith(" listed)"), o["label"]
+        # A folder holding SEVERAL chats is named by its folder (a folder holding one is named by
+        # its chat, which the next test pins).
+        if not is_folderless(path) and not o["label"].endswith("(1 listed)"):
             leaf = short_path(path, 1, mark="")
-            assert o["label"].endswith(" listed)") and leaf in o["label"], (o["label"], leaf)
+            assert leaf in o["label"], (o["label"], leaf)
     assert client.get("/api/cohorts").json() == options
     # The Dash surface gets the same hover as `title`, the one key its option shape has for it.
     from c4x.ui.header import dash_cohort_options
     dashed = dash_cohort_options()
     assert [o["value"] for o in dashed] == [o["value"] for o in options]
     assert all(set(o) == {"label", "value", "title"} and o["title"] for o in dashed)
+
+
+def test_a_folder_holding_one_chat_reads_as_that_chat_s_title(client):
+    """The sidebar shows "T02" under folder "2"; "2 (1 listed)" named nothing a reader knew. A
+    folder with one listed chat is labelled by that chat's title (the frame's, the same name the
+    Sessions list shows), a folder with several keeps its name, and only two rows that would read
+    the same get their folder appended."""
+    from c4x.labels import cut_title, short_path
+    from c4x.store import cohort_options, session_rows
+    frame = session_rows()
+    options = cohort_options()
+    labels = {o["value"].split("::", 1)[1]: o["label"] for o in options
+              if o["value"].startswith("project::")}
+    singles = [p for p, n in frame["project"].value_counts().items() if n == 1]
+    manys = [p for p, n in frame["project"].value_counts().items() if n > 1]
+    seen_single = seen_many = 0
+    for p, label in labels.items():
+        name = label.rsplit(" (", 1)[0]
+        if p in singles:
+            title = cut_title(frame.loc[frame["project"] == p, "title"].iloc[0])
+            assert name == title or name.startswith(title + " - "), (name, title)
+            seen_single += 1
+        elif p in manys:
+            # The folder's name, or more of its path when another folder reads the same
+            # (`L:\Books` beside `P:\Books` shows whole).
+            leaf = short_path(p, 1, mark="")
+            assert leaf in name, (name, leaf)
+            seen_many += 1
+    assert seen_single and seen_many, "the fixture offers both shapes"
+    assert len(set(labels.values())) == len(labels), "no two rows read the same"

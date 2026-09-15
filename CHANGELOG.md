@@ -86,6 +86,16 @@ removed and nothing here said so.
   restart note and turns amber after a switch; the row's sentence is gone; the numbers refresh on
   focus and after any change. Stop C4X sits behind a divider, Adopted Chats (renamed) after
   Restart C4X behind another.
+- **The header, second pass.** A folder holding one chat reads as that chat's title (the frame's,
+  the same name the Sessions list shows) and a folder holding several by its name, the folder
+  appended only where two rows would read the same; the "Population" word is gone (the label
+  stays for screen readers); the "Account" word is gone and the All / Current hovers carry, one
+  line each, what the side shows, "Quit Claude before switching" and the restart note, the switch
+  turning amber after a change; the Adopt button reads "Adopt (N)" with its sentence on hover. A
+  chat the desktop app holds a live record for is listed whatever its size: the laptop's T02 (one
+  transcript row), T09 and T14-A sat in the sidebar and nowhere on the page, since the five-row
+  floor took them for harness one-shots; the floor now exempts any chat with a live record in
+  `desktop_records` (`live_records_sql`), in the SQL half and the pandas half alike.
 - **Every adopted record carries a name, and the ones a first build left nameless can be named.**
   The desktop app shows a record with no `title` as "General coding session", every one of them,
   and the first build wrote a title only from the store's `custom` or `ai` kinds: 64 of 82 on the

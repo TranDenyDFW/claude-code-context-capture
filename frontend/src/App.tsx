@@ -402,6 +402,7 @@ export default function App() {
             )}
             <Dropdown
               label="Population"
+              hideLabel
               value={selection.cohort ?? ''}
               // CHANGING THE POPULATION CLEARS THE SESSION, because the two can contradict each
               // other and nothing downstream reconciles them. Picking a session first and then a

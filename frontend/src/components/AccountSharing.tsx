@@ -37,6 +37,7 @@ function Problem({ error }: { error: unknown }) {
 
 export const RESTART_NOTE =
   'Restart Claude for this to take effect. It reads these directories when it starts.'
+export const QUIT_NOTE = 'Quit Claude before switching: a directory it has open cannot be moved.'
 
 export function AccountSharing({
   writesEnabled,
@@ -84,25 +85,30 @@ export function AccountSharing({
     }
   }
 
+  // EVERYTHING A SWITCH NEEDS TO KNOW IS ON THE TWO BUTTONS, one line each: what the side shows,
+  // that Claude must be quit before switching, that it must be restarted after. The "ACCOUNT"
+  // word that used to carry the restart note is gone, the user's choice: the buttons say what
+  // they are.
+  const notes = '\n' + QUIT_NOTE + '\n' + RESTART_NOTE
   const hover = {
-    all: `Every account's chats: ${state.chats_visible} across ${state.pairs} account directories`,
+    all: `Every account's chats: ${state.chats_visible} across ${state.pairs} account directories${notes}`,
     current:
-      state.current_chats === null || state.current_chats === undefined
+      (state.current_chats === null || state.current_chats === undefined
         ? "Only the signed-in account's own chats: not known while sharing is on"
-        : `Only the signed-in account's own chats: ${state.current_chats}`,
+        : `Only the signed-in account's own chats: ${state.current_chats}`) + notes,
   }
 
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-2">
-        <span
-          title={RESTART_NOTE}
+        <div
+          role="group"
+          aria-label="Account"
           data-restart={restart ? 'true' : 'false'}
-          className={`text-xs uppercase tracking-wide ${restart ? 'text-warn' : 'text-ink-faint'}`}
+          className={`inline-flex overflow-hidden rounded-md border ${
+            restart ? 'border-warn/70' : 'border-edge'
+          }`}
         >
-          Account
-        </span>
-        <div className="inline-flex overflow-hidden rounded-md border border-edge">
           {(['all', 'current'] as const).map((option) => (
             <button
               key={option}
@@ -123,11 +129,6 @@ export function AccountSharing({
           ))}
         </div>
       </div>
-      {state.app_running && writesEnabled ? (
-        <p className="text-xs text-ink-faint">
-          Quit Claude before switching: a directory it has open cannot be moved.
-        </p>
-      ) : null}
       {error ? <Problem error={error} /> : null}
     </div>
   )

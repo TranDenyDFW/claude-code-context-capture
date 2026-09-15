@@ -232,7 +232,8 @@ describe('the header, as the user asked for it', () => {
       groups: [{ cwd: 'P:/Alpha', project: 'Alpha', count: 1, newest: '2026-08-01T00:04:00Z', sessions: [] }],
     })
     show('/')
-    const adopt = await screen.findByRole('button', { name: /no record of/ })
+    const adopt = await screen.findByRole('button', { name: /^Adopt \(\d+\)$/ })
+    expect(adopt.getAttribute('title')).toContain('no record of')
     const server = screen.getByRole('group', { name: 'C4X server' })
     expect(server.compareDocumentPosition(adopt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(server.className).toContain('border-l')

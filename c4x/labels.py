@@ -151,16 +151,21 @@ def _best_title(titles):
     hard and marked as cut so it cannot be mistaken for a name someone chose.
     """
     for kind in ("desktop", "custom", "ai", "last-prompt"):
-        text = (titles or {}).get(kind)
-        if not text:
-            continue
-        text = " ".join(str(text).split())
-        if not text:
-            continue
-        if len(text) > PROMPT_LABEL_MAX:
-            text = text[:PROMPT_LABEL_MAX].rstrip() + "..."
-        return text
+        text = cut_title((titles or {}).get(kind))
+        if text:
+            return text
     return None
+
+
+def cut_title(text) -> str:
+    """A title as a label: whitespace collapsed, cut to PROMPT_LABEL_MAX and marked as cut.
+    Empty for nothing, whitespace or a non-string."""
+    if not text:
+        return ""
+    text = " ".join(str(text).split())
+    if len(text) > PROMPT_LABEL_MAX:
+        text = text[:PROMPT_LABEL_MAX].rstrip() + "..."
+    return text
 
 
 def chat_name(path, titles) -> str:
