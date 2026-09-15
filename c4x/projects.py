@@ -105,7 +105,10 @@ BY_TRANSCRIPT = ("files",)
 # module can answer rather than a thing to check by eye.
 STORE_WIDE = ("probes", "probe_categories", "probe_details", "probe_message_breakdown",
               "context_baselines", "record_types", "harvest_runs", "excluded_projects",
-              "sqlite_sequence")
+              "sqlite_sequence",
+              # Which account the desktop app was signed in as, over time, on THIS machine: a
+              # switch here says nothing about a project and nothing about another machine.
+              "account_log")
 
 MANIFEST_TABLE = "c4x_export"
 
