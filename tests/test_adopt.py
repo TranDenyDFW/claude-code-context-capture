@@ -693,3 +693,40 @@ class TestTheServerRoutes:
 
     def test_the_health_answer_names_the_process(self, client):
         assert client.get("/api/health").json()["pid"] == os.getpid()
+
+
+class TestDeletedInTheApp:
+    """A chat the desktop app deleted (its record gone, the app's marker beside it) is never
+    offered again and is out of c4x's own counts."""
+
+    @pytest.fixture
+    def deleted(self, machine):
+        con = sqlite3.connect(str(store.DB_PATH))
+        con.execute("""INSERT INTO desktop_records (record_uuid, session_id, dir, title, archived,
+                         first_seen, last_seen, gone_at, deleted_at, source)
+                       VALUES ('44444444-4444-4444-8444-444444444444', 's3-1', 'X:/r/a/o', 't', 0,
+                               '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z',
+                               '2026-09-15T01:05:00Z', '2026-09-15T01:01:21.365Z', 'disk')""")
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        return machine
+
+    def test_a_deleted_chat_is_not_offered_and_is_counted(self, deleted):
+        state = adopt.state()
+        assert "s3-1" not in candidate_ids(state) and "s3-0" in candidate_ids(state)
+        assert state["deleted_in_app"] == 1
+        written = {w["session_id"] for w in adopt.adopt([DELTA])["written"]}
+        assert written == {"s3-0"}, "adopting the folder never writes the deleted chat back"
+
+    def test_a_record_c4x_wrote_that_the_app_deleted_is_no_record_of_c4x_s(self, machine):
+        report = adopt.adopt([GAMMA])
+        path = Path(report["written"][0]["path"])
+        entry = next(e for e in adopt._load_ledger() if e["session_id"] == "s2-0")
+        uuid = entry["record"][len("local_"):]
+        path.unlink()
+        assert [e["session_id"] for e, _r, _p in adopt._ledger_records()] == ["s2-0"], (
+            "gone without a marker: still c4x's, and counted missing by the sweep")
+        (path.parent / f"deleted_{uuid}").write_text("1789434081365", encoding="utf-8")
+        assert adopt._ledger_records() == [], "gone with the app's marker: the user deleted it"
+        assert adopt.state()["untitled_adopted"] == 0

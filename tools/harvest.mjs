@@ -429,6 +429,29 @@ CREATE TABLE IF NOT EXISTS review_misses (
   pool_key TEXT NOT NULL,
   checked_at TEXT NOT NULL
 );
+-- THE APP'S OWN RECORDS, REMEMBERED. The desktop app lists a chat because a local_<uuid>.json
+-- names it, and when a chat is deleted in the app the record goes and a marker deleted_<uuid>
+-- appears beside it (measured on the test laptop, 2026-09-15: 13 ASCII digits, the delete time
+-- in epoch milliseconds; the transcript under ~/.claude/projects is left alone). The store never
+-- knew a record's uuid, so a marker named nothing it could act on and a deleted chat stayed
+-- listed. Every pass now remembers each record it sees, uuid and cliSessionId together, and
+-- seeds the same from data/adopted-records.json for the records c4x wrote; a record that is gone
+-- with a marker is stamped deleted_at (the app deleted the chat), one gone without is stamped
+-- gone_at only (c4x took it back, a move, a reinstall: not a delete). Rows are never removed; a
+-- record that returns has both stamps cleared. Readers hide a chat whose record is deleted_at.
+CREATE TABLE IF NOT EXISTS desktop_records (
+  record_uuid TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  dir TEXT NOT NULL,
+  title TEXT,
+  archived INTEGER,
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  gone_at TEXT,
+  deleted_at TEXT,
+  source TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS desktop_records_session ON desktop_records(session_id);
 -- A project the user deleted and asked to stop capturing. Keyed on cwd, not on the transcript
 -- directory: the mapping is many-to-many, the 'subagents' slug alone covers 30 different working
 -- directories, and excluding one of those by slug would silently stop capturing the other 29.
@@ -1178,6 +1201,19 @@ export function resolveRecordsRoots(argv = [], env = process.env) {
 // a person can edit that away, the field stays.
 export function readDesktopRecords(roots) {
   const out = new Map();
+  for (const r of listDesktopRecords(roots)) out.set(r.session_id, { fork: r.fork, file: r.file });
+  return out;
+}
+
+// The file name the app gives a record: local_<uuid>.json. A record named otherwise is read for
+// the chain map like any other but is not remembered in desktop_records, since the marker the app
+// leaves on a delete is deleted_<uuid> and there would be nothing to match it to.
+const RECORD_FILE = /^local_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/i;
+const LEDGER_RECORD = /^local_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+/** Every record on disk as {uuid, session_id, dir, file, title, archived, fork}; uuid is null for a file not named local_<uuid>.json. */
+export function listDesktopRecords(roots) {
+  const out = [];
   for (const root of roots) {
     let accounts = [];
     try { accounts = readdirSync(root, { withFileTypes: true }); } catch { continue; }
@@ -1195,15 +1231,98 @@ export function readDesktopRecords(roots) {
           let rec;
           try { rec = JSON.parse(readFileSync(join(dir, f), 'utf8')); } catch { continue; }
           if (!rec || typeof rec !== 'object' || typeof rec.cliSessionId !== 'string') continue;
-          out.set(rec.cliSessionId, {
+          const named = RECORD_FILE.exec(f);
+          out.push({
+            uuid: named ? named[1].toLowerCase() : null,
+            session_id: rec.cliSessionId, dir, file: f,
+            title: typeof rec.title === 'string' ? rec.title : null,
+            archived: rec.isArchived === true ? 1 : rec.isArchived === false ? 0 : null,
             fork: typeof rec.forkedFromSessionId === 'string' && rec.forkedFromSessionId.length > 0,
-            file: f,
           });
         }
       }
     }
   }
   return out;
+}
+
+/**
+ * When the app deleted the record `uuid` that lived in `dir`, as an ISO stamp, or null when no
+ * marker says so. The marker is deleted_<uuid> beside where the record was; on a packaged install
+ * the ledger's path is the writer's view of the directory (see c4x/adopt.py _resolve_record), so
+ * the same <account>/<org> is also tried under every records root. Its content is the delete time
+ * in epoch milliseconds (measured); anything else still means deleted, at `now`.
+ */
+export function markerTime(dir, uuid, now, roots = []) {
+  const name = `deleted_${uuid}`;
+  const places = [join(dir, name)];
+  const org = basename(dir);
+  const account = basename(dirname(dir));
+  for (const root of roots) places.push(join(root, account, org, name));
+  const path = places.find((p) => existsSync(p));
+  if (!path) return null;
+  let text = '';
+  try { text = readFileSync(path, 'utf8').trim(); } catch { return now; }
+  if (!/^\d{10,16}$/.test(text)) return now;
+  const n = Number(text);
+  const when = new Date(n < 1e11 ? n * 1000 : n);
+  return Number.isNaN(when.getTime()) ? now : when.toISOString();
+}
+
+/**
+ * Remember every record on disk, seed the ones c4x wrote from the ledger, and stamp the ones that
+ * have gone: deleted_at when the app's marker says it deleted them, gone_at otherwise. Runs inside
+ * the caller's transaction. Returns counts; never removes a row.
+ */
+export function reconcileDesktopRecords(db, roots, { ledgerPath = join(ROOT, 'data', 'adopted-records.json'),
+                                                     now = new Date().toISOString(), listed = null } = {}) {
+  const result = { seen: 0, ledger: 0, deleted: 0, gone: 0, returned: 0 };
+  const records = listed ?? listDesktopRecords(roots);
+  const upsert = db.prepare(`INSERT INTO desktop_records
+      (record_uuid, session_id, dir, title, archived, first_seen, last_seen, gone_at, deleted_at, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'disk')
+    ON CONFLICT(record_uuid) DO UPDATE SET session_id = excluded.session_id, dir = excluded.dir,
+      title = excluded.title, archived = excluded.archived, last_seen = excluded.last_seen,
+      gone_at = NULL, deleted_at = NULL, source = 'disk'`);
+  const was = db.prepare('SELECT gone_at, deleted_at FROM desktop_records WHERE record_uuid = ?');
+  const present = new Set();
+  for (const r of records) {
+    if (!r.uuid) continue;
+    present.add(r.uuid);
+    const before = was.get(r.uuid);
+    if (before && (before.gone_at || before.deleted_at)) result.returned++;
+    upsert.run(r.uuid, r.session_id, r.dir, r.title, r.archived, now, now);
+    result.seen++;
+  }
+  // THE LEDGER: the records c4x wrote, uuid and session together, so a record the app deleted
+  // before this table existed still maps to its chat. On the laptop that was 19 of the 20 chats
+  // deleted by hand. A row already known is left as it is.
+  let entries = [];
+  try { entries = JSON.parse(readFileSync(ledgerPath, 'utf8')); } catch { entries = []; }
+  const seed = db.prepare(`INSERT OR IGNORE INTO desktop_records
+      (record_uuid, session_id, dir, title, archived, first_seen, last_seen, gone_at, deleted_at, source)
+    VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, 'ledger')`);
+  if (Array.isArray(entries)) {
+    for (const e of entries) {
+      if (!e || typeof e !== 'object') continue;
+      const named = LEDGER_RECORD.exec(String(e.record || ''));
+      if (!named || typeof e.session_id !== 'string' || typeof e.path !== 'string') continue;
+      const at = typeof e.at === 'string' && e.at ? e.at : now;
+      if (seed.run(named[1].toLowerCase(), e.session_id, dirname(e.path), at, at).changes) result.ledger++;
+    }
+  }
+  // EVERYTHING NOT ON DISK NOW. A marker says the app deleted it; nothing says it merely went.
+  const rows = db.prepare('SELECT record_uuid, dir, gone_at, deleted_at FROM desktop_records').all();
+  const stamp = db.prepare(`UPDATE desktop_records
+    SET gone_at = COALESCE(gone_at, ?), deleted_at = COALESCE(deleted_at, ?) WHERE record_uuid = ?`);
+  for (const row of rows) {
+    if (present.has(row.record_uuid)) continue;
+    const when = markerTime(row.dir, row.record_uuid, now, roots);
+    if (when && !row.deleted_at) result.deleted++;
+    if (!when && !row.gone_at) result.gone++;
+    stamp.run(now, when, row.record_uuid);
+  }
+  return result;
 }
 
 const TRANSCRIPT_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i;
@@ -3298,6 +3417,21 @@ async function run({ full, recordsRoots = null }) {
     sidecars.workflow_runs = h.stats.workflowRuns;
   }
 
+  // THE APP'S RECORDS, every pass, in a transaction of their own: a chat deleted in the app since
+  // the last run is a record gone with a marker beside it, and stamping it here is what takes the
+  // chat off every list on the next render. Cheap (one directory listing the chains pass makes
+  // again below) and never fatal to the pass: a failure is reported in the run's output.
+  let desktopRecords = { seen: 0, ledger: 0, deleted: 0, gone: 0, returned: 0, failed: null };
+  db.exec('BEGIN');
+  try {
+    desktopRecords = { ...reconcileDesktopRecords(db, recordsRoots ?? resolveRecordsRoots([])), failed: null };
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* nothing left to roll back */ }
+    desktopRecords.failed = String(e && e.message ? e.message : e);
+    process.stderr.write(`harvest: desktop records pass failed: ${desktopRecords.failed}\n`);
+  }
+
   // THE CHAINS, for every directory touched. A resume that happened since the last run is a new
   // transcript in a directory that already holds its predecessor; deriving links for that one
   // directory is what folds it into its chat on the next render without anyone running anything.
@@ -3362,6 +3496,7 @@ async function run({ full, recordsRoots = null }) {
     mode: full ? 'full' : 'incremental',
     chains,
     sidecars,
+    desktop_records: desktopRecords,
     plans: h.stats.plans, task_events: h.stats.taskEvents, workflow_links: h.stats.workflowLinks,
     files_seen: h.stats.filesSeen, files_read: h.stats.filesRead, rewritten_files: h.stats.rewrites,
     // REPORTED, not merely counted. A run that quietly reads fewer files than it saw is
@@ -4508,6 +4643,79 @@ async function selfTest() {
   // review of it; one that repeats a person's prompt word for word is not; an even tie names
   // nobody. Through the same ingest as the chains fixtures, then the derivation over the store.
   {
+    // THE APP'S RECORDS, REMEMBERED: a record that goes with a marker is a deleted chat, one that
+    // goes without is not, the ledger maps a record harvest never saw, and a record that returns
+    // is clean again. Fed the marker's measured shape (13 digits of epoch ms) and a known-bad one.
+    {
+      const rroot = join(tmp, 'records-reconcile', 'root');
+      const rdir = join(rroot, 'acct-1', 'org-1');
+      mkdirSync(rdir, { recursive: true });
+      const U1 = '11111111-1111-4111-8111-111111111111';
+      const U2 = '22222222-2222-4222-8222-222222222222';
+      const U3 = '33333333-3333-4333-8333-333333333333';
+      const U9 = '99999999-9999-4999-8999-999999999999';
+      const recAt = (u, sid, title) => writeFileSync(join(rdir, `local_${u}.json`),
+        JSON.stringify({ cliSessionId: sid, title, isArchived: false }));
+      recAt(U1, 'sess-1', 'One');
+      recAt(U2, 'sess-2', 'Two');
+      writeFileSync(join(rdir, 'scheduled-tasks.json'), '{"scheduledTasks": []}');
+      const ledger = join(tmp, 'records-reconcile', 'adopted-records.json');
+      writeFileSync(ledger, JSON.stringify([
+        { session_id: 'sess-3', record: `local_${U3}`, path: join(rdir, `local_${U3}.json`), at: '2026-09-01T00:00:00Z' },
+        { session_id: 'sess-1', record: `local_${U1}`, path: join(rdir, `local_${U1}.json`), at: '2026-09-02T00:00:00Z' },
+        { nonsense: true }, null,
+      ]));
+      writeFileSync(join(rdir, `deleted_${U3}`), '1789434081365');   // the shape measured on the laptop
+      writeFileSync(join(rdir, `deleted_${U9}`), '1789434081365');   // a uuid nobody knows
+      const rdb = new DatabaseSync(':memory:');
+      rdb.exec(SCHEMA);
+      const row = (u) => rdb.prepare('SELECT * FROM desktop_records WHERE record_uuid = ?').get(u);
+      const T1 = '2026-09-15T00:00:00.000Z';
+      const first = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: T1 });
+      checks.push(['records: every record on disk is remembered with its session, title and flag',
+        first.seen === 2 && row(U1)?.session_id === 'sess-1' && row(U1)?.title === 'One' && row(U1)?.archived === 0
+        && row(U1)?.source === 'disk' && row(U1)?.deleted_at === null && row(U1)?.gone_at === null,
+        JSON.stringify(first)]);
+      checks.push(['records: the ledger seeds a record harvest never saw, and a known one is left alone',
+        first.ledger === 1 && row(U3)?.source === 'ledger' && row(U3)?.session_id === 'sess-3'
+        && row(U3)?.first_seen === '2026-09-01T00:00:00Z' && row(U1)?.source === 'disk']);
+      checks.push(['records: a ledger record gone with a marker is a deleted chat, stamped from the marker (gate can fail)',
+        row(U3)?.deleted_at === '2026-09-15T01:01:21.365Z' && row(U3)?.gone_at === T1 && first.deleted === 1,
+        JSON.stringify(row(U3))]);
+      checks.push(['records: a marker for a uuid nobody knows makes no row', !row(U9)]);
+      // Then the app deletes one (record gone, marker written) and c4x takes another back (gone, no marker).
+      rmSync(join(rdir, `local_${U1}.json`));
+      writeFileSync(join(rdir, `deleted_${U1}`), '1789434081365');
+      rmSync(join(rdir, `local_${U2}.json`));
+      const T2 = '2026-09-15T01:00:00.000Z';
+      const second = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: T2 });
+      checks.push(['records: a record gone with a marker beside it is deleted_at (gate can fail)',
+        row(U1)?.deleted_at === '2026-09-15T01:01:21.365Z' && row(U1)?.gone_at === T2 && second.deleted === 1,
+        JSON.stringify(row(U1))]);
+      checks.push(['records: a record gone without a marker is gone_at only, never deleted (gate can fail)',
+        row(U2)?.gone_at === T2 && row(U2)?.deleted_at === null && second.gone === 1, JSON.stringify(row(U2))]);
+      checks.push(['records: a second pass leaves the stamps as they were',
+        (() => { const again = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: '2026-09-15T02:00:00.000Z' });
+                 return again.deleted === 0 && again.gone === 0 && row(U1)?.gone_at === T2 && row(U2)?.gone_at === T2; })()]);
+      // A record that returns (a reinstall restoring records) is clean again.
+      recAt(U2, 'sess-2', 'Two again');
+      const third = reconcileDesktopRecords(rdb, [rroot], { ledgerPath: ledger, now: '2026-09-15T03:00:00.000Z' });
+      checks.push(['records: a record that returns has both stamps cleared and its new title',
+        third.returned === 1 && row(U2)?.gone_at === null && row(U2)?.deleted_at === null && row(U2)?.title === 'Two again']);
+      // The marker's content: digits are epoch ms (or seconds), anything else still means deleted, at now.
+      checks.push(['records: a marker in seconds or in prose still dates the delete',
+        markerTime(rdir, U1, 'NOW') === '2026-09-15T01:01:21.365Z'
+        && (() => { writeFileSync(join(rdir, `deleted_${U9}`), 'gone'); return markerTime(rdir, U9, 'NOW') === 'NOW'; })()
+        && (() => { writeFileSync(join(rdir, `deleted_${U9}`), '1789434081'); return markerTime(rdir, U9, 'NOW') === '2026-09-15T01:01:21.000Z'; })()
+        && markerTime(rdir, '00000000-0000-4000-8000-000000000000', 'NOW') === null]);
+      // The packaged-install case: the ledger's dir is the writer's view; the marker sits under a root.
+      const other = join(tmp, 'records-reconcile', 'other-root');
+      mkdirSync(join(other, 'acct-1', 'org-1'), { recursive: true });
+      writeFileSync(join(other, 'acct-1', 'org-1', `deleted_${U3}`), '1789434081365');
+      checks.push(['records: a marker under another records root for the same pair is found',
+        markerTime(join('X:', 'redirected', 'acct-1', 'org-1'), U3, 'NOW', [other]) === '2026-09-15T01:01:21.365Z']);
+      rdb.close();
+    }
     const vdir = join(tmp, 'reviews', 'projects', 'P--review');
     mkdirSync(vdir, { recursive: true });
     const sid = (tag) => `${tag}-0000-4000-8000-00000000000a`;

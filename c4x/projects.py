@@ -72,6 +72,9 @@ BY_SESSION = ("hook_events", "attachments", "tool_calls", "messages", "turns",
               # nothing. Both keyed on the run's own session id; a run and the session it reviewed
               # share a cwd by construction, so they travel and die with one project.
               "review_links", "review_misses",
+              # The app's own record for a chat, remembered by uuid and session id so the marker
+              # the app leaves on a delete names a chat the store knows. Keyed on session_id.
+              "desktop_records",
               # WHAT A CHAT PLANNED AND RAN. Four tables harvest writes beside the transcripts, and
               # they belong to a project for the same reason the offsets do: the runs sit inside
               # the session directory this delete is about to remove, and an export that left them
@@ -1164,7 +1167,8 @@ def import_(path, into=None, dry_run=False):
                 # rows this store holds for those members are the stale ones: keeping them would
                 # split one chat into two rows here. Every other table is keyed on identities that
                 # do not change meaning between exports.
-                verb = ("INSERT OR REPLACE" if table in ("session_links", "review_links")
+                verb = ("INSERT OR REPLACE"
+                        if table in ("session_links", "review_links", "desktop_records")
                         else "INSERT OR IGNORE")
                 con.execute(f"{verb} INTO main.{table} ({listed}) "
                             f"SELECT {listed} FROM src.{table}")

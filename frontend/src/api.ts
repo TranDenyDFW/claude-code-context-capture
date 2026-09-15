@@ -570,6 +570,8 @@ export interface AdoptState {
   review_runs: number
   /** Records c4x wrote for review runs that are still on disk; the drawer offers to take them back. */
   review_records: number
+  /** Chats deleted in the desktop app whose transcript is still here: hidden, never offered. */
+  deleted_in_app?: number
   app_running: boolean
   sharing: 'all' | 'current' | null
 }

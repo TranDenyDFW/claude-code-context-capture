@@ -433,13 +433,14 @@ def overview_stats() -> dict:
     # read 24,386 over a store holding 8,775, and its GB caption would have counted bytes that are
     # not transcript bytes. A number under the wrong word is a wrong number.
     kind = "WHERE kind IS NULL" if column_present("files", "kind") else ""
-    # SESSIONS, NOT REVIEW RUNS. A run is a session row, and it is also a review of another one;
-    # the card is headed "sessions" and a reader takes that as the chats this store holds.
-    runs = ("SELECT session_id FROM review_links" if tables_present("review_links")
-            else "SELECT NULL WHERE 0")
+    # SESSIONS, NOT REVIEW RUNS AND NOT DELETED CHATS. A run is a session row, and it is also a
+    # review of another one; a chat the desktop app deleted is hidden from every list; the card
+    # is headed "sessions" and a reader takes that as the chats this store holds. The same
+    # subquery the session frame uses, so the two cannot disagree.
+    hidden = hidden_sessions_sql()
     small = q(f"""
         SELECT (SELECT COUNT(*) FROM sessions
-                 WHERE session_id NOT IN ({runs}))                 AS sessions,
+                 WHERE session_id NOT IN ({hidden}))               AS sessions,
                (SELECT COUNT(*) FROM turns)                        AS turn_rows,
                (SELECT COUNT(*) FROM compactions)                  AS compactions,
                (SELECT SUM(summary_uuid IS NULL) FROM compactions) AS unpaired,
@@ -555,6 +556,7 @@ def invalidate():
     # into its head, and an imported chain must start to.
     _links_cache.update({"at": 0.0, "head_of": None, "members_of": None})
     _reviews_cache.update({"at": 0.0, "parent_of": None, "runs_of": None})
+    _deleted_cache.update({"at": 0.0, "ids": None})
     # Derived from that map and from five tables harvest writes, so it is stale for both reasons a
     # removal makes the map stale, and cleared beside it rather than left to its own ttl.
     _work_cache.update({"at": 0.0, "totals": None})
@@ -682,6 +684,60 @@ def review_links(ttl: float = 45.0) -> tuple[dict, dict]:
     if seen == _generation["n"]:
         _reviews_cache.update({"at": now, "parent_of": parent_of, "runs_of": runs_of})
     return parent_of, runs_of
+
+
+_deleted_cache: dict = {"at": 0.0, "ids": None}
+
+
+def _read_deleted() -> frozenset:
+    """The session ids of every chat the desktop app deleted: `desktop_records.deleted_at` set.
+
+    Harvest stamps the row when a record has gone and the app's `deleted_<uuid>` marker sits
+    beside where it was (docs/desktop-records.md section 7). Empty on a store from before the
+    table existed.
+    """
+    if not tables_present("desktop_records"):
+        return frozenset()
+    df = q("SELECT session_id FROM desktop_records WHERE deleted_at IS NOT NULL")
+    return frozenset(str(s) for s in df["session_id"])
+
+
+def deleted_in_app(ttl: float = 45.0) -> frozenset:
+    """The deleted chats' session ids, cached the way `review_links` is and cleared by the same
+    `invalidate`. A raw id still opens its chat page; what this feeds is every LIST."""
+    now = _time.time()
+    if _deleted_cache["ids"] is not None and now - _deleted_cache["at"] < ttl:
+        return _deleted_cache["ids"]
+    seen = _generation["n"]
+    ids = _read_deleted()
+    if seen == _generation["n"]:
+        _deleted_cache.update({"at": now, "ids": ids})
+    return ids
+
+
+def hidden_sessions_sql() -> str:
+    """A subquery naming every session no list shows: the review runs, the chats the desktop app
+    deleted, and every session of a deleted chat's chain.
+
+    ONE PLACE, because two readers count sessions in SQL (`_session_rows_uncached` and
+    `overview_stats`) and they have to agree on what is hidden. A deleted record names ONE
+    session of its chat, which need not be the head (the app keeps the id it started with while
+    the CLI resumes into new ones), so the chain is followed both ways: the head of a deleted
+    session, and every member of that head. `SELECT NULL WHERE 0` when the tables are absent, so
+    a store from before them is the store it was.
+    """
+    parts: list = []
+    if tables_present("review_links"):
+        parts.append("SELECT session_id FROM review_links")
+    if tables_present("desktop_records"):
+        deleted = "SELECT session_id FROM desktop_records WHERE deleted_at IS NOT NULL"
+        parts.append(deleted)
+        if tables_present("session_links"):
+            heads = (f"SELECT head_id FROM session_links WHERE session_id IN ({deleted}) "
+                     f"UNION {deleted}")
+            parts.append(heads)
+            parts.append(f"SELECT session_id FROM session_links WHERE head_id IN ({heads})")
+    return " UNION ".join(parts) if parts else "SELECT NULL WHERE 0"
 
 
 def chat_head(session_id):
@@ -1356,11 +1412,14 @@ def _session_rows_uncached() -> pd.DataFrame:
     """
     linked = ("SELECT session_id FROM session_links UNION SELECT head_id FROM session_links"
               if tables_present("session_links") else "SELECT NULL WHERE 0")
-    # A REVIEW RUN IS NOT A CHAT. It is listed nowhere on its own; the chat it reviewed carries it
-    # as a count, and its rows reach that chat's numbers through `scoped()` under the subagent
-    # scope. Left out of the frame here, before the floor and the collapse ever see it.
-    runs = ("SELECT session_id FROM review_links" if tables_present("review_links")
-            else "SELECT NULL WHERE 0")
+    # A REVIEW RUN IS NOT A CHAT, AND A CHAT DELETED IN THE APP IS NOT LISTED. A run is listed
+    # nowhere on its own; the chat it reviewed carries it as a count, and its rows reach that
+    # chat's numbers through `scoped()` under the subagent scope. A chat the desktop app deleted
+    # (its record gone, the app's marker beside it) is hidden with every session of its chain, the
+    # user's choice: its transcript stays on disk and a raw id still opens it. Both left out of the
+    # frame here, before the floor and the collapse ever see them, through the one subquery the
+    # Summary's count uses too.
+    hidden = hidden_sessions_sql()
     df = q(f"""
         SELECT t.session_id,
                s.cwd, s.project_slug, s.entrypoint, s.transcript_path,
@@ -1381,7 +1440,7 @@ def _session_rows_uncached() -> pd.DataFrame:
                           ELSE 2 END LIMIT 1) AS title_kind
         FROM turns t
         LEFT JOIN sessions s ON s.session_id = t.session_id
-        WHERE t.session_id NOT IN ({runs})
+        WHERE t.session_id NOT IN ({hidden})
         -- Where the window sits NOW, which is what the header reports; peak is the high-water
         -- mark. Showing only peak made the two disagree for one session with nothing saying which
         -- was which, and the gap between them is what a compaction took out.
