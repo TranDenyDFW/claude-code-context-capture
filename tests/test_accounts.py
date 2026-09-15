@@ -12,6 +12,7 @@ every test runs on every leg.
 """
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -592,3 +593,52 @@ class TestLinksTheKernelResolvesElsewhere:
         assert accounts.resolves_to(machine / B / ORG_B, decoy)
         assert not (machine / A / ORG_A / "local_d0.json").exists()
         assert sorted(p.name for p in accounts.backups_dir().iterdir()) == before
+
+
+class TestTheTags:
+    """`current_chats` and each pair's `own` from harvest's owner tags, once any exist."""
+
+    def _tagged_store(self, tmp_path, rows):
+        from tests.test_projects import build_store, forget_cached_rows
+        path = build_store(tmp_path / "data" / "context.db")
+        con = sqlite3.connect(str(path))
+        for n, (owner, gone) in enumerate(rows):
+            con.execute("""INSERT INTO desktop_records (record_uuid, session_id, dir, first_seen,
+                             last_seen, gone_at, source, owner_account, owner_org, owner_source)
+                           VALUES (?, ?, 'X:/r/a/o', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z',
+                                   ?, 'disk', ?, ?, ?)""",
+                        (f"{n:08d}-0000-4000-8000-000000000000", f"s0-{n}", gone, owner,
+                         None if owner is None else "org", None if owner is None else "signed-in"))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        return path
+
+    def test_the_numbers_come_from_the_tags_when_any_exist(self, machine, tmp_path, monkeypatch):
+        self._tagged_store(tmp_path, [(A, None), (A, None), (B, None), (None, None),
+                                      (A, "2026-09-02T00:00:00Z")])
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        state = accounts.state()
+        assert state["current_source"] == "tags" and state["untagged"] == 1
+        assert state["current_chats"] == 2, "live records tagged with the signed-in account"
+        assert {p["account"]: p["own"] for p in state["roots"][0]["pairs"]} == {A: 2, B: 1}
+        signed_in_as(machine, monkeypatch, B, ORG_B)
+        assert accounts.state()["current_chats"] == 1
+
+    def test_without_tags_the_manifest_and_the_directories_answer_and_say_so(self, machine,
+                                                                            monkeypatch):
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        assert accounts.state()["current_source"] == "directory"
+        accounts.share_all()
+        assert accounts.state()["current_source"] == "manifest"
+        import shutil
+        shutil.rmtree(accounts.backups_dir())
+        state = accounts.state()
+        assert state["current_source"] is None and state["current_chats"] is None
+
+    def test_a_store_with_the_table_and_no_tags_is_no_tags(self, machine, tmp_path, monkeypatch):
+        self._tagged_store(tmp_path, [(None, None), (None, None)])
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        state = accounts.state()
+        assert state["current_source"] == "directory" and state["untagged"] == 2
+        assert state["current_chats"] == 3

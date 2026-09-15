@@ -400,6 +400,10 @@ COLUMN_HELP = {
     "project": ("The working directory. A path ending in \\archived is a chat the desktop app "
                 "has archived. An unmarked path means NOT KNOWN to be archived: the flag is only "
                 "readable for chats the app kept a record of, which is a minority of these."),
+    "account": ("The account the desktop app was signed in as when this chat's record first "
+                "appeared, as harvest tagged it (the first 8 characters of the account id). Blank "
+                "when no record of the chat carries a tag: a chat from before the tag, or one the "
+                "app never recorded."),
     "last active": "The last recorded activity, not when the session was created.",
     "title": ("The name the desktop app shows, when it has a record of the chat. Otherwise it is "
               "read from the transcript: a title typed into the chat, then one Claude generated, "

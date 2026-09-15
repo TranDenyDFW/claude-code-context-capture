@@ -147,6 +147,9 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             "title": r.title,
             "project": (titled_path(r.project, _titles.get(r.session_id, {}))
                         if is_folderless(r.project) else r.project),
+            # The account the chat was made under, as harvest tagged its record; blank when no
+            # record of the chat carries a tag (docs/desktop-records.md section 6).
+            "account": str(r.account)[:8] if isinstance(r.account, str) and r.account else "",
             "last active": str(r.last_ts or "")[:16].replace("T", " "),
             "turns": int(r.turns),
             "peak": int(r.peak or 0),
@@ -219,8 +222,8 @@ def sessions_table_layout(session_id=None, scope="main", cohort=None):
             # id in it, which cannot be joined back to anything. Same trap as c4x/tabs/summary.py,
             # where an undeclared hidden column made every row click a silent no-op.
             columns=(_cols := numeric_columns(
-                ["section", "title", "project", "last active", "turns", "current", "peak",
-                 "compactions", "cli sessions", "work"],
+                ["section", "title", "project", "account", "last active", "turns", "current",
+                 "peak", "compactions", "cli sessions", "work"],
                 {"turns", "current", "peak", "compactions", "cli sessions"}) + [
                 {"name": "session_id", "id": "session_id"}]),
             tooltip_header=header_help(_cols),
