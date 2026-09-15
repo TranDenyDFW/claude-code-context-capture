@@ -643,7 +643,8 @@ def chat_links(ttl: float = 45.0) -> tuple[dict, dict]:
 
 
 def _read_reviews() -> tuple[dict, dict]:
-    """{run: the session it reviewed} and {session: [its runs, newest first]}, or two empty dicts.
+    """{run: the session it reviewed, or None for a run the store cannot place} and {session:
+    [its runs, newest first]}, or two empty dicts.
 
     Empty on a store from before the table existed and on one harvest has not derived yet, so
     with no links every one-shot is an ordinary session, which is what the page showed before.
@@ -654,10 +655,19 @@ def _read_reviews() -> tuple[dict, dict]:
               FROM review_links r LEFT JOIN sessions s ON s.session_id = r.session_id""")
     if df.empty:
         return {}, {}
-    parent_of = {s: h for s, h in zip(df["session_id"], df["head_id"], strict=True) if s != h}
+    # A NULL head is an ORPHAN: a run the store knows is a review (its lines are said somewhere,
+    # its reply is a verdict) but cannot place. It maps to None here and to no chat's list below,
+    # so it folds into nothing and is listed nowhere; pandas hands the NULL back as None or NaN
+    # depending on the column's other values, and neither is a session id.
+    parent_of: dict = {}
+    for s, h in zip(df["session_id"], df["head_id"], strict=True):
+        head = h if isinstance(h, str) and h else None
+        if head != s:
+            parent_of[s] = head
     started = dict(zip(df["session_id"], df["first_ts"], strict=True))
     runs_of: dict = {}
-    for run in sorted(parent_of, key=lambda sid: str(started.get(sid) or ""), reverse=True):
+    placed = [run for run, parent in parent_of.items() if parent]
+    for run in sorted(placed, key=lambda sid: str(started.get(sid) or ""), reverse=True):
         runs_of.setdefault(parent_of[run], []).append(run)
     return parent_of, runs_of
 
@@ -677,15 +687,16 @@ def review_links(ttl: float = 45.0) -> tuple[dict, dict]:
 def chat_head(session_id):
     """The session a selection resolves to: the newest of its chat, or itself when unlinked.
 
-    A review run resolves to the chat it reviewed, so a link that names the run opens that chat.
-    Identity for None and for an id the store has never seen, so every caller can apply it
-    unconditionally rather than guarding first.
+    A review run resolves to the chat it reviewed, so a link that names the run opens that chat;
+    a run the store cannot place (a None parent) resolves to itself. Identity for None and for an
+    id the store has never seen, so every caller can apply it unconditionally rather than
+    guarding first.
     """
     if not session_id:
         return session_id
     head_of, _members = chat_links()
     parent_of, _runs = review_links()
-    base = parent_of.get(session_id, session_id)
+    base = parent_of.get(session_id) or session_id
     return head_of.get(base, base)
 
 
@@ -700,7 +711,7 @@ def chat_members(session_id, reviews: bool = False) -> list:
         return []
     head_of, members_of = chat_links()
     parent_of, runs_of = review_links()
-    base = parent_of.get(session_id, session_id)
+    base = parent_of.get(session_id) or session_id
     head = head_of.get(base, base)
     members = list(members_of.get(head, [head]))
     if reviews:

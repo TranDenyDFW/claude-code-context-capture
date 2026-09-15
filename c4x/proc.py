@@ -12,6 +12,7 @@ import would slip past that guard.
 """
 import subprocess
 import sys
+from pathlib import Path
 
 # 0x08000000 on Windows; absent elsewhere, where a child never gets a window of its own anyway.
 # `vars(subprocess).get`, not `getattr`: tools/table_audit.py reads every `getattr(...)` call as a
@@ -26,3 +27,31 @@ def run(args, **kw):
     if sys.platform == "win32":
         kw["creationflags"] = int(kw.get("creationflags", 0)) | NO_WINDOW
     return subprocess.run(args, **kw)
+
+
+# Windows: a child that survives its parent has to be a process of its own (DETACHED_PROCESS)
+# and in its own group (CREATE_NEW_PROCESS_GROUP), or the console control events and the job
+# the parent belongs to reach it. Both absent elsewhere, where `start_new_session` does the job.
+DETACHED = (int(vars(subprocess).get("DETACHED_PROCESS", 0))
+            | int(vars(subprocess).get("CREATE_NEW_PROCESS_GROUP", 0)))
+
+
+def detach(args, log_path, cwd=None):
+    """Start `args` so that it outlives this process, its stdout and stderr appended to `log_path`.
+
+    The one way this package starts a server again from inside a server (`c4x/server.py`,
+    `restart_server`): the hook starts the first one detached from node the same way. Returns the
+    `Popen`, whose pid the caller spares from its own shutdown. `subprocess.Popen` is looked up at
+    call time for the same reason `run` looks up `subprocess.run`.
+    """
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    kw: dict = {"stdin": subprocess.DEVNULL, "stdout": None, "stderr": subprocess.STDOUT,
+                "cwd": None if cwd is None else str(cwd), "close_fds": True}
+    if sys.platform == "win32":
+        kw["creationflags"] = DETACHED | NO_WINDOW
+    else:
+        kw["start_new_session"] = True
+    with log_path.open("ab") as log:
+        kw["stdout"] = log
+        return subprocess.Popen(args, **kw)

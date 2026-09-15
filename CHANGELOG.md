@@ -41,6 +41,33 @@ removed and nothing here said so.
   prompt the chat was answering when it started, and its cost. Adopt never offers a run and takes
   back the records an earlier build wrote for them (`POST /api/adopt/unadopt-reviews`); the
   "Reviewer - <chat>" naming of the previous entry is withdrawn with it.
+- **The sweep runs itself when the app starts, restarts Claude, and reaches the runs the store
+  cannot place.** Four reviewer chats stayed in the laptop's sidebar after "Remove them": the runs
+  `review_links` could not tie. One quoted the chat beside it exactly, from its compaction summary,
+  a user-role record the model wrote; the said rule now counts compaction summaries beside
+  assistant text and tool results (a person cannot type one, so the repeated-prompt guard holds).
+  The other three quote lines no session in their folder says; a one-shot whose lines are said
+  somewhere in the store, at least two, and whose reply is a bare verdict, is now recorded as a
+  review with no chat (`head_id NULL`; the table is rebuilt from the `NOT NULL` shape with its rows
+  kept and its misses forgotten, so each is judged once under the new rule): folded into nothing,
+  listed nowhere, never offered, its record taken back with the rest. Then the server runs the
+  sweep once it is up (`adopt.sweep_reviews`, a thread waiting for its own health answer): the
+  ledger's records for runs are removed and, when any was, the desktop app is restarted
+  (`c4x/desktop.py`: every `claude.exe` terminated, the Store build relaunched through
+  `explorer.exe shell:AppsFolder\<family>!<id>` with the id read from the package manifest, the
+  installer's build by its exe). Only while Claude runs, never twice within ten minutes, off under
+  `--no-writes`, `install --no-review-sweep` (`--review-sweep` undoes it; the receipt's
+  `reviewSweep` reaches the server's argv) or `C4X_NO_REVIEW_SWEEP=1`. The report lands in
+  `data/raw/.review-sweep`; `GET /api/adopt/sweep` reads it and the drawer shows it in one line.
+- **Stop C4X and Restart C4X, in the header.** `POST /api/server/stop` stops the server (the page
+  asks first and says the next Claude session starts one again); `POST /api/server/restart` starts
+  a replacement with the same flags (`c4x/server.py restart_server`, through the package's one
+  detached spawn `proc.detach`, spared from the shutdown's kill of its children) and exits, and
+  the replacement waits for its predecessor's pid (`--after`) before binding. The page waits for a
+  DIFFERENT process to answer `/api/health`, which now carries `pid`, then refetches everything.
+  Both routes are JSON-bodied, so a foreign page's request meets the preflight the middleware
+  refuses. `tokenFrom` in `tools/dashboard.mjs` takes the newest token in the log, since a restart
+  appends its replacement's.
 - **Every adopted record carries a name, and the ones a first build left nameless can be named.**
   The desktop app shows a record with no `title` as "General coding session", every one of them,
   and the first build wrote a title only from the store's `custom` or `ai` kinds: 64 of 82 on the

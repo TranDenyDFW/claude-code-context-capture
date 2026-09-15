@@ -17,6 +17,8 @@
 //   node install.mjs uninstall [--purge]    remove only our entries; --purge also drops the store
 //   node install.mjs install --evict-missing  also remove c4x entries whose script file is gone
 //   node install.mjs install --no-dashboard  do not start the dashboard with Claude (--dashboard undoes it)
+//   node install.mjs install --no-review-sweep  the server neither takes back review-run records at
+//                                            startup nor restarts Claude (--review-sweep undoes it)
 //   node install.mjs reset --data|--settings|--all
 //   node install.mjs --self-test
 //
@@ -426,7 +428,18 @@ export function receiptFields(argv = [], prior = null) {
   let dashboard = prior?.dashboard ?? true;
   if (argv.includes('--no-dashboard')) dashboard = false;
   if (argv.includes('--dashboard')) dashboard = true;
-  return { dashboard, dashboardLauncher: prior?.dashboardLauncher ?? null };
+  // The startup sweep: the same shape, read by tools/dashboard.mjs into the server's argv.
+  let reviewSweep = prior?.reviewSweep ?? true;
+  if (argv.includes('--no-review-sweep')) reviewSweep = false;
+  if (argv.includes('--review-sweep')) reviewSweep = true;
+  return { dashboard, reviewSweep, dashboardLauncher: prior?.dashboardLauncher ?? null };
+}
+
+const CHOICE_FLAGS = ['--no-dashboard', '--dashboard', '--no-review-sweep', '--review-sweep'];
+
+function choicesLine(receipt) {
+  return `dashboard autostart: ${receipt?.dashboard === false ? 'off' : 'on'}; `
+    + `review sweep at server start: ${receipt?.reviewSweep === false ? 'off' : 'on'}`;
 }
 
 function saveReceipt(extra, argv = []) {
@@ -741,9 +754,9 @@ function cmdInstall(argv) {
   if (!changes.length && !adopted && !(evict && gone.length)) {
     console.log('no changes: already converged');
     // A choice is not a change to the wiring, and it still has to land.
-    if (!dry && (argv.includes('--no-dashboard') || argv.includes('--dashboard'))) {
+    if (!dry && CHOICE_FLAGS.some((f) => argv.includes(f))) {
       saveReceipt({}, argv);
-      console.log(`dashboard autostart: ${loadReceipt()?.dashboard === false ? 'off' : 'on'}`);
+      console.log(choicesLine(loadReceipt()));
     }
     firstHarvest(argv, dry);
     return 0;
@@ -773,6 +786,8 @@ function cmdInstall(argv) {
     console.log(`dashboard    : ${r?.dashboard === false ? 'off (--no-dashboard)'
       : l?.launcher ? `starts with Claude via ${l.launcher.cmd.join(' ')} (${l.launcher.kind})`
       : `cannot start: ${l?.why ?? 'launcher not resolved'}`}`);
+    console.log(`review sweep : ${r?.reviewSweep === false ? 'off (--no-review-sweep)'
+      : 'at server start, records c4x wrote for review runs are taken back and Claude is restarted'}`);
   }
   console.log(`wrote ${posix(SETTINGS)}${backup ? ` (backup: ${posix(backup)})` : ''}`);
   // Measured, not assumed: the first hook fired nine seconds after this write, in a session that
@@ -1197,6 +1212,14 @@ function selfTest() {
   add('--dashboard lifts it', receiptFields(['--dashboard'], { dashboard: false }).dashboard === true);
   add('the resolved launcher is carried forward too',
     receiptFields([], { dashboardLauncher: { why: 'x' } }).dashboardLauncher?.why === 'x');
+  add('the review sweep is on by default', receiptFields([], null).reviewSweep === true);
+  add('--no-review-sweep records the opt-out', receiptFields(['--no-review-sweep'], null).reviewSweep === false);
+  add('a re-install without the flag KEEPS the sweep opt-out (gate can fail)',
+    receiptFields([], { reviewSweep: false }).reviewSweep === false);
+  add('--review-sweep lifts it', receiptFields(['--review-sweep'], { reviewSweep: false }).reviewSweep === true);
+  add('the sweep choice does not touch the dashboard choice',
+    receiptFields(['--no-review-sweep'], { dashboard: false }).dashboard === false
+    && receiptFields(['--no-dashboard'], null).reviewSweep === true);
 
   // The status line's states, with fixed inputs.
   {

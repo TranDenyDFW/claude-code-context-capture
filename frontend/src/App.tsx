@@ -12,6 +12,7 @@ import { CompareArms } from '@/components/CompareArms'
 import { ProjectMoves } from '@/components/ProjectMoves'
 import { AccountSharing } from '@/components/AccountSharing'
 import { AdoptSessions } from '@/components/AdoptSessions'
+import { ServerControls } from '@/components/ServerControls'
 import { Sidebar, useCollapsed } from '@/components/Sidebar'
 
 /**
@@ -488,6 +489,13 @@ export default function App() {
             >
               {live ? 'Live' : 'Paused'}
             </button>
+            <ServerControls
+              // A fresh server has an empty cache and may be running newer code: everything the
+              // page holds is refetched once the replacement answers.
+              onRestarted={() => {
+                void client.invalidateQueries()
+              }}
+            />
           </div>
         </div>
 

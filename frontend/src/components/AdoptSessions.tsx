@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '@/api'
-import type { AdoptReport, AdoptState, RetitleReport, UnadoptReport } from '@/api'
+import type { AdoptReport, AdoptState, RetitleReport, SweepState, UnadoptReport } from '@/api'
 import { Portal } from './Portal'
 
 /**
@@ -56,6 +56,7 @@ export function AdoptSessions({
   const [report, setReport] = useState<AdoptReport | null>(null)
   const [named, setNamed] = useState<RetitleReport | null>(null)
   const [unadopted, setUnadopted] = useState<UnadoptReport | null>(null)
+  const [sweep, setSweep] = useState<SweepState | null>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
 
@@ -78,6 +79,19 @@ export function AdoptSessions({
       live = false
     }
   }, [includeCli])
+
+  // What the server did at startup about review runs: one line in the drawer, read once. A
+  // server that cannot say (an older one, a failed read) shows no line rather than a wrong one.
+  useEffect(() => {
+    let live = true
+    api.adopt
+      .sweep()
+      .then((answer) => live && setSweep(answer))
+      .catch(() => live && setSweep(null))
+    return () => {
+      live = false
+    }
+  }, [])
 
   // Focus goes into the drawer when it opens and back to the button when it closes, which is what
   // opening and closing a dialog mean. Escape only: a non-modal dialog must not swallow Tab.
@@ -270,6 +284,18 @@ export function AdoptSessions({
                 {plural(reviewRuns, 'review run')} on this machine {reviewRuns === 1 ? 'is' : 'are'}{' '}
                 folded into the {reviewRuns === 1 ? 'chat it' : 'chats they'} reviewed and{' '}
                 {reviewRuns === 1 ? 'is' : 'are'} not offered.
+              </p>
+            ) : null}
+            {sweep ? (
+              <p className="text-xs text-ink-faint" data-testid="startup-sweep">
+                {!sweep.enabled
+                  ? 'The startup sweep is off on this server: review-run records are taken back ' +
+                    'only from here, and Claude is never restarted by c4x.'
+                  : sweep.last
+                    ? `Startup sweep at ${sweep.last.at.replace('T', ' ').replace('Z', ' UTC')}: ` +
+                      `${sweep.last.why}.`
+                    : 'No startup sweep has run on this store yet. Each server started with ' +
+                      'Claude takes back review-run records and restarts Claude when it removed any.'}
               </p>
             ) : null}
             {state.deleted_markers > 0 ? (

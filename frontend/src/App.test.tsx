@@ -28,7 +28,8 @@ vi.mock('@/api', async (importOriginal) => {
       // header threw and four tests about the population chip failed for a reason none of them
       // named.
       accounts: { state: vi.fn(), share: vi.fn(), verify: vi.fn() },
-      adopt: { state: vi.fn(), run: vi.fn(), retitle: vi.fn() },
+      adopt: { state: vi.fn(), run: vi.fn(), retitle: vi.fn(), sweep: vi.fn() },
+      server: { stop: vi.fn(), restart: vi.fn() },
     },
   }
 })
@@ -72,7 +73,7 @@ beforeEach(() => {
   window.history.replaceState(null, '', '/')
   vi.mocked(api.tabs).mockResolvedValue(TABS)
   vi.mocked(api.health).mockResolvedValue({
-    ok: true, db: 'data/context.db', read_only: true, writes_enabled: false, cache: {},
+    ok: true, db: 'data/context.db', pid: 1, read_only: true, writes_enabled: false, cache: {},
   })
   vi.mocked(api.cohorts).mockResolvedValue([])
   vi.mocked(api.selector).mockResolvedValue([])
@@ -88,6 +89,7 @@ beforeEach(() => {
     cli_candidates: 0, other_account: 0, deleted_markers: 0, untitled_adopted: 0,
     review_runs: 0, review_records: 0, app_running: false, sharing: null,
   })
+  vi.mocked(api.adopt.sweep).mockResolvedValue({ enabled: true, last: null })
   vi.mocked(api.tab).mockResolvedValue(payload())
 })
 

@@ -28,6 +28,7 @@ ALPHA, BETA = r"P:\Alpha", r"P:\Beta"
 HEAD, OLD = "s0-0", "s0-1"           # one chat in Alpha: OLD resumed into HEAD
 LONE = "s1-0"                        # an unchained chat in Beta
 RUN, RUN2 = "r-1", "r-2"             # a review of OLD (so of the chat), a review of LONE
+ORPHAN = "r-4"                       # a review the store cannot place: a NULL head
 L1 = ("The parser now rejects a trailing comma and the three tests that covered it pass again "
       "after the rewrite")
 L4 = "Both Delta chats said this exact sentence once, so a run quoting only it ties to neither"
@@ -86,6 +87,9 @@ def review_store(tmp_path, monkeypatch):
     con.execute("""INSERT INTO review_links (session_id, head_id, hits, snippets, verdict, method,
                      linked_at) VALUES ('r-3', ?, 3, 8, NULL, 'test', '2026-08-02T00:00:00Z')
                    ON CONFLICT(session_id) DO NOTHING""", (LONE,))
+    # An ORPHAN: harvest knows it is a review (its lines are said somewhere, its reply a verdict)
+    # and cannot say of what. A NULL head: it folds into nothing and is listed nowhere.
+    _run(con, ORPHAN, BETA, 58, "APPROVED", None, "APPROVED\nof a chat this store cannot name")
     for sid, usd in ((HEAD, 1.0), (RUN, 0.25)):
         con.execute("INSERT INTO cost_state (session_id, total_cost_usd) VALUES (?, ?)", (sid, usd))
     con.commit()
@@ -105,8 +109,19 @@ def store(review_store):
 class TestTheMap:
     def test_a_run_knows_its_chat_and_a_chat_its_runs(self, store):
         parent_of, runs_of = store.review_links(ttl=0)
-        assert parent_of == {RUN: OLD, RUN2: LONE, "r-3": LONE}
-        assert runs_of == {OLD: [RUN], LONE: ["r-3", RUN2]}, "newest first"
+        assert parent_of == {RUN: OLD, RUN2: LONE, "r-3": LONE, ORPHAN: None}
+        assert runs_of == {OLD: [RUN], LONE: ["r-3", RUN2]}, "newest first, and no list for None"
+
+    def test_an_orphan_folds_into_nothing_and_is_listed_nowhere(self, store):
+        assert store.chat_head(ORPHAN) == ORPHAN
+        assert store.chat_members(ORPHAN) == [ORPHAN]
+        assert store.chat_members(ORPHAN, reviews=True) == [ORPHAN], "it is nobody's run"
+        rows = store.session_rows(ttl=0)
+        assert ORPHAN not in set(rows["session_id"]), "still a run, so still no row of its own"
+        assert int(rows["reviews"].sum()) == 3, "and it counts toward no chat"
+        assert list(store.chat_reviews(LONE)["session_id"]) == ["r-3", RUN2]
+        from c4x.ui.header import selector_options
+        assert ORPHAN not in {o["value"] for o in selector_options()}
 
     def test_a_run_resolves_to_the_head_of_the_chat_it_reviewed(self, store):
         assert store.chat_head(RUN) == HEAD, "through the chain: OLD folds into HEAD"
@@ -150,7 +165,7 @@ class TestTheLists:
     def test_the_summary_counts_chats_not_runs(self, store):
         stats = store.overview_stats()
         total = store.q("SELECT COUNT(*) n FROM sessions")["n"].iloc[0]
-        assert stats["sessions"] == int(total) - 3
+        assert stats["sessions"] == int(total) - 4, "three placed runs and the orphan"
 
     def test_the_picker_says_how_many_reviews_a_chat_received(self, store):
         from c4x.ui.header import selector_options

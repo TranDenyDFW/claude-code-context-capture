@@ -113,10 +113,15 @@ export function windowless(interpreter, { exists = existsSync, platform = proces
   return exists(quiet) ? quiet : interpreter;
 }
 
-export function launchArgv(launcher, { db, port, exists = existsSync, platform = process.platform }) {
+/**
+ * The server's command line. `sweep: false` (the receipt's `reviewSweep: false`, recorded by
+ * `install --no-review-sweep`) adds `--no-review-sweep`, so the server neither takes back
+ * review-run records at startup nor restarts Claude; the fold itself is untouched by the flag.
+ */
+export function launchArgv(launcher, { db, port, sweep = true, exists = existsSync, platform = process.platform }) {
   const head = launcher.kind === 'python' ? windowless(launcher.cmd[0], { exists, platform }) : launcher.cmd[0];
   return [head, ...launcher.cmd.slice(1), ...(launcher.module ? ['-m', 'c4x.api'] : []),
-          '--db', db, '--port', String(port), '--watchdog'];
+          '--db', db, '--port', String(port), '--watchdog', ...(sweep === false ? ['--no-review-sweep'] : [])];
 }
 
 /** The path of the interpreter this command runs, when it imports the dashboard's modules; else null. */
@@ -182,9 +187,14 @@ export function claim(stampPath = STAMP, now = Date.now(), windowMs = DEBOUNCE_M
 }
 
 /** The shutdown token out of the server's own announce line, or null. */
+/**
+ * The NEWEST token in the log. A restart from the page (`c4x/server.py restart_server`) appends
+ * its replacement's output to the same log, so the log then holds two tokens and only the last
+ * one belongs to a server that is still there; the first match sent `stop` a dead server's token.
+ */
 export function tokenFrom(logText) {
-  const m = String(logText ?? '').match(/X-C4X-Shutdown:\s*([^"\s]+)/);
-  return m ? m[1] : null;
+  const all = [...String(logText ?? '').matchAll(/X-C4X-Shutdown:\s*([^"\s]+)/g)];
+  return all.length ? all[all.length - 1][1] : null;
 }
 
 export function readLog(path = LOG) {
@@ -245,7 +255,7 @@ export async function launch({ port = portFrom(), env = process.env, now = Date.
     log({ hook_event_name: 'SessionStart', reason: `c4x dashboard: not started: ${why}` });
     return { did: 'none', why };
   }
-  const argv = launchArgv(launcher, { db, port });
+  const argv = launchArgv(launcher, { db, port, sweep: readJson(RECEIPT)?.reviewSweep !== false });
   const ownLog = spawnIt(argv);
   log({ hook_event_name: 'SessionStart', reason: `c4x dashboard: started ${posix(argv[0])} (${launcher.kind}) on ${port}` });
   const settled = ownLog ? await wait(ownLog, port, db, { probe }) : { up: null };
@@ -359,6 +369,14 @@ async function selfTest() {
   add('an exe takes the flags without -m and is never swapped',
     launchArgv({ cmd: ['X:/c4x.exe'], module: false, kind: 'exe' }, { db: 'D:/s.db', port: 8059, exists: yes, platform: 'win32' }).join(' ')
       === 'X:/c4x.exe --db D:/s.db --port 8059 --watchdog');
+  add('a receipt that turned the review sweep off puts --no-review-sweep on the command line',
+    launchArgv(pyL, { db: 'D:/s.db', port: 8059, sweep: false, exists: no, platform: 'win32' }).join(' ')
+      === `${PY} -m c4x.api --db D:/s.db --port 8059 --watchdog --no-review-sweep`);
+  add('and by default the flag is absent (gate can fail)',
+    !launchArgv(pyL, { db: 'D:/s.db', port: 8059, exists: no, platform: 'win32' }).includes('--no-review-sweep'));
+  add('the newest shutdown token in a log wins, a restart having appended a second server\'s',
+    tokenFrom('X-C4X-Shutdown: first"\n[shutdown] restart\nX-C4X-Shutdown: second"\n') === 'second'
+    && tokenFrom('nothing here') === null);
   add('an interpreter that does not exist is null, quickly',
     pythonImports(['c4x-no-such-interpreter-xyz'], { timeoutMs: 2000 }) === null);
 

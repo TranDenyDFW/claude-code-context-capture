@@ -407,15 +407,21 @@ CREATE INDEX IF NOT EXISTS session_links_head ON session_links(head_id);
 -- every harvest pass for the directories it touched, and by --backfill-reviews. A found link is
 -- permanent. review_misses remembers a run that tied to nothing together with the sessions that
 -- were its pool, so it is asked again only when a session joins that pool.
+-- head_id IS NULL for an ORPHAN: a run that is a review by every other sign (its lines are said
+-- somewhere in the store, at least two of them, and its reply is a bare verdict) but whose folder
+-- holds no session that says them, so the store cannot name the chat it read. Four of the 58 on
+-- the laptop: one ran in a skills directory, two in a fixtures subfolder with no other session,
+-- one beside a chat that says none of its lines. An orphan is listed nowhere and folds into no
+-- chat; it exists so the record the app holds for it can be taken back with the rest.
 CREATE TABLE IF NOT EXISTS review_links (
   session_id TEXT PRIMARY KEY,
-  head_id TEXT NOT NULL,
+  head_id TEXT,
   hits INTEGER NOT NULL,
   snippets INTEGER NOT NULL,
   verdict TEXT,
   method TEXT NOT NULL,
   linked_at TEXT NOT NULL,
-  CHECK (head_id <> session_id)
+  CHECK (head_id IS NULL OR head_id <> session_id)
 );
 CREATE INDEX IF NOT EXISTS review_links_head ON review_links(head_id);
 CREATE TABLE IF NOT EXISTS review_misses (
@@ -748,6 +754,25 @@ export function openDb(dbPath = DB_PATH) {
     // Derived table, rebuilt rather than migrated in place. Reported, never silent.
     db.exec('DROP TABLE hook_events');
     console.error('harvest: rebuilt hook_events, the old nullable primary key could not dedupe');
+  }
+  // review_links was born with head_id NOT NULL, one build before orphans existed. Rebuilt WITH
+  // its rows (a found link is permanent) under the nullable shape; the old index goes with the
+  // old table, explicitly, or CREATE INDEX IF NOT EXISTS would find its name taken and leave the
+  // new table unindexed. Reported once, never silent.
+  const links = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='review_links'").get();
+  if (links && /head_id TEXT NOT NULL/.test(String(links.sql))) {
+    db.exec('ALTER TABLE review_links RENAME TO review_links_old');
+    db.exec('DROP INDEX IF EXISTS review_links_head');
+    db.exec(SCHEMA);
+    db.exec(`INSERT INTO review_links (session_id, head_id, hits, snippets, verdict, method, linked_at)
+             SELECT session_id, head_id, hits, snippets, verdict, method, linked_at FROM review_links_old`);
+    db.exec('DROP TABLE review_links_old');
+    // The misses go too, once: every one was judged before the orphan look existed, and a miss is
+    // asked again only when its pool changes, which for a run in a folder of its own is never.
+    // Emptying the table here makes the next pass ask each of them under the new rule.
+    db.exec("DELETE FROM review_misses WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE name='review_misses')");
+    console.error('harvest: rebuilt review_links so head_id may be NULL (a review of a chat this store cannot name)');
   }
   db.exec(SCHEMA);
   // A store written before transcript_path and extra were stored keeps its rows; the columns are
@@ -1832,6 +1857,12 @@ export const REVIEW = {
   ONE_SHOT_MESSAGES: 3,  // one typed prompt and at most three messages: the only sessions tested
   SLACK_MS: 3600 * 1000, // how long a session may have been quiet before a run that read it began
   CHUNK: 900,            // parameters per query, under SQLite's limit with room for the others
+  // WHAT A SESSION SAID: its assistant text, its tool results, and its compaction summaries. The
+  // last is a user-role row nobody typed: the model wrote it when the context was compacted, and
+  // the laptop's fourth unplaced run quoted exactly that (the chat beside it had just compacted,
+  // so the hook's "last 250 records" were the summary). A person cannot type one, so counting it
+  // keeps the guard the said rule exists for: a repeated typed prompt still matches nothing here.
+  SAID: "(role = 'assistant' OR type IN ('tool_result', 'compact_summary'))",
 };
 // CLAUDE SAID: / OUTPUT WAS: / USER:, the label the excerpt's writer put in front of a copied line.
 // Dropped, so the line matches what the reviewed session actually said.
@@ -1899,7 +1930,8 @@ export function reviewVerdict(text) {
  * that missed is asked again only when its pool is a different set of sessions.
  */
 export function deriveReviews(db, sessionIds, { write = true, method = 'harvest', now = null } = {}) {
-  const result = { sessions: 0, one_shots: 0, already: 0, unchanged: 0, linked: [], misses: 0, hit_queries: 0 };
+  const result = { sessions: 0, one_shots: 0, already: 0, unchanged: 0, linked: [], orphans: [], misses: 0,
+                   hit_queries: 0 };
   const ids = [...new Set(sessionIds.filter(Boolean).map(String))];
   result.sessions = ids.length;
   if (!ids.length) return result;
@@ -1957,7 +1989,7 @@ export function deriveReviews(db, sessionIds, { write = true, method = 'harvest'
       // reviewer shared one said line and one typed line with it, and lost on the said count.
       const hits = new Map();
       const saidSum = snips.map(() =>
-        "MAX(CASE WHEN (role = 'assistant' OR type = 'tool_result') AND instr(text, ?) > 0 THEN 1 ELSE 0 END)").join(' + ');
+        `MAX(CASE WHEN ${REVIEW.SAID} AND instr(text, ?) > 0 THEN 1 ELSE 0 END)`).join(' + ');
       const anySum = snips.map(() => 'MAX(CASE WHEN instr(text, ?) > 0 THEN 1 ELSE 0 END)').join(' + ');
       for (const chunk of reviewChunks(pool)) {
         result.hit_queries++;
@@ -1976,10 +2008,30 @@ export function deriveReviews(db, sessionIds, { write = true, method = 'harvest'
       const verdict = reviewVerdict(replyOf.get(shot)?.text);
       result.linked.push({ session_id: shot, head_id: head, hits: best, snippets: snips.length, verdict });
       if (write) { putLink.run(shot, head, best, snips.length, verdict, method, stamp); dropMiss.run(shot); }
-    } else {
-      result.misses++;
-      if (write) putMiss.run(shot, key, stamp);
+      continue;
     }
+    // THE ORPHAN LOOK, for a run its folder cannot place. A review by every other sign: its
+    // reply is a bare verdict (the cheap test, first, since almost every miss is an ordinary
+    // one-shot with an ordinary answer), and at least two of its lines are said, as assistant
+    // text or tool results, somewhere in the store. The verdict is what keeps a person's real
+    // chat safe: pasting another chat's output into a new session earns an answer, not a verdict.
+    // The scan is store-wide and unindexed, which is why it runs only past the verdict test and
+    // only once per miss until the pool changes.
+    const verdict = snips.length ? reviewVerdict(replyOf.get(shot)?.text) : null;
+    if (verdict) {
+      result.hit_queries++;
+      const anySum = snips.map(() => 'MAX(CASE WHEN instr(text, ?) > 0 THEN 1 ELSE 0 END)').join(' + ');
+      const row = db.prepare(`SELECT ${anySum} AS said FROM messages
+        WHERE session_id <> ? AND ${REVIEW.SAID}`).get(...snips, shot);
+      const said = Number(row?.said ?? 0);
+      if (said >= Math.min(2, snips.length)) {
+        result.orphans.push({ session_id: shot, head_id: null, hits: said, snippets: snips.length, verdict });
+        if (write) { putLink.run(shot, null, said, snips.length, verdict, method, stamp); dropMiss.run(shot); }
+        continue;
+      }
+    }
+    result.misses++;
+    if (write) putMiss.run(shot, key, stamp);
   }
   return result;
 }
@@ -1992,7 +2044,7 @@ export async function backfillReviews(dbPath = DB_PATH, { quiet = false, write =
   const count = () => db.prepare('SELECT COUNT(*) n FROM review_links').get().n;
   const slugs = db.prepare('SELECT project_slug FROM sessions GROUP BY project_slug').all().map((r) => r.project_slug);
   const report = { db: posix(dbPath), directories: slugs.length, sessions: 0, one_shots: 0, already: 0,
-                   unchanged: 0, linked: 0, misses: 0, by_verdict: {}, heads: 0,
+                   unchanged: 0, linked: 0, orphans: 0, misses: 0, by_verdict: {}, heads: 0,
                    links_before: count(), links_after: 0, wrote: write, ms: 0 };
   const heads = new Set();
   const bySlug = db.prepare('SELECT session_id FROM sessions WHERE project_slug IS ?');
@@ -2012,9 +2064,10 @@ export async function backfillReviews(dbPath = DB_PATH, { quiet = false, write =
     report.already += r.already;
     report.unchanged += r.unchanged;
     report.linked += r.linked.length;
+    report.orphans += r.orphans.length;
     report.misses += r.misses;
-    for (const l of r.linked) {
-      heads.add(l.head_id);
+    for (const l of r.linked.concat(r.orphans)) {
+      if (l.head_id) heads.add(l.head_id);
       const v = l.verdict ?? 'none';
       report.by_verdict[v] = (report.by_verdict[v] ?? 0) + 1;
     }
@@ -3278,7 +3331,7 @@ async function run({ full, recordsRoots = null }) {
           const rv = deriveReviews(db, ids, { write: true, method: 'harvest' });
           db.exec('COMMIT');
           chains.links += r.links;
-          chains.reviews += rv.linked.length;
+          chains.reviews += rv.linked.length + rv.orphans.length;
           for (const k of Object.keys(chains.rows_moved)) chains.rows_moved[k] += r.moved[k];
           for (const k of Object.keys(chains.rows_repaired)) chains.rows_repaired[k] += r.repaired[k];
         } catch (e) {
@@ -4459,8 +4512,12 @@ async function selfTest() {
     mkdirSync(vdir, { recursive: true });
     const sid = (tag) => `${tag}-0000-4000-8000-00000000000a`;
     const V = { P: sid('aaaa000a'), R1: sid('bbbb000a'), R2: sid('cccc000a'),
-                P2: sid('dddd000a'), P3: sid('eeee000a'), R3: sid('ffff000a'), R4: sid('abab000a') };
+                P2: sid('dddd000a'), P3: sid('eeee000a'), R3: sid('ffff000a'), R4: sid('abab000a'),
+                R5: sid('acac000a'), R6: sid('adad000a'), R7: sid('aeae000a'),
+                P5: sid('afaf000a'), R8: sid('baba000a') };
     const CWD = 'P:\\review';
+    // A folder of its own, so a run there has no pool at all: what an orphan looks like.
+    const CWD2 = 'P:\\elsewhere';
     const at = (m) => `2026-05-01T10:${String(m).padStart(2, '0')}:00.000Z`;
     const L1 = 'The parser now rejects a trailing comma and the three tests that covered it pass again after the rewrite';
     const L2 = '12 passed in 0.41s, nothing skipped, and the fixture directory was removed on the way out cleanly';
@@ -4470,12 +4527,14 @@ async function selfTest() {
     const PREAMBLE = "You are reviewing another Claude instance's work before it is allowed to finish its turn.\n\n"
       + 'Look for a claim wider than its evidence.\n\n--- THE WORK ---\n';
     let vn = 0;
-    const user = (s, ts, content) => JSON.stringify({ type: 'user', uuid: `v${++vn}`, sessionId: s, timestamp: ts,
-      cwd: CWD, message: { role: 'user', content } });
-    const said = (s, ts, text) => JSON.stringify({ type: 'assistant', uuid: `v${++vn}`, sessionId: s, timestamp: ts,
-      cwd: CWD, message: { model: 'm', usage: { input_tokens: 1, cache_creation_input_tokens: 0,
-                                                 cache_read_input_tokens: 0, output_tokens: 1 },
-                           content: [{ type: 'text', text }] } });
+    const user = (s, ts, content, cwd = CWD) => JSON.stringify({ type: 'user', uuid: `v${++vn}`, sessionId: s,
+      timestamp: ts, cwd, message: { role: 'user', content } });
+    const said = (s, ts, text, cwd = CWD) => JSON.stringify({ type: 'assistant', uuid: `v${++vn}`, sessionId: s,
+      timestamp: ts, cwd, message: { model: 'm', usage: { input_tokens: 1, cache_creation_input_tokens: 0,
+                                                            cache_read_input_tokens: 0, output_tokens: 1 },
+                                      content: [{ type: 'text', text }] } });
+    const summary = (s, ts, text, cwd = CWD) => JSON.stringify({ type: 'user', uuid: `v${++vn}`, sessionId: s,
+      timestamp: ts, cwd, isCompactSummary: true, message: { role: 'user', content: text } });
     const ran = (s, ts, id) => JSON.stringify({ type: 'assistant', uuid: `v${++vn}`, sessionId: s, timestamp: ts,
       cwd: CWD, message: { model: 'm', usage: { input_tokens: 1, output_tokens: 1 },
                            content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'pytest' } }] } });
@@ -4495,6 +4554,23 @@ async function selfTest() {
     // One said line and one typed line: the typed one counts once a said one matched.
     put(V.R4, [user(V.R4, at(12), PREAMBLE + 'USER: ' + T + '\n\nCLAUDE SAID: ' + L1 + '\n'),
                said(V.R4, at(13), 'fine')]);
+    // ORPHANS AND THEIR NEIGHBOURS, in a folder with no other session. R5 quotes P's lines (said
+    // in another folder) and replies with a verdict: a review of a chat this folder cannot name.
+    // R6 quotes the same lines and replies in prose: a person pasting output, left alone. R7
+    // repeats the typed prompt and replies with a verdict: typed-only lines, left alone.
+    put(V.R5, [user(V.R5, at(14), PREAMBLE + 'CLAUDE SAID: ' + L1 + '\n\nOUTPUT WAS: ' + L2 + '\n', CWD2),
+               said(V.R5, at(15), 'PROBLEMS\n- the claim is wider than the check', CWD2)]);
+    put(V.R6, [user(V.R6, at(16), PREAMBLE + 'CLAUDE SAID: ' + L1 + '\n\nOUTPUT WAS: ' + L2 + '\n', CWD2),
+               said(V.R6, at(17), 'I read through this and the parser change looks reasonable to me.', CWD2)]);
+    put(V.R7, [user(V.R7, at(18), T, CWD2), said(V.R7, at(19), 'APPROVED\nnothing to add', CWD2)]);
+    // A run quoting the chat's COMPACTION SUMMARY, a user-role row the model wrote (the laptop's
+    // fourth unplaced run quoted exactly that). It ties to the chat like a quoted said line does.
+    const S1 = 'The migration ran clean on the copy and the two counts that were compared agreed exactly by row';
+    const S2 = 'Remaining work is the receipt field and the one docs paragraph that still names the old flag';
+    put(V.P5, [user(V.P5, at(0), 'carry on'), summary(V.P5, at(1), 'This session is being continued.\n' + S1 + '\n' + S2 + '\n'),
+               said(V.P5, at(2), 'continuing'), user(V.P5, at(3), 'thanks')]);
+    put(V.R8, [user(V.R8, at(20), PREAMBLE + 'CLAUDE SAID: ' + S1 + '\n\nCLAUDE SAID: ' + S2 + '\n'),
+               said(V.R8, at(21), 'APPROVED\nthe summary holds')]);
     const vdb = new DatabaseSync(':memory:');
     vdb.exec(SCHEMA);
     const vh = new Harvest(vdb);
@@ -4512,10 +4588,19 @@ async function selfTest() {
     const dry = deriveReviews(vdb, vids, { write: false });
     checks.push(['reviews: write:false writes nothing and still reports the links (gate can fail)',
       vdb.prepare('SELECT COUNT(*) n FROM review_links').get().n === 0
-      && vdb.prepare('SELECT COUNT(*) n FROM review_misses').get().n === 0 && dry.linked.length === 2]);
+      && vdb.prepare('SELECT COUNT(*) n FROM review_misses').get().n === 0
+      && dry.linked.length === 3 && dry.orphans.length === 2]);
     const rv = deriveReviews(vdb, vids, { write: true, now: '2026-05-01T12:00:00.000Z' });
     const link = (s) => vdb.prepare('SELECT * FROM review_links WHERE session_id = ?').get(s);
-    checks.push(['reviews: four one-shots seen, the parents are not', rv.one_shots === 4, String(rv.one_shots)]);
+    checks.push(['reviews: eight one-shots seen, the parents are not', rv.one_shots === 8, String(rv.one_shots)]);
+    checks.push(['reviews: a run quoting a compaction summary of the chat ties to that chat (gate can fail)',
+      link(V.R8) && link(V.R8).head_id === V.P5 && link(V.R8).hits === 2 && link(V.R8).verdict === 'APPROVED',
+      JSON.stringify(link(V.R8))]);
+    checks.push(['reviews: a verdict reply quoting lines said elsewhere is an orphan, head NULL (gate can fail)',
+      link(V.R5) && link(V.R5).head_id === null && link(V.R5).hits === 2 && link(V.R5).verdict === 'PROBLEMS'
+      && rv.orphans.length === 2, JSON.stringify(link(V.R5))]);
+    checks.push(['reviews: the same quotes with a prose reply are left alone (gate can fail)', !link(V.R6)]);
+    checks.push(['reviews: a repeated typed prompt with a verdict reply is left alone', !link(V.R7)]);
     checks.push(['reviews: a run quoting what the session said and what its tool returned is tied to it (gate can fail)',
       link(V.R1)?.head_id === V.P && link(V.R1)?.hits === 2 && link(V.R1)?.snippets === 3
       && link(V.R1)?.verdict === 'APPROVED' && link(V.R1)?.method === 'harvest'
@@ -4523,20 +4608,52 @@ async function selfTest() {
     checks.push(['reviews: a run repeating a typed prompt word for word is NOT a review (gate can fail)', !link(V.R2)]);
     checks.push(['reviews: a typed line counts once a said line matched (gate can fail)',
       link(V.R4)?.head_id === V.P && link(V.R4)?.hits === 2 && link(V.R4)?.verdict === null, JSON.stringify(link(V.R4))]);
-    checks.push(['reviews: an even tie names nobody', !link(V.R3) && rv.misses === 2, String(rv.misses)]);
+    // The even tie names nobody as head; with its verdict reply it is an orphan, the shape of two
+    // of the four runs the laptop could not place (their fixture lines were said by two chats).
+    checks.push(['reviews: an even tie names nobody, and with a verdict reply it is an orphan (gate can fail)',
+      link(V.R3) && link(V.R3).head_id === null && link(V.R3).hits === 2 && link(V.R3).verdict === 'PROBLEMS'
+      && rv.misses === 3, JSON.stringify({ r3: link(V.R3), misses: rv.misses })]);
     checks.push(['reviews: a miss remembers its pool',
       vdb.prepare('SELECT pool_key FROM review_misses WHERE session_id = ?').get(V.R2)?.pool_key
-        === [V.P, V.P2, V.P3].sort().join(',')]);
+        === [V.P, V.P2, V.P3, V.P5].sort().join(',')]);
     const again = deriveReviews(vdb, vids, { write: true });
     checks.push(['reviews: a second pass asks nothing again',
-      again.already === 2 && again.unchanged === 2 && again.hit_queries === 0 && again.linked.length === 0]);
-    // A session joining the pools makes the two misses worth asking again, and the answer holds.
+      again.already === 5 && again.unchanged === 3 && again.hit_queries === 0 && again.linked.length === 0
+      && again.orphans.length === 0]);
+    // A session joining the pool makes the one miss in that folder worth asking again, and the
+    // answer holds; the two misses in the other folder are untouched.
     const P4 = sid('a4a4000a');
     put(P4, [user(P4, at(5), 'late'), said(P4, at(6), 'nothing to do with it'), user(P4, at(7), 'still')]);
     await vh.file(join(vdir, P4 + '.jsonl'), true);
     const third = deriveReviews(vdb, vids.concat(P4), { write: true });
-    checks.push(['reviews: a session joining the pool reopens the misses, and they stay misses',
-      third.hit_queries === 2 && third.misses === 2 && third.already === 2 && third.unchanged === 0]);
+    checks.push(['reviews: a session joining the pool reopens its miss, and it stays a miss',
+      third.hit_queries === 1 && third.misses === 1 && third.already === 5 && third.unchanged === 2,
+      JSON.stringify({ q: third.hit_queries, m: third.misses, a: third.already, u: third.unchanged })]);
+    // THE REBUILD: a store from the build before orphans, head_id NOT NULL, keeps its row and
+    // takes a NULL head afterwards, with the index back on the new table.
+    {
+      const opath = join(tmp, 'reviews', 'old-shape.db');
+      const odb = new DatabaseSync(opath);
+      odb.exec(`CREATE TABLE review_links (
+        session_id TEXT PRIMARY KEY, head_id TEXT NOT NULL, hits INTEGER NOT NULL, snippets INTEGER NOT NULL,
+        verdict TEXT, method TEXT NOT NULL, linked_at TEXT NOT NULL, CHECK (head_id <> session_id));
+        CREATE INDEX review_links_head ON review_links(head_id);
+        INSERT INTO review_links VALUES ('r-old', 'h-old', 2, 3, 'APPROVED', 'test', '2026-05-01T00:00:00Z');
+        CREATE TABLE review_misses (session_id TEXT PRIMARY KEY, pool_key TEXT NOT NULL, checked_at TEXT NOT NULL);
+        INSERT INTO review_misses VALUES ('r-miss', 'a,b', '2026-05-01T00:00:00Z');`);
+      odb.close();
+      const ndb = openDb(opath);
+      const missesLeft = ndb.prepare('SELECT COUNT(*) n FROM review_misses').get().n;
+      checks.push(['reviews: the rebuild forgets every miss, so each is asked again under the orphan look', missesLeft === 0]);
+      const oldRow = ndb.prepare("SELECT head_id FROM review_links WHERE session_id = 'r-old'").get();
+      let nullOk = true;
+      try { ndb.prepare("INSERT INTO review_links VALUES ('r-new', NULL, 2, 2, 'PROBLEMS', 'test', 'now')").run(); } catch { nullOk = false; }
+      const indexed = ndb.prepare("SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND name='review_links_head'").get();
+      const oldGone = !ndb.prepare("SELECT 1 FROM sqlite_master WHERE name='review_links_old'").get();
+      ndb.close();
+      checks.push(['reviews: a store with the NOT NULL head is rebuilt, rows kept, NULL accepted, index on the new table (gate can fail)',
+        oldRow?.head_id === 'h-old' && nullOk && indexed?.tbl_name === 'review_links' && oldGone]);
+    }
     // The backfill, on a file, both ways.
     const vpath = join(tmp, 'reviews', 'store.db');
     const fdb = openDb(vpath);
@@ -4546,11 +4663,13 @@ async function selfTest() {
     const dryRep = await backfillReviews(vpath, { quiet: true, write: false });
     const fcount = () => { const d = new DatabaseSync(vpath); const n = d.prepare('SELECT COUNT(*) n FROM review_links').get().n; d.close(); return n; };
     checks.push(['backfill-reviews: --dry-run reports and writes nothing (gate can fail)',
-      dryRep.linked === 2 && dryRep.wrote === false && fcount() === 0]);
+      dryRep.linked === 3 && dryRep.orphans === 2 && dryRep.wrote === false && fcount() === 0]);
     const rep = await backfillReviews(vpath, { quiet: true, write: true });
-    checks.push(['backfill-reviews: the links land, with their verdicts counted',
-      rep.linked === 2 && rep.by_verdict.APPROVED === 1 && rep.by_verdict.none === 1 && rep.heads === 1
-      && fcount() === 2 && rep.links_after === 2 && rep.links_before === 0]);
+    checks.push(['backfill-reviews: the links and the orphans land, with their verdicts counted',
+      rep.linked === 3 && rep.orphans === 2 && rep.by_verdict.APPROVED === 2 && rep.by_verdict.none === 1
+      && rep.by_verdict.PROBLEMS === 2 && rep.heads === 2
+      && fcount() === 5 && rep.links_after === 5 && rep.links_before === 0,
+      JSON.stringify({ l: rep.linked, o: rep.orphans, v: rep.by_verdict, h: rep.heads, n: fcount() })]);
   }
 
   // Chains, fourth directory: a project this machine IMPORTED. The transcript is byte identical to

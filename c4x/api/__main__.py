@@ -18,6 +18,8 @@ exit 3, because binding on top would give two answers to one address.
 import json
 import os
 import sys
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -57,6 +59,77 @@ def db_from_argv(argv):
 
 def wants_watchdog(argv):
     return "--watchdog" in argv
+
+
+def wants_review_sweep(argv, env=None):
+    """The sweep at startup (`adopt.sweep_reviews`) is on unless `--no-review-sweep` or
+    `C4X_NO_REVIEW_SWEEP=1` says otherwise. The install receipt's `reviewSweep: false` reaches
+    here as the flag, through `tools/dashboard.mjs launchArgv`."""
+    environment = os.environ if env is None else env
+    return "--no-review-sweep" not in argv and environment.get("C4X_NO_REVIEW_SWEEP") != "1"
+
+
+def after_pid(argv):
+    """`--after <pid>`: the process to outwait before binding, or None.
+
+    A restart (`c4x.server.restart_server`) starts its replacement while it still holds the port
+    and passes its own pid; the replacement waits for it to go rather than finding the port held
+    and exiting with "already running".
+    """
+    if "--after" in argv:
+        i = argv.index("--after")
+        if i + 1 < len(argv) and argv[i + 1].isdigit():
+            return int(argv[i + 1])
+    return None
+
+
+def wait_for_exit(pid, timeout=30.0, exists=None, sleep=time.sleep, now=time.monotonic):
+    """Block until `pid` is gone or `timeout` passes. True when it went."""
+    import psutil
+    there = psutil.pid_exists if exists is None else exists
+    deadline = now() + float(timeout)
+    while now() < deadline:
+        if not there(pid):
+            return True
+        sleep(0.25)
+    return not there(pid)
+
+
+def _say(message):
+    """Flushed: stdout is a block-buffered log file when the hook starts this server, and a
+    line written from a thread after startup would otherwise wait in the buffer for the exit."""
+    print(message, flush=True)
+
+
+def start_review_sweep(port, run, db_path, *, probe=None, tries=60, every=0.5, log=_say,
+                       sleep=time.sleep):
+    """A thread that waits for our own `/__health__` answer, then calls `run()` once.
+
+    Started before `uvicorn.run` (which never returns), so the wait is what makes it "after the
+    server is up": the sweep removes records and restarts the app, and a page opened by the
+    restarted app's first session must find the server answering. Never raises into the server:
+    a failed sweep is a log line.
+    """
+    ask = already_running if probe is None else probe
+
+    def _go():
+        for _ in range(int(tries)):
+            if ask(port, db_path, timeout=1.0) == OURS:
+                break
+            sleep(every)
+        else:
+            log("[review sweep] the port never answered; not run")
+            return
+        try:
+            report = run()
+        except Exception as exc:  # noqa: BLE001 - reported, never raised into the server
+            log(f"[review sweep] failed: {exc!r}")
+            return
+        log(f"[review sweep] done: {json.dumps(report, default=str)}")
+
+    thread = threading.Thread(target=_go, name="c4x-review-sweep", daemon=True)
+    thread.start()
+    return thread
 
 
 def already_running(port, db_path, timeout=1.0):
@@ -154,6 +227,43 @@ def self_test():
     finally:
         paths.FROZEN = was_frozen
 
+    # The restart's wait and the sweep thread, with a fake clock and a fake port.
+    sweep_checks: dict = {}
+    alive = {"n": 3}
+
+    def fading(pid):
+        alive["n"] -= 1
+        return alive["n"] > 0
+    ticks = {"t": 0.0}
+
+    def clock():
+        ticks["t"] += 1.0
+        return ticks["t"]
+    sweep_checks["waited"] = wait_for_exit(1, timeout=30.0, exists=fading, sleep=lambda s: None,
+                                           now=clock)
+    sweep_checks["timed_out"] = wait_for_exit(1, timeout=2.0, exists=lambda pid: True,
+                                              sleep=lambda s: None, now=clock)
+    asked = {"n": 0}
+
+    def probe(port, db, timeout=1.0):
+        asked["n"] += 1
+        return OURS if asked["n"] >= 2 else None
+    ran = {"n": 0}
+
+    def run():
+        ran["n"] += 1
+        return {"removed": 0}
+    start_review_sweep(1, run, here, probe=probe, every=0, log=lambda m: None,
+                       sleep=lambda s: None).join(5)
+    sweep_checks["ran"], sweep_checks["asked"] = ran["n"], asked["n"]
+    never = {"n": 0}
+
+    def never_run():
+        never["n"] += 1
+    start_review_sweep(1, never_run, here, probe=lambda *a, **k: None, tries=3, every=0,
+                       log=lambda m: None, sleep=lambda s: None).join(5)
+    sweep_checks["never_ran"] = never["n"]
+
     cases = [
         ("--port wins over everything", port_from_argv(["--port", "9999"]) == 9999),
         ("a missing --port value falls back", port_from_argv(["--port"]) == DEFAULT_PORT),
@@ -167,6 +277,18 @@ def self_test():
         # --port 8061 and the variable unset it reported 8059 while serving 8061.
         ("--port is a number main() can export", port_from_argv(["--port", "8061"]) == 8061),
         ("--watchdog is parsed", wants_watchdog(["--watchdog"]) and not wants_watchdog([])),
+        ("the review sweep is on by default and off by flag or by environment",
+         wants_review_sweep([], env={}) and not wants_review_sweep(["--no-review-sweep"], env={})
+         and not wants_review_sweep([], env={"C4X_NO_REVIEW_SWEEP": "1"})),
+        ("--after names the predecessor, and a missing or odd value is none",
+         after_pid(["--after", "4242"]) == 4242 and after_pid(["--after"]) is None
+         and after_pid(["--after", "x"]) is None and after_pid([]) is None),
+        ("the predecessor is waited for, and the wait ends when it goes",
+         sweep_checks["waited"] is True and sweep_checks["timed_out"] is False),
+        ("the sweep runs once, after the port answers as ours",
+         sweep_checks["ran"] == 1 and sweep_checks["asked"] >= 2),
+        ("a port that never answers runs no sweep (gate can fail)",
+         sweep_checks["never_ran"] == 0),
         ("nothing answers on a closed port", already_running(free_port(), here) is None),
         ("a listener that never answers is nobody, within the timeout",
          silent_answer is None and silent_took < 3.0),
@@ -223,6 +345,11 @@ def main(argv=None):
     os.environ["C4X_API_PORT"] = str(port)
 
     from c4x import store
+    predecessor = after_pid(argv)
+    if predecessor is not None:
+        # A restart's replacement: the server that started us holds the port until it has gone.
+        if not wait_for_exit(predecessor):
+            print(f"pid {predecessor} did not exit within 30 s; asking the port anyway")
     holder = already_running(port, store.DB_PATH)
     if holder == OURS:
         print(f"c4x api already running on http://127.0.0.1:{port} for {store.DB_PATH}")
@@ -249,6 +376,20 @@ def main(argv=None):
         print(f"  watchdog: stops once no Claude process has been seen for {int(GRACE)} s")
     if reload:
         print("  reloading on source changes")
+    # THE SWEEP AT STARTUP, once the port answers. Exported as an environment variable too, so
+    # `/api/adopt/sweep` can say the sweep is off on this server rather than only silent.
+    if "--no-review-sweep" in argv:
+        os.environ["C4X_NO_REVIEW_SWEEP"] = "1"
+    sweep_off = ("--no-writes" if os.environ.get("C4X_NO_WRITES")
+                 else "--no-review-sweep" if not wants_review_sweep(argv)
+                 else "--reload" if reload else None)
+    if sweep_off:
+        print(f"  review sweep: off ({sweep_off})", flush=True)
+    else:
+        from c4x import adopt
+        start_review_sweep(port, adopt.sweep_reviews, store.DB_PATH)
+        print("  review sweep: once the port answers, records c4x wrote for review runs are "
+              "taken back and Claude is restarted (--no-review-sweep turns it off)", flush=True)
 
     # host is fixed, not configurable. This process can read every conversation on the machine.
     #

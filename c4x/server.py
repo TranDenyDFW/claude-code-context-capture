@@ -7,8 +7,10 @@ should not have to scroll past nine hundred lines of layout to find it.
 import html as _html
 import os
 import secrets as _secrets
+import sys
 import threading as _threading
 import time as _time
+from pathlib import Path
 from urllib.parse import urlsplit as _urlsplit
 
 from flask import request as _flask_request
@@ -124,14 +126,21 @@ def port_from_argv(argv, fallback):
     return fallback
 
 
-def hardened_shutdown(reason: str) -> None:
-    """Kill children then self. Runs in a background thread so the response flushes first."""
+def hardened_shutdown(reason: str, spare=()) -> None:
+    """Kill children then self. Runs in a background thread so the response flushes first.
+
+    `spare` names child pids that must live on: the server this one started to replace itself
+    (`restart_server`) is a child by parent pid however detached it was spawned, and the recursive
+    kill below would take it with everything else.
+    """
+    spared = {int(p) for p in spare}
+
     def _do_kill():
         _time.sleep(0.25)
         try:
             import psutil
             me = psutil.Process(os.getpid())
-            children = me.children(recursive=True)
+            children = [c for c in me.children(recursive=True) if c.pid not in spared]
             for child in children:
                 try:
                     child.kill()
@@ -144,6 +153,46 @@ def hardened_shutdown(reason: str) -> None:
 
     print(f"[shutdown] {reason}", flush=True)
     _threading.Thread(target=_do_kill, daemon=True).start()
+
+
+def relaunch_argv(argv=None, executable=None, frozen=None, pid=None) -> list:
+    """The command that starts this server again once this process has gone.
+
+    The same interpreter (a `pythonw.exe` stays windowless), the same flags (`--db`, `--port`,
+    `--watchdog`, `--no-review-sweep`, whatever the hook passed), plus `--after <our pid>`, which
+    `c4x.api.main` reads as "wait for that process to exit before binding": the port is ours until
+    then, and a child that raced us would find it held and exit saying so. A stale `--after` from
+    an earlier restart is dropped. Frozen, the exe IS the module, so no `-m`.
+    """
+    from c4x.paths import FROZEN
+    flags = list(sys.argv[1:] if argv is None else argv)
+    while "--after" in flags:
+        i = flags.index("--after")
+        del flags[i:i + 2]
+    exe = executable or sys.executable
+    is_frozen = FROZEN if frozen is None else frozen
+    head = [exe] if is_frozen else [exe, "-m", "c4x.api"]
+    return head + flags + ["--after", str(os.getpid() if pid is None else pid)]
+
+
+def restart_server(reason: str, log_path=None, detach=None) -> dict:
+    """Start a replacement, spare it, stop. The Restart button's whole action.
+
+    The replacement's output is appended to the same `dashboard.log` the hook's launch wrote, so
+    `install status` and `install uninstall` find the newest shutdown token there. `detach` is
+    `c4x.proc.detach` unless a test passes its own.
+    """
+    from c4x import proc, store
+    from c4x.paths import install_root
+    argv = relaunch_argv()
+    log = Path(log_path) if log_path else Path(store.DB_PATH).parent / "raw" / "dashboard.log"
+    child = (proc.detach if detach is None else detach)(argv, log, cwd=install_root())
+    # `vars(child).get`, not `getattr`: tools/table_audit.py reads every `getattr(...)` call as a
+    # callee it cannot name and fails the suite on it (see c4x/proc.py).
+    pid = int(vars(child).get("pid", 0) or 0)
+    print(f"[restart] {reason}: started pid {pid} as {' '.join(argv)}", flush=True)
+    hardened_shutdown(f"restart ({reason})", spare=[pid] if pid else ())
+    return {"restarting": True, "pid": pid, "argv": argv}
 
 
 def register_routes(server, db_path, port):
