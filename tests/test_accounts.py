@@ -281,3 +281,128 @@ class TestWhatTheSignedInAccountSees:
         state = accounts.state()
         assert state["signed_in"] is None and state["current_chats"] is None
         assert {p["account"]: p["own"] for p in state["roots"][0]["pairs"]} == {A: 3, B: 1}
+
+
+ORG_C = "33333333-5555-4555-8555-333333333333"
+
+
+class TestCoveringAPairThatAppearsLater:
+    """The app creates `<account>/<org>` at sign-in with an organisation the junctions never
+    named; `reconcile` folds it into the shared directory the moment the app is closed."""
+
+    def _later_pair(self, machine, account=A, org=ORG_C, names=("c0",)):
+        for name in names:
+            record(machine / account / org, name)
+        return machine / account / org
+
+    def test_a_pair_the_app_creates_later_is_covered(self, machine, monkeypatch):
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        accounts.share_all()
+        later = self._later_pair(machine)
+        report = accounts.reconcile()
+        assert report["ran"] is True and report["restart_required"] is True
+        assert accounts.link_target(later), "the new pair is a link now"
+        assert (machine / A / ORG_A / "local_c0.json").is_file(), "its record is shared now"
+        assert any(Path(link["link"]) == later for link in accounts._recorded_links()), (
+            "the marker names the new link")
+        owners = accounts._record_owners(accounts._newest_manifest())
+        assert owners["local_c0.json"] == (str(machine), A, ORG_C), (
+            "the newest manifest files the record under the pair it came from")
+        assert accounts.state()["uncovered"] == []
+        assert accounts.verify()["ok"]
+
+    def test_reconcile_refuses_while_the_app_runs_and_names_the_pending_pair(self, machine,
+                                                                            monkeypatch):
+        accounts.share_all()
+        later = self._later_pair(machine)
+        before = sorted(p.name for p in accounts.backups_dir().iterdir())
+        monkeypatch.setattr(accounts, "app_running", lambda: True)
+        report = accounts.reconcile()
+        assert report["ran"] is False and report["app_running"] is True
+        assert [p["org"] for p in report["pending"]] == [ORG_C]
+        assert "Quit Claude" in report["why"]
+        assert (later / "local_c0.json").is_file() and accounts.link_target(later) is None
+        assert sorted(p.name for p in accounts.backups_dir().iterdir()) == before, (
+            "a refusal takes no backup")
+        assert [p["org"] for p in accounts.state()["uncovered"]] == [ORG_C]
+
+    def test_an_unshared_machine_is_left_alone(self, machine):
+        report = accounts.reconcile()
+        assert report["ran"] is False and "off" in report["why"] and report["pending"] == []
+        assert not accounts.marker_path().exists() and not accounts.backups_dir().exists()
+        assert accounts.state()["intended_source"] == "none"
+
+    def test_intent_is_read_from_the_disk_when_the_marker_is_gone(self, machine):
+        accounts.share_all()
+        accounts.marker_path().unlink()
+        assert accounts.intended_mode() == accounts.ALL, "links on disk are not made by accident"
+        assert accounts.state()["intended_source"] == "disk"
+        report = accounts.reconcile()
+        assert report["ran"] is True and report["marker_written"] is True
+        marker = json.loads(accounts.marker_path().read_text(encoding="utf-8"))
+        assert marker["mode"] == accounts.ALL and marker["by"] == "reconcile"
+        assert [Path(link["link"]) for link in marker["links"]] == [machine / B / ORG_B]
+        assert accounts.state()["intended_source"] == "marker"
+
+    def test_a_machine_with_links_and_no_manifest_gets_one(self, machine, monkeypatch):
+        import shutil
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        accounts.share_all()
+        shutil.rmtree(accounts.backups_dir())
+        assert accounts.state()["current_chats"] is None, "links and no manifest: not known"
+        report = accounts.reconcile()
+        assert report["ran"] is True and report["backup"], "a manifest with nothing to fold"
+        assert accounts.state()["current_chats"] == 4, (
+            "every record sits under A now, and the new manifest says so")
+
+    def test_nothing_pending_with_a_manifest_takes_no_second_backup(self, machine):
+        accounts.share_all()
+        before = sorted(p.name for p in accounts.backups_dir().iterdir())
+        report = accounts.reconcile()
+        assert report["ran"] is True and report["backup"] is None
+        assert "nothing to cover" in report["why"]
+        assert sorted(p.name for p in accounts.backups_dir().iterdir()) == before
+
+    def test_a_backup_on_a_linked_root_lists_each_record_once(self, machine):
+        """On Windows a junction is a directory to rglob, and the shared directory was copied
+        once per link; on Linux the symlink was never followed and this passed either way."""
+        accounts.share_all()
+        _dest, manifest = accounts._backup([str(machine)], "again")
+        names = [Path(f["rel"]).name for f in manifest["files"]
+                 if Path(f["rel"]).name.startswith("local_")]
+        assert sorted(names) == ["local_a0.json", "local_a1.json", "local_a2.json", "local_b0.json"]
+        assert {Path(f["rel"]).parts[0] for f in manifest["files"]} == {A}, "under the holder"
+
+    def test_two_backups_in_one_second_do_not_collide(self, machine):
+        first, _ = accounts._backup([str(machine)], "one")
+        second, _ = accounts._backup([str(machine)], "two")
+        assert first != second and first.is_dir() and second.is_dir()
+
+    def test_a_fuller_new_pair_does_not_displace_the_link_target(self, machine):
+        accounts.share_all()
+        later = self._later_pair(machine, B, ORG_C, names=("c0", "c1", "c2", "c3", "c4"))
+        head = accounts.canonical_pair(accounts.pairs_on(machine))
+        assert head["account"] == A and head["org"] == ORG_A, "the pair the links point at wins"
+        accounts.reconcile()
+        assert accounts.link_target(later) and accounts.link_target(machine / A / ORG_A) is None
+        assert len(list((machine / A / ORG_A).glob("local_*.json"))) == 9
+
+    def test_an_empty_new_pair_is_reported_by_verify_and_in_state(self, machine):
+        accounts.share_all()
+        (machine / A / ORG_C).mkdir(parents=True)
+        answer = accounts.verify()
+        assert not answer["ok"] and any("not covered" in p for p in answer["problems"])
+        assert [p["org"] for p in answer["uncovered"]] == [ORG_C]
+        assert [p["org"] for p in accounts.state()["uncovered"]] == [ORG_C]
+        accounts.reconcile()
+        assert accounts.link_target(machine / A / ORG_C) and accounts.verify()["ok"]
+
+    def test_the_cli_covers_and_reports(self, machine, capsys):
+        accounts.share_all()
+        self._later_pair(machine)
+        assert accounts.main(["--reconcile", "--dry-run"]) == 0
+        printed = json.loads(capsys.readouterr().out)
+        assert printed["dry_run"] is True and printed["roots"][0]["linked"], "names the fold"
+        assert accounts.link_target(machine / A / ORG_C) is None, "and moves nothing"
+        assert accounts.main(["--reconcile"]) == 0
+        assert accounts.link_target(machine / A / ORG_C)

@@ -232,14 +232,21 @@ def state():
     current = next((p["own"] for p in every
                     if signed and p["account"] == signed["account"] and p["org"] == signed["org"]),
                    None)
+    meant = intent(linked=bool(linked))
+    # THE PAIRS SHARING DOES NOT COVER YET, while sharing is meant: the ones the app created
+    # since. The page says how many, and `reconcile` folds them in when Claude next closes.
+    uncovered = ([{"root": p["root"], "account": p["account"], "org": p["org"],
+                   "path": p["path"], "records": p["records"]}
+                  for r in roots for p in uncovered_pairs(r["pairs"])]
+                 if meant["mode"] == ALL else [])
     return {
         "supported": ok, "why_not": why, "app_running": app_running(),
         # WHAT WAS ASKED FOR, beside what is on disk. They disagree when a migration has undone the
         # sharing, and that difference is the whole of what `verify` reports.
-        "mode": mode, "intended": intended_mode(), "roots": roots,
-        "pairs": len(every), "linked": len(linked),
+        "mode": mode, "intended": meant["mode"], "intended_source": meant["source"],
+        "roots": roots, "pairs": len(every), "linked": len(linked),
         "chats_visible": sum(p["records"] for p in every if not p["link_to"]),
-        "signed_in": signed, "current_chats": current,
+        "signed_in": signed, "current_chats": current, "uncovered": uncovered,
     }
 
 
@@ -255,19 +262,47 @@ def marker_path():
     return Path(store.DB_PATH).parent / "account-sharing.json"
 
 
+def intent(linked=None) -> dict:
+    """What sharing is meant to be, and what says so: `{"mode": all|current, "source":
+    marker|disk|none}`.
+
+    THE MARKER FIRST, THE DISK SECOND. The marker is what a person asked for; but a marker lives
+    beside the store and a reset of `data/` takes it with it, while the junctions stay where they
+    are. Measured on the author's machine: eight of nine pairs linked, no marker, and the page
+    said Current while every account read one list. Links on disk are not made by accident, so
+    with no marker they ARE the intent, and `reconcile()` writes the marker back. `linked` may be
+    passed by a caller that has already walked the roots.
+    """
+    try:
+        recorded = json.loads(marker_path().read_text(encoding="utf-8")).get("mode")
+        if recorded in (ALL, CURRENT):
+            return {"mode": recorded, "source": "marker"}
+    except (OSError, ValueError):
+        pass
+    if linked is None:
+        from c4x import store
+        linked = any(p["link_to"] for r in store.sessions_roots() for p in pairs_on(r))
+    return {"mode": ALL, "source": "disk"} if linked else {"mode": CURRENT, "source": "none"}
+
+
 def intended_mode():
     """`all` when sharing was turned on and not turned off, else `current`."""
+    return intent()["mode"]
+
+
+def _recorded_links() -> list:
+    """The links the marker recorded, or none."""
     try:
-        return json.loads(marker_path().read_text(encoding="utf-8")).get("mode") or CURRENT
+        return json.loads(marker_path().read_text(encoding="utf-8")).get("links") or []
     except (OSError, ValueError):
-        return CURRENT
+        return []
 
 
-def _write_marker(links):
+def _write_marker(links, by="share_all"):
     marker_path().parent.mkdir(parents=True, exist_ok=True)
     marker_path().write_text(json.dumps({
         "mode": ALL, "set_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "links": links}, indent=1), encoding="utf-8")
+        "by": by, "links": links}, indent=1), encoding="utf-8")
 
 
 def _clear_marker():
@@ -281,9 +316,17 @@ def backups_dir():
 
 
 def _backup(roots, note):
-    """Copy every pair, with hashes, into a DATED directory. Never over the previous one."""
+    """Copy every pair, with hashes, into a DATED directory. Never over the previous one.
+
+    LINKS ARE NOT WALKED. On Windows a junction is a directory to `rglob`, so a backup of a linked
+    root copied the shared directory once per junction and the manifest filed every record under
+    whichever pair was walked last, which is the one map `share_current` and `own_records` read.
+    `os.walk` with the linked directories pruned copies each file once, under the pair that holds
+    it. The stamp carries microseconds: `share_all` and `reconcile` can each take a backup within
+    one second, and two backups with one name raised.
+    """
     import hashlib
-    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
     dest = backups_dir() / stamp
     dest.mkdir(parents=True, exist_ok=False)
     manifest: dict[str, Any] = {"note": note, "taken_at": stamp, "files": []}
@@ -291,16 +334,19 @@ def _backup(roots, note):
         src = Path(root)
         if not src.is_dir():
             continue
-        for f in sorted(src.rglob("*")):
-            if not f.is_file():
-                continue
-            rel = f.relative_to(src)
-            out = dest / f"root{n}" / rel
-            out.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(f, out)
-            manifest["files"].append({
-                "root": str(src), "rel": str(rel), "bytes": f.stat().st_size,
-                "sha256": hashlib.sha256(f.read_bytes()).hexdigest()})
+        for dirpath, dirnames, filenames in os.walk(src):
+            dirnames[:] = sorted(d for d in dirnames if link_target(Path(dirpath) / d) is None)
+            for name in sorted(filenames):
+                f = Path(dirpath) / name
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(src)
+                out = dest / f"root{n}" / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, out)
+                manifest["files"].append({
+                    "root": str(src), "rel": str(rel), "bytes": f.stat().st_size,
+                    "sha256": hashlib.sha256(f.read_bytes()).hexdigest()})
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
     return dest, manifest
 
@@ -328,16 +374,80 @@ def _record_owners(manifest) -> dict:
 
 
 def canonical_pair(pairs):
-    """The pair every other one points at: the one already holding the most chats.
+    """The pair every other one points at: the one the links already point at, else the one
+    holding the most chats.
 
     Not a new directory of its own. The app writes into whichever pair it is signed in to, and a
     pair it has never written to is a pair it may recreate; the fullest existing one is the one
-    with the most to lose and the least to prove.
+    with the most to lose and the least to prove. ONCE LINKS EXIST, THEIR TARGET WINS: a pair the
+    app created after sharing began can hold more records than the shared directory does on a
+    quiet day, and folding the shared directory into it would chain every junction through a
+    junction and move the one list the accounts read.
     """
     real = [p for p in pairs if not p["link_to"]]
     if not real:
         return None
-    return max(real, key=lambda p: (p["records"], p["path"]))
+    targets = [p["link_to"] for p in pairs if p["link_to"]]
+    pointed = [p for p in real if any(_same_path(p["path"], t) for t in targets)]
+    return max(pointed or real, key=lambda p: (p["records"], p["path"]))
+
+
+def uncovered_pairs(pairs) -> list:
+    """The real pairs beside the canonical one on a root: what sharing does not cover yet.
+
+    With or without records. The app creates `<account>/<org>` when an account signs in with
+    that organisation, before any chat is written, and an empty directory it holds open is
+    still a directory it reads instead of the shared one. Empty when the root has one pair.
+    """
+    if len(pairs) < 2:
+        return []
+    head = canonical_pair(pairs)
+    if head is None:
+        return []
+    return [p for p in pairs if not p["link_to"] and not _same_path(p["path"], head["path"])]
+
+
+def _fold_pair(pair, head, backup, dry_run=False) -> dict:
+    """Move one pair's files into the head and make the pair a link to it.
+
+    The per-pair half of `share_all`, and the whole of what `reconcile` does for a pair the app
+    created later. Files of a name the head already holds are set aside under the backup, never
+    merged: `scheduled-tasks.json` is a different account's schedule and nothing here can say
+    which wins. A directory that still holds anything after the move is left as it is, named in
+    the error with the backup's path.
+    """
+    out: dict[str, Any] = {"moved": [], "set_aside": [], "linked": []}
+    here = Path(pair["path"])
+    for f in sorted(here.iterdir()):
+        if not f.is_file():
+            continue
+        target = Path(head["path"]) / f.name
+        if target.exists():
+            out["set_aside"].append(
+                {"path": str(f), "why": "a file of that name is already shared"})
+            if not dry_run:
+                keep = Path(str(backup)) / "set-aside" / pair["account"][:8]
+                keep.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(f), str(keep / f.name))
+            continue
+        out["moved"].append({"from": str(f), "to": str(target)})
+        if not dry_run:
+            shutil.move(str(f), str(target))
+    if dry_run:
+        out["linked"].append({"link": pair["path"], "to": head["path"]})
+        return out
+    rest = list(here.iterdir())
+    if rest:
+        raise RuntimeError(
+            f"{here} still holds {len(rest)} entr(ies) and cannot become a link; "
+            f"nothing else was changed. The backup is at {backup}.")
+    here.rmdir()
+    try:
+        _make_link(here, head["path"])
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"could not link {here}: {exc}. The backup is at {backup}.") from exc
+    out["linked"].append({"link": pair["path"], "to": head["path"]})
+    return out
 
 
 def share_all(dry_run=False):
@@ -361,49 +471,99 @@ def share_all(dry_run=False):
         head = canonical_pair(pairs)
         if head is None or len(pairs) < 2:
             continue
-        moved, aside, linked = [], [], []
+        moved: list = []
+        aside: list = []
+        linked: list = []
         for pair in pairs:
             if pair["path"] == head["path"] or pair["link_to"]:
                 continue
-            here = Path(pair["path"])
-            for f in sorted(here.iterdir()):
-                if not f.is_file():
-                    continue
-                target = Path(head["path"]) / f.name
-                if target.exists():
-                    # ONE DIRECTORY, ONE OF EACH. Reported, never merged: `scheduled-tasks.json`
-                    # is a different account's schedule and nothing here can say which wins.
-                    aside.append({"path": str(f), "why": "a file of that name is already shared"})
-                    if not dry_run:
-                        keep = Path(str(report["backup"])) / "set-aside" / pair["account"][:8]
-                        keep.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(f), str(keep / f.name))
-                    continue
-                moved.append({"from": str(f), "to": str(target)})
-                if not dry_run:
-                    shutil.move(str(f), str(target))
-            if dry_run:
-                linked.append({"link": pair["path"], "to": head["path"]})
-                continue
-            rest = list(here.iterdir())
-            if rest:
-                raise RuntimeError(
-                    f"{here} still holds {len(rest)} entr(ies) and cannot become a link; "
-                    f"nothing else was changed. The backup is at {report['backup']}.")
-            here.rmdir()
-            try:
-                _make_link(here, head["path"])
-            except OSError as exc:
-                raise RuntimeError(
-                    f"could not link {here}: {exc}. The backup is at {report['backup']}.") from exc
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    f"could not link {here}: {exc}. The backup is at {report['backup']}.") from exc
-            linked.append({"link": pair["path"], "to": head["path"]})
+            folded = _fold_pair(pair, head, report["backup"], dry_run)
+            moved += folded["moved"]
+            aside += folded["set_aside"]
+            linked += folded["linked"]
         report["roots"].append({"root": str(root), "canonical": head["path"],
                                 "moved": moved, "set_aside": aside, "linked": linked})
     if not dry_run:
         _write_marker([link for r in report["roots"] for link in r["linked"]])
+    report["state"] = state()
+    return report
+
+
+def reconcile(dry_run=False) -> dict:
+    """Cover every pair sharing does not cover yet, and refresh what sharing rests on.
+
+    WHY. The app creates `<account>/<org>` when an account signs in with an organisation the
+    junctions never named, and from then on that account reads its own new directory: a private
+    list beside the shared one. Measured on the author's machine on 2026-09-15: Account #1 signed
+    in with a newer organisation, got a real directory and fifteen chats of its own, and at the
+    next account switch the app folded that directory into the one the junctions point at and
+    removed it, so the account came back to nothing. Nothing c4x could have caught while the app
+    was open, and everything it can put right the moment the app is closed: the server's watchdog
+    calls this before it stops, sixty seconds after the last Claude process.
+
+    WHAT. Under intent ALL only (`intent()`: the marker, or links on disk when the marker is
+    gone): every real pair beside the canonical one is folded into it and linked, after a backup
+    whose manifest says which record came from where; a machine with links and no manifest gets
+    a manifest even with nothing to fold, since `share_current` and the Current count read it;
+    the marker is written back every time, so the page stops saying Current over a shared disk.
+    Refused, and nothing moved, while the app runs: the report names the pending pairs instead.
+    """
+    from c4x import store
+    ok, why = supported()
+    if not ok:
+        raise RuntimeError(why)
+    roots = [str(r) for r in store.sessions_roots()]
+    pairs_by_root = {r: pairs_on(r) for r in roots}
+    linked_any = any(p["link_to"] for ps in pairs_by_root.values() for p in ps)
+    meant = intent(linked=linked_any)
+    report: dict[str, Any] = {"ran": False, "dry_run": bool(dry_run), "intended": meant["mode"],
+                              "intended_source": meant["source"], "app_running": False,
+                              "why": "", "pending": [], "backup": None, "roots": [],
+                              "marker_written": False, "restart_required": False}
+    if meant["mode"] != ALL:
+        report["why"] = "sharing is off; nothing to cover"
+        report["state"] = state()
+        return report
+    pending = [p for ps in pairs_by_root.values() for p in uncovered_pairs(ps)]
+    report["pending"] = [{"root": p["root"], "account": p["account"], "org": p["org"],
+                          "path": p["path"], "records": p["records"]} for p in pending]
+    if app_running():
+        report["app_running"] = True
+        report["why"] = (
+            "Claude is running, and a directory it has open cannot be moved. Quit Claude and try "
+            "again; nothing has been changed." if pending
+            else "Claude is running; nothing to cover")
+        report["state"] = state()
+        return report
+    if not dry_run and (pending or _newest_manifest() is None):
+        dest, _manifest = _backup(roots, "before covering the pairs the app created since sharing"
+                                  if pending else "the sharing manifest, taken by reconcile")
+        report["backup"] = str(dest)
+    for root, pairs in pairs_by_root.items():
+        head = canonical_pair(pairs)
+        todo = [p for p in pending if p["root"] == root]
+        if head is None or not todo:
+            continue
+        moved: list = []
+        aside: list = []
+        linked: list = []
+        for pair in todo:
+            folded = _fold_pair(pair, head, report["backup"], dry_run)
+            moved += folded["moved"]
+            aside += folded["set_aside"]
+            linked += folded["linked"]
+        report["roots"].append({"root": root, "canonical": head["path"],
+                                "moved": moved, "set_aside": aside, "linked": linked})
+    if not dry_run:
+        links = [{"link": p["path"], "to": p["link_to"]}
+                 for r in roots for p in pairs_on(r) if p["link_to"]]
+        _write_marker(links, by="reconcile")
+        report["marker_written"] = True
+    report["ran"] = True
+    report["why"] = (f"covered {len(pending)} pair(s)" if pending
+                     else "nothing to cover; the marker and the manifest are in place")
+    report["restart_required"] = bool(pending) and not dry_run
+    report["pending"] = []
     report["state"] = state()
     return report
 
@@ -473,12 +633,9 @@ def verify():
     """
     from c4x import store
     intended = intended_mode()
-    out: dict[str, Any] = {"ok": True, "intended": intended, "problems": [], "roots": []}
-    recorded: list[dict[str, Any]] = []
-    try:
-        recorded = json.loads(marker_path().read_text(encoding="utf-8")).get("links") or []
-    except (OSError, ValueError):
-        recorded = []
+    out: dict[str, Any] = {"ok": True, "intended": intended, "problems": [], "roots": [],
+                           "uncovered": []}
+    recorded = _recorded_links()
     for link in recorded:
         here = Path(link["link"])
         target = link_target(here)
@@ -493,12 +650,17 @@ def verify():
     for root in store.sessions_roots():
         pairs = pairs_on(root)
         linked = [p for p in pairs if p["link_to"]]
-        holding = [p for p in pairs if not p["link_to"] and p["records"]]
-        if intended == ALL and len(holding) > 1:
+        # A PAIR SHARING DOES NOT COVER, records or not: the app creates the directory at sign-in
+        # and reads it instead of the shared one from then on.
+        missing = uncovered_pairs(pairs) if intended == ALL else []
+        if missing:
             out["ok"] = False
+            out["uncovered"] += [{"root": p["root"], "account": p["account"], "org": p["org"],
+                                  "path": p["path"], "records": p["records"]} for p in missing]
             out["problems"].append(
-                f"{root}: sharing is on and {len(holding)} pairs hold records of their own, so the "
-                "accounts are no longer reading one list")
+                f"{root}: {len(missing)} pair(s) beside the shared directory are not covered, so "
+                "that account reads a list of its own; reconcile covers them when Claude next "
+                "closes")
         if intended == CURRENT and linked:
             out["ok"] = False
             out["problems"].append(
@@ -510,18 +672,25 @@ def verify():
                 out["ok"] = False
                 out["problems"].append(
                     f"{pair['path']} and the directory it points at do not list the same records")
-        out["roots"].append({"root": str(root), "linked": len(linked), "holding": len(holding)})
+        holding = [p for p in pairs if not p["link_to"] and p["records"]]
+        out["roots"].append({"root": str(root), "linked": len(linked), "holding": len(holding),
+                             "uncovered": len(missing)})
     return out
 
 
 def main(argv=None):
-    """`python -m c4x.accounts [--state | --all | --current | --verify] [--dry-run]`."""
+    """`python -m c4x.accounts [--state | --all | --current | --reconcile | --verify]
+    [--dry-run]`."""
     argv = list(sys.argv[1:] if argv is None else argv)
     dry = "--dry-run" in argv
     if "--all" in argv:
         print(json.dumps(share_all(dry_run=dry), indent=1))
     elif "--current" in argv:
         print(json.dumps(share_current(dry_run=dry), indent=1))
+    elif "--reconcile" in argv:
+        answer = reconcile(dry_run=dry)
+        print(json.dumps(answer, indent=1))
+        return 0 if answer["ran"] or not answer["pending"] else 1
     elif "--verify" in argv:
         answer = verify()
         print(json.dumps(answer, indent=1))
