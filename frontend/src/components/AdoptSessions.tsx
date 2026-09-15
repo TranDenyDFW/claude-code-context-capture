@@ -184,7 +184,10 @@ export function AdoptSessions({
     }
   }
 
-  const label =
+  // THE BUTTON SAYS "Adopt (N)" AND THE HOVER SAYS WHY, the user's choice: the sentence that was
+  // the button's text ran to 60 characters and moved the whole header row. N is the number of
+  // chats the drawer offers; what else the drawer can do is the hover.
+  const hint =
     total > 0
       ? `${plural(total, 'chat')} on this machine that Claude has no record of`
       : unnamed > 0
@@ -195,16 +198,16 @@ export function AdoptSessions({
 
   return (
     <div className="ml-1 flex items-center gap-2 border-l border-edge pl-3">
-      <span className="text-xs uppercase tracking-wide text-ink-faint">Adopt</span>
       <button
         ref={trigger}
         type="button"
         aria-expanded={open}
         aria-controls="adopt-drawer"
+        title={hint}
         onClick={() => setOpen((now) => !now)}
         className="rounded-md border border-edge bg-page px-2.5 py-1.5 text-sm text-ink-dim hover:text-ink"
       >
-        {label}
+        Adopt ({total})
       </button>
       {open ? (
         <Portal>

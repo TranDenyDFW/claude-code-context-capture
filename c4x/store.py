@@ -23,7 +23,15 @@ from typing import Any, TypedDict
 import pandas as pd
 
 from c4x import proc
-from c4x.labels import chat_name, distinct_short_paths, is_folderless, plural, titled_path
+from c4x.labels import (
+    chat_name,
+    cut_title,
+    distinct_short_paths,
+    is_folderless,
+    plural,
+    short_path,
+    titled_path,
+)
 from c4x.paths import install_root
 
 # The install, not this file's directory: they differ once the API is frozen into an exe, and
@@ -715,6 +723,21 @@ def deleted_in_app(ttl: float = 45.0) -> frozenset:
     return ids
 
 
+def live_records_sql() -> str:
+    """A subquery naming every session the desktop app holds a live record for, per harvest's
+    `desktop_records` (neither gone nor deleted). `SELECT NULL WHERE 0` without the table."""
+    if not tables_present("desktop_records"):
+        return "SELECT NULL WHERE 0"
+    return "SELECT session_id FROM desktop_records WHERE gone_at IS NULL AND deleted_at IS NULL"
+
+
+def live_record_ids() -> frozenset:
+    """The same set, for the pandas half of the floor."""
+    if not tables_present("desktop_records"):
+        return frozenset()
+    return frozenset(str(s) for s in q(live_records_sql())["session_id"])
+
+
 def hidden_sessions_sql() -> str:
     """A subquery naming every session no list shows: the review runs, the chats the desktop app
     deleted, and every session of a deleted chat's chain.
@@ -1301,6 +1324,13 @@ def _import_dates(session_ids) -> dict:
     return out
 
 
+def is_placeholder_title(text) -> bool:
+    """Whether a frame title is one of `_title_or_name`'s stand-ins rather than a name: the
+    population list falls back to the folder for those."""
+    text = str(text or "")
+    return text == "(untitled)" or text.startswith("Imported_")
+
+
 def _title_or_name(title, section, imported_at) -> str:
     """The stored title, or a name for a session that can never have one.
 
@@ -1420,6 +1450,7 @@ def _session_rows_uncached() -> pd.DataFrame:
     # frame here, before the floor and the collapse ever see them, through the one subquery the
     # Summary's count uses too.
     hidden = hidden_sessions_sql()
+    recorded = live_records_sql()
     df = q(f"""
         SELECT t.session_id,
                s.cwd, s.project_slug, s.entrypoint, s.transcript_path,
@@ -1459,8 +1490,9 @@ def _session_rows_uncached() -> pd.DataFrame:
         GROUP BY t.session_id
         -- Fewer than SESSION_TURN_FLOOR transcript rows and a session is not listed. The rule,
         -- its measurement and its one warning are beside the constant. A linked session is
-        -- admitted regardless, because the floor is applied to its CHAT after the collapse.
-        HAVING COUNT(*) >= ? OR t.session_id IN ({linked})
+        -- admitted regardless, because the floor is applied to its CHAT after the collapse; so
+        -- is a session the desktop app holds a live record for, because the app lists it.
+        HAVING COUNT(*) >= ? OR t.session_id IN ({linked}) OR t.session_id IN ({recorded})
     """, (SESSION_TURN_FLOOR,))
     if df.empty:
         return df
@@ -1468,7 +1500,15 @@ def _session_rows_uncached() -> pd.DataFrame:
     # is one small table and this only runs on a cache miss.
     head_of, members_of = chat_links(ttl=0)
     df = _collapse_chains(df, head_of, members_of)
-    df = df[df["turns"] >= SESSION_TURN_FLOOR].copy()
+    # THE FLOOR, ON THE CHAT, WITH ONE EXEMPTION. A chat the desktop app lists (a live record for
+    # any of its sessions, per harvest's `desktop_records`) is listed here whatever its size: the
+    # laptop's sidebar showed T02 under folder 2 while this page, needing five rows, showed
+    # nothing for it, and a page that disagrees with the app it describes is wrong, not strict.
+    # The floor still keeps the record-less one-shots of a harness or a hook probe out.
+    live = live_record_ids()
+    kept = [int(t) >= SESSION_TURN_FLOOR or any(m in live for m in members_of.get(s, [s]))
+            for s, t in zip(df["session_id"], df["turns"], strict=True)]
+    df = df[kept].copy()
     if df.empty:
         return df
     # How many review runs read this chat, over every session it spans. A count, the way
@@ -1683,6 +1723,27 @@ def cohort_options() -> list:
         for p in folderless:
             ids = by_project.get(p) or []
             labels[p] = chat_name(p, every.get(ids[0], {}) if ids else {})
+    # A FOLDER HOLDING ONE CHAT READS AS THAT CHAT'S TITLE, the user's rule: the sidebar shows
+    # "T02" under folder "2", and "2 (1 listed)" here named nothing a reader recognises. A folder
+    # holding several keeps its name, the way the sidebar's group does. The title is the frame's,
+    # the same name the Sessions list shows, cut as a scratch chat's is. Two rows that then read
+    # the same get their folder appended, and only those two.
+    singles = [p for p, row in work.iterrows()
+               if int(row["sessions"]) == 1 and not is_folderless(p)]
+    if singles:
+        first_title = df[df["project"].isin(singles)].groupby("project")["title"].first()
+        for p in singles:
+            text = cut_title(first_title.get(p))
+            # A placeholder ("(untitled)", "Imported_<date>") is not a name; the folder stays.
+            if text and not is_placeholder_title(text):
+                labels[p] = text
+    seen_labels: dict = {}
+    for p, text in labels.items():
+        seen_labels.setdefault(text, []).append(p)
+    for group in seen_labels.values():
+        if len(group) > 1:
+            for p in group:
+                labels[p] = f"{labels[p]} - {short_path(p, 1, mark='')}"
     for proj, row in work.iterrows():
         # "listed", the same qualifier the All sessions option above carries. Without it the
         # number reads as "this project has N sessions", when it is the count the picker will

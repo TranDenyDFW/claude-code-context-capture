@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
-import { AccountSharing, RESTART_NOTE } from './AccountSharing'
+import { AccountSharing, QUIT_NOTE, RESTART_NOTE } from './AccountSharing'
 import { api, ApiError } from '@/api'
 import type { AccountsState } from '@/api'
 
@@ -79,13 +79,17 @@ describe('AccountSharing', () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
     draw()
     const all = await screen.findByRole('button', { name: 'All' })
+    const notes = '\n' + QUIT_NOTE + '\n' + RESTART_NOTE
     expect(all.getAttribute('title')).toBe(
-      "Every account's chats: 187 across 2 account directories")
+      "Every account's chats: 187 across 2 account directories" + notes)
     expect(screen.getByRole('button', { name: 'Current' }).getAttribute('title')).toBe(
-      "Only the signed-in account's own chats: 12")
+      "Only the signed-in account's own chats: 12" + notes)
     expect(screen.queryByText(/187/)).toBeNull()
     expect(screen.queryByText(/shared across/)).toBeNull()
     expect(screen.queryByText(/each with its own chats/)).toBeNull()
+    expect(screen.queryByText(/Quit Claude before switching/)).toBeNull()
+    expect(screen.queryByText('Account')).toBeNull()
+    expect(screen.getByRole('group', { name: 'Account' })).not.toBeNull()
   })
 
   it('says the Current number is not known when the server cannot tell', async () => {
@@ -95,7 +99,7 @@ describe('AccountSharing', () => {
     expect(current.getAttribute('title')).toContain('not known while sharing is on')
   })
 
-  it('carries the restart note on the label, and marks the label after a switch', async () => {
+  it('carries the restart note on the buttons, and marks the switch after a change', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
     const share = vi.spyOn(api.accounts, 'share').mockResolvedValue({
       mode: 'all', dry_run: false, restart_required: true, backup: 'C:\\x\\1',
@@ -103,13 +107,14 @@ describe('AccountSharing', () => {
     })
     const onChanged = vi.fn()
     draw({ onChanged })
-    const label = await screen.findByText('Account')
-    expect(label.getAttribute('title')).toBe(RESTART_NOTE)
-    expect(label.getAttribute('data-restart')).toBe('false')
-    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+    const all = await screen.findByRole('button', { name: 'All' })
+    expect(all.getAttribute('title')).toContain(RESTART_NOTE)
+    const group = screen.getByRole('group', { name: 'Account' })
+    expect(group.getAttribute('data-restart')).toBe('false')
+    fireEvent.click(all)
     await waitFor(() => expect(share).toHaveBeenCalledWith('all'))
-    await waitFor(() => expect(label.getAttribute('data-restart')).toBe('true'))
-    expect(label.className).toContain('text-warn')
+    await waitFor(() => expect(group.getAttribute('data-restart')).toBe('true'))
+    expect(group.className).toContain('border-warn')
     expect(screen.queryByText(/Restart Claude/)).toBeNull()
     expect(onChanged).toHaveBeenCalled()
     // The report's state replaces the one read on mount: All is now the side that is on.
@@ -127,7 +132,7 @@ describe('AccountSharing', () => {
     draw()
     fireEvent.click(await screen.findByRole('button', { name: 'All' }))
     expect(await screen.findByText(/Quit Claude and try again/)).not.toBeNull()
-    expect(screen.getByText('Account').getAttribute('data-restart')).toBe('false')
+    expect(screen.getByRole('group', { name: 'Account' }).getAttribute('data-restart')).toBe('false')
   })
 
   it('is disabled on a server that answers no writes', async () => {

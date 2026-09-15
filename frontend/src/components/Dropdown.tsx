@@ -28,11 +28,14 @@ export function Dropdown({
   value,
   options,
   onChange,
+  hideLabel = false,
 }: {
   label: string
   value: string
   options: DropdownOption[]
   onChange: (value: string) => void
+  /** Keep the label for screen readers only: the control's own text says what it is. */
+  hideLabel?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [cursor, setCursor] = useState(0)
@@ -122,7 +125,7 @@ export function Dropdown({
 
   return (
     <div ref={box} className="relative flex items-center gap-1.5 text-xs text-ink-faint">
-      <span id={labelId}>{label}</span>
+      <span id={labelId} className={hideLabel ? 'sr-only' : undefined}>{label}</span>
       <button
         type="button"
         role="combobox"

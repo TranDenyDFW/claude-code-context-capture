@@ -227,7 +227,7 @@ describe('axe finds no WCAG A or AA violation in', () => {
                  newest: '2026-08-03T12:01:00Z', sessions: [] }],
     })
     const { container } = render(<AdoptSessions writesEnabled onChanged={() => {}} />)
-    const opener = await findByRole(container, 'button', { name: /no record of/ })
+    const opener = await findByRole(container, 'button', { name: /^Adopt \(\d+\)$/ })
     opener.click()
     // The drawer is a portal at the end of the document, so the whole document is what axe sees.
     await screen.findByRole('checkbox', { name: /SecDb/ })
