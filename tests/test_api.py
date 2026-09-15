@@ -936,8 +936,8 @@ def test_a_folder_holding_one_chat_reads_as_that_chat_s_title(client):
     folder with one listed chat is labelled by that chat's title (the frame's, the same name the
     Sessions list shows), a folder with several keeps its name, and only two rows that would read
     the same get their folder appended."""
-    from c4x.labels import cut_title, short_path
-    from c4x.store import cohort_options, session_rows
+    from c4x.labels import cut_title, is_folderless, short_path
+    from c4x.store import cohort_options, is_placeholder_title, session_rows
     frame = session_rows()
     options = cohort_options()
     labels = {o["value"].split("::", 1)[1]: o["label"] for o in options
@@ -947,9 +947,12 @@ def test_a_folder_holding_one_chat_reads_as_that_chat_s_title(client):
     seen_single = seen_many = 0
     for p, label in labels.items():
         name = label.rsplit(" (", 1)[0]
-        if p in singles:
+        if p in singles and not is_folderless(p):
             title = cut_title(frame.loc[frame["project"] == p, "title"].iloc[0])
-            assert name == title or name.startswith(title + " - "), (name, title)
+            # A stand-in title ("(untitled)", "Imported_<date>") is no name: the folder stays.
+            expected = short_path(p, 1, mark="") if is_placeholder_title(title) else title
+            assert name == expected or name.startswith(expected + " - "), (name, expected)
+            assert "(untitled)" not in name and not name.startswith("Imported_"), name
             seen_single += 1
         elif p in manys:
             # The folder's name, or more of its path when another folder reads the same

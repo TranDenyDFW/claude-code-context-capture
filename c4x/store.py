@@ -1324,6 +1324,13 @@ def _import_dates(session_ids) -> dict:
     return out
 
 
+def is_placeholder_title(text) -> bool:
+    """Whether a frame title is one of `_title_or_name`'s stand-ins rather than a name: the
+    population list falls back to the folder for those."""
+    text = str(text or "")
+    return text == "(untitled)" or text.startswith("Imported_")
+
+
 def _title_or_name(title, section, imported_at) -> str:
     """The stored title, or a name for a session that can never have one.
 
@@ -1727,7 +1734,8 @@ def cohort_options() -> list:
         first_title = df[df["project"].isin(singles)].groupby("project")["title"].first()
         for p in singles:
             text = cut_title(first_title.get(p))
-            if text:
+            # A placeholder ("(untitled)", "Imported_<date>") is not a name; the folder stays.
+            if text and not is_placeholder_title(text):
                 labels[p] = text
     seen_labels: dict = {}
     for p, text in labels.items():
