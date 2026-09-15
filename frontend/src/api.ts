@@ -494,6 +494,13 @@ export interface AccountPair {
    * ones written since. null when links exist and no manifest says whose is whose.
    */
   own?: number | null
+  /**
+   * On an `uncovered` entry: why this pair does not read the shared list. `not linked` is a
+   * directory the app created since sharing; `points elsewhere` a link the kernel lands on
+   * another directory (the Store build's virtual spelling of the target); `dangling` a link to
+   * nothing. The server covers all three when Claude next closes.
+   */
+  why?: 'not linked' | 'points elsewhere' | 'dangling'
 }
 
 /**

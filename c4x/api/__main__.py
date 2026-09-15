@@ -105,12 +105,17 @@ def _reconcile_summary(report) -> str:
     """One line for the log: what the reconcile did, or why it did nothing."""
     if not report.get("ran"):
         return f"skipped: {report.get('why') or 'nothing'}"
-    linked = sum(len(r["linked"]) for r in report.get("roots", []))
-    moved = sum(len(r["moved"]) for r in report.get("roots", []))
-    aside = sum(len(r["set_aside"]) for r in report.get("roots", []))
+    roots = report.get("roots", [])
+    linked = sum(len(r["linked"]) for r in roots)
+    moved = sum(len(r["moved"]) for r in roots)
+    aside = sum(len(r["set_aside"]) for r in roots)
+    relinked = sum(len(r.get("relinked", [])) for r in roots)
+    copied = sum(len(d.get("copied", [])) for r in roots for d in r.get("relinked", []))
     parts = [report.get("why") or "ran"]
     if linked or moved or aside:
         parts.append(f"{linked} linked, {moved} moved, {aside} set aside")
+    if relinked:
+        parts.append(f"{relinked} re-pointed, {copied} copied through")
     if report.get("backup"):
         parts.append(f"backup {report['backup']}")
     if report.get("marker_written"):

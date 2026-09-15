@@ -182,14 +182,16 @@ describe('the pairs sharing does not cover yet', () => {
 
   it('names the count and when it is covered, with the paths on hover', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(
-      state({ intended: 'all', mode: 'mixed', uncovered: [pair(), pair({ path: 'C:\\r\\x\\y' })] }))
+      state({ intended: 'all', mode: 'mixed', uncovered: [
+        pair({ why: 'not linked' }), pair({ path: 'C:\\r\\x\\y', why: 'points elsewhere' })] }))
     draw()
     const line = await screen.findByText(/2 account pairs not yet covered/)
     expect(line.textContent).toContain(COVER_NOTE)
     const row = line.closest('p') as HTMLElement
     expect(row.getAttribute('data-uncovered')).toBe('2')
     expect(row.getAttribute('title')).toContain(COVER_HOVER)
-    expect(row.getAttribute('title')).toContain('C:\\r\\x\\y')
+    expect(row.getAttribute('title')).toContain('C:\\r\\x\\y: points elsewhere')
+    expect(row.getAttribute('title')).toContain(': not linked')
     const button = screen.getByRole('button', { name: 'Cover now' }) as HTMLButtonElement
     expect(button.disabled).toBe(false)
   })
