@@ -154,8 +154,65 @@ def pairs_on(root):
     return out
 
 
+def _same_path(a, b) -> bool:
+    """Two spellings of one directory: a junction's target is read back in whatever form the
+    platform gives it, which need not be the string the pair list holds."""
+    try:
+        return Path(str(a)).resolve() == Path(str(b)).resolve()
+    except OSError:
+        return str(a) == str(b)
+
+
+def own_records(pair, pairs, owners):
+    """How many chats this pair would list on its own: what `share_current` would hand it back.
+
+    A pair that is neither a link nor a link's target holds its own files, so the answer is its
+    `records`. Under sharing every file sits in one directory and only the newest backup's
+    manifest says which came from where: a pair's own are the records the manifest filed under
+    it that are still there, plus, for the directory the others point at, every record the
+    manifest never saw (written since sharing began, which `share_current` leaves in place).
+    None when links exist and no manifest does, a junction made by hand: a guess would be a wrong
+    number under a right-looking label.
+    """
+    targets = [p["link_to"] for p in pairs if p["link_to"]]
+    if pair["link_to"]:
+        shared = pair["link_to"]
+    elif any(_same_path(pair["path"], t) for t in targets):
+        shared = pair["path"]
+    else:
+        return int(pair["records"])
+    if owners is None:
+        return None
+    try:
+        present = {f.name for f in Path(shared).glob(f"{RECORD}*.json")}
+    except OSError:
+        return None
+    key = (pair["root"], pair["account"], pair["org"])
+    mine = {name for name, who in owners.items()
+            if name.startswith(RECORD) and who == key and name in present}
+    if not pair["link_to"]:
+        mine |= {name for name in present if name not in owners}
+    return len(mine)
+
+
+def signed_in_pair():
+    """{account, org} for the pair the desktop app is writing, or None when nothing says."""
+    from c4x import appstate
+    try:
+        pair = appstate.desktop_pair(appstate.sessions_root())
+    except (OSError, ValueError):
+        return None
+    return {"account": pair["account"], "org": pair["org"]} if pair else None
+
+
 def state():
-    """What every pair on every records root resolves to, and whether they are shared."""
+    """What every pair on every records root resolves to, and whether they are shared.
+
+    `chats_visible` is what All shows: every record in the directories that hold files. `own` on
+    each pair and `current_chats` for the signed-in one are what Current would show, read from
+    the newest backup manifest only while a pair is linked (a page load in Current mode pays for
+    a directory listing and nothing more).
+    """
     from c4x import store
     ok, why = supported()
     roots = [{"root": r, "pairs": pairs_on(r)} for r in store.sessions_roots()]
@@ -165,6 +222,16 @@ def state():
     if linked:
         mode = ALL if len(linked) == len([p for p in every if p["records"] or p["link_to"]]) - 1 \
             else MIXED
+    owners: dict | None = {}
+    if linked:
+        manifest = _newest_manifest()
+        owners = _record_owners(manifest) if manifest else None
+    for p in every:
+        p["own"] = own_records(p, every, owners)
+    signed = signed_in_pair()
+    current = next((p["own"] for p in every
+                    if signed and p["account"] == signed["account"] and p["org"] == signed["org"]),
+                   None)
     return {
         "supported": ok, "why_not": why, "app_running": app_running(),
         # WHAT WAS ASKED FOR, beside what is on disk. They disagree when a migration has undone the
@@ -172,6 +239,7 @@ def state():
         "mode": mode, "intended": intended_mode(), "roots": roots,
         "pairs": len(every), "linked": len(linked),
         "chats_visible": sum(p["records"] for p in every if not p["link_to"]),
+        "signed_in": signed, "current_chats": current,
     }
 
 
@@ -235,6 +303,28 @@ def _backup(roots, note):
                 "sha256": hashlib.sha256(f.read_bytes()).hexdigest()})
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
     return dest, manifest
+
+
+def _newest_manifest():
+    """The newest backup's manifest, or None when no backup has been taken."""
+    stamps = sorted(backups_dir().glob("*/manifest.json")) if backups_dir().is_dir() else []
+    if not stamps:
+        return None
+    try:
+        return json.loads(stamps[-1].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _record_owners(manifest) -> dict:
+    """name -> (root, account, org) for every record and per-pair file the manifest filed under
+    a pair: where `share_current` sends each back, and what `own_records` counts."""
+    where: dict = {}
+    for item in manifest.get("files", []):
+        rel = Path(item["rel"])
+        if len(rel.parts) == 3 and rel.name.startswith(RECORD) or rel.name in PER_PAIR:
+            where[rel.name] = (item["root"], rel.parts[0], rel.parts[1])
+    return where
 
 
 def canonical_pair(pairs):
@@ -333,15 +423,11 @@ def share_current(dry_run=False):
         raise RuntimeError(
             "Claude is running, and these directories cannot be moved while it is. Quit Claude "
             "and try again; nothing has been changed.")
-    stamps = sorted(backups_dir().glob("*/manifest.json")) if backups_dir().is_dir() else []
-    if not stamps:
+    manifest = _newest_manifest()
+    if manifest is None:
         raise RuntimeError("no backup to restore the layout from, so nothing was changed")
-    manifest = json.loads(stamps[-1].read_text(encoding="utf-8"))
-    where = {}
-    for item in manifest["files"]:
-        rel = Path(item["rel"])
-        if len(rel.parts) == 3 and rel.name.startswith(RECORD) or rel.name in PER_PAIR:
-            where[rel.name] = (item["root"], rel.parts[0], rel.parts[1])
+    where = _record_owners(manifest)
+    stamps = sorted(backups_dir().glob("*/manifest.json"))
     report: dict[str, Any] = {"mode": CURRENT, "dry_run": bool(dry_run), "restored": [],
                               "left": [], "restart_required": True,
                               "from_backup": str(stamps[-1].parent)}

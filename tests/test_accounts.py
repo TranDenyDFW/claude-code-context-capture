@@ -212,3 +212,72 @@ class TestAppRunning:
             raise AssertionError("the process table was read")
         monkeypatch.setattr(accounts.psutil, "process_iter", never)
         assert accounts.app_running() is False
+
+
+def signed_in_as(root, monkeypatch, account, org):
+    """Make `account`/`org` the pair the desktop app is writing, the way the app records it:
+    `config.json` names the account and `plan-usage-history.json` the organisation. Without
+    this `desktop_pair` falls back to the newest record on disk, which is whichever the
+    fixture wrote last, and a test built on that passes or fails by mtime."""
+    from c4x import appstate
+    (root.parent / "config.json").write_text(json.dumps({"lastKnownAccountUuid": account}),
+                                             encoding="utf-8")
+    (root.parent / "plan-usage-history.json").write_text(
+        json.dumps({"samples": [{"org": org, "t": 1}]}), encoding="utf-8")
+    monkeypatch.setattr(appstate, "sessions_root", lambda: str(root))
+
+
+class TestWhatTheSignedInAccountSees:
+    """`own` per pair and `current_chats`: what Current would show, beside what All shows."""
+
+    def test_in_current_mode_the_count_is_the_pair_s_own_records(self, machine, monkeypatch):
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        state = accounts.state()
+        own = {p["account"]: p["own"] for p in state["roots"][0]["pairs"]}
+        assert own == {A: 3, B: 1}
+        assert state["signed_in"] == {"account": A, "org": ORG_A}
+        assert state["current_chats"] == 3 and state["chats_visible"] == 4
+
+    def test_under_all_each_account_still_knows_its_own(self, machine, monkeypatch):
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        accounts.share_all()
+        state = accounts.state()
+        assert state["chats_visible"] == 4, "All shows every record in the one directory"
+        own = {p["account"]: p["own"] for p in state["roots"][0]["pairs"]}
+        assert own == {A: 3, B: 1}, "the manifest says whose each record was"
+        assert state["current_chats"] == 3
+        # A chat written while shared lands in the shared directory and counts for the pair the
+        # others point at, which is where share_current leaves it.
+        record(machine / A / ORG_A, "new-since")
+        state = accounts.state()
+        own = {p["account"]: p["own"] for p in state["roots"][0]["pairs"]}
+        assert own == {A: 4, B: 1} and state["current_chats"] == 4
+        signed_in_as(machine, monkeypatch, B, ORG_B)
+        assert accounts.state()["current_chats"] == 1
+
+    def test_putting_it_back_returns_the_plain_count(self, machine, monkeypatch):
+        signed_in_as(machine, monkeypatch, B, ORG_B)
+        accounts.share_all()
+        assert accounts.state()["current_chats"] == 1
+        accounts.share_current()
+        state = accounts.state()
+        assert state["current_chats"] == 1
+        assert {p["account"]: p["own"] for p in state["roots"][0]["pairs"]} == {A: 3, B: 1}
+
+    def test_a_link_with_no_manifest_answers_none_not_a_guess(self, machine, monkeypatch):
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        accounts.share_all()
+        import shutil
+        shutil.rmtree(accounts.backups_dir())
+        state = accounts.state()
+        assert state["current_chats"] is None
+        assert all(p["own"] is None for p in state["roots"][0]["pairs"])
+        assert state["chats_visible"] == 4, "All's number does not need the manifest"
+
+    def test_no_signed_in_pair_answers_none(self, machine, monkeypatch):
+        from c4x import appstate
+        monkeypatch.setattr(appstate, "sessions_root", lambda: str(machine))
+        monkeypatch.setattr(appstate, "desktop_pair", lambda root=None: None)
+        state = accounts.state()
+        assert state["signed_in"] is None and state["current_chats"] is None
+        assert {p["account"]: p["own"] for p in state["roots"][0]["pairs"]} == {A: 3, B: 1}
