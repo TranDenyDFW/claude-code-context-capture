@@ -87,3 +87,108 @@ def test_the_project_chart_sums_to_the_stores_resident_tokens(body, q):
     assert charted > 0, "the chart plots nothing"
     assert charted <= total * 1.01, (
         f"the top-15 chart plots {charted:,.0f} against a store total of {total:,.0f}")
+
+
+
+# THE CACHE COST OF AN ACCOUNT SWITCH, on a store built for it: harvest's account_log dates the
+# switch, and the first call of a chat after it that reads no cache and writes its whole context
+# again is the cost. An expired cache, a compaction, and a machine that never switched are not.
+import sqlite3
+
+from tests.test_projects import build_store, forget_cached_rows
+
+SWITCH = "2026-09-15T12:00:00.000Z"
+
+
+def _turn(con, sid, n, ts, resident, cread, ccreate, eph_1h=0):
+    con.execute(
+        """INSERT INTO turns (uuid,session_id,ts,model,request_id,input_tokens,
+             cache_creation_input_tokens,cache_read_input_tokens,output_tokens,thinking_tokens,
+             eph_1h,eph_5m,service_tier,total_resident,is_sidechain,file_path,line_no,parent_uuid)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f"{sid}-x{n}", sid, ts, "claude-opus-5", f"req-{sid}-x{n}", 1, ccreate, cread, 4, 0,
+         eph_1h, 0 if eph_1h else 1, "standard", resident, 0, rf"C:\t\{sid}.jsonl", 100 + n, None))
+
+
+def _switch_store(tmp_path, monkeypatch, log_rows=2):
+    from c4x import store
+    path = build_store(tmp_path / "switch.db")
+    con = sqlite3.connect(str(path))
+    rows = [("2026-09-15T10:00:00.000Z", "2026-09-15T10:00:00.000Z", "acct-1"),
+            ("2026-09-15T12:03:00.000Z", SWITCH, "acct-2")][:log_rows]
+    for seen, switched, account in rows:
+        con.execute("INSERT INTO account_log (seen_at, switched_at, account, org, source) "
+                    "VALUES (?, ?, ?, 'org', 'config.json')", (seen, switched, account))
+    con.commit()
+    con.close()
+    monkeypatch.setattr(store, "DB_PATH", path)
+    forget_cached_rows()
+    return path
+
+
+class TestTheCacheCostOfASwitch:
+    def test_a_rewrite_right_after_a_switch_is_counted(self, tmp_path, monkeypatch):
+        from c4x.tabs.summary import decisions, switch_rewrites
+        path = _switch_store(tmp_path, monkeypatch)
+        con = sqlite3.connect(str(path))
+        _turn(con, "s0-0", 1, "2026-09-15T11:58:00.000Z", 300_000, 290_000, 5_000)
+        _turn(con, "s0-0", 2, "2026-09-15T12:01:00.000Z", 300_000, 0, 295_000)
+        _turn(con, "s0-0", 3, "2026-09-15T12:02:00.000Z", 300_000, 295_000, 1_000)
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        got = switch_rewrites()
+        assert got["calls"] == 1 and got["tokens"] == 295_000 and got["worst"] == "s0-0"
+        assert got["sessions"] == ["s0-0"] and got["switches"] == 1
+        finding = [d for d in decisions() if "account switch" in d["finding"]]
+        assert len(finding) == 1 and finding[0]["session_id"] == "s0-0"
+        assert "295.0k" in finding[0]["evidence"] or "295k" in finding[0]["evidence"]
+        assert finding[0]["goes to"] == "tab-session"
+
+    def test_an_expired_cache_is_not_a_switch(self, tmp_path, monkeypatch):
+        """The previous call was ten minutes before, past the five-minute lifetime it asked for:
+        the rewrite would have happened with no switch at all."""
+        from c4x.tabs.summary import switch_rewrites
+        path = _switch_store(tmp_path, monkeypatch)
+        con = sqlite3.connect(str(path))
+        _turn(con, "s0-0", 1, "2026-09-15T11:50:00.000Z", 300_000, 290_000, 5_000)
+        _turn(con, "s0-0", 2, "2026-09-15T12:01:00.000Z", 300_000, 0, 295_000)
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        assert switch_rewrites()["calls"] == 0
+
+    def test_a_one_hour_cache_still_alive_is_counted(self, tmp_path, monkeypatch):
+        from c4x.tabs.summary import switch_rewrites
+        path = _switch_store(tmp_path, monkeypatch)
+        con = sqlite3.connect(str(path))
+        _turn(con, "s0-0", 1, "2026-09-15T11:20:00.000Z", 300_000, 290_000, 5_000, eph_1h=1)
+        _turn(con, "s0-0", 2, "2026-09-15T12:01:00.000Z", 300_000, 0, 295_000)
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        assert switch_rewrites()["calls"] == 1
+
+    def test_a_compaction_is_not_a_rewrite(self, tmp_path, monkeypatch):
+        """The new context is a fraction of the old: what a compaction writes."""
+        from c4x.tabs.summary import switch_rewrites
+        path = _switch_store(tmp_path, monkeypatch)
+        con = sqlite3.connect(str(path))
+        _turn(con, "s0-0", 1, "2026-09-15T11:58:00.000Z", 300_000, 290_000, 5_000)
+        _turn(con, "s0-0", 2, "2026-09-15T12:01:00.000Z", 70_000, 0, 70_000)
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        assert switch_rewrites()["calls"] == 0
+
+    def test_a_machine_that_never_switched_has_no_finding(self, tmp_path, monkeypatch):
+        from c4x.tabs.summary import decisions, switch_rewrites
+        path = _switch_store(tmp_path, monkeypatch, log_rows=1)
+        con = sqlite3.connect(str(path))
+        _turn(con, "s0-0", 1, "2026-09-15T11:58:00.000Z", 300_000, 290_000, 5_000)
+        _turn(con, "s0-0", 2, "2026-09-15T12:01:00.000Z", 300_000, 0, 295_000)
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        assert switch_rewrites()["calls"] == 0
+        assert not [d for d in decisions() if "account switch" in d["finding"]]
