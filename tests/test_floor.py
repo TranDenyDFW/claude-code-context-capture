@@ -12,6 +12,8 @@ parameter, and is left alone on purpose.
 import re
 from pathlib import Path
 
+import pytest
+
 from c4x.store import SESSION_TURN_FLOOR
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,8 +62,15 @@ def test_the_floor_is_a_small_positive_integer():
 
 # --- the one exemption: a chat the desktop app lists is listed here ------------------------
 
-def _tiny_store(tmp_path, monkeypatch):
-    """The real schema; `s0-0` cut to ONE transcript row, well under the floor."""
+@pytest.fixture
+def tiny_store(tmp_path, monkeypatch):
+    """The real schema; `s0-0` cut to ONE transcript row, well under the floor.
+
+    CLEARED AFTERWARDS. The frame is cached for 45 s, and a test file that leaves its store's
+    frame in the cache hands it to the next file: on CI this leaked `s0-0` into
+    tests/test_front_door.py, whose cohort then had no sessions with turns in the real fixture,
+    and the runner read that skip as a fixture gap.
+    """
     import sqlite3
 
     from c4x import store
@@ -73,7 +82,8 @@ def _tiny_store(tmp_path, monkeypatch):
     con.close()
     monkeypatch.setattr(store, "DB_PATH", path)
     forget_cached_rows()
-    return path
+    yield path
+    forget_cached_rows()
 
 
 def _record_row(path, sid, gone_at=None, deleted_at=None):
@@ -88,20 +98,17 @@ def _record_row(path, sid, gone_at=None, deleted_at=None):
     con.close()
 
 
-def test_a_chat_below_the_floor_is_not_listed_without_a_record(tmp_path, monkeypatch):
+def test_a_chat_below_the_floor_is_not_listed_without_a_record(tiny_store):
     from c4x import store
-    _tiny_store(tmp_path, monkeypatch)
     assert "s0-0" not in set(store.session_rows(ttl=0)["session_id"])
 
 
-def test_a_chat_the_desktop_app_holds_a_live_record_for_is_listed_whatever_its_size(
-        tmp_path, monkeypatch):
+def test_a_chat_the_desktop_app_holds_a_live_record_for_is_listed_whatever_its_size(tiny_store):
     """Measured on the laptop: T02 (one row), T09 (three) and T14-A (four) sat in the sidebar and
     nowhere on this page. The app lists them, so this page does too."""
     from c4x import store
     from tests.test_projects import forget_cached_rows
-    path = _tiny_store(tmp_path, monkeypatch)
-    _record_row(path, "s0-0")
+    _record_row(tiny_store, "s0-0")
     forget_cached_rows()
     rows = store.session_rows(ttl=0)
     assert "s0-0" in set(rows["session_id"])
@@ -109,10 +116,9 @@ def test_a_chat_the_desktop_app_holds_a_live_record_for_is_listed_whatever_its_s
     assert store.overview_stats()["listed"] == len(rows), "the card counts what the list draws"
 
 
-def test_a_record_that_went_or_was_deleted_exempts_nothing(tmp_path, monkeypatch):
+def test_a_record_that_went_or_was_deleted_exempts_nothing(tiny_store):
     from c4x import store
     from tests.test_projects import forget_cached_rows
-    path = _tiny_store(tmp_path, monkeypatch)
-    _record_row(path, "s0-0", gone_at="2026-09-15T01:05:00Z")
+    _record_row(tiny_store, "s0-0", gone_at="2026-09-15T01:05:00Z")
     forget_cached_rows()
     assert "s0-0" not in set(store.session_rows(ttl=0)["session_id"])
