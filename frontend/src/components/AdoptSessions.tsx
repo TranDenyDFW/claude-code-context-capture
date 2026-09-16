@@ -1,8 +1,11 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '@/api'
 import type { AdoptGroup, AdoptReport, AdoptState, RetitleReport, SweepState, UnadoptReport } from '@/api'
+import { Confirm } from './Confirm'
 import { Dialog } from './Dialog'
 import { matches } from './Palette'
+import { restartOutcome, restartQuestion } from './restart'
+import type { Outcome } from './restart'
 
 /**
  * Give Claude a record for the chats it has no record of.
@@ -69,6 +72,9 @@ export function AdoptSessions({
   const [sweep, setSweep] = useState<SweepState | null>(null)
   const [query, setQuery] = useState('')
   const [expanded, setExpanded] = useState<string[]>([])
+  // WHICH WRITE IS BEING ASKED ABOUT. Each of the three writes a file Claude reads when it
+  // starts, so each asks first and the server restarts Claude after (the user's rule).
+  const [asking, setAsking] = useState<'adopt' | 'name' | 'take' | null>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const search = useRef<HTMLInputElement>(null)
 
@@ -157,58 +163,83 @@ export function AdoptSessions({
 
   // Records a first build wrote without a name: the app shows each as "General coding session",
   // and the store has a real name for every one of them.
-  async function nameThem() {
-    if (busy) return
+  async function nameThem(): Promise<Outcome> {
     setBusy(true)
     setError(null)
     setNamed(null)
     try {
-      const answer = await api.adopt.retitle()
+      const answer = await api.adopt.retitle(true)
       setNamed(answer)
       await refresh(includeCli)
       onChanged?.()
+      return restartOutcome(answer.restart, `${plural(answer.renamed.length, 'record')} named.`)
     } catch (problem) {
       setError(problem)
+      throw problem
     } finally {
       setBusy(false)
     }
   }
 
-  // Records a first build wrote for review runs. A run folds into the chat it reviewed and is
-  // no chat of its own; the app listed 58 of them on the test laptop as if they were.
-  async function takeBackReviews() {
-    if (busy) return
+  // Records a first build wrote for review runs and child runs. A run folds into the chat it
+  // reviewed or that spawned it and is no chat of its own; the app listed 58 of them on the
+  // test laptop as if they were.
+  async function takeBackReviews(): Promise<Outcome> {
     setBusy(true)
     setError(null)
     setUnadopted(null)
     try {
-      const answer = await api.adopt.unadoptReviews()
+      const answer = await api.adopt.unadoptReviews(true)
       setUnadopted(answer)
       await refresh(includeCli)
       onChanged?.()
+      return restartOutcome(answer.restart,
+                            `${plural(answer.removed.length, 'record')} taken back.`)
     } catch (problem) {
       setError(problem)
+      throw problem
     } finally {
       setBusy(false)
     }
   }
 
-  async function adoptNow() {
-    if (!selected || busy) return
+  async function adoptNow(): Promise<Outcome> {
     setBusy(true)
     setError(null)
     setReport(null)
     try {
-      const answer = await api.adopt.run({ cwds: chosen, include_cli: includeCli, dry_run: false })
+      const answer = await api.adopt.run({ cwds: chosen, include_cli: includeCli, dry_run: false,
+                                           restart: true })
       setReport(answer)
       setChosen([])
       await refresh(includeCli)
       onChanged?.()
+      return restartOutcome(answer.restart,
+                            `${plural(answer.written.length, 'record')} written.`)
     } catch (problem) {
       setError(problem)
+      throw problem
     } finally {
       setBusy(false)
     }
+  }
+
+  const ask = {
+    adopt: {
+      label: 'Adopt chats',
+      does: `writes ${plural(selected, 'record')} for the ${plural(selected, 'chat')} ticked`,
+      action: adoptNow,
+    },
+    name: {
+      label: 'Name the records',
+      does: `names the ${plural(unnamed, 'record')} that ${unnamed === 1 ? 'has' : 'have'} no name`,
+      action: nameThem,
+    },
+    take: {
+      label: 'Remove the runs from Claude',
+      does: `takes back the ${plural(reviewRecords, 'record')} written for runs`,
+      action: takeBackReviews,
+    },
   }
 
   // THE BUTTON SAYS "Adopt (N)" AND THE HOVER SAYS WHY, the user's choice: the sentence that was
@@ -292,7 +323,7 @@ export function AdoptSessions({
               <button
                 type="button"
                 disabled={!writesEnabled || busy || selected === 0}
-                onClick={() => void adoptNow()}
+                onClick={() => setAsking('adopt')}
                 className={button}
               >
                 Adopt {plural(selected, 'chat')}
@@ -303,6 +334,19 @@ export function AdoptSessions({
             </>
           }
         >
+          {asking ? (
+            <Confirm
+              label={ask[asking].label}
+              question={restartQuestion(state.app_running, ask[asking].does, false)}
+              action={ask[asking].action}
+              progress={state.app_running
+                ? () => api.adopt.state(includeCli)
+                    .then((now) => (now.app_running ? 'Claude is running' : 'Claude is closed'))
+                : undefined}
+              opener={search}
+              onClose={() => setAsking(null)}
+            />
+          ) : null}
           <div className="flex flex-col gap-3">
             {unnamed > 0 ? (
               <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -313,7 +357,7 @@ export function AdoptSessions({
                 <button
                   type="button"
                   disabled={!writesEnabled || busy}
-                  onClick={() => void nameThem()}
+                  onClick={() => setAsking('name')}
                   className="rounded-md border border-edge bg-page px-2.5 py-1 text-sm text-ink disabled:opacity-50"
                 >
                   Name {unnamed === 1 ? 'it' : 'them'}
@@ -337,7 +381,7 @@ export function AdoptSessions({
                 <button
                   type="button"
                   disabled={!writesEnabled || busy}
-                  onClick={() => void takeBackReviews()}
+                  onClick={() => setAsking('take')}
                   className="rounded-md border border-edge bg-page px-2.5 py-1 text-sm text-ink disabled:opacity-50"
                 >
                   Remove {reviewRecords === 1 ? 'it' : 'them'} from Claude

@@ -359,6 +359,9 @@ export interface ImportReport {
   inserted: Record<string, number>
   already_present: Record<string, number>
   dropped_columns: Record<string, string[]>
+  /** The desktop app's record was written, which the app reads when it starts. */
+  restart_required?: boolean
+  restart?: RestartReport | null
 }
 
 export interface DeleteReport {
@@ -554,12 +557,30 @@ export interface AccountsState {
 }
 
 /** What `/api/accounts/sharing` answers. `restart_required` is always true on a change. */
+/**
+ * What the server did to Claude around a confirmed write (`desktop.with_restart`): whether it
+ * was running, whether it was quit and how many processes that was, whether it came back and
+ * how (`shell`: the app's own activation; `task`: a scheduled task in the interactive session,
+ * the way that worked on the test laptop when the activation did not), and a sentence.
+ */
+export interface RestartReport {
+  was_running: boolean
+  quit: boolean
+  killed: number
+  relaunched: boolean
+  how: 'shell' | 'task' | null
+  launch: string[] | null
+  why: string
+}
+
 export interface SharingReport {
   mode: 'all' | 'current'
   dry_run: boolean
   restart_required: boolean
   backup?: string | null
   state: AccountsState
+  /** Present when the request carried `restart: true`. */
+  restart?: RestartReport | null
 }
 
 /** What `/api/accounts/reconcile` answers: the fold of the uncovered pairs, or why it did not run. */
@@ -572,6 +593,7 @@ export interface ReconcileReport {
   marker_written: boolean
   restart_required: boolean
   state: AccountsState
+  restart?: RestartReport | null
 }
 
 /** One chat the desktop app has no record of. */
@@ -651,6 +673,7 @@ export interface RetitleReport {
   kept: number
   missing: number
   restart_required: boolean
+  restart?: RestartReport | null
 }
 
 /** What `POST /api/adopt/unadopt-reviews` answers: the records taken back, and their chats. */
@@ -665,6 +688,7 @@ export interface UnadoptReport {
   missing: number
   kept: number
   restart_required: boolean
+  restart?: RestartReport | null
 }
 
 /** What one startup sweep did: `adopt.sweep_reviews`, read back from its stamp file. */
@@ -699,6 +723,7 @@ export interface AdoptReport {
   selected: number
   restart_required: boolean
   dry_run: boolean
+  restart?: RestartReport | null
 }
 
 /** One plan a chat proposed. The whole text lives behind `/api/plan/<tool_use_id>`. */
@@ -944,9 +969,16 @@ export const api = {
     state: () => get<AccountsState>('/api/accounts'),
     verify: () =>
       get<{ ok: boolean; intended: string; problems: string[] }>('/api/accounts/verify'),
-    share: (mode: 'all' | 'current') => post<SharingReport>('/api/accounts/sharing', { mode }),
-    /** Cover now: the fold the server runs when Claude closes, on demand. 409 while it is open. */
-    reconcile: () => post<ReconcileReport>('/api/accounts/reconcile', {}),
+    /**
+     * `restart`: the person confirmed, so the server quits Claude first and starts it again
+     * after (the report's `restart` says how it went). Without it the server refuses with 409
+     * while Claude is open, as it always did.
+     */
+    share: (mode: 'all' | 'current', restart = false) =>
+      post<SharingReport>('/api/accounts/sharing', { mode, restart }),
+    /** Cover now: the fold the server runs when Claude closes, on demand. 409 while it is open,
+     * unless `restart` has the server quit and start Claude around it. */
+    reconcile: (restart = false) => post<ReconcileReport>('/api/accounts/reconcile', { restart }),
   },
 
   /**
@@ -956,10 +988,12 @@ export const api = {
   adopt: {
     state: (includeCli = false) =>
       get<AdoptState>('/api/adopt', { include_cli: includeCli ? 'true' : undefined }),
-    run: (body: { cwds: string[]; include_cli: boolean; dry_run: boolean }) =>
+    /** `restart`: the person confirmed, so the server restarts Claude once the records are written. */
+    run: (body: { cwds: string[]; include_cli: boolean; dry_run: boolean; restart?: boolean }) =>
       post<AdoptReport>('/api/adopt', body),
-    retitle: () => post<RetitleReport>('/api/adopt/retitle', {}),
-    unadoptReviews: () => post<UnadoptReport>('/api/adopt/unadopt-reviews', {}),
+    retitle: (restart = false) => post<RetitleReport>('/api/adopt/retitle', { restart }),
+    unadoptReviews: (restart = false) =>
+      post<UnadoptReport>('/api/adopt/unadopt-reviews', { restart }),
     /** The sweep the server runs at startup: whether it is on here, and what the last one did. */
     sweep: () => get<SweepState>('/api/adopt/sweep'),
   },
@@ -990,11 +1024,14 @@ export const api = {
      * `dryRun` names every destination and writes nothing. The page runs that first, so a wrong
      * destination is visible before it lands rather than after.
      */
-    import: (file: File, into?: string, dryRun = false) => {
+    import: (file: File, into?: string, dryRun = false, restart = false) => {
       const body = new FormData()
       body.append('file', file)
       if (into) body.append('into', into)
       if (dryRun) body.append('dry_run', 'true')
+      // The desktop app's record the import writes is read when the app starts; the person
+      // confirmed, so the server restarts Claude once it is written.
+      if (restart && !dryRun) body.append('restart', 'true')
       return post<ImportReport>('/api/project/import', body)
     },
 

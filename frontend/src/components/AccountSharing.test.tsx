@@ -57,6 +57,14 @@ beforeEach(() => {
   focusManager.setFocused(undefined)
 })
 
+/** The confirm every switch opens: press Continue in it. */
+async function goOn() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+}
+
+/** What the confirm says once the write ran. */
+const outcome = () => screen.findByTestId('confirm-outcome')
+
 describe('AccountSharing', () => {
   it('offers nothing when the machine has one account directory', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ pairs: 1 }))
@@ -122,7 +130,10 @@ describe('AccountSharing', () => {
     const group = screen.getByRole('group', { name: 'Account' })
     expect(group.getAttribute('data-restart')).toBe('false')
     fireEvent.click(all)
-    await waitFor(() => expect(share).toHaveBeenCalledWith('all'))
+    // Nothing moves until the confirm's Continue, which sends the restart flag.
+    expect(share).not.toHaveBeenCalled()
+    await goOn()
+    await waitFor(() => expect(share).toHaveBeenCalledWith('all', true))
     await waitFor(() => expect(group.getAttribute('data-restart')).toBe('true'))
     expect(group.className).toContain('border-warn')
     expect(screen.queryByText(/Restart Claude/)).toBeNull()
@@ -131,18 +142,45 @@ describe('AccountSharing', () => {
     expect(screen.getByRole('button', { name: 'All' }).getAttribute('aria-pressed')).toBe('true')
   })
 
-  it('says what to do when the server refuses because Claude is open', async () => {
+  it('shows the refusal the server sends, in the confirm, and marks nothing', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
     vi.spyOn(api.accounts, 'share').mockRejectedValue(
       new ApiError('409 from /api/accounts/sharing', 409, {
-        error: 'Claude is running, and a directory it has open cannot be moved. Quit Claude and '
-          + 'try again; nothing has been changed.',
+        error: 'a restart is already under way; wait for it to finish',
       }),
     )
     draw()
     fireEvent.click(await screen.findByRole('button', { name: 'All' }))
-    expect(await screen.findByText(/Quit Claude and try again/)).not.toBeNull()
+    await goOn()
+    expect((await outcome()).textContent).toContain('already under way')
     expect(screen.getByRole('group', { name: 'Account' }).getAttribute('data-restart')).toBe('false')
+  })
+
+  it('says whether Claude came back, from the report, once the switch ran', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ app_running: true }))
+    vi.spyOn(api.accounts, 'share').mockResolvedValue({
+      mode: 'all', dry_run: false, restart_required: false, backup: null,
+      state: state({ intended: 'all', mode: 'all', linked: 1 }),
+      restart: { was_running: true, quit: true, killed: 12, relaunched: true, how: 'task',
+                 launch: ['explorer.exe'], why: 'relaunched through the task scheduler' },
+    })
+    draw()
+    fireEvent.click(await screen.findByRole('button', { name: 'All' }))
+    const dialog = screen.getByRole('dialog', { name: /every account/ })
+    expect(dialog.textContent).toContain('closes every Claude window')
+    await goOn()
+    expect((await outcome()).textContent)
+      .toBe('The directories are linked. Claude was closed and started again through the task scheduler.')
+    // Started again: no amber mark, nothing left for the person to restart.
+    expect(screen.getByRole('group', { name: 'Account' }).getAttribute('data-restart')).toBe('false')
+  })
+
+  it('says nothing is quit when Claude is not running', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ app_running: false }))
+    draw()
+    fireEvent.click(await screen.findByRole('button', { name: 'All' }))
+    expect(screen.getByRole('dialog', { name: /every account/ }).textContent)
+      .toContain('Claude is not running, so nothing is quit')
   })
 
   it('is disabled on a server that answers no writes', async () => {
@@ -196,17 +234,22 @@ describe('the pairs sharing does not cover yet', () => {
     expect(button.disabled).toBe(false)
   })
 
-  it('cannot cover while Claude is open, and says so on the button', async () => {
+  it('asks before covering while Claude is open, naming the close, and Cancel covers nothing', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(
       state({ intended: 'all', app_running: true, uncovered: [pair()] }))
     const reconcile = vi.spyOn(api.accounts, 'reconcile')
     draw()
     expect(await screen.findByText(/1 account pair not yet covered/)).not.toBeNull()
     const button = screen.getByRole('button', { name: 'Cover now' }) as HTMLButtonElement
-    expect(button.disabled).toBe(true)
-    expect(button.getAttribute('title')).toContain('Quit Claude first')
+    expect(button.disabled).toBe(false)
+    expect(button.getAttribute('title')).toContain('after asking')
     fireEvent.click(button)
+    const dialog = screen.getByRole('dialog', { name: 'Cover now' })
+    expect(dialog.textContent).toContain('closes every Claude window')
+    expect(dialog.textContent).toContain('moves the uncovered account directories')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(reconcile).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 
   it('is disabled on a server that answers no writes', async () => {
@@ -230,7 +273,8 @@ describe('the pairs sharing does not cover yet', () => {
     const onChanged = vi.fn()
     draw({ onChanged })
     fireEvent.click(await screen.findByRole('button', { name: 'Cover now' }))
-    await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1))
+    await goOn()
+    await waitFor(() => expect(reconcile).toHaveBeenCalledWith(true))
     await waitFor(() => expect(screen.queryByText(/not yet covered/)).toBeNull())
     const group = screen.getByRole('group', { name: 'Account' })
     expect(group.getAttribute('data-restart')).toBe('true')
@@ -242,21 +286,21 @@ describe('the pairs sharing does not cover yet', () => {
       state({ intended: 'all', uncovered: [pair()] }))
     vi.spyOn(api.accounts, 'reconcile').mockRejectedValue(
       new ApiError('409 from /api/accounts/reconcile', 409, {
-        error: 'Claude is running, and a directory it has open cannot be moved. Quit Claude and '
-          + 'try again; nothing has been changed.',
+        error: 'Claude could not be closed; nothing has been changed. Quit it yourself and try again.',
         pending: [pair()],
       }),
     )
     draw()
     fireEvent.click(await screen.findByRole('button', { name: 'Cover now' }))
-    expect(await screen.findByText(/Quit Claude and try again/)).not.toBeNull()
+    await goOn()
+    expect((await outcome()).textContent).toContain('Quit it yourself and try again')
     expect(screen.getByText(/not yet covered/)).not.toBeNull()
   })
 })
 
 
-describe('Current asks before un-sharing, and says where its number came from', () => {
-  it('opens a confirm on Current and calls nothing until Un-share', async () => {
+describe('every switch asks first, and says where the Current number came from', () => {
+  it('opens a confirm on Current and calls nothing until Continue', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ intended: 'all', mode: 'all' }))
     const share = vi.spyOn(api.accounts, 'share').mockResolvedValue({
       mode: 'current', dry_run: false, restart_required: true, backup: null,
@@ -265,12 +309,14 @@ describe('Current asks before un-sharing, and says where its number came from', 
     draw()
     fireEvent.click(await screen.findByRole('button', { name: 'Current' }))
     expect(share).not.toHaveBeenCalled()
-    const ask = screen.getByRole('group', { name: 'Un-share' })
-    expect(ask.textContent).toContain('Quit Claude first')
-    fireEvent.click(screen.getByRole('button', { name: 'Un-share' }))
+    const ask = screen.getByRole('dialog', { name: /signed-in account/ })
+    expect(ask.textContent).toContain('un-links the account directories')
+    expect(ask.textContent).toContain('takes chats away from every other account')
+    await goOn()
     await waitFor(() => expect(share).toHaveBeenCalledTimes(1))
-    expect(share).toHaveBeenCalledWith('current')
-    await waitFor(() => expect(screen.queryByRole('group', { name: 'Un-share' })).toBeNull())
+    expect(share).toHaveBeenCalledWith('current', true)
+    fireEvent.click(await screen.findByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
   it('keeps sharing when told to', async () => {
@@ -278,13 +324,13 @@ describe('Current asks before un-sharing, and says where its number came from', 
     const share = vi.spyOn(api.accounts, 'share')
     draw()
     fireEvent.click(await screen.findByRole('button', { name: 'Current' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Keep sharing' }))
-    expect(screen.queryByRole('group', { name: 'Un-share' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
     expect(share).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: 'All' }).getAttribute('aria-pressed')).toBe('true')
   })
 
-  it('switches to All in one click, as before', async () => {
+  it('asks before All as well, the user\'s example, and only Continue switches', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
     const share = vi.spyOn(api.accounts, 'share').mockResolvedValue({
       mode: 'all', dry_run: false, restart_required: true, backup: null,
@@ -292,8 +338,10 @@ describe('Current asks before un-sharing, and says where its number came from', 
     })
     draw()
     fireEvent.click(await screen.findByRole('button', { name: 'All' }))
-    await waitFor(() => expect(share).toHaveBeenCalledWith('all'))
-    expect(screen.queryByRole('group', { name: 'Un-share' })).toBeNull()
+    expect(share).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: /every account/ })).not.toBeNull()
+    await goOn()
+    await waitFor(() => expect(share).toHaveBeenCalledWith('all', true))
   })
 
   it('says the Current number is by the account each chat was made under, with the untagged', async () => {

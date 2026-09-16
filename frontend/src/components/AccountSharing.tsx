@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError } from '@/api'
+import { Confirm } from './Confirm'
+import { restartOutcome, restartQuestion } from './restart'
 
 /**
  * Show every account's chats, or only the signed-in account's.
@@ -13,12 +15,15 @@ import { api, ApiError } from '@/api'
  * beside the switch as a sentence; the user asked for the row to say less. All's hover carries
  * what All shows (every record in the shared directory), Current's what Current would show the
  * signed-in account (its own chats, derived on the server from the sharing backup), and the
- * label's hover carries the one instruction a switch needs: restart Claude, which reads these
- * directories when it starts. After a switch the label turns amber so the hover is noticed.
+ * label's hover carries the one thing a switch needs to know: it closes Claude and starts it
+ * again, after asking.
  *
- * NOTHING HAPPENS WHILE CLAUDE IS OPEN. A directory the app holds cannot be moved, and half a move
- * leaves an account pointing at an empty directory: the server answers 409 and the message below
- * is the one instruction that resolves it.
+ * EVERY SWITCH ASKS, THEN THE SERVER DOES THE REST. A directory the app holds cannot be moved, so
+ * the page used to refuse while Claude was open and tell the person to quit it; the user's rule
+ * now: "prompt the user to continue ... and only continue if they confirm". A click on All,
+ * Current or Cover now opens a confirm naming what will happen (every Claude window closed, the
+ * directories moved, Claude started again); Continue sends `restart: true` and the server quits,
+ * acts and relaunches; the outcome says whether Claude came back.
  */
 function Problem({ error }: { error: unknown }) {
   const detail = error instanceof ApiError ? error.detail : undefined
@@ -36,12 +41,15 @@ function Problem({ error }: { error: unknown }) {
 }
 
 export const RESTART_NOTE =
-  'Restart Claude for this to take effect. It reads these directories when it starts.'
-export const QUIT_NOTE = 'Quit Claude before switching: a directory it has open cannot be moved.'
+  'Claude is started again afterwards; it reads these directories when it starts.'
+export const QUIT_NOTE = 'Switching closes every Claude window and starts Claude again; you are asked first.'
 export const COVER_NOTE = 'covered when Claude next closes'
 export const COVER_HOVER =
   'A pair the app created at a sign-in since sharing began. That account reads a list of its ' +
-  'own until it is covered. The server covers it a minute after Claude closes, or now.'
+  'own until it is covered. The server covers it a minute after Claude closes, or now, after ' +
+  'asking, with Claude closed and started again.'
+
+type Ask = 'all' | 'current' | 'cover'
 
 export function AccountSharing({
   writesEnabled,
@@ -62,13 +70,11 @@ export function AccountSharing({
     retry: false,
   })
   const state = query.data ?? null
-  const [busy, setBusy] = useState<'all' | 'current' | 'cover' | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [restart, setRestart] = useState(false)
-  // CURRENT ASKS FIRST. It un-shares the directories, which is the one switch that takes chats
-  // away from every other account on the machine, and a click that lands on the wrong side of a
-  // two-button switch should not do that on its own.
-  const [confirming, setConfirming] = useState(false)
+  // WHICH SWITCH IS BEING ASKED ABOUT. Nothing moves until Continue.
+  const [asking, setAsking] = useState<Ask | null>(null)
+  const group = useRef<HTMLDivElement>(null)
 
   // ONE ACCOUNT IS NOT A CHOICE. With a single pair on the machine there is nothing to share and
   // the control would offer a toggle that changes nothing.
@@ -79,47 +85,37 @@ export function AccountSharing({
   // organisation the links never named, and that account reads its own list from then on; at the
   // next switch the app folds it into the shared directory and the account comes back to nothing
   // (measured: fifteen chats). The server covers such a pair a minute after Claude closes; the
-  // line says so, and the button does it now, with Claude closed.
+  // line says so, and the button does it now, after asking.
   const uncovered = mode === 'all' ? (state.uncovered ?? []) : []
 
-  async function choose(next: 'all' | 'current') {
-    if (next === mode || busy) return
-    setBusy(next)
-    setError(null)
-    setRestart(false)
-    try {
-      const report = await api.accounts.share(next)
-      client.setQueryData(['accounts'], report.state)
-      setRestart(report.restart_required)
-      onChanged?.()
-    } catch (problem) {
-      setError(problem)
-    } finally {
-      setBusy(null)
-    }
+  const does: Record<Ask, string> = {
+    all: 'links the account directories so every account reads the same chats',
+    current: 'un-links the account directories so each account goes back to its own chats',
+    cover: 'moves the uncovered account directories into the shared one and links them',
+  }
+  const did: Record<Ask, string> = {
+    all: 'The directories are linked.',
+    current: 'The directories are separate again.',
+    cover: 'The pairs are covered.',
   }
 
-  async function cover() {
-    if (busy) return
-    setBusy('cover')
+  async function run(which: Ask) {
     setError(null)
     setRestart(false)
-    try {
-      const report = await api.accounts.reconcile()
-      client.setQueryData(['accounts'], report.state)
-      setRestart(report.restart_required)
-      onChanged?.()
-    } catch (problem) {
-      setError(problem)
-    } finally {
-      setBusy(null)
-    }
+    const report =
+      which === 'cover' ? await api.accounts.reconcile(true) : await api.accounts.share(which, true)
+    client.setQueryData(['accounts'], report.state)
+    setRestart(report.restart_required)
+    onChanged?.()
+    return restartOutcome(report.restart, did[which])
   }
+
+  const progress = () =>
+    api.accounts.state().then((now) => (now.app_running ? 'Claude is running' : 'Claude is closed'))
 
   // EVERYTHING A SWITCH NEEDS TO KNOW IS ON THE TWO BUTTONS, one line each: what the side shows,
-  // that Claude must be quit before switching, that it must be restarted after. The "ACCOUNT"
-  // word that used to carry the restart note is gone, the user's choice: the buttons say what
-  // they are.
+  // that the switch closes and restarts Claude after asking. The "ACCOUNT" word that used to
+  // carry the restart note is gone, the user's choice: the buttons say what they are.
   const notes = '\n' + QUIT_NOTE + '\n' + RESTART_NOTE
   // THE CURRENT NUMBER SAYS WHERE IT CAME FROM. From the tags it is the chats made under the
   // signed-in account, and the untagged remainder is named; from the manifest or the directories
@@ -158,6 +154,7 @@ export function AccountSharing({
     <div className="flex flex-col gap-1">
       <div className="flex items-center gap-2">
         <div
+          ref={group}
           role="group"
           aria-label="Account"
           data-restart={restart ? 'true' : 'false'}
@@ -169,14 +166,10 @@ export function AccountSharing({
             <button
               key={option}
               type="button"
-              disabled={!writesEnabled || busy !== null}
+              disabled={!writesEnabled || asking !== null}
               aria-pressed={mode === option}
               title={hover[option]}
-              onClick={() =>
-                option === 'current' && mode !== 'current'
-                  ? setConfirming(true)
-                  : void choose(option)
-              }
+              onClick={() => (option === mode ? undefined : setAsking(option))}
               className={
                 'px-2.5 py-1.5 text-sm transition-colors disabled:opacity-50 ' +
                 (mode === option
@@ -188,35 +181,6 @@ export function AccountSharing({
             </button>
           ))}
         </div>
-        {confirming ? (
-          <span
-            role="group"
-            aria-label="Un-share"
-            className="flex flex-wrap items-center gap-2 text-xs text-warn"
-          >
-            <span>Un-share the directories? Each account goes back to its own chats. Quit Claude first.</span>
-            <button
-              type="button"
-              disabled={!writesEnabled || busy !== null}
-              onClick={() => {
-                setConfirming(false)
-                void choose('current')
-              }}
-              className="rounded-md border border-edge bg-page px-2 py-0.5 text-xs text-ink-dim
-                         transition-colors hover:text-ink disabled:opacity-50"
-            >
-              Un-share
-            </button>
-            <button
-              type="button"
-              onClick={() => setConfirming(false)}
-              className="rounded-md border border-edge bg-page px-2 py-0.5 text-xs text-ink-dim
-                         transition-colors hover:text-ink"
-            >
-              Keep sharing
-            </button>
-          </span>
-        ) : null}
       </div>
       {uncovered.length ? (
         <p
@@ -234,21 +198,32 @@ export function AccountSharing({
           </span>
           <button
             type="button"
-            disabled={!writesEnabled || state.app_running || busy !== null}
+            disabled={!writesEnabled || asking !== null}
             title={
               !writesEnabled
                 ? 'This server was started without writes'
-                : state.app_running
-                  ? 'Quit Claude first: a directory it has open cannot be moved'
-                  : 'Move these into the shared directory now and link them'
+                : 'Move these into the shared directory now and link them, after asking'
             }
-            onClick={() => void cover()}
+            onClick={() => setAsking('cover')}
             className="rounded-md border border-edge bg-page px-2 py-0.5 text-xs text-ink-dim
                        transition-colors hover:text-ink disabled:opacity-50"
           >
             Cover now
           </button>
         </p>
+      ) : null}
+      {asking ? (
+        <Confirm
+          label={asking === 'cover' ? 'Cover now' : asking === 'all' ? 'Show every account’s chats' : 'Show only the signed-in account’s chats'}
+          question={restartQuestion(state.app_running, does[asking], true)}
+          detail={asking === 'current'
+            ? 'This takes chats away from every other account on the machine.'
+            : undefined}
+          action={() => run(asking)}
+          progress={state.app_running ? progress : undefined}
+          opener={group}
+          onClose={() => setAsking(null)}
+        />
       ) : null}
       {error ? <Problem error={error} /> : null}
     </div>

@@ -415,6 +415,38 @@ class TestTheRoutes:
         assert [w["session_id"] for w in body["written"]] == ["s0-0"] and body["restart_required"]
         assert len(list((machine / A / ORG_A).glob("local_*.json"))) == 2
 
+    def test_a_confirmed_restart_wraps_the_write_and_the_flagless_post_does_not(self, client,
+                                                                                monkeypatch):
+        """`{"restart": true}` reaches `desktop.with_restart` with the write as its action and
+        the report comes back under `restart`; without the flag nothing about restarts runs."""
+        from c4x import desktop
+        seen = []
+
+        def with_restart(action, *, quit_first, needed=None, **_kw):
+            seen.append(quit_first)
+            result = action()
+            return result, {"was_running": True, "quit": True, "killed": 2, "relaunched": True,
+                            "how": "task", "launch": ["x"],
+                            "why": "relaunched through the task scheduler"}
+        monkeypatch.setattr(desktop, "with_restart", with_restart)
+        plain = client.post("/api/adopt", json={"cwds": [ALPHA]}).json()
+        assert seen == [] and "restart" not in plain and plain["restart_required"] is True
+        confirmed = client.post("/api/adopt", json={"cwds": [GAMMA], "restart": True}).json()
+        assert seen == [False], "an adopt writes first and restarts after"
+        assert confirmed["restart"]["how"] == "task" and confirmed["restart_required"] is False
+        named = client.post("/api/adopt/retitle", json={"restart": True}).json()
+        assert seen == [False, False] and named["restart"]["relaunched"] is True
+        assert client.post("/api/adopt/unadopt-reviews").status_code == 200, "no body still works"
+
+    def test_a_restart_already_under_way_is_409(self, client, monkeypatch):
+        from c4x import desktop
+
+        def busy(*a, **k):
+            raise desktop.RestartBusy("a restart is already under way; wait for it to finish")
+        monkeypatch.setattr(desktop, "with_restart", busy)
+        answer = client.post("/api/adopt", json={"cwds": [ALPHA], "restart": True})
+        assert answer.status_code == 409 and "already under way" in answer.json()["detail"]["error"]
+
     def test_nothing_selected_is_400(self, client):
         assert client.post("/api/adopt", json={"cwds": []}).status_code == 400
         assert client.post("/api/adopt", json={}).status_code == 400

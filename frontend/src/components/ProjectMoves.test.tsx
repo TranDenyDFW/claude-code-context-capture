@@ -456,6 +456,12 @@ async function choose(file = new File([new Uint8Array([1, 2, 3])], 'secdb.db')) 
   return screen.findByRole('button', { name: /^Import$/ })
 }
 
+/** The import asks first: press Import, then Import now in the confirm. */
+async function commit(button: HTMLElement) {
+  fireEvent.click(button)
+  fireEvent.click(await screen.findByRole('button', { name: 'Import now' }))
+}
+
 describe('import', () => {
   it('shows where the export would land, and writes nothing, before it is confirmed', async () => {
     const call = vi.spyOn(api.project, 'import').mockResolvedValue(report({ dry_run: true }))
@@ -479,7 +485,7 @@ describe('import', () => {
     fireEvent.change(screen.getByLabelText(/working directory on this machine/i),
                      { target: { value: 'D:\\Work\\Alpha' } })
     expect(screen.getByText(/D--Work-Alpha/)).toBeTruthy()
-    fireEvent.click(button)
+    await commit(button)
     await screen.findByText(/^Imported/)
     expect(call.mock.calls[1][1]).toBe('D:\\Work\\Alpha')
   })
@@ -512,7 +518,7 @@ describe('import', () => {
       dropped_columns: { sessions: ['from_the_future'] },
     }))
     show()
-    fireEvent.click(await choose())
+    await commit(await choose())
     expect(await screen.findByText(/^Imported/)).toBeTruthy()
     // Counts of zero are left out: a table that gained nothing is noise in a success report.
     expect(screen.getByText(/turns 25,964 · messages 22,416/)).toBeTruthy()
@@ -524,7 +530,7 @@ describe('import', () => {
      async () => {
        vi.spyOn(api.project, 'import').mockResolvedValue(report())
        show()
-       fireEvent.click(await choose())
+       await commit(await choose())
        await screen.findByText(/^Imported/)
        expect(screen.getByText(/desktop app record/)).toBeTruthy()
      })
@@ -541,7 +547,7 @@ describe('import', () => {
       },
     }))
     show()
-    fireEvent.click(await choose())
+    await commit(await choose())
     await screen.findByText(/^Imported/)
     expect(screen.queryByText(/NOT a mirror/)).toBeNull()
     expect(screen.getByText(/carries rows only/)).toBeTruthy()
@@ -552,7 +558,7 @@ describe('import', () => {
     // rewritten by design; the page kept it.
     vi.spyOn(api.project, 'import').mockResolvedValue(report())
     show()
-    fireEvent.click(await choose())
+    await commit(await choose())
     await screen.findByText(/^Imported/)
     expect(screen.queryByText(/[Bb]yte for byte/)).toBeNull()
     expect(screen.getByText(/Every carried file is identical/)).toBeTruthy()
@@ -570,7 +576,7 @@ describe('import', () => {
       },
     }))
     show()
-    fireEvent.click(await choose())
+    await commit(await choose())
     await screen.findByText(/^Imported/)
     expect(screen.getByText(/NOT a mirror/)).toBeTruthy()
     expect(screen.getByText(/s0-0\.jsonl/)).toBeTruthy()
@@ -586,7 +592,7 @@ describe('import', () => {
       },
     }))
     show()
-    fireEvent.click(await choose())
+    await commit(await choose())
     await screen.findByText(/^Imported/)
     expect(screen.getByText(/SHORTER/)).toBeTruthy()
   })
@@ -598,7 +604,7 @@ describe('import', () => {
     const lift = vi.spyOn(api.project, 'include').mockResolvedValue({ project: PROJECT, removed: 1 })
     vi.spyOn(api.project, 'excluded').mockResolvedValue({ excluded: [], writes_enabled: true })
     show()
-    fireEvent.click(await choose())
+    await commit(await choose())
     fireEvent.click(await screen.findByRole('button', { name: /resume capturing/i }))
     await vi.waitFor(() =>
       expect(screen.queryByRole('button', { name: /resume capturing/i })).toBeNull())
@@ -608,7 +614,7 @@ describe('import', () => {
   it('offers nothing to resume when the project is not excluded', async () => {
     vi.spyOn(api.project, 'import').mockResolvedValue(report())
     show()
-    fireEvent.click(await choose())
+    await commit(await choose())
     await screen.findByText(/^Imported/)
     expect(screen.queryByRole('button', { name: /resume capturing/i })).toBeNull()
   })

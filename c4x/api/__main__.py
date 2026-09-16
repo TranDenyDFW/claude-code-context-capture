@@ -452,8 +452,12 @@ def main(argv=None):
     print("  project export/import/delete: "
           + ("OFF (--no-writes)" if os.environ.get("C4X_NO_WRITES") else "on"))
     if wants_watchdog(argv):
-        from c4x.watchdog import GRACE, Watchdog
-        Watchdog(stop=reconcile_then_stop).start()
+        from c4x import desktop
+        from c4x.watchdog import GRACE, Watchdog, claude_alive
+        # A confirmed restart (quit, act, relaunch) is Claude alive to the watchdog, so a fold
+        # longer than the grace cannot stop this server under it.
+        Watchdog(stop=reconcile_then_stop,
+                 is_alive=lambda: desktop.restart_in_progress() or claude_alive()).start()
         print(f"  watchdog: stops once no Claude process has been seen for {int(GRACE)} s, and "
               "first covers any account pair the app created since sharing")
     # THE RECONCILE AT START: a server started with the app closed can cover the pairs now.
