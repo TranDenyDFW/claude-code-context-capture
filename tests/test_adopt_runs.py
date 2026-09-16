@@ -36,7 +36,7 @@ def _session(con, home, sid, cwd):
 
 
 @pytest.fixture
-def with_runs(machine, tmp_path):
+def with_runs(machine, tmp_path):  # noqa: F811  (the imported fixture, requested by name)
     """The adopt fixture plus three one-shots under Delta: a child of s3-0 and a batch run in a
     tmp folder, and a plain chat in another folder. Nothing marks the first two as runs yet."""
     home = tmp_path / "home" / ".claude" / "projects" / "slug"
@@ -64,7 +64,8 @@ def offered(state):
 
 
 class TestWhatIsOffered:
-    def test_runs_are_never_offered_and_are_counted_under_the_folder_they_fold_into(self, with_runs):
+    def test_runs_are_never_offered_and_are_counted_under_the_folder_they_fold_into(
+            self, with_runs):
         link()
         state = adopt.state()
         assert PLAIN in offered(state)

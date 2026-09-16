@@ -142,10 +142,10 @@ class TestTheProjectSurfaces:
         assert ALPHA in cats and CHILD_CWD not in cats and BATCH_CWD not in cats
         assert LONE_CWD in cats, "a run placed under nothing keeps its own bar, as before"
         con = sqlite3.connect(str(runs_store))
-        own = {cwd: n for cwd, n in con.execute(
+        own = dict(con.execute(
             """SELECT s.cwd, SUM(t.result_bytes) FROM tool_calls t
                JOIN sessions s ON s.session_id = t.session_id
-               WHERE s.session_id NOT IN (SELECT session_id FROM run_links) GROUP BY s.cwd""")}
+               WHERE s.session_id NOT IN (SELECT session_id FROM run_links) GROUP BY s.cwd"""))
         con.close()
         bar = {p: sum(int(trace.x[i]) for trace in fig.data) for i, p in enumerate(cats)}
         # The project's own calls, plus the two runs folded in; Beta's bar is its own calls only.
