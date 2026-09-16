@@ -594,6 +594,12 @@ export interface AdoptGroup {
   count: number
   newest: string
   sessions: AdoptSession[]
+  /**
+   * Headless runs folded under this folder (a harness's `claude -p` children, never offered on
+   * their own). Absent from a server that does not derive them; the table shows the column only
+   * when it is there.
+   */
+  runs?: number
 }
 
 /**

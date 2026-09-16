@@ -60,9 +60,10 @@ The header has **All** and **Current**.
 
 ## Chats the app lost
 
-**Adopt** in the header lists every chat on this machine the desktop app has no record of,
-grouped by folder. Tick the folders you want back and restart Claude. Chats you deleted in the
-app stay out of the list, so you do not bring them back by accident.
+**Adopt** in the header opens a table of every chat on this machine the desktop app has no
+record of, one row per folder, with a search box to find a folder or a chat by name. Tick the
+folders you want back and restart Claude. Chats you deleted in the app stay out of the list, so
+you do not bring them back by accident.
 
 ## Moving a project to another machine
 
