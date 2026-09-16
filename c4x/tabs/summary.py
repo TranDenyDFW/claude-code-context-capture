@@ -10,7 +10,7 @@ from dash import dcc, html
 from c4x.breakdown import latest_baseline
 from c4x.dash_compat import DataTable
 from c4x.labels import short_path
-from c4x.store import overview_stats, project_labels, q, tables_present
+from c4x.store import overview_stats, project_labels, q, runs_by_project, tables_present
 from c4x.theme import (
     ACCENT,
     BORDER,
@@ -159,16 +159,28 @@ def project_totals_fig() -> go.Figure:
     which is a legend nobody can read for a band nobody can see.
     """
     KINDS = 8
-    rows = q("""
-        SELECT COALESCE(NULLIF(s.cwd,''), s.project_slug, '(unknown)') AS project,
+    # A CHILD RUN'S BYTES COUNT UNDER THE PROJECT IT FOLDS INTO (harvest's `run_links.project`:
+    # the chat that spawned it works there; a batch's is the nearest folder above it with a
+    # real chat). Without the fold a harness's 870 one-shot folders were 870 bars' worth of
+    # projects, each too small to draw, and the project they belong to lost their bytes.
+    folded = tables_present("run_links")
+    rows = q(f"""
+        SELECT COALESCE({"NULLIF(r.project,''), " if folded else ""}NULLIF(s.cwd,''),
+                        s.project_slug, '(unknown)') AS project,
                CASE WHEN t.server_name IS NOT NULL AND t.server_name <> '' THEN 'MCP'
                     ELSE COALESCE(NULLIF(t.tool_name,''), '(unnamed)') END AS kind,
                SUM(COALESCE(t.result_bytes, 0)) AS bytes
         FROM tool_calls t LEFT JOIN sessions s ON s.session_id = t.session_id
-        GROUP BY project, kind
+        {"LEFT JOIN run_links r ON r.session_id = t.session_id" if folded else ""}
+        GROUP BY 1, 2
     """)
+    # BY POSITION, NOT BY NAME. run_links has a column called `project`, and SQLite resolves a
+    # GROUP BY name to the input column before the output alias: `GROUP BY project` grouped on
+    # r.project, NULL for every ordinary call, and every project's own bytes landed in one bar
+    # (measured by the test that folds a run into its project: Beta's bytes read under Alpha).
     if rows.empty:
         return empty_fig("No tool calls recorded yet")
+    runs_in = runs_by_project() if folded else {}
 
     totals = rows.groupby("project")["bytes"].sum().sort_values(ascending=False)
     top = list(totals.head(15).index)
@@ -195,7 +207,11 @@ def project_totals_fig() -> go.Figure:
             x=[int(part.get(p, 0)) for p in top], y=top, orientation="h", name=kind,
             marker=dict(color=SECTION_COLORS[index % len(SECTION_COLORS)],
                         line=dict(color=BORDER, width=1)),
-            hovertemplate="%{y}<br>" + kind + ": %{x:,.0f} bytes<extra></extra>",
+            # The runs folded into the bar, said on hover so a bar that grew by a harness's
+            # worth of bytes says why.
+            customdata=[int(runs_in.get(p, 0)) for p in top],
+            hovertemplate="%{y}<br>" + kind + ": %{x:,.0f} bytes<br>%{customdata} runs folded in"
+                          "<extra></extra>",
         ))
     fig.update_layout(barmode="stack", title="Tool Bytes by Project",
                       title_font=dict(color=TEXT, size=13),

@@ -233,6 +233,33 @@ describe('AdoptSessions', () => {
     expect(screen.queryByRole('button', { name: /Remove them/ })).toBeNull()
   })
 
+  it('says how many runs are folded away, never offers them, and takes their records back with the reviews', async () => {
+    vi.spyOn(api.adopt, 'state')
+      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, review_records: 1, run_records: 2,
+                                     runs: 875, runs_placed: 5, runs_batched: 870, runs_unplaced: 0 }))
+      .mockResolvedValueOnce(state({ groups: [], cli_candidates: 0, runs: 875, runs_placed: 5,
+                                     runs_batched: 870 }))
+    const unadopt = vi.spyOn(api.adopt, 'unadoptReviews').mockResolvedValue({
+      removed: [{ session_id: 'r1', path: 'p1', reviewed: 'c', kind: 'review' },
+                { session_id: 'x1', path: 'p2', reviewed: null, kind: 'run', parent: 'c' },
+                { session_id: 'x2', path: 'p3', reviewed: null, kind: 'run', parent: null }],
+      missing: 0, kept: 0, restart_required: true,
+    })
+    render(<AdoptSessions writesEnabled />)
+    expect((await screen.findByRole('button', { name: ADOPT })).getAttribute('title'))
+      .toBe('3 runs still in Claude')
+    await opened()
+    expect(screen.getByTestId('runs-folded').textContent).toBe(
+      '5 runs on this machine are folded under the chats that spawned them; 870 runs with no chat '
+      + 'behind them are folded under the folder above them (the Runs column); none is offered.')
+    expect(screen.getByText(/3 runs are listed in Claude as a chat/).textContent)
+      .toContain('or a one-shot a chat’s command spawned')
+    expect(screen.queryAllByRole('checkbox', { name: /^Adopt / })).toEqual([])
+    fireEvent.click(screen.getByRole('button', { name: 'Remove them from Claude' }))
+    await waitFor(() => expect(unadopt).toHaveBeenCalled())
+    expect(await screen.findByText(/Restart Claude to drop the 3 runs/)).not.toBeNull()
+  })
+
   it('shows nothing when every chat already has a record', async () => {
     vi.spyOn(api.adopt, 'state').mockResolvedValue(state({ groups: [], cli_candidates: 0 }))
     const { container } = render(<AdoptSessions writesEnabled />)

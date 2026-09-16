@@ -160,6 +160,7 @@ def title_for(kinds: dict, first_prompt: Any = None, last_ts: Any = None) -> tup
 def state(root=None, include_cli=False) -> dict:
     """What could be adopted, grouped by folder, and where a record would land."""
     from c4x import accounts, appstate, reviews, store
+    from c4x import runs as child_runs
     root = str(root or appstate.sessions_root())
     pair = appstate.desktop_pair(root)
     base: dict[str, Any] = {"supported": False, "why_not": "", "pair": None, "physical": None,
@@ -223,6 +224,16 @@ def state(root=None, include_cli=False) -> dict:
     runs = reviews.reviewed_by([r["session_id"] for r, _cli in eligible])
     eligible = [(r, cli) for r, cli in eligible if r["session_id"] not in runs]
     every_run = reviews.reviewed_by()
+    # A CHILD RUN IS NEVER OFFERED EITHER, placed or a batch: it folds into the chat that spawned
+    # it or under the project above it (harvest's `run_links`, read through `c4x.runs`), and the
+    # app would otherwise list a harness's 870 one-shots as 870 chats, which is what this page
+    # offered on the author's machine. Counted per folder, so the window says which folder they
+    # belong to, and in all, so it can say how many it left out.
+    spawned = child_runs.spawned_by([r["session_id"] for r, _cli in eligible])
+    eligible = [(r, cli) for r, cli in eligible if r["session_id"] not in spawned]
+    every_spawned = child_runs.spawned_by()
+    _spawned_by, _children_of, project_of = store.run_links()
+    folded = store.runs_by_project()
     by_cwd: dict[str, list] = {}
     for r, cli in eligible:
         sid = r["session_id"]
@@ -236,7 +247,8 @@ def state(root=None, include_cli=False) -> dict:
         sessions.sort(key=lambda s: str(s["last_ts"]), reverse=True)
         name = re.split(r"[\\/]", cwd.rstrip("\\/"))[-1] if cwd else "(no folder)"
         groups.append({"cwd": cwd, "project": name or cwd, "count": len(sessions),
-                       "newest": sessions[0]["last_ts"], "sessions": sessions})
+                       "newest": sessions[0]["last_ts"], "sessions": sessions,
+                       "runs": int(folded.get(cwd, 0))})
     groups.sort(key=lambda g: str(g["newest"]), reverse=True)
     return {**base, "supported": True,
             "pair": {"account": pair["account"], "org": pair["org"], "root": root,
@@ -252,6 +264,16 @@ def state(root=None, include_cli=False) -> dict:
             "review_runs": len(runs),
             "review_records": sum(1 for e, rec, _p in ledger
                                   if rec is not None and str(e.get("session_id")) in every_run),
+            # The child runs the store knows: under the chats that spawned them, under a project
+            # as a batch, or placed nowhere; and the records an earlier build wrote for any.
+            "runs": len(every_spawned),
+            "runs_placed": sum(1 for parent in every_spawned.values() if parent),
+            "runs_batched": sum(1 for run, parent in every_spawned.items()
+                                if not parent and project_of.get(run)),
+            "runs_unplaced": sum(1 for run, parent in every_spawned.items()
+                                 if not parent and not project_of.get(run)),
+            "run_records": sum(1 for e, rec, _p in ledger
+                               if rec is not None and str(e.get("session_id")) in every_spawned),
             # Chats the desktop app deleted, with a transcript still here: left out above.
             "deleted_in_app": deleted,
             "app_running": accounts.app_running(), "sharing": accounts.intended_mode()}
@@ -401,8 +423,12 @@ def unadopt_reviews() -> dict:
     and nothing about its content. It is measured on the laptop before this runs there.
     """
     from c4x import appstate, reviews
+    from c4x import runs as child_runs
     report: dict[str, Any] = {"removed": [], "missing": 0, "kept": 0, "restart_required": False}
     runs = reviews.reviewed_by()
+    # The child runs too: a record for a harness's one-shot is a chat of its own in the app's
+    # sidebar exactly the way a review run's was.
+    spawned = child_runs.spawned_by()
     roots = [Path(r) for r in appstate.sessions_roots()]
     entries = _load_ledger()
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -411,7 +437,7 @@ def unadopt_reviews() -> dict:
         if not isinstance(entry, dict) or not entry.get("path") or entry.get("removed_at"):
             continue
         sid = str(entry.get("session_id"))
-        if sid not in runs:
+        if sid not in runs and sid not in spawned:
             report["kept"] += 1
             continue
         _record, path = _resolve_record(entry, roots)
@@ -429,7 +455,9 @@ def unadopt_reviews() -> dict:
             continue
         entry["removed_at"] = stamp
         changed = True
-        report["removed"].append({"session_id": sid, "path": str(path), "reviewed": runs[sid]})
+        report["removed"].append({"session_id": sid, "path": str(path), "reviewed": runs.get(sid),
+                                  "kind": "review" if sid in runs else "run",
+                                  "parent": spawned.get(sid)})
     if changed:
         _save_ledger(entries)
     report["restart_required"] = bool(report["removed"])

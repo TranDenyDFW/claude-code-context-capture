@@ -72,6 +72,10 @@ BY_SESSION = ("hook_events", "attachments", "tool_calls", "messages", "turns",
               # nothing. Both keyed on the run's own session id; a run and the session it reviewed
               # share a cwd by construction, so they travel and die with one project.
               "review_links", "review_misses",
+              # A child run's tie to the chat that spawned it (or to the project above a batch),
+              # and the record of a one-shot that tied to nothing. Keyed on the run's own session
+              # id, which sits in the project's directory like the run's transcript.
+              "run_links", "run_misses",
               # The app's own record for a chat, remembered by uuid and session id so the marker
               # the app leaves on a delete names a chat the store knows. Keyed on session_id.
               "desktop_records",
@@ -1171,7 +1175,8 @@ def import_(path, into=None, dry_run=False):
                 # split one chat into two rows here. Every other table is keyed on identities that
                 # do not change meaning between exports.
                 verb = ("INSERT OR REPLACE"
-                        if table in ("session_links", "review_links", "desktop_records")
+                        if table in ("session_links", "review_links", "run_links",
+                                     "desktop_records")
                         else "INSERT OR IGNORE")
                 if table == "desktop_records" and "owner_source" in shared:
                     # THE TAG THIS STORE HOLDS WINS. A record's owner is the account it first

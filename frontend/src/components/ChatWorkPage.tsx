@@ -43,6 +43,9 @@ export function csv(body: ChatWork): string {
       r.verdict ?? 'no verdict',
       `round ${r.round} ${(r.input_tokens ?? 0) + (r.cache_read ?? 0) + (r.cache_creation ?? 0)
         + (r.output_tokens ?? 0)} tokens ${r.cost_usd ?? ''}`]),
+    ...(body.runs ?? []).map((r) => ['run', r.session_id, r.ts, r.prompt ?? '', `tied by ${r.how}`,
+      `${r.leaf} ${(r.input_tokens ?? 0) + (r.cache_read ?? 0) + (r.cache_creation ?? 0)
+        + (r.output_tokens ?? 0)} tokens ${r.cost_usd ?? ''}`]),
     ...body.changed_files.map((f) => ['changed_file', f.file, f.last_ts, `${f.edits} edits`, f.kinds,
       f.additions === null ? 'no patch recorded'
         : `+${f.additions} -${f.deletions} over ${f.patched ?? 0} of ${f.edits} edits`]),
@@ -408,6 +411,35 @@ export function ChatWorkPage({ session, onBack }: { session: string; onBack: () 
               </Row>
             ))}
           </Section>
+
+          {/* THE CHILD RUNS THIS CHAT SPAWNED: one-shot claude -p sessions its shell commands
+              started (a harness, a script), tied to it by harvest and listed nowhere on their
+              own. How the tie was made, the folder each worked in, its one prompt, its cost.
+              Absent from a server that does not derive them. */}
+          {body.runs ? (
+            <Section title="Runs" count={body.runs_total ?? 0} shown={body.runs.length}>
+              {body.runs.map((r) => (
+                <Row key={r.session_id}>
+                  <Meta>
+                    <span className="font-mono font-semibold text-ink-dim">
+                      {r.leaf || '(no folder)'}
+                    </span>
+                    <span>tied by {r.how}</span>
+                    <span className="tabular-nums">
+                      {((r.input_tokens ?? 0) + (r.cache_read ?? 0) + (r.cache_creation ?? 0)
+                        + (r.output_tokens ?? 0)).toLocaleString()} tokens
+                    </span>
+                    {r.cost_usd !== null && <span className="tabular-nums">${r.cost_usd.toFixed(4)}</span>}
+                    <span className="font-mono">{r.session_id.slice(0, 8)}</span>
+                    <span className="ml-auto tabular-nums">{String(r.ts ?? '').slice(0, 19)}</span>
+                  </Meta>
+                  <p className="mt-0.5 text-2xs text-ink-dim">
+                    {r.prompt ? r.prompt : 'no prompt recorded'}
+                  </p>
+                </Row>
+              ))}
+            </Section>
+          ) : null}
 
           <Section title="Changes" count={body.changed_files_total} shown={body.changed_files.length}>
             {body.changed_files.map((f) => {

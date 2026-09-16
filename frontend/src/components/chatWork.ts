@@ -101,6 +101,18 @@ export function chatWorkContent(body: ChatWork): Partial<InspectorContent> {
       meta: meta('chat-reviews', 'Reviews'),
     })
   }
+  if (body.runs?.length) {
+    groups.push({
+      name: 'Runs',
+      table: table('chat-runs', body.runs.map((r) => ({
+        when: r.ts, how: r.how, folder: r.leaf, prompt: r.prompt ?? '',
+        tokens: (r.input_tokens ?? 0) + (r.cache_read ?? 0) + (r.cache_creation ?? 0)
+          + (r.output_tokens ?? 0),
+        cost_usd: r.cost_usd, run: r.session_id,
+      })), ['when', 'how', 'folder', 'prompt', 'tokens', 'cost_usd', 'run']),
+      meta: meta('chat-runs', 'Runs'),
+    })
+  }
   if (body.changed_files.length) {
     groups.push({
       name: 'Changes',
@@ -122,6 +134,7 @@ export function chatWorkContent(body: ChatWork): Partial<InspectorContent> {
     ['Workflow runs', String(body.workflow_runs_total)],
     ['Task notifications', String(body.task_events_total)],
     ['Reviews', String(body.reviews_total ?? 0)],
+    ['Runs', String(body.runs_total ?? 0)],
     ['Files changed', String(body.changed_files_total)],
     ['Edits', String(body.changes_total)],
   ]

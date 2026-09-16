@@ -11,6 +11,30 @@ removed and nothing here said so.
 
 ### Added
 
+- **A headless child run folds into the chat that spawned it, or under the project above it.**
+  The Adopt window offered 870 one-chat folders under one project's `tmp` (bashrec, fidpool,
+  crit-live and the rest): a harness's `claude -p` one-shots, one typed prompt each, at most 12
+  messages, carrying the app's entrypoint from their environment, and no shell call in any chat
+  spawned them. The user's words: "lots of them look awfully like subagents ... They should still
+  be associated with their parent project where applicable." Harvest now derives `run_links`
+  beside `review_links` (`deriveRuns`, `--backfill-runs`): a one-shot begun inside the span of
+  another chat's shell call is that chat's child (the call's input carries its prompt or names its
+  folder, the call's result quotes its reply, or its folder sits under the chat's), and a one-shot
+  with no such call and three or more sibling one-shots within ten minutes is a batch folded under
+  the nearest folder above it with a real chat. `tool_calls` gained `result_ts` (the span's end;
+  `--backfill-tool-outcomes` fills it on old rows), and the review rule's one-shot query took a
+  `max` so both rules share it. The store folds a child into its chat (head, members under the
+  subagent scope, the work column's `runs`, a Runs section on the chat page with how the tie was
+  made) and hides every run from the lists; the population list says "(N listed, M runs)"; the
+  Summary's project bars fold a run's bytes into its project (and the query groups by position:
+  `GROUP BY project` had bound to `run_links.project`, which merged every project's own bytes
+  into one bar, caught by the new test); Adopt never offers a run, shows a Runs column per folder
+  and a line saying how many are folded where, and takes their records back with the reviews.
+  `c4x/runs.py` reads the map. Tests: harvest's self-test (16 new checks, three mutations red:
+  no span end, loose containment, the fixture with a one-shot beside an open call in the parent's
+  own folder), `tests/test_store_runs.py` (8), `tests/test_adopt_runs.py` (4), the chat page and
+  Adopt window suites. Existing stores get the tables on first open and the fold through
+  `node tools/harvest.mjs --backfill-tool-outcomes` then `--backfill-runs`, run by hand.
 - **The Adopt window: a table over the page, with a search box.** The Adopt button opened a
   drawer down the right edge, a stacked list of folders; the user's words: "looks so stuffy on
   the side like that". It now opens a window over the page the way the Project button does (the
