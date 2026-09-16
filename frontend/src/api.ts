@@ -532,6 +532,14 @@ export interface AccountsState {
   current_source?: 'tags' | 'manifest' | 'directory' | null
   /** Live records no tag names an account for; only meaningful with `current_source` tags. */
   untagged?: number
+  /** Chats this page lists, in all; null without a store. */
+  listed?: number | null
+  /**
+   * Chats this page lists for the signed-in account: the same number the population list's
+   * "Signed-in account's chats" carries, from one function. null when nothing is signed in or
+   * there is no store. `current_chats` stays what the desktop app lists (records).
+   */
+  current_listed?: number | null
   /**
    * What says `intended`: the marker a switch wrote, the links on the disk when the marker is
    * gone (a reset of `data/` takes it; the junctions stay), or nothing.

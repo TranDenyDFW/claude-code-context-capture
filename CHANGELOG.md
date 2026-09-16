@@ -100,6 +100,15 @@ removed and nothing here said so.
   resident context, within that call's own cache lifetime, so an expiry or a compaction is not
   counted): caches are isolated between organisations, so finish a chat under the account it
   started with. `docs/desktop-records.md` section 6 carries the rules and the measurements.
+- **One number for the signed-in account, projects A to Z, the Summary chart named the way the
+  list is.** The header's Current hover said 175 while the population list said 107 for the same
+  words: the header counted the app's records, the list the chats this page lists (the rest are
+  chats whose transcripts the store never held). Both now read the page's count from one
+  function (`store.listed_by_account`), and the hover says "107 listed here; 175 in the app";
+  All says the same both ways. The population list keeps the forty projects with the most work
+  and shows them A to Z by the name on the screen. "Tool Bytes by Project" labels its bars with
+  the list's names (`store.project_labels`, lifted out of the list) instead of the shortened
+  path, the full path staying on hover.
 - **The README says what c4x does for a person.** Use another account when one runs out and
   keep every chat; get back the chats the app lost; move a project to another machine; search
   every chat; a warning before a compaction. Then install, the account switch in plain words
