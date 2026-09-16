@@ -1724,8 +1724,9 @@ def cohort_options() -> list:
     # Offered only once harvest has tagged something, so a store from before the tag reads as it
     # did.
     if "account" in df.columns and df["account"].notna().any():
-        signed = signed_in_account()
-        mine = int((df["account"] == signed).sum()) if signed else 0
+        who = listed_by_account()
+        signed = who["signed_in"]
+        mine = int(who["mine"] or 0)
         opts.append({"label": f"Signed-in account's chats ({mine:,})",
                      "value": "account::signed-in",
                      "path": "Every listed chat made under the account the desktop app is "
@@ -1770,15 +1771,48 @@ def cohort_options() -> list:
     #
     # The VALUE keeps the full path. The label is ambiguous by construction and nothing matches
     # on it; `cohort_parts` below splits the value, and a delete resolves through that.
-    labels = distinct_short_paths(list(work.index), keep=1, mark="")
-    # A CHAT WITH NO FOLDER GETS ITS NAME, and nothing else. distinct_short_paths keeps the tail
-    # that tells two projects apart, which is right when the tail is a directory somebody chose
-    # and useless when it is "scratch-2026-09-05-d67fea" under two generated uuids. For those the
-    # chat's own name is the only thing that identifies it to a reader, so the row is the name
-    # (the scratch segment only when it has none).
-    #
-    # The VALUE is untouched: cohort_parts splits it, and a delete resolves through that.
-    folderless = [p for p in work.index if is_folderless(p)]
+    labels = project_labels(list(work.index), df)
+    projects = []
+    for proj, row in work.iterrows():
+        # "listed", the same qualifier the All sessions option above carries. Without it the
+        # number reads as "this project has N sessions", when it is the count the picker will
+        # SHOW: a project whose sessions fall below SESSION_TURN_FLOOR offers fewer than it holds,
+        # and a reader comparing it against the store has nothing to reconcile the two. Same
+        # defect the first option was fixed for, on the option beside it.
+        name = labels[proj]
+        projects.append((name, {"label": f"{name} ({int(row['sessions']):,} listed)",
+                                "value": f"project::{proj}", "path": str(proj)}))
+    # A TO Z BY THE NAME SHOWN, the user's rule. The work ranking above decides which forty are
+    # offered; the order they are read in is the order a person scans a list: by the name on the
+    # screen, case folded, the count suffix left out of the comparison.
+    projects.sort(key=lambda pair: pair[0].casefold())
+    opts.extend(option for _name, option in projects)
+    return opts
+
+
+def project_labels(paths, df=None) -> dict:
+    """The name the page shows for each project path, the ONE rule every surface reads.
+
+    The folder's leaf, disambiguated only where two leaves read the same ("ccxe/c4x" beside
+    "other/c4x"); a chat with no folder gets its name and nothing else (`chat_name`: the scratch
+    segment says nothing to a reader); a folder holding ONE listed chat reads as that chat's
+    title, the user's rule, since the sidebar shows "T02" under folder "2" and "2" named nothing
+    a reader knew; a placeholder title ("(untitled)", "Imported_<date>") is not a name, so the
+    folder stays; two names that then read the same get their folder appended, and only those
+    two. The population list and the Summary chart both call this, so the bar a reader sees on
+    the Summary tab is named the way the list they pick from names it.
+
+    `df` is the session frame (`session_rows()` when not given): the listed count and the first
+    title per project come from it, so a path the frame does not list (a project below the floor,
+    a chart bar drawn from tool calls alone) reads as its folder.
+    """
+    paths = [str(p) for p in paths]
+    if not paths:
+        return {}
+    if df is None:
+        df = session_rows()
+    labels = distinct_short_paths(paths, keep=1, mark="")
+    folderless = [p for p in paths if is_folderless(p)]
     if folderless:
         by_project: dict = {}
         for p in folderless:
@@ -1788,18 +1822,12 @@ def cohort_options() -> list:
         for p in folderless:
             ids = by_project.get(p) or []
             labels[p] = chat_name(p, every.get(ids[0], {}) if ids else {})
-    # A FOLDER HOLDING ONE CHAT READS AS THAT CHAT'S TITLE, the user's rule: the sidebar shows
-    # "T02" under folder "2", and "2 (1 listed)" here named nothing a reader recognises. A folder
-    # holding several keeps its name, the way the sidebar's group does. The title is the frame's,
-    # the same name the Sessions list shows, cut as a scratch chat's is. Two rows that then read
-    # the same get their folder appended, and only those two.
-    singles = [p for p, row in work.iterrows()
-               if int(row["sessions"]) == 1 and not is_folderless(p)]
+    counts = df["project"].value_counts() if not df.empty else {}
+    singles = [p for p in paths if not is_folderless(p) and int(counts.get(p, 0)) == 1]
     if singles:
         first_title = df[df["project"].isin(singles)].groupby("project")["title"].first()
         for p in singles:
             text = cut_title(first_title.get(p))
-            # A placeholder ("(untitled)", "Imported_<date>") is not a name; the folder stays.
             if text and not is_placeholder_title(text):
                 labels[p] = text
     seen_labels: dict = {}
@@ -1809,15 +1837,27 @@ def cohort_options() -> list:
         if len(group) > 1:
             for p in group:
                 labels[p] = f"{labels[p]} - {short_path(p, 1, mark='')}"
-    for proj, row in work.iterrows():
-        # "listed", the same qualifier the All sessions option above carries. Without it the
-        # number reads as "this project has N sessions", when it is the count the picker will
-        # SHOW: a project whose sessions fall below SESSION_TURN_FLOOR offers fewer than it holds,
-        # and a reader comparing it against the store has nothing to reconcile the two. Same
-        # defect the first option was fixed for, on the option beside it.
-        opts.append({"label": f"{labels[proj]} ({int(row['sessions']):,} listed)",
-                     "value": f"project::{proj}", "path": str(proj)})
-    return opts
+    return labels
+
+
+def listed_by_account() -> dict:
+    """How many chats this page lists, in all and per account, and the signed-in account's own.
+
+    ONE FUNCTION for the two places that say "the signed-in account's chats": the population
+    list's entry and the header's Current hover read the same number from here, so they cannot
+    drift. The header used to count the app's records (175 on the author's machine) while the
+    list counted the chats this page lists (107: the rest are chats the app lists whose
+    transcripts the store never held, or that have no turns). `mine` is None when nothing is
+    signed in.
+    """
+    df = session_rows()
+    signed = signed_in_account()
+    if df.empty or "account" not in df.columns:
+        return {"listed": int(len(df)), "by_account": {}, "signed_in": signed,
+                "mine": 0 if signed else None}
+    by = {str(a): int(n) for a, n in df["account"].value_counts().items()}
+    return {"listed": int(len(df)), "by_account": by, "signed_in": signed,
+            "mine": by.get(signed, 0) if signed else None}
 
 
 def cohort_parts(cohort) -> tuple:
