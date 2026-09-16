@@ -182,41 +182,64 @@ class TestSharingAndPuttingItBack:
 
 
 class TestAppRunning:
-    """No child process: the answer comes from the process table, by image name, in any case.
+    """No child process: the answer comes from the process table, by image name in any case AND
+    the executable's path (`c4x.desktop.app_processes`), so the CLI, which shares the name, never
+    counts as the app.
 
     It asked `tasklist`, on every page load, and once the server ran without a console each of
     those calls flashed a console window.
     """
-    class _Process:
-        def __init__(self, name):
-            self.info = {"name": name}
+    APP = r"C:\Program Files\WindowsApps\Claude_2.110.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe"
+    CLI = r"C:\Users\me\.local\bin\claude.exe"
 
-    def _table(self, monkeypatch, names):
+    class _Process:
+        def __init__(self, pid, name, exe):
+            self.pid = pid
+            self.info = {"pid": pid, "name": name}
+            self._exe = exe
+
+        def name(self):
+            return self.info["name"]
+
+        def exe(self):
+            return self._exe
+
+    def _table(self, monkeypatch, rows):
+        from c4x import desktop
         seen = {"attrs": None}
 
         def process_iter(attrs=None):
             seen["attrs"] = attrs
-            return iter(self._Process(n) for n in names)
-        monkeypatch.setattr(accounts.psutil, "process_iter", process_iter)
+            return iter(self._Process(i, n, e) for i, (n, e) in enumerate(rows, 1))
+        monkeypatch.setattr(desktop.psutil, "process_iter", process_iter)
+        monkeypatch.setattr(desktop.platform, "system", lambda: "Windows")
         return seen
 
-    def test_the_app_is_found_by_image_name_in_any_case(self, monkeypatch):
-        monkeypatch.setattr(accounts.platform, "system", lambda: "Windows")
-        seen = self._table(monkeypatch, ["svchost.exe", "CLAUDE.EXE"])
+    def test_the_app_is_found_by_image_name_in_any_case_and_its_own_path(self, monkeypatch):
+        seen = self._table(monkeypatch, [("svchost.exe", r"C:\Windows\System32\svchost.exe"),
+                                         ("CLAUDE.EXE", self.APP)])
         assert accounts.app_running() is True
-        assert seen["attrs"] == ["name"], "only the name is asked for, which is what stays cheap"
+        assert seen["attrs"] == ["pid", "name"], "the name for every process; the path on ask"
+
+    def test_a_terminal_s_claude_is_not_the_app(self, monkeypatch):
+        """Measured on the author's machine, 2026-09-16: two CLI sessions named claude.exe beside
+        fourteen app processes. A switch must not be refused because a terminal is open."""
+        self._table(monkeypatch, [("claude.exe", self.CLI),
+                                  ("claude.exe", r"C:\Users\me\AppData\Roaming\Claude\claude-code"
+                                                 r"\2.1.270\claude.exe")])
+        assert accounts.app_running() is False
 
     def test_a_process_that_refuses_its_name_is_skipped(self, monkeypatch):
-        monkeypatch.setattr(accounts.platform, "system", lambda: "Windows")
-        self._table(monkeypatch, [None, "node.exe", "claude-helper.exe"])
+        self._table(monkeypatch, [(None, None), ("node.exe", "n"), ("claude-helper.exe", self.APP)])
         assert accounts.app_running() is False, "a helper is not the app, and None is not a name"
 
     def test_off_windows_the_table_is_never_read(self, monkeypatch):
-        monkeypatch.setattr(accounts.platform, "system", lambda: "Linux")
+        from c4x import desktop
+        monkeypatch.setattr(desktop.platform, "system", lambda: "Linux")
 
         def never(attrs=None):
             raise AssertionError("the process table was read")
-        monkeypatch.setattr(accounts.psutil, "process_iter", never)
+        monkeypatch.setattr(desktop.psutil, "process_iter", never)
         assert accounts.app_running() is False
 
 

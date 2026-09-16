@@ -438,6 +438,35 @@ Derived after every harvest pass for the directories it touched and by `--backfi
 (`--backfill-tool-outcomes` first, which now also fills `result_ts` on rows from before the
 column, so every call's span has an end); a fresh install's first harvest derives it as it goes.
 
+**The app, never the CLI; and the launch, two ways.** Measured on the author's machine,
+2026-09-16: sixteen processes named `claude.exe`, fourteen the Store app's
+(`C:\Program Files\WindowsApps\Claude_<version>_<hash>\app\Claude.exe`) and two Claude Code CLI
+sessions (`~/.local/bin/claude.exe`, and the copy the app carries under its LocalCache
+`claude-code\<version>\claude.exe`). A restart on the name alone would have ended every terminal
+session, and `app_running` refused a switch whenever a terminal was open, so `desktop.is_app_exe`
+keeps only the app's own executable (a WindowsApps package directory, or the installer's path)
+and reads the path only for the processes named `claude.exe`. The relaunch: on the test laptop,
+2026-09-16, app 2.110, the startup sweep took back two stale run records, terminated the app's
+twelve processes, ran `explorer.exe shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude` and nothing
+came back in 20 s (the same activation from an SSH session returned 1 and started nothing in
+135 s), so the watchdog stopped the server with Claude closed and the person asked why nothing
+started any more; a scheduled task registered for the interactive logon (`-LogonType Interactive`)
+started the app, twelve processes within thirty seconds. `launch_app` now tries the activation,
+then the task, and waits for a process of the app's own after each; `restart_app`,
+`with_restart` and the sweep all go through it.
+
+**A confirmed restart around a page write.** `with_restart(action, quit_first)` (`c4x/desktop.py`)
+runs quit, act, relaunch for sharing and the fold (a directory the app holds cannot be moved)
+and act, quit, relaunch for adopt, retitle, unadopt and import (new files are safe with the app
+open; the restart only when the write reports `restart_required`). One at a time; the watchdog
+treats the window as Claude alive so a long fold cannot stop the server under it; the app not
+running means the action runs plainly and the report says so; an app that will not close changes
+nothing; an action that fails after the quit brings the app back and re-raises. The six routes
+take `restart: true` (`/api/accounts/sharing`, `/api/accounts/reconcile`, `/api/adopt`,
+`/api/adopt/retitle`, `/api/adopt/unadopt-reviews`, `/api/project/import` as a form field); the
+flagless request is what it was, 409 while the app is open where a directory is about to move.
+The page asks first, always (`docs/dashboard.md`, "The header").
+
 **The sweep runs itself when the app starts, and restarts the app.** The user's decision: the
 button should not be needed. "The app starts" has one observable in c4x, the SessionStart hook
 finding nobody on the port and starting the server, so the server runs the sweep once, right after

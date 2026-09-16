@@ -1,7 +1,10 @@
 import { useRef, useState } from 'react'
 import { api, ApiError } from '@/api'
 import type { Cohort, DeleteReport, ImportReport } from '@/api'
+import { Confirm } from './Confirm'
 import { Portal } from './Portal'
+import { restartOutcome, restartQuestion } from './restart'
+import type { Outcome } from './restart'
 
 /**
  * Move a whole project in or out of the store.
@@ -92,6 +95,10 @@ export function ProjectMoves({
   // where every file would land; the import only happens once the destination has been seen.
   const [staged, setStaged] = useState<{ file: File; plan: ImportReport } | null>(null)
   const [into, setInto] = useState('')
+  // Whether Claude is running, read when a file is staged, so the confirm can say whether the
+  // import closes it or merely leaves a record for its next start. Unknown reads as running,
+  // the wording that promises more, not less.
+  const [appRunning, setAppRunning] = useState(true)
   const upload = useRef<HTMLInputElement>(null)
 
   const project = pathOf(cohort)
@@ -129,6 +136,10 @@ export function ProjectMoves({
       const plan = await api.project.import(file, undefined, true)
       setStaged({ file, plan })
       setInto(plan.into[0] ?? '')
+      api.accounts
+        .state()
+        .then((now) => setAppRunning(Boolean(now.app_running)))
+        .catch(() => setAppRunning(true))
     } catch (problem) {
       setError(problem)
     } finally {
@@ -138,16 +149,23 @@ export function ProjectMoves({
     }
   }
 
-  const doImport = async () => {
-    if (!staged) return
+  // THE IMPORT ASKS FIRST. It writes the desktop app's record, which the app reads when it
+  // starts, so the confirm names the restart and the server does it (`restart: true`); the
+  // outcome under the report says whether Claude came back.
+  const [askingImport, setAskingImport] = useState(false)
+  const doImport = async (): Promise<Outcome> => {
+    if (!staged) return { ok: false, text: 'nothing staged' }
     setBusy('import')
     setError(null)
     try {
-      setImported(await api.project.import(staged.file, into.trim() || undefined))
+      const report = await api.project.import(staged.file, into.trim() || undefined, false, true)
+      setImported(report)
       setStaged(null)
       onChanged()
+      return restartOutcome(report.restart, 'The import landed.')
     } catch (problem) {
       setError(problem)
+      throw problem
     } finally {
       setBusy(null)
     }
@@ -375,13 +393,26 @@ export function ProjectMoves({
                     )}
                     <div className="mt-2 flex gap-2">
                       <button
-                        onClick={() => void doImport()}
+                        onClick={() => setAskingImport(true)}
                         disabled={busy !== null || !into.trim()}
                         className="rounded-md border border-edge bg-page px-2.5 py-1 text-sm
                                    text-ink hover:bg-edge/20 disabled:opacity-50"
                       >
                         Import
                       </button>
+                      {askingImport && staged ? (
+                        <Confirm
+                          label="Import a project"
+                          question={restartQuestion(
+                            appRunning,
+                            `imports ${staged.file.name} into ${into.trim()} and writes the desktop app's record for it`,
+                            false,
+                          )}
+                          actionLabel="Import now"
+                          action={doImport}
+                          onClose={() => setAskingImport(false)}
+                        />
+                      ) : null}
                       <button
                         onClick={() => setStaged(null)}
                         disabled={busy !== null}

@@ -194,7 +194,10 @@ class TestTheStopThatCoversFirst:
 
         from c4x.api import __main__ as server_main
         source = inspect.getsource(server_main.main)
-        assert "Watchdog(stop=reconcile_then_stop)" in source
+        assert "Watchdog(stop=reconcile_then_stop," in source
+        # A confirmed restart's quit-act-relaunch window counts as Claude alive, so a fold
+        # longer than the grace cannot stop the server under it (c4x/desktop.py, with_restart).
+        assert "is_alive=lambda: desktop.restart_in_progress() or claude_alive()" in source
         assert "reconcile_at_start()" in source
 
     def test_at_start_it_runs_only_when_the_app_is_closed(self, monkeypatch):

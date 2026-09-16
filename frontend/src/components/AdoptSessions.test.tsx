@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { AdoptSessions } from './AdoptSessions'
 import { api, ApiError } from '@/api'
 import type { AdoptReport, AdoptState, RetitleReport } from '@/api'
@@ -67,6 +67,15 @@ async function opened() {
   fireEvent.click(await screen.findByRole('button', { name: ADOPT }))
 }
 
+/** Every write asks first: press Continue in the confirm, then ITS Close once it has run (the
+ * window behind it has a Close of its own, which must stay untouched). */
+async function goOn() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+  await screen.findByTestId('confirm-outcome')
+  const dialogs = screen.getAllByRole('dialog')
+  fireEvent.click(within(dialogs[dialogs.length - 1]).getByRole('button', { name: 'Close' }))
+}
+
 describe('AdoptSessions', () => {
   it('names the nameless records a first build wrote, then asks for a restart', async () => {
     const stateCall = vi.spyOn(api.adopt, 'state')
@@ -84,7 +93,11 @@ describe('AdoptSessions', () => {
     expect(screen.getByText(/64 adopted chats have no name yet/).textContent)
       .toContain('General coding session')
     fireEvent.click(screen.getByRole('button', { name: 'Name them' }))
-    await waitFor(() => expect(retitle).toHaveBeenCalled())
+    expect(retitle).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: 'Name the records' }).textContent)
+      .toContain('names the 64 records that have no name')
+    await goOn()
+    await waitFor(() => expect(retitle).toHaveBeenCalledWith(true))
     expect(await screen.findByText(/Restart Claude to see the 64 names/)).not.toBeNull()
     expect(onChanged).toHaveBeenCalled()
     expect(stateCall).toHaveBeenCalledTimes(2)
@@ -185,8 +198,10 @@ describe('AdoptSessions', () => {
                      { target: { value: 'alpha' } })
     fireEvent.click(screen.getByRole('button', { name: 'Select all' }))
     fireEvent.click(screen.getByRole('button', { name: /^Adopt 1 chat$/ }))
+    await goOn()
     await waitFor(() =>
-      expect(run).toHaveBeenCalledWith({ cwds: ['P:\\Alpha'], include_cli: false, dry_run: false }))
+      expect(run).toHaveBeenCalledWith({ cwds: ['P:\\Alpha'], include_cli: false, dry_run: false,
+                                         restart: true }))
   })
 
   it('shows a Runs column only when the server sends one', async () => {
@@ -228,7 +243,8 @@ describe('AdoptSessions', () => {
     expect((await screen.findByTestId('startup-sweep')).textContent)
       .toBe('Startup sweep at 2026-09-14 22:24:05 UTC: removed 4 review-run record(s); Claude restarted.')
     fireEvent.click(screen.getByRole('button', { name: 'Remove them from Claude' }))
-    await waitFor(() => expect(unadopt).toHaveBeenCalled())
+    await goOn()
+    await waitFor(() => expect(unadopt).toHaveBeenCalledWith(true))
     expect(await screen.findByText(/Restart Claude to drop the 58 review runs/)).not.toBeNull()
     expect(screen.queryByRole('button', { name: /Remove them/ })).toBeNull()
   })
@@ -256,7 +272,10 @@ describe('AdoptSessions', () => {
       .toContain('or a one-shot a chat’s command spawned')
     expect(screen.queryAllByRole('checkbox', { name: /^Adopt / })).toEqual([])
     fireEvent.click(screen.getByRole('button', { name: 'Remove them from Claude' }))
-    await waitFor(() => expect(unadopt).toHaveBeenCalled())
+    expect(screen.getByRole('dialog', { name: 'Remove the runs from Claude' }).textContent)
+      .toContain('takes back the 3 records written for runs')
+    await goOn()
+    await waitFor(() => expect(unadopt).toHaveBeenCalledWith(true))
     expect(await screen.findByText(/Restart Claude to drop the 3 runs/)).not.toBeNull()
   })
 
@@ -313,8 +332,13 @@ describe('AdoptSessions', () => {
     await opened()
     fireEvent.click(screen.getByRole('button', { name: 'Select all' }))
     fireEvent.click(screen.getByRole('button', { name: /^Adopt 3 chats$/ }))
+    expect(run).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: 'Adopt chats' }).textContent)
+      .toContain('writes 3 records for the 3 chats ticked')
+    await goOn()
     await waitFor(() =>
-      expect(run).toHaveBeenCalledWith({ cwds: ['P:\\Gamma', 'P:\\Alpha'], include_cli: false, dry_run: false }))
+      expect(run).toHaveBeenCalledWith({ cwds: ['P:\\Gamma', 'P:\\Alpha'], include_cli: false,
+                                         dry_run: false, restart: true }))
     expect((await screen.findByText(/Restart Claude to see the 3 chats adopted/)).textContent)
       .toContain('reads these records when it starts')
     expect(onChanged).toHaveBeenCalled()
@@ -330,6 +354,7 @@ describe('AdoptSessions', () => {
     await opened()
     fireEvent.click(screen.getByRole('checkbox', { name: /Alpha/ }))
     fireEvent.click(screen.getByRole('button', { name: /^Adopt 1 chat$/ }))
+    await goOn()
     expect(await screen.findByText(/sharing is on: these records live/)).not.toBeNull()
   })
 
@@ -352,6 +377,12 @@ describe('AdoptSessions', () => {
     await opened()
     fireEvent.click(screen.getByRole('checkbox', { name: /Alpha/ }))
     fireEvent.click(screen.getByRole('button', { name: /^Adopt 1 chat$/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+    // The refusal is the confirm's outcome and the window's own problem line, both.
+    expect((await screen.findByTestId('confirm-outcome')).textContent)
+      .toContain('turn sharing off and on again')
+    const dialogs = screen.getAllByRole('dialog')
+    fireEvent.click(within(dialogs[dialogs.length - 1]).getByRole('button', { name: 'Close' }))
     expect(await screen.findByText(/turn sharing off and on again/)).not.toBeNull()
     expect(screen.queryByText(/Restart Claude/)).toBeNull()
   })

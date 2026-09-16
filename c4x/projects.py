@@ -1140,6 +1140,7 @@ def import_(path, into=None, dry_run=False):
         from c4x import appstate
         report["dry_run"] = True
         report["app_state"] = appstate.restore(app_rows, mapping, dry_run=True)
+        report["restart_required"] = False
         return report
 
     with store.write() as con:
@@ -1239,6 +1240,9 @@ def import_(path, into=None, dry_run=False):
     report["chains"] = chains_landed(manifest)
 
     report["app_state"] = restore_app_state(path, mapping)
+    # The app reads its records directory when it starts: a desktop record written here is
+    # listed after a restart, the same flag Adopt reports for the same reason.
+    report["restart_required"] = bool((report["app_state"] or {}).get("desktop"))
     report["mirror"] = verify_mirror(path, mapping=mapping)
     return report
 

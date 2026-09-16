@@ -1626,7 +1626,8 @@ _IMPORT_MAX_BYTES = 1 << 30
 
 @api.post("/api/project/import")
 async def project_import(file: UploadFile = File(...), into: str = Form(default=""),
-                         dry_run: bool = Form(default=False)):
+                         dry_run: bool = Form(default=False),
+                         restart: bool = Form(default=False)):
     """Load an exported project. Verified before a single row is written.
 
     `into` is the working directory on THIS machine to import into, and everything is rebuilt from
@@ -1665,7 +1666,11 @@ async def project_import(file: UploadFile = File(...), into: str = Form(default=
                         "error": f"an import is capped at {_IMPORT_MAX_BYTES // (1 << 20)} MB",
                         "file": given})
                 fh.write(chunk)
-        return projects.import_(path, into=(into or None), dry_run=dry_run)
+        # `restart` (a form field, like the rest): the desktop app's record written by the
+        # import is read when the app starts, so the page can ask for the restart here too.
+        return _with_restart(bool(restart) and not dry_run,
+                             lambda: projects.import_(path, into=(into or None), dry_run=dry_run),
+                             quit_first=False)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400,
                             detail={"error": str(exc), "file": given}) from exc
@@ -1719,14 +1724,42 @@ def accounts_state():
     return accounts.state()
 
 
+def _with_restart(wanted: bool, action, *, quit_first: bool, needed=None) -> dict:
+    """Run a write with the desktop app quit and started again around it, when asked to.
+
+    THE PAGE ASKS FIRST, THE SERVER DOES THE REST. A `"restart": true` in the request means the
+    person confirmed a dialog naming what happens (every Claude window closed, the write, Claude
+    started again); the flagless request is byte for byte what it was, 409 while the app is
+    open where a directory it holds is about to move. `quit_first` is for those (sharing, the
+    fold); an adopt or an import writes new files first and restarts only when it wrote any
+    (`needed`: the report's `restart_required`). The report gains `restart`, and
+    `restart_required` drops to false once the app was started again, since it has read the
+    files by then. 409 while another restart is under way.
+    """
+    if not wanted:
+        return action()
+    from c4x import desktop
+    try:
+        result, restart = desktop.with_restart(
+            action, quit_first=quit_first,
+            needed=needed or (lambda r: bool(r.get("restart_required"))))
+    except desktop.RestartBusy as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+    result["restart"] = restart
+    if restart.get("relaunched"):
+        result["restart_required"] = False
+    return result
+
+
 @api.post("/api/accounts/sharing")
 def accounts_sharing(body: dict):
-    """`{"mode": "all"}` to show every account's chats to whichever account is signed in.
+    """`{"mode": "all"}` to show every account's chats to whichever account is signed in;
+    `"restart": true` to have the server quit Claude first and start it again after.
 
-    409, NOT 400 or 500, when Claude is open. The request is well formed and the server is
-    refusing it for a reason the user can act on: a directory the app holds cannot be moved, and a
-    half-moved pair leaves an account pointing at nothing. The page turns that into the one
-    instruction that resolves it.
+    409, NOT 400 or 500, when Claude is open and no restart was asked for. The request is well
+    formed and the server is refusing it for a reason the user can act on: a directory the app
+    holds cannot be moved, and a half-moved pair leaves an account pointing at nothing. The page
+    turns that into the one instruction that resolves it.
     """
     from c4x import accounts
     _require_writes()
@@ -1734,24 +1767,28 @@ def accounts_sharing(body: dict):
     if mode not in (accounts.ALL, accounts.CURRENT):
         raise HTTPException(status_code=400,
                             detail={"error": "mode is 'all' or 'current'", "mode": mode})
+    wanted = (body or {}).get("restart") is True
+    switch = accounts.share_all if mode == accounts.ALL else accounts.share_current
     try:
-        return accounts.share_all() if mode == accounts.ALL else accounts.share_current()
+        return _with_restart(wanted, switch, quit_first=True)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail={"error": str(exc), "mode": mode}) from exc
 
 
 @api.post("/api/accounts/reconcile")
-def accounts_reconcile():
+def accounts_reconcile(body: dict | None = None):
     """Cover now: fold the pairs the app created since sharing into the shared directory.
 
     The same fold the watchdog runs when Claude closes, on demand. 409 with the pending pairs
     while Claude is open (a directory it holds cannot be moved; the page says to quit it first),
-    the report otherwise; `ran` is false with `why` when sharing is off.
+    the report otherwise; `ran` is false with `why` when sharing is off. `{"restart": true}`
+    has the server quit Claude first and start it again after.
     """
     from c4x import accounts
     _require_writes()
+    wanted = (body or {}).get("restart") is True
     try:
-        report = accounts.reconcile()
+        report = _with_restart(wanted, accounts.reconcile, quit_first=True)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
     if report["app_running"] and report["pending"]:
@@ -1794,8 +1831,11 @@ def adopt_run(body: dict):
         raise HTTPException(status_code=400,
                             detail={"error": "nothing selected: pass the folders to adopt as cwds"})
     try:
-        return adopt.adopt(cwds, include_cli=bool(body.get("include_cli")),
-                           dry_run=bool(body.get("dry_run")))
+        return _with_restart(
+            body.get("restart") is True,
+            lambda: adopt.adopt(cwds, include_cli=bool(body.get("include_cli")),
+                                dry_run=bool(body.get("dry_run"))),
+            quit_first=False)
     except adopt.SharingMismatch as exc:
         raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
     except ValueError as exc:
@@ -1803,21 +1843,25 @@ def adopt_run(body: dict):
 
 
 @api.post("/api/adopt/retitle")
-def adopt_retitle():
+def adopt_retitle(body: dict | None = None):
     """Name every record c4x wrote that has none. A first build left 64 of 82 nameless on the
-    test laptop, and the app shows each of those as "General coding session"."""
+    test laptop, and the app shows each of those as "General coding session". `{"restart":
+    true}` restarts Claude afterwards, when a name was written."""
     from c4x import adopt
     _require_writes()
-    return adopt.retitle()
+    return _with_restart((body or {}).get("restart") is True, adopt.retitle, quit_first=False)
 
 
 @api.post("/api/adopt/unadopt-reviews")
-def adopt_unadopt_reviews():
-    """Take back the records c4x wrote for review runs: a run folds into the chat it reviewed
-    and is no chat of its own in the app either. The ledger's records only, the runs only."""
+def adopt_unadopt_reviews(body: dict | None = None):
+    """Take back the records c4x wrote for review runs and child runs: a run folds into the
+    chat it reviewed or spawned it and is no chat of its own in the app either. The ledger's
+    records only, the runs only. `{"restart": true}` restarts Claude afterwards, when a record
+    was taken back."""
     from c4x import adopt
     _require_writes()
-    return adopt.unadopt_reviews()
+    return _with_restart((body or {}).get("restart") is True, adopt.unadopt_reviews,
+                         quit_first=False)
 
 
 @api.get("/api/adopt/sweep")

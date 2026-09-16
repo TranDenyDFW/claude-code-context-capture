@@ -44,8 +44,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import psutil
-
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -205,13 +203,12 @@ def app_running():
     calls flashed a console window. The rule is the same one `tasklist /FI "IMAGENAME eq
     claude.exe"` applied: a process whose image name is `claude.exe`, in any case. A process that
     refuses its name (another user's) has `None` there and is skipped.
+
+    THE APP, NOT THE CLI. Both are named `claude.exe`; `c4x.desktop.app_processes` keeps the
+    ones running the app's own executable, so an open terminal never refuses a switch.
     """
-    if platform.system() != "Windows":
-        return False
-    for process in psutil.process_iter(["name"]):
-        if str(process.info.get("name") or "").lower() == "claude.exe":
-            return True
-    return False
+    from c4x import desktop
+    return desktop.app_running()
 
 
 def link_target(path):

@@ -72,16 +72,28 @@ class TestFindingTheApp:
         assert desktop.find_app(run=missing, exists=lambda p: False, system="Windows") is None
 
 
+APP_EXE = r"C:\Program Files\WindowsApps\Claude_2.110.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe"
+CLI_EXE = r"C:\Users\me\.local\bin\claude.exe"
+
+
 class _Proc:
-    def __init__(self, pid, name, terminates=True):
+    """A process as the table shows it: the name for every one, the executable's path on ask.
+    The app's own path unless told otherwise, since most of these tests are about the app."""
+    def __init__(self, pid, name, terminates=True, exe=APP_EXE):
         self.pid = pid
         self.info = {"pid": pid, "name": name}
+        self._exe = exe
         self.terminates = terminates
         self.terminated = False
         self.killed = False
 
     def name(self):
         return self.info["name"]
+
+    def exe(self):
+        if self._exe is psutil.AccessDenied:
+            raise psutil.AccessDenied(self.pid)
+        return self._exe
 
     def terminate(self):
         self.terminated = True
@@ -103,6 +115,59 @@ class TestTheProcesses:
                 raise psutil.NoSuchProcess(self.pid)
         table = [Gone(7, None), _Proc(8, "claude.exe")]
         assert [p.pid for p in desktop.app_processes(table, self_pid=0)] == [8]
+
+    def test_the_cli_is_never_the_app_though_it_shares_the_name(self):
+        """Measured on the author's machine, 2026-09-16: 14 app processes and 2 CLI sessions,
+        all sixteen named claude.exe; a restart on the name alone would end every terminal."""
+        table = [_Proc(1, "claude.exe", exe=CLI_EXE),
+                 _Proc(2, "claude.exe",
+                       exe=r"C:\Users\me\AppData\Roaming\Claude\claude-code\2.1.270\claude.exe"),
+                 _Proc(3, "claude.exe", exe=psutil.AccessDenied),
+                 _Proc(4, "claude.exe", exe=None),
+                 _Proc(5, "Claude.exe")]
+        assert [p.pid for p in desktop.app_processes(table, self_pid=0)] == [5]
+
+    def test_the_path_is_read_only_for_the_ones_named_claude(self):
+        asked = []
+
+        class Counting(_Proc):
+            def exe(self):
+                asked.append(self.pid)
+                return super().exe()
+        table = [Counting(1, "svchost.exe"), Counting(2, "node.exe"), Counting(3, "claude.exe")]
+        desktop.app_processes(table, self_pid=0)
+        assert asked == [3], "one handle per claude.exe, none for the rest of the table"
+
+
+class TestTheIdentityRule:
+    @pytest.mark.parametrize("path", [
+        APP_EXE,
+        r"D:\WindowsApps\Claude_1.52386.6.0_x64__pzs8sxrjxfjjc\app\Claude.exe",
+        "C:/Program Files/WindowsApps/Claude_2.110.0.0_x64__pzs8sxrjxfjjc/app/CLAUDE.EXE",
+        r"%LOCALAPPDATA%\Programs\Claude\Claude.exe",
+        r"%LOCALAPPDATA%\Programs\claude-desktop\Claude.exe",
+    ])
+    def test_the_app_s_own_executable(self, path):
+        assert desktop.is_app_exe(path, expand=lambda raw: raw) is True
+
+    @pytest.mark.parametrize("path", [
+        CLI_EXE,
+        r"C:\Users\me\AppData\Roaming\Claude\claude-code\2.1.270\claude.exe",
+        r"C:\Users\me\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude"
+        r"\claude-code\2.1.270\claude.exe",
+        r"C:\Program Files\WindowsApps\Claude_2.110.0.0_x64__pzs8sxrjxfjjc\app\resources"
+        r"\cowork-svc.exe",
+        r"C:\Users\me\AppData\Local\Programs\Claude\Claude.exe.bak",
+        "", None, 7,
+    ])
+    def test_everything_else_is_not(self, path):
+        assert desktop.is_app_exe(path, expand=lambda raw: raw) is False
+
+    def test_the_installer_path_is_expanded_before_the_comparison(self):
+        local = r"C:\Users\me\AppData\Local"
+        grow = lambda raw: raw.replace("%LOCALAPPDATA%", local)  # noqa: E731
+        assert desktop.is_app_exe(local + r"\Programs\Claude\Claude.exe", expand=grow) is True
+        assert desktop.is_app_exe(local + r"\Programs\Other\Claude.exe", expand=grow) is False
 
 
 class TestTheRestart:
@@ -132,9 +197,12 @@ class TestTheRestart:
         def now():
             clock["t"] += 1.0
             return clock["t"]
+        def task(app, log):
+            state.setdefault("tasks", []).append(app["launch"])
+            return False, "no task scheduler in a test"
         report = desktop.restart_app(app, launch=launch, processes=processes, wait_procs=wait_procs,
                                      sleep=lambda s: None, now=now, log=lambda m: None,
-                                     relaunch_s=5.0)
+                                     relaunch_s=5.0, task=task)
         return report, first, state
 
     def test_every_app_process_is_terminated_then_started_and_seen_back(self, monkeypatch):

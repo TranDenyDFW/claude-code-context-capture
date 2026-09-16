@@ -11,6 +11,31 @@ removed and nothing here said so.
 
 ### Added
 
+- **Every control that closes or restarts Claude, or C4X, asks first, then does it.** The user's
+  rule: "prompt the user to continue; for example, if changing to all from current, it requires
+  a reboot, prompt the user when they click all and only continue if they confirm." All,
+  Current, Cover now, Adopt, Name them, Remove them, Import, Stop C4X and Restart C4X open a
+  window (`Confirm.tsx`, on the `Dialog` chrome) naming exactly what will happen; Cancel does
+  nothing; Continue sends `restart: true` and the server quits the desktop app, acts and starts
+  it again (`desktop.with_restart`: quit, act, relaunch for the directory moves; act, quit,
+  relaunch for the writes the app may stay open for), one at a time, the watchdog told to wait,
+  and the outcome stays on screen. The page no longer refuses while Claude is open or tells the
+  person to quit it. Two things measured on the way, both fixed here: `claude.exe` is also the
+  CLI (16 processes on the author's machine, 2 of them terminal sessions; a restart on the name
+  alone would have ended them, and `app_running` refused a switch because a terminal was open),
+  so `desktop.is_app_exe` tells the app by its executable's path; and on the test laptop the
+  startup sweep killed Claude and could not start it again (`explorer.exe shell:AppsFolder`
+  brought nothing back from the hook-started server, nor from an SSH session), which the person
+  saw as "it doesn't start up automatically anymore", so `launch_app` falls back to a transient
+  scheduled task in the interactive logon session, which brought the app back in thirty
+  seconds. `projects.import_` reports `restart_required`. Tests: `tests/test_desktop.py` (the
+  identity table, the CLI never the app, the path read only for `claude.exe`),
+  `tests/test_desktop_restart.py` (18: the launch two ways, the task command, quit-act-relaunch
+  and act-quit-relaunch in order, not running, off Windows, a failed relaunch said not claimed,
+  an app that will not close changes nothing, a failing action relaunches then raises, one at a
+  time, the watchdog window), `tests/test_adopt.py` (the flag reaches `with_restart`; a busy
+  restart is 409), `tests/test_accounts.py` (a terminal's claude is not the app); vitest
+  `Confirm.test.tsx`, `restart.test.ts`, and the four controls' suites.
 - **A headless child run folds into the chat that spawned it, or under the project above it.**
   The Adopt window offered 870 one-chat folders under one project's `tmp` (bashrec, fidpool,
   crit-live and the rest): a harness's `claude -p` one-shots, one typed prompt each, at most 12
