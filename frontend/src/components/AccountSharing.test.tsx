@@ -315,3 +315,38 @@ describe('Current asks before un-sharing, and says where its number came from', 
     expect(current.getAttribute('title')).not.toContain('made under')
   })
 })
+
+
+describe('one number for the signed-in account', () => {
+  it('leads with what the page lists and follows with what the app lists', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', mode: 'all', chats_visible: 191, pairs: 9, current_chats: 175,
+        current_source: 'tags', untagged: 1, listed: 489, current_listed: 107 }))
+    draw()
+    const current = await screen.findByRole('button', { name: 'Current' })
+    expect(current.getAttribute('title')).toContain(
+      "Only the signed-in account's own chats: 107 listed here; 175 in the app; 1 of unknown account")
+    expect(screen.getByRole('button', { name: 'All' }).getAttribute('title')).toContain(
+      "Every account's chats: 489 listed here; 191 in the app across 9 account directories")
+  })
+
+  it('says the app count is not known when it is not, and still leads with the page count', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', mode: 'all', current_chats: null, current_source: null,
+        listed: 489, current_listed: 107 }))
+    draw()
+    const current = await screen.findByRole('button', { name: 'Current' })
+    expect(current.getAttribute('title')).toContain(
+      "Only the signed-in account's own chats: 107 listed here; not known while sharing is on in the app")
+  })
+
+  it('keeps the older sentences when the server has no page count', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ current_chats: 12, listed: null, current_listed: null }))
+    draw()
+    const current = await screen.findByRole('button', { name: 'Current' })
+    expect(current.getAttribute('title')).toContain("Only the signed-in account's own chats: 12\n")
+    expect(screen.getByRole('button', { name: 'All' }).getAttribute('title')).toContain(
+      "Every account's chats: 187 across 2 account directories")
+  })
+})

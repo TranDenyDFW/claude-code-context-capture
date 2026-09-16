@@ -9,8 +9,8 @@ from dash import dcc, html
 
 from c4x.breakdown import latest_baseline
 from c4x.dash_compat import DataTable
-from c4x.labels import is_folderless, titled_path
-from c4x.store import cohort_sessions, overview_stats, q, tables_present, titles_for
+from c4x.labels import short_path
+from c4x.store import overview_stats, project_labels, q, tables_present
 from c4x.theme import (
     ACCENT,
     BORDER,
@@ -172,14 +172,10 @@ def project_totals_fig() -> go.Figure:
 
     totals = rows.groupby("project")["bytes"].sum().sort_values(ascending=False)
     top = list(totals.head(15).index)
-    # Titles only for the folder-less bars, and only for the fifteen actually drawn: this is a
-    # display lookup, so it must not cost a query proportional to the store.
-    _titles = {}
-    for p in top:
-        if is_folderless(p):
-            ids = cohort_sessions(f"project::{p}")
-            if ids:
-                _titles[p] = titles_for(ids).get(ids[0], {})
+    # NAMED THE WAY THE POPULATION LIST NAMES THEM, the user's rule: the folder's leaf, a
+    # one-chat folder by its chat's title, a folder-less chat by its name, the same
+    # `project_labels` the list reads, for the fifteen bars drawn and no more.
+    names = project_labels(top)
     kept = rows[rows["project"].isin(top)]
     ranked = kept.groupby("kind")["bytes"].sum().sort_values(ascending=False)
     named = list(ranked.head(KINDS).index)
@@ -208,11 +204,9 @@ def project_totals_fig() -> go.Figure:
     # nothing downstream matches on a shortened string. Only the tick text is abbreviated, and
     # automargin lets the axis size itself to what is left rather than to a hard-coded margin.
     fig.update_yaxes(autorange="reversed", tickvals=top,
-                     # NAMED when the path names nothing. A scratch workspace bar was labelled
-                     # with a generated id under a generated uuid, which identifies the bar without
-                     # telling the reader what it was. `y` keeps the full path, so the hover still
-                     # reports it exactly.
-                     ticktext=[titled_path(p, _titles.get(p, {})) for p in top],
+                     # `y` keeps the full path, so the hover still reports it exactly; only the
+                     # tick text carries the list's name.
+                     ticktext=[names.get(p, short_path(p, 1, mark="")) for p in top],
                      automargin=True)
     return fig
 

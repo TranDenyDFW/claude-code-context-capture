@@ -57,7 +57,26 @@ no tag names an account for), or the sharing backup's manifest, or the directori
 **The account a chat was made under.** The population list offers "Signed-in account's chats
 (N)", one "Account <id>" entry per account seen, and "No account known"; All sessions carries an
 `account` column; `docs/desktop-records.md` section 6 says how the tag is decided and what it
-cannot know. The Summary tab names the calls that rewrote their whole context right after an
+cannot know.
+
+**One number for the signed-in account.** The header's hover and the population list read the
+same count from one function (`store.listed_by_account`): the chats THIS PAGE lists for the
+signed-in account. The desktop app lists more (its records: on the author's machine 175 records
+against 107 listed chats, the rest being chats whose transcripts the store never held, or with no
+turns), so the hover says both: "107 listed here; 175 in the app". All says the same two ways
+round: the chats listed here, and the records in the app across the account directories.
+
+**Projects A to Z, by the name shown.** The forty projects offered are still the forty with the
+most work in them (the rule above the ranking says why); they are listed in alphabetical order
+of the name on the screen, case folded, the count suffix left out of the comparison.
+
+**The Summary chart is named the way the list is.** "Tool Bytes by Project" labels its bars with
+the same names the population list shows (`store.project_labels`: the folder's leaf, a one-chat
+folder by its chat's title, a folder-less chat by its name, two names that read the same with
+their folder appended), instead of the shortened path it used to draw. The bar's own value keeps
+the full path, so the hover still reports it. The suffix that tells two same-named folders apart
+is computed per list, so the chart's fifteen and the dropdown's forty can differ where only one
+of them holds both folders. The Summary tab names the calls that rewrote their whole context right after an
 account switch ("The cache was rewritten after an account switch"), from harvest's account log,
 and says what to do: finish a chat under the account it started with.
 

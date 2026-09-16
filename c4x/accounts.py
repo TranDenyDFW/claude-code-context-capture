@@ -386,6 +386,15 @@ def state():
             p["own"] = counts.get(p["account"], 0)
         current = counts.get(signed["account"], 0) if signed else None
         current_source = "tags"
+    # WHAT THIS PAGE LISTS, beside what the app lists: the same number the population list's
+    # "Signed-in account's chats" carries, from the one function both read. None without a store.
+    listed = current_listed = None
+    try:
+        who = store.listed_by_account()
+        listed = who["listed"]
+        current_listed = who["mine"] if signed else None
+    except Exception:  # noqa: BLE001 - no store, no frame; the hover keeps the app's numbers
+        pass
     meant = intent(linked=bool(linked))
     # THE PAIRS SHARING DOES NOT COVER YET, while sharing is meant: the ones the app created
     # since. The page says how many, and `reconcile` folds them in when Claude next closes.
@@ -402,6 +411,7 @@ def state():
         # WHERE THE CURRENT NUMBER CAME FROM: the tags, the sharing backup's manifest, or the
         # directories themselves; None when links exist and nothing can say.
         "current_source": current_source, "untagged": untagged,
+        "listed": listed, "current_listed": current_listed,
     }
 
 

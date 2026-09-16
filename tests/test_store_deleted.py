@@ -193,3 +193,60 @@ class TestTheAccountTag:
         forget_cached_rows()
         assert not [o for o in store.cohort_options() if o["value"].startswith("account::")]
         assert store.session_rows(ttl=0)["account"].isna().all()
+
+
+class TestOneNumberAndOneName:
+    """The population list's signed-in count, the header's, and the names every surface shows."""
+
+    def test_the_signed_in_count_is_the_one_function_both_surfaces_read(self, tagged_store,
+                                                                         monkeypatch):
+        from c4x import store
+        monkeypatch.setattr(store, "signed_in_account", lambda: ACCT_A)
+        who = store.listed_by_account()
+        assert who["signed_in"] == ACCT_A and who["mine"] == 1
+        assert who["listed"] == len(store.session_rows(ttl=0))
+        labels = {o["value"]: o["label"] for o in store.cohort_options()}
+        assert labels["account::signed-in"] == f"Signed-in account's chats ({who['mine']})"
+        monkeypatch.setattr(store, "signed_in_account", lambda: None)
+        assert store.listed_by_account()["mine"] is None
+
+    def test_projects_are_offered_a_to_z_by_the_name_shown(self, tmp_path, monkeypatch):
+        """Zeta does the most work, so the ranking that picks the forty puts it first; the list a
+        person reads is A to Z by the name on the screen, case folded."""
+        from c4x import store
+        path = build_store(tmp_path / "order.db", project=r"P:\Zeta", extra_project=r"P:\alpha")
+        con = sqlite3.connect(str(path))
+        for i in range(5):
+            con.execute(
+                """INSERT INTO turns (uuid,session_id,ts,model,request_id,input_tokens,
+                     cache_creation_input_tokens,cache_read_input_tokens,output_tokens,
+                     thinking_tokens,eph_1h,eph_5m,service_tier,total_resident,is_sidechain,
+                     file_path,line_no,parent_uuid)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"s0-0-z{i}", "s0-0", f"2026-08-01T01:{i:02d}:00Z", "claude-opus-5",
+                 f"req-z-{i}", 1, 2, 3, 4, 0, 0, 0, "standard", 1000, 0, r"C:\t\s0-0.jsonl",
+                 900 + i, None))
+        con.commit()
+        con.close()
+        monkeypatch.setattr(store, "DB_PATH", path)
+        forget_cached_rows()
+        options = [o for o in store.cohort_options() if o["value"].startswith("project::")]
+        names = [o["label"].rsplit(" (", 1)[0] for o in options]
+        assert names == ["alpha", "Zeta"], names
+        forget_cached_rows()
+
+    def test_the_chart_and_the_list_name_a_project_the_same_way(self, tagged_store):
+        from c4x import store
+        from c4x.tabs.summary import project_totals_fig
+        fig = project_totals_fig()
+        paths = list(fig.layout.yaxis.tickvals)
+        assert paths, "the chart drew no bars"
+        names = dict(zip(paths, fig.layout.yaxis.ticktext, strict=True))
+        assert names == store.project_labels(paths)
+        listed = {o["path"]: o["label"].rsplit(" (", 1)[0] for o in store.cohort_options()
+                  if o["value"].startswith("project::")}
+        shared = [p for p in paths if p in listed]
+        assert shared, "the chart and the list share no project"
+        for p in shared:
+            assert names[p] == listed[p], (p, names[p], listed[p])
+        assert all("..." not in n and not n.startswith("P:") for n in names.values()), names

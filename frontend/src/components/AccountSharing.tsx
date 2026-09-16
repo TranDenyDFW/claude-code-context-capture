@@ -125,16 +125,33 @@ export function AccountSharing({
   // signed-in account, and the untagged remainder is named; from the manifest or the directories
   // it is what un-sharing would hand that account back.
   const untagged = state.untagged ?? 0
+  // ONE NUMBER, SAID ONCE. The page's count leads when the server has it: it is the number the
+  // population list's "Signed-in account's chats" shows, read from the same function, so the
+  // two cannot disagree. The app's own count (its records) follows as "in the app".
+  const listedHere = typeof state.listed === 'number'
+  const appCount =
+    state.current_chats === null || state.current_chats === undefined
+      ? 'not known while sharing is on'
+      : `${state.current_chats}`
   const hover = {
-    all: `Every account's chats: ${state.chats_visible} across ${state.pairs} account directories${notes}`,
+    all:
+      (listedHere
+        ? `Every account's chats: ${state.listed} listed here; ${state.chats_visible} in the app ` +
+          `across ${state.pairs} account directories`
+        : `Every account's chats: ${state.chats_visible} across ${state.pairs} account directories`) +
+      notes,
     current:
-      (state.current_chats === null || state.current_chats === undefined
-        ? "Only the signed-in account's own chats: not known while sharing is on"
-        : state.current_source === 'tags'
-          ? `Only the signed-in account's own chats: ${state.current_chats}, by the account each ` +
-            `chat was made under` +
-            (untagged ? `; ${untagged} of unknown account` : '')
-          : `Only the signed-in account's own chats: ${state.current_chats}`) + notes,
+      (typeof state.current_listed === 'number'
+        ? `Only the signed-in account's own chats: ${state.current_listed} listed here; ` +
+          `${appCount} in the app` +
+          (state.current_source === 'tags' && untagged ? `; ${untagged} of unknown account` : '')
+        : state.current_chats === null || state.current_chats === undefined
+          ? "Only the signed-in account's own chats: not known while sharing is on"
+          : state.current_source === 'tags'
+            ? `Only the signed-in account's own chats: ${state.current_chats}, by the account each ` +
+              `chat was made under` +
+              (untagged ? `; ${untagged} of unknown account` : '')
+            : `Only the signed-in account's own chats: ${state.current_chats}`) + notes,
   }
 
   return (

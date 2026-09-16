@@ -598,6 +598,15 @@ class TestLinksTheKernelResolvesElsewhere:
 class TestTheTags:
     """`current_chats` and each pair's `own` from harvest's owner tags, once any exist."""
 
+    @pytest.fixture(autouse=True)
+    def _fresh_frame(self):
+        # THE 45 SECOND FRAME CACHE outlives a test: a frame built on one test's store answered
+        # the next test's "no store" as six rows. Forgotten before and after each test here.
+        from tests.test_projects import forget_cached_rows
+        forget_cached_rows()
+        yield
+        forget_cached_rows()
+
     def _tagged_store(self, tmp_path, rows):
         from tests.test_projects import build_store, forget_cached_rows
         path = build_store(tmp_path / "data" / "context.db")
@@ -642,3 +651,23 @@ class TestTheTags:
         state = accounts.state()
         assert state["current_source"] == "directory" and state["untagged"] == 2
         assert state["current_chats"] == 3
+
+    def test_the_header_carries_what_the_page_lists_beside_what_the_app_lists(self, machine,
+                                                                            tmp_path, monkeypatch):
+        """Three live records tagged A, two of them chats this page lists: the app shows 3, the
+        page 2, and the header carries both, the page's from the same function the population
+        list reads."""
+        from c4x import store
+        self._tagged_store(tmp_path, [(A, None), (A, None), (B, None), (None, None),
+                                      (A, "2026-09-02T00:00:00Z"), (A, None)])
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        state = accounts.state()
+        assert state["current_chats"] == 3, "records the app lists for A"
+        assert state["current_listed"] == 2, "chats this page lists for A"
+        assert state["current_listed"] == store.listed_by_account()["mine"]
+        assert state["listed"] == len(store.session_rows(ttl=0))
+
+    def test_without_a_store_the_page_numbers_are_none(self, machine, monkeypatch):
+        signed_in_as(machine, monkeypatch, A, ORG_A)
+        state = accounts.state()
+        assert state["listed"] is None and state["current_listed"] is None
