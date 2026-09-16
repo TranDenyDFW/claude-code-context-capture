@@ -90,26 +90,116 @@ describe('AdoptSessions', () => {
     expect(stateCall).toHaveBeenCalledTimes(2)
   })
 
-  it('opens as a drawer at the end of the document, with focus in and back out again', async () => {
+  it('opens as a window over the page, with focus in the search box and back on the button', async () => {
     vi.spyOn(api.adopt, 'state').mockResolvedValue(state())
     const { container } = render(<AdoptSessions writesEnabled />)
     const trigger = await screen.findByRole('button', { name: ADOPT })
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(trigger)
-    const drawer = screen.getByRole('dialog', { name: 'Adopted Chats' })
+    const dialog = screen.getByRole('dialog', { name: 'Adopted Chats' })
     // Not inside the header's subtree: a fixed element there is clipped to the header's box.
-    expect(container.contains(drawer)).toBe(false)
-    expect(drawer.parentElement).toBe(document.body)
-    expect(document.activeElement).toBe(drawer)
+    expect(container.contains(dialog)).toBe(false)
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    // The page is dimmed behind it: a backdrop at the end of the document, the project
+    // dialog's way, the user's choice over the side drawer this used to be.
+    const backdrop = dialog.parentElement as HTMLElement
+    expect(backdrop.getAttribute('role')).toBe('presentation')
+    expect(backdrop.parentElement).toBe(document.body)
+    const search = screen.getByRole('searchbox', { name: 'Search folders and chats' })
+    expect(document.activeElement).toBe(search)
     expect(trigger.getAttribute('aria-expanded')).toBe('true')
-    expect(trigger.getAttribute('aria-controls')).toBe(drawer.id)
-    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(trigger.getAttribute('aria-controls')).toBe(dialog.id)
+    fireEvent.keyDown(search, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(document.activeElement).toBe(trigger)
     fireEvent.click(trigger)
     fireEvent.click(screen.getByRole('button', { name: 'Close' }))
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('lays the folders out as a table, and narrows it as you type by folder, path and chat title', async () => {
+    const chat = (id: string, title: string) => ({
+      session_id: id, title, title_source: 'auto' as const, first_ts: '2026-08-01T00:00:00Z',
+      last_ts: '2026-08-03T12:01:00Z', turns: 7, model: 'claude-opus-5', cli: false, cwd: 'x',
+    })
+    vi.spyOn(api.adopt, 'state').mockResolvedValue(state({ groups: [
+      { cwd: 'P:\\Gamma', project: 'Gamma', count: 2, newest: '2026-08-03T12:01:00Z',
+        sessions: [chat('g1', 'Wire the hooks'), chat('g2', 'Second thoughts')] },
+      { cwd: 'P:\\Alpha', project: 'Alpha', count: 1, newest: '2026-08-01T00:04:00Z',
+        sessions: [chat('a1', 'Fix the exporter')] },
+      { cwd: 'D:\\Work\\Beta', project: 'Beta', count: 1, newest: '2026-07-01T00:04:00Z', sessions: [] },
+    ] }))
+    render(<AdoptSessions writesEnabled />)
+    await opened()
+    const offered = () =>
+      screen.getAllByRole('checkbox', { name: /^Adopt / }).map((b) => b.getAttribute('aria-label'))
+    expect(screen.getAllByRole('columnheader').map((h) => h.textContent))
+      .toEqual(['Adopt', 'Folder', 'Chats', 'Newest', 'Path'])
+    expect(offered()).toEqual(['Adopt Gamma', 'Adopt Alpha', 'Adopt Beta'])
+    // A folder holding one chat carries that chat's title, the way the population list names it.
+    expect(screen.getByText('Fix the exporter')).not.toBeNull()
+    expect(screen.queryByText('Second thoughts')).toBeNull()
+    const search = screen.getByRole('searchbox', { name: 'Search folders and chats' })
+    fireEvent.change(search, { target: { value: 'gam' } })
+    expect(offered()).toEqual(['Adopt Gamma'])
+    expect(screen.getByText('1 of 3 folders match')).not.toBeNull()
+    fireEvent.change(search, { target: { value: 'd:\\work' } })
+    expect(offered()).toEqual(['Adopt Beta'])
+    // A chat title matched: the folder opens so the row shows why it is there.
+    fireEvent.change(search, { target: { value: 'second' } })
+    expect(offered()).toEqual(['Adopt Gamma'])
+    expect(screen.getByText('Second thoughts')).not.toBeNull()
+    fireEvent.change(search, { target: { value: 'zzz' } })
+    expect(screen.queryAllByRole('checkbox', { name: /^Adopt / })).toEqual([])
+    expect(screen.getByText('No folder matches that.')).not.toBeNull()
+    expect(screen.getByText('0 of 3 folders match')).not.toBeNull()
+    // Escape clears the search first; only an empty search lets it close the window.
+    fireEvent.keyDown(search, { key: 'Escape' })
+    expect((search as HTMLInputElement).value).toBe('')
+    expect(screen.getByRole('dialog', { name: 'Adopted Chats' })).not.toBeNull()
+    expect(offered()).toEqual(['Adopt Gamma', 'Adopt Alpha', 'Adopt Beta'])
+    fireEvent.keyDown(search, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('opens a folder to its chats on request, and Select all takes the folders shown', async () => {
+    const chat = (id: string, title: string) => ({
+      session_id: id, title, title_source: 'auto' as const, first_ts: '2026-08-01T00:00:00Z',
+      last_ts: '2026-08-03T12:01:00Z', turns: 7, model: 'claude-opus-5', cli: true, cwd: 'x',
+    })
+    vi.spyOn(api.adopt, 'state').mockResolvedValue(state({ groups: [
+      { cwd: 'P:\\Gamma', project: 'Gamma', count: 2, newest: '2026-08-03T12:01:00Z',
+        sessions: [chat('g1', 'Wire the hooks'), chat('g2', 'Second thoughts')] },
+      { cwd: 'P:\\Alpha', project: 'Alpha', count: 1, newest: '2026-08-01T00:04:00Z', sessions: [] },
+    ] }))
+    const run = vi.spyOn(api.adopt, 'run').mockResolvedValue(report())
+    render(<AdoptSessions writesEnabled />)
+    await opened()
+    fireEvent.click(screen.getByRole('button', { name: 'Show the chats in Gamma' }))
+    expect(screen.getByText('Wire the hooks')).not.toBeNull()
+    expect(screen.getAllByText('7 turns, 2026-08-03, CLI')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the chats in Gamma' }))
+    expect(screen.queryByText('Wire the hooks')).toBeNull()
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search folders and chats' }),
+                     { target: { value: 'alpha' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Select all' }))
+    fireEvent.click(screen.getByRole('button', { name: /^Adopt 1 chat$/ }))
+    await waitFor(() =>
+      expect(run).toHaveBeenCalledWith({ cwds: ['P:\\Alpha'], include_cli: false, dry_run: false }))
+  })
+
+  it('shows a Runs column only when the server sends one', async () => {
+    const stateCall = vi.spyOn(api.adopt, 'state').mockResolvedValue(state({ groups: [
+      { cwd: 'P:\\Gamma', project: 'Gamma', count: 1, newest: '2026-08-03T12:01:00Z', sessions: [], runs: 870 },
+      { cwd: 'P:\\Alpha', project: 'Alpha', count: 1, newest: '2026-08-01T00:04:00Z', sessions: [] },
+    ] }))
+    render(<AdoptSessions writesEnabled />)
+    await opened()
+    expect(screen.getAllByRole('columnheader').map((h) => h.textContent))
+      .toEqual(['Adopt', 'Folder', 'Chats', 'Newest', 'Runs', 'Path'])
+    expect(screen.getByText('870')).not.toBeNull()
+    expect(stateCall).toHaveBeenCalled()
   })
 
   it('offers to take back the records a first build wrote for review runs, then asks for a restart', async () => {

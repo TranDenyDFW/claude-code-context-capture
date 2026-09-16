@@ -11,6 +11,21 @@ removed and nothing here said so.
 
 ### Added
 
+- **The Adopt window: a table over the page, with a search box.** The Adopt button opened a
+  drawer down the right edge, a stacked list of folders; the user's words: "looks so stuffy on
+  the side like that". It now opens a window over the page the way the Project button does (the
+  page dimmed behind it, Escape or the backdrop to close, focus into the search box and back to
+  the button), and the folders are a table: Adopt, Folder (a one-chat folder carries its chat's
+  title), Chats, Newest, Path, and Runs when the server sends it. The search box narrows the
+  table as you type by folder name, path and chat title, every word in any order (the palette's
+  rule, `matches()`), says "N of M folders match", and opens a folder whose chat title matched so
+  the row shows why it is there; Escape clears the search before it closes the window; Select
+  all takes the folders shown. The chrome is one component, `frontend/src/components/Dialog.tsx`,
+  lifted from the project dialog: Escape scoped by DOM containment (a window opened from inside
+  another one closes alone), Tab kept inside the panel, the backdrop click ignored while a write
+  is under way. Every handler, API call and sentence of the drawer is kept. Tests:
+  `Dialog.test.tsx` (4), `AdoptSessions.test.tsx` (17, four new), the a11y gate over the opened
+  window.
 - **The server's children open no console window.** Once the hook started the server as
   `pythonw.exe`, every console program it ran got a console of its own from Windows, a box that
   flashed on every page load: `tasklist` behind `/api/adopt` and `/api/accounts`, `node` behind

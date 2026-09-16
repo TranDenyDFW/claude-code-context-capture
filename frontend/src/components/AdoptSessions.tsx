@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '@/api'
-import type { AdoptReport, AdoptState, RetitleReport, SweepState, UnadoptReport } from '@/api'
-import { Portal } from './Portal'
+import type { AdoptGroup, AdoptReport, AdoptState, RetitleReport, SweepState, UnadoptReport } from '@/api'
+import { Dialog } from './Dialog'
+import { matches } from './Palette'
 
 /**
  * Give Claude a record for the chats it has no record of.
@@ -17,11 +18,13 @@ import { Portal } from './Portal'
  * reinstall orphan look the same to the rule, so the number of markers is said out loud and the
  * choice is per folder. Claude may stay open: these are new files, read when it next starts.
  *
- * A BUTTON IN THE HEADER, A DRAWER FOR THE REST. The header keeps one button saying what there is
- * to do; everything else opens beside the page, in a non-modal dialog like the Inspector (Escape,
- * a close button, focus in on open and back on the button on close; no backdrop and no Tab trap,
- * for the reasons in `Inspector.tsx`). Rendered through a portal, because the header's backdrop
- * filter would clip a fixed drawer to the header's own box (see `Portal.tsx`).
+ * A BUTTON IN THE HEADER, A WINDOW FOR THE REST. The header keeps one button saying what there
+ * is to do; everything else opens in a window over the page (`Dialog.tsx`, the project dialog's
+ * chrome: the page dimmed behind it, Escape or the backdrop to close, focus in and back). The
+ * user's choice: the side drawer this used to be "looks so stuffy on the side". The folders are
+ * a TABLE, one row each, with a search box that narrows it by folder name, path and chat title
+ * as you type; a folder whose chat title matched opens to show its chats, so the row says why
+ * it is there.
  */
 function Problem({ error }: { error: unknown }) {
   const detail = error instanceof ApiError ? error.detail : undefined
@@ -40,6 +43,13 @@ function Problem({ error }: { error: unknown }) {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
+/** What the search box reads: the folder's name, its full path, and every chat title in it. */
+const haystack = (g: AdoptGroup) =>
+  [g.project, g.cwd, ...g.sessions.map((s) => s.title)].join(' ')
+
+const cell = 'px-2 py-1.5 align-top'
+const head = 'border-b border-edge px-2 py-2 text-left text-xs font-medium text-ink-faint'
+
 export function AdoptSessions({
   writesEnabled,
   onChanged,
@@ -57,8 +67,10 @@ export function AdoptSessions({
   const [named, setNamed] = useState<RetitleReport | null>(null)
   const [unadopted, setUnadopted] = useState<UnadoptReport | null>(null)
   const [sweep, setSweep] = useState<SweepState | null>(null)
+  const [query, setQuery] = useState('')
+  const [expanded, setExpanded] = useState<string[]>([])
   const trigger = useRef<HTMLButtonElement>(null)
-  const panel = useRef<HTMLDivElement>(null)
+  const search = useRef<HTMLInputElement>(null)
 
   const refresh = useCallback(
     (cli: boolean) =>
@@ -80,7 +92,7 @@ export function AdoptSessions({
     }
   }, [includeCli])
 
-  // What the server did at startup about review runs: one line in the drawer, read once. A
+  // What the server did at startup about review runs: one line in the window, read once. A
   // server that cannot say (an older one, a failed read) shows no line rather than a wrong one.
   useEffect(() => {
     let live = true
@@ -92,21 +104,6 @@ export function AdoptSessions({
       live = false
     }
   }, [])
-
-  // Focus goes into the drawer when it opens and back to the button when it closes, which is what
-  // opening and closing a dialog mean. Escape only: a non-modal dialog must not swallow Tab.
-  useEffect(() => {
-    if (!open) return
-    panel.current?.focus()
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      trigger.current?.focus()
-    }
-  }, [open])
 
   // NOTHING TO OFFER, NOTHING SHOWN. A machine whose every chat has a record, or one with no
   // account to file a record under, gets no control at all.
@@ -124,8 +121,29 @@ export function AdoptSessions({
     .filter((g) => chosen.includes(g.cwd))
     .reduce((n, g) => n + g.count, 0)
 
+  // THE SEARCH. Every term must appear somewhere in the folder's name, path or chat titles (the
+  // palette's rule, so "secdb 08-31" works here too). A folder that is in the table only because
+  // a chat title matched is opened, so the row shows the title that put it there.
+  const needle = query.trim()
+  const shown = needle ? state.groups.filter((g) => matches(haystack(g), needle)) : state.groups
+  const titleHit = (g: AdoptGroup) =>
+    needle !== '' && !matches(`${g.project} ${g.cwd}`, needle)
+      && g.sessions.some((s) => matches(s.title, needle))
+  const isOpen = (g: AdoptGroup) => expanded.includes(g.cwd) || titleHit(g)
+  const hasRuns = state.groups.some((g) => typeof g.runs === 'number')
+  const columns = hasRuns ? 6 : 5
+
   function toggle(cwd: string) {
     setChosen((now) => (now.includes(cwd) ? now.filter((c) => c !== cwd) : [...now, cwd]))
+  }
+
+  function toggleOpen(cwd: string) {
+    setExpanded((now) => (now.includes(cwd) ? now.filter((c) => c !== cwd) : [...now, cwd]))
+  }
+
+  function close() {
+    setOpen(false)
+    setQuery('')
   }
 
   // Records a first build wrote without a name: the app shows each as "General coding session",
@@ -186,7 +204,7 @@ export function AdoptSessions({
 
   // THE BUTTON SAYS "Adopt (N)" AND THE HOVER SAYS WHY, the user's choice: the sentence that was
   // the button's text ran to 60 characters and moved the whole header row. N is the number of
-  // chats the drawer offers; what else the drawer can do is the hover.
+  // chats the window offers; what else the window can do is the hover.
   const hint =
     total > 0
       ? `${plural(total, 'chat')} on this machine that Claude has no record of`
@@ -196,47 +214,87 @@ export function AdoptSessions({
           ? `${plural(reviewRecords, 'review run')} still in Claude`
           : 'Adopted Chats'
 
+  const link = 'text-ink-dim underline hover:text-ink'
+  const button =
+    'rounded-md border border-edge bg-page px-2.5 py-1.5 text-sm text-ink disabled:opacity-50'
+
   return (
     <div className="ml-1 flex items-center gap-2 border-l border-edge pl-3">
       <button
         ref={trigger}
         type="button"
         aria-expanded={open}
-        aria-controls="adopt-drawer"
+        aria-controls="adopt-window"
         title={hint}
-        onClick={() => setOpen((now) => !now)}
+        onClick={() => (open ? close() : setOpen(true))}
         className="rounded-md border border-edge bg-page px-2.5 py-1.5 text-sm text-ink-dim hover:text-ink"
       >
         Adopt ({total})
       </button>
       {open ? (
-        <Portal>
-          <div
-            ref={panel}
-            id="adopt-drawer"
-            role="dialog"
-            aria-label="Adopted Chats"
-            tabIndex={-1}
-            className="fixed inset-y-0 right-0 z-30 flex w-full max-w-xl flex-col gap-3 overflow-y-auto
-                       border-l border-edge bg-panel p-4 shadow-panel outline-none"
-          >
-            <div className="flex items-start justify-between gap-3">
+        <Dialog
+          id="adopt-window"
+          label="Adopted Chats"
+          width="max-w-[60rem]"
+          onClose={close}
+          busy={busy}
+          opener={trigger}
+          initialFocus={search}
+          header={
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="text-md font-semibold text-ink">Adopted Chats</h2>
-                <p className="text-2xs text-ink-faint">
+                <p className="mt-0.5 text-xs text-ink-faint">
                   Records for the chats Claude has no record of, and names for the ones c4x wrote.
                 </p>
               </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={search}
+                  type="search"
+                  value={query}
+                  aria-label="Search folders and chats"
+                  placeholder="Search folders, paths and chat titles"
+                  onChange={(event) => setQuery(event.target.value)}
+                  // Escape clears the search first; the window closes only when there is
+                  // nothing to clear (the key then reaches the window's own handler).
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape' && query !== '') {
+                      event.stopPropagation()
+                      setQuery('')
+                    }
+                  }}
+                  className="w-64 rounded-md border border-edge bg-page px-2.5 py-1.5 text-sm text-ink
+                             outline-none placeholder:text-ink-faint focus:border-edge-bright"
+                />
+                <span className="text-xs text-ink-faint" aria-live="polite">
+                  {needle ? `${shown.length} of ${plural(state.groups.length, 'folder')} match` : ''}
+                </span>
+              </div>
+            </div>
+          }
+          footer={
+            <>
+              {state.other_account > 0 ? (
+                <span className="mr-auto text-xs text-ink-faint">
+                  {plural(state.other_account, 'chat')} belong to another account and are left alone
+                </span>
+              ) : null}
               <button
                 type="button"
-                onClick={() => setOpen(false)}
-                aria-label="Close"
-                title="Close (Esc)"
-                className="rounded border border-edge px-2 py-1 text-xs text-ink-dim hover:text-ink"
+                disabled={!writesEnabled || busy || selected === 0}
+                onClick={() => void adoptNow()}
+                className={button}
               >
-                ×
+                Adopt {plural(selected, 'chat')}
               </button>
-            </div>
+              <button type="button" onClick={close} className={`${button} text-ink-dim hover:text-ink`}>
+                Close
+              </button>
+            </>
+          }
+        >
+          <div className="flex flex-col gap-3">
             {unnamed > 0 ? (
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <span className="text-ink-dim">
@@ -319,16 +377,12 @@ export function AdoptSessions({
             <div className="flex flex-wrap items-center gap-3 text-xs">
               <button
                 type="button"
-                className="text-ink-dim underline hover:text-ink"
-                onClick={() => setChosen(state.groups.map((g) => g.cwd))}
+                className={link}
+                onClick={() => setChosen(shown.map((g) => g.cwd))}
               >
                 Select all
               </button>
-              <button
-                type="button"
-                className="text-ink-dim underline hover:text-ink"
-                onClick={() => setChosen([])}
-              >
+              <button type="button" className={link} onClick={() => setChosen([])}>
                 None
               </button>
               <label className="flex items-center gap-1 text-ink-dim">
@@ -340,41 +394,6 @@ export function AdoptSessions({
                 Include CLI and SDK sessions ({state.cli_candidates})
               </label>
             </div>
-            <ul className="flex flex-col gap-1">
-              {state.groups.map((g) => (
-                <li key={g.cwd}>
-                  <label className="flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={chosen.includes(g.cwd)}
-                      onChange={() => toggle(g.cwd)}
-                    />
-                    <span className="text-ink">{g.project}</span>
-                    <span className="text-xs text-ink-faint">
-                      {plural(g.count, 'chat')}, newest {g.newest.slice(0, 10)}
-                    </span>
-                    <span className="truncate text-xs text-ink-faint" title={g.cwd}>
-                      {g.cwd}
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                disabled={!writesEnabled || busy || selected === 0}
-                onClick={() => void adoptNow()}
-                className="rounded-md border border-edge bg-page px-2.5 py-1.5 text-sm text-ink disabled:opacity-50"
-              >
-                Adopt {plural(selected, 'chat')}
-              </button>
-              {state.other_account > 0 ? (
-                <span className="text-xs text-ink-faint">
-                  {plural(state.other_account, 'chat')} belong to another account and are left alone
-                </span>
-              ) : null}
-            </div>
             {report && report.restart_required ? (
               <p className="rounded-md border border-edge bg-page px-3 py-2 text-sm text-ink-dim">
                 Restart Claude to see the {plural(report.written.length, 'chat')} adopted. It reads
@@ -383,8 +402,113 @@ export function AdoptSessions({
             ) : null}
             {report?.note ? <p className="text-xs text-ink-faint">{report.note}</p> : null}
             {error ? <Problem error={error} /> : null}
+            {state.groups.length > 0 ? (
+              <table className="w-full border-collapse text-sm">
+                <thead className="sticky top-0 z-10 bg-panel">
+                  <tr>
+                    <th scope="col" className={`${head} w-12`}>
+                      Adopt
+                    </th>
+                    <th scope="col" className={head}>
+                      Folder
+                    </th>
+                    <th scope="col" className={`${head} text-right`}>
+                      Chats
+                    </th>
+                    <th scope="col" className={head}>
+                      Newest
+                    </th>
+                    {hasRuns ? (
+                      <th scope="col" className={`${head} text-right`}>
+                        Runs
+                      </th>
+                    ) : null}
+                    <th scope="col" className={head}>
+                      Path
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shown.map((g) => (
+                    <Fragment key={g.cwd}>
+                      <tr className="border-b border-edge/60 hover:bg-panel-raised/40">
+                        <td className={`${cell} text-center`}>
+                          <input
+                            type="checkbox"
+                            aria-label={`Adopt ${g.project}`}
+                            checked={chosen.includes(g.cwd)}
+                            onChange={() => toggle(g.cwd)}
+                          />
+                        </td>
+                        <td className={cell}>
+                          <div className="flex items-center gap-1.5">
+                            {g.sessions.length > 0 ? (
+                              <button
+                                type="button"
+                                aria-expanded={isOpen(g)}
+                                aria-label={`${isOpen(g) ? 'Hide' : 'Show'} the chats in ${g.project}`}
+                                onClick={() => toggleOpen(g.cwd)}
+                                className="w-4 text-ink-faint hover:text-ink"
+                              >
+                                {isOpen(g) ? '▾' : '▸'}
+                              </button>
+                            ) : (
+                              <span className="w-4" />
+                            )}
+                            <span className="text-ink">{g.project}</span>
+                          </div>
+                          {g.count === 1 && g.sessions[0]?.title ? (
+                            <div className="pl-[1.375rem] text-xs text-ink-faint">
+                              {g.sessions[0].title}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td className={`${cell} text-right tabular-nums text-ink-dim`}>{g.count}</td>
+                        <td className={`${cell} whitespace-nowrap text-ink-dim`}>{g.newest.slice(0, 10)}</td>
+                        {hasRuns ? (
+                          <td className={`${cell} text-right tabular-nums text-ink-dim`}>
+                            {g.runs ?? 0}
+                          </td>
+                        ) : null}
+                        <td
+                          className={`${cell} max-w-[22rem] truncate font-mono text-xs text-ink-faint`}
+                          title={g.cwd}
+                        >
+                          {g.cwd}
+                        </td>
+                      </tr>
+                      {isOpen(g) ? (
+                        <tr className="border-b border-edge/60">
+                          <td />
+                          <td colSpan={columns - 1} className="px-2 pb-2 pt-0">
+                            <ul className="flex flex-col gap-0.5 pl-[1.375rem] text-xs">
+                              {g.sessions.map((s) => (
+                                <li key={s.session_id} className="flex flex-wrap gap-x-3">
+                                  <span className="text-ink">{s.title}</span>
+                                  <span className="text-ink-faint">
+                                    {plural(s.turns, 'turn')}, {s.last_ts.slice(0, 10)}
+                                    {s.cli ? ', CLI' : ''}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  ))}
+                  {shown.length === 0 ? (
+                    <tr>
+                      <td colSpan={columns} className="px-2 py-4 text-center text-sm text-ink-dim">
+                        No folder matches that.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            ) : null}
           </div>
-        </Portal>
+        </Dialog>
       ) : null}
     </div>
   )

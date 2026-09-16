@@ -82,13 +82,20 @@ and says what to do: finish a chat under the account it started with.
 
 ## Adopt, and review runs
 
-After Restart C4X, the **Adopt (N)** button (the hover says what N is) opens a drawer listing the
-chats on this machine that the desktop app has no record of, grouped by folder. A reinstall leaves every transcript and
-none of the records, so the app shows a cloud list pointing at a device that no longer exists;
-ticking a folder writes the records into the signed-in account's directory and Claude lists the
-chats after a restart. Nothing is preselected: a chat you deleted in the app looks the same to
-this rule as one a reinstall orphaned, and the page says how many of those the app has deleted.
-The same drawer names the records c4x wrote that carry no name, after the store's name for each.
+After Restart C4X, the **Adopt (N)** button (the hover says what N is) opens a window over the
+page (the page dimmed behind it, the way the Project dialog opens; Escape or the backdrop closes
+it) listing the chats on this machine that the desktop app has no record of, as a table with one
+row per folder: the folder (a folder holding one chat shows that chat's title under it), how many
+chats, the newest, and the path. A search box at the top narrows the table as you type, by folder
+name, path or chat title (every word must appear somewhere, in any order), says how many folders
+match, and a folder that is in the table because a chat title matched opens to show its chats;
+the arrow beside a folder opens it by hand. Escape clears the search first and closes the window
+second. Select all takes the folders shown. A reinstall leaves every transcript and none of the
+records, so the app shows a cloud list pointing at a device that no longer exists; ticking a
+folder writes the records into the signed-in account's directory and Claude lists the chats after
+a restart. Nothing is preselected: a chat you deleted in the app looks the same to this rule as
+one a reinstall orphaned, and the page says how many of those the app has deleted. The same
+window names the records c4x wrote that carry no name, after the store's name for each.
 A review run (a hook's `claude -p` that read another chat) is never offered: harvest ties it to
 the chat it read by quotation (`desktop-records.md` §7), it is listed nowhere on its own,
 the chat's page lists it with its verdict and the prompt it followed, and its tokens count toward
