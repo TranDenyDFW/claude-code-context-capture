@@ -95,7 +95,12 @@ records, so the app shows a cloud list pointing at a device that no longer exist
 folder writes the records into the signed-in account's directory and Claude lists the chats after
 a restart. Nothing is preselected: a chat you deleted in the app looks the same to this rule as
 one a reinstall orphaned, and the page says how many of those the app has deleted. The same
-window names the records c4x wrote that carry no name, after the store's name for each.
+window names the records c4x wrote that carry no name, after the store's name for each. A
+headless child run (a harness's `claude -p` one-shot a chat's shell command spawned, or a batch of
+them with no chat behind it) is never offered: it folds into the chat that spawned it or under
+the folder above it, the window's Runs column says how many each folder carries, a line says how
+many are folded where, and the records an earlier build wrote for runs are taken back with the
+review records (`docs/desktop-records.md` section 7 has the rule).
 A review run (a hook's `claude -p` that read another chat) is never offered: harvest ties it to
 the chat it read by quotation (`desktop-records.md` §7), it is listed nowhere on its own,
 the chat's page lists it with its verdict and the prompt it followed, and its tokens count toward

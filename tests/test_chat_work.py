@@ -265,7 +265,7 @@ class TestAStoreHarvestedBeforeThisExisted:
         """The Python package never creates a table, so an older store simply has none of these."""
         con = sqlite3.connect(str(work_store))
         for table in ("plans", "agent_runs", "workflow_runs", "task_events", "changes",
-                      "review_links"):
+                      "review_links", "run_links"):
             con.execute(f"DROP TABLE {table}")
         con.commit()
         con.close()

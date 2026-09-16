@@ -627,6 +627,18 @@ export interface AdoptState {
   review_runs: number
   /** Records c4x wrote for review runs that are still on disk; the drawer offers to take them back. */
   review_records: number
+  /**
+   * Headless child runs (a harness's `claude -p` one-shots) the store knows: folded under the
+   * chats that spawned them (`runs_placed`), under the project above a batch (`runs_batched`),
+   * or placed nowhere (`runs_unplaced`); never offered. `run_records` counts the records an
+   * earlier build wrote for any of them, taken back with the review records. Absent from a
+   * server that does not derive them.
+   */
+  runs?: number
+  runs_placed?: number
+  runs_batched?: number
+  runs_unplaced?: number
+  run_records?: number
   /** Chats deleted in the desktop app whose transcript is still here: hidden, never offered. */
   deleted_in_app?: number
   app_running: boolean
@@ -643,8 +655,13 @@ export interface RetitleReport {
 
 /** What `POST /api/adopt/unadopt-reviews` answers: the records taken back, and their chats. */
 export interface UnadoptReport {
-  /** `reviewed` is null for a run the store knows is a review but cannot place. */
-  removed: { session_id: string; path: string; reviewed: string | null }[]
+  /**
+   * `reviewed` is null for a run the store knows is a review but cannot place, and for a child
+   * run; `kind` says which (absent from an older server, which took back reviews only), and
+   * `parent` is the chat that spawned a child run, null for a batch.
+   */
+  removed: { session_id: string; path: string; reviewed: string | null; kind?: 'review' | 'run';
+             parent?: string | null }[]
   missing: number
   kept: number
   restart_required: boolean
@@ -834,6 +851,28 @@ export interface ChangeDetail {
   outcome: string | null
   denial_kind: string | null
 }
+/**
+ * One headless child run of the chat: a one-shot `claude -p` its shell command spawned (a
+ * harness, a script), tied to it by harvest's `run_links` and listed nowhere on its own. `how`
+ * is the evidence that tied it (prompt, cwd, quoted, under); `leaf` the last segment of the
+ * folder it worked in, which is what a harness names its cases by.
+ */
+export interface ChatRun {
+  session_id: string
+  ts: string | null
+  how: 'prompt' | 'cwd' | 'quoted' | 'under' | string
+  hits: number
+  call_id: string | null
+  cwd: string | null
+  leaf: string
+  prompt: string | null
+  calls: number
+  input_tokens: number | null
+  cache_read: number | null
+  cache_creation: number | null
+  output_tokens: number | null
+  cost_usd: number | null
+}
 export interface ChatWork {
   session: string
   chat: string[]
@@ -852,6 +891,9 @@ export interface ChatWork {
   changes_total: number
   reviews: ChatReview[]
   reviews_total: number
+  /** Absent from a server that does not derive child runs. */
+  runs?: ChatRun[]
+  runs_total?: number
 }
 
 export const api = {

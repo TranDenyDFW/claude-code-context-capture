@@ -214,9 +214,15 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   -- Deliberately not translated: permission-rule covers a settings deny rule AND a hook that
   -- blocked the call, the transcript records the same value for both, so any split would be ours
   -- rather than the transcript.
-  denial_kind TEXT
+  denial_kind TEXT,
+  -- WHEN THE RESULT CAME BACK: the timestamp of the record carrying the tool_result block, NULL
+  -- until it is seen (and on a row from before the column: --backfill-tool-outcomes fills it).
+  -- A call's span, from its own ts to this, is what ties a headless child run to the shell call
+  -- that spawned it (run_links below).
+  result_ts TEXT
 );
 CREATE INDEX IF NOT EXISTS tool_calls_session ON tool_calls (session_id);
+CREATE INDEX IF NOT EXISTS tool_calls_ts ON tool_calls (ts);
 CREATE INDEX IF NOT EXISTS tool_calls_target ON tool_calls (target);
 CREATE INDEX IF NOT EXISTS tool_calls_name ON tool_calls (tool_name);
 -- THE PLAN, WHOLE. An ExitPlanMode call carries the entire proposal in its input, and until now
@@ -429,6 +435,54 @@ CREATE TABLE IF NOT EXISTS review_misses (
   pool_key TEXT NOT NULL,
   checked_at TEXT NOT NULL
 );
+-- HEADLESS CHILD RUNS: which one-shot sessions a chat's shell command spawned, and which are a
+-- harness's batch with no chat behind them. Measured on the author's store, 2026-09-16: three
+-- children of one chat, each begun 2.9 s after a Bash or PowerShell call of the parent whose
+-- input carried the child's one typed prompt, whose result came back 0.9 s after the child's last
+-- record and quoted the child's 72 character reply (one child in a subfolder, one two levels
+-- down after a Set-Location, one in the parent's own cwd); and 888 sessions under one project's
+-- tmp folder (bashrec, fidpool, fid2, crit-live, fidelity, fid), one typed prompt each, at most
+-- 12 messages, no shell call anywhere spawned them, the one session in the folder above them has
+-- no tool use at all. The Adopt page offered 870 of them as one-chat folders.
+-- head_id is the parent chat for a child a call spawned (how: prompt, the JSON-escaped head of
+-- the child's prompt occurs in the call's input; cwd, the input names the child's cwd at a path
+-- boundary and that cwd is strictly under the parent's, since a child in the parent's own
+-- directory is named by every cd the parent ever ran, which tied 78 SDK one-shots to the wrong
+-- call on the author's store; quoted, the child's cwd is the parent's or under it and a reply
+-- line of 40 ASCII characters or more occurs in the parent's tool results inside the call's
+-- span; under, strict containment and the span alone) and NULL for a BATCH: at least three
+-- other one-shots sharing the cwd's parent or grandparent directory began within ten minutes
+-- (measured on the author's store: the parent level alone batches 805 of the 808, the
+-- grandparent the 12 nested one level deeper; a person's desktop one-shots reach at most one
+-- sibling within an hour; none of the 137 misses batch at either level). project is the cwd
+-- the run folds under: the parent's for a child, else the nearest directory at or above the
+-- run's cwd that is the cwd of a session which is not itself a run (a workflow's agents run in
+-- the chat's own directory), NULL when there is none. Every reader folds a
+-- run the way it folds a review run: out of the lists, into the chat's numbers under the subagent
+-- scope, and a batch into its project's totals. call_id is the spawning call; hits counts the
+-- tiers that agreed (a batch: its siblings). A linked run whose transcript grows a second typed
+-- prompt is unlinked on the next pass that touches it: the guard for a person's chat opened in a
+-- subfolder while a parent's command ran. Derived after every harvest pass for the directories
+-- it touched (the span needs tool_calls.result_ts, above) and by --backfill-runs. run_misses
+-- remembers a one-shot that tied to nothing with the parents and siblings that were its pool.
+CREATE TABLE IF NOT EXISTS run_links (
+  session_id TEXT PRIMARY KEY,
+  head_id TEXT,
+  project TEXT,
+  how TEXT NOT NULL,
+  call_id TEXT,
+  hits INTEGER NOT NULL,
+  method TEXT NOT NULL,
+  linked_at TEXT NOT NULL,
+  CHECK (head_id IS NULL OR head_id <> session_id)
+);
+CREATE INDEX IF NOT EXISTS run_links_head ON run_links(head_id);
+CREATE INDEX IF NOT EXISTS run_links_project ON run_links(project);
+CREATE TABLE IF NOT EXISTS run_misses (
+  session_id TEXT PRIMARY KEY,
+  pool_key TEXT NOT NULL,
+  checked_at TEXT NOT NULL
+);
 -- THE APP'S OWN RECORDS, REMEMBERED. The desktop app lists a chat because a local_<uuid>.json
 -- names it, and when a chat is deleted in the app the record goes and a marker deleted_<uuid>
 -- appears beside it (measured on the test laptop, 2026-09-15: 13 ASCII digits, the delete time
@@ -582,7 +636,8 @@ export const TOOL_INPUT_PREVIEW = 500;
 export const ADDED_COLUMNS = {
   hook_events: HOOK_EVENT_COLUMNS,
   turns: ['parent_uuid'],
-  tool_calls: ['subagent_type', 'input_preview', 'description', 'outcome', 'denial_kind'],
+  tool_calls: ['subagent_type', 'input_preview', 'description', 'outcome', 'denial_kind',
+               'result_ts'],
   // `kind` is NULL on every row written before it existed, and NULL means transcript. The sidecar
   // pass writes 'sidecar' for the small JSON files beside them, so a reader that means transcripts
   // can say so: the census, the dry run and the Diagnostics tab all count rows in this table.
@@ -957,6 +1012,11 @@ export async function backfillToolOutcomes(dbPath = DB_PATH, { quiet = false } =
     'UPDATE tool_calls SET outcome = ?, denial_kind = ?,'
     + ' result_bytes = COALESCE(result_bytes, ?), is_error = COALESCE(is_error, ?)'
     + ' WHERE tool_use_id = ? AND outcome IS NULL');
+  // THE RESULT'S TIME, for rows from before the column existed: filled only where it is NULL,
+  // whatever the outcome column says, since a row repaired earlier may already carry an outcome
+  // and still no time. The run rule (deriveRuns) reads it as the end of the call's span.
+  const setResultTs = db.prepare(
+    'UPDATE tool_calls SET result_ts = ? WHERE tool_use_id = ? AND result_ts IS NULL');
   // The same high-water guard backfillAgents documents: three writers exist by design, so a
   // COUNT(*) before and after fires on a true statement about a cause this tool had nothing to
   // do with. Counting only rows that already existed is the fix.
@@ -971,7 +1031,7 @@ export async function backfillToolOutcomes(dbPath = DB_PATH, { quiet = false } =
   };
 
   const files = listTranscripts(PROJECTS);
-  let scanned = 0, skipped = 0, filled = 0;
+  let scanned = 0, skipped = 0, filled = 0, timed = 0;
   const perFile = [];
   // BATCHED. backfillAgents writes hundreds of rows in autocommit; this writes a quarter of a
   // million, which is one fsync each without a transaction around them.
@@ -1005,6 +1065,7 @@ export async function backfillToolOutcomes(dbPath = DB_PATH, { quiet = false } =
             : rc == null ? 0 : Buffer.byteLength(JSON.stringify(rc), 'utf8');
           here += setOutcome.run(
             outcome, denial, rb, blk.is_error ? 1 : 0, blk.tool_use_id).changes;
+          timed += setResultTs.run(d.timestamp ?? null, blk.tool_use_id).changes;
         }
       }
       filled += here;
@@ -1065,6 +1126,8 @@ export async function backfillToolOutcomes(dbPath = DB_PATH, { quiet = false } =
       filled_from_transcripts: filled,
       filled_from_the_stored_flag: swept,
     },
+    // The result times filled on rows from before the column existed (the run rule's spans).
+    result_ts_filled: timed,
     transcripts_no_longer_on_disk: orphaned.length,
     calls_still_without_an_outcome: counted(
       'SELECT COUNT(*) n FROM tool_calls WHERE outcome IS NULL'),
@@ -2215,14 +2278,27 @@ const reviewChunks = (items, size = REVIEW.CHUNK) => {
 };
 const reviewMarks = (n) => Array(n).fill('?').join(',');
 
-/** The sessions among `ids` with exactly one typed prompt and at most three messages. */
-export function reviewOneShots(db, ids) {
+/**
+ * A PROMPT A PERSON TYPED, as SQL over `messages`. The store files every user message that is
+ * not a tool result as `typed`, and three shapes of those are nobody's prompt: hook feedback
+ * Claude Code injects as a user message ("Stop hook feedback: ..."), the note it writes when a
+ * request is interrupted, and a block it injects between angle brackets (a command's output, a
+ * system reminder). Measured on the author's store: of 14,555 typed user messages after a
+ * session's first, 455 were hook feedback, 271 interruption notes and 2,762 injected blocks, and
+ * 65 harness one-shots read as two or three prompts because a Stop hook talked back.
+ */
+export const PERSON_PROMPT = "type = 'typed' AND role = 'user' AND text NOT LIKE '<%'"
+  + " AND text NOT LIKE '[Request interrupted%' AND substr(text, 1, 40) NOT LIKE '% hook feedback:%'";
+
+/** The sessions among `ids` with exactly one prompt a person typed and at most `max` messages:
+ * three for the review rule, RUN.MAX_MESSAGES for the run rule. */
+export function reviewOneShots(db, ids, max = REVIEW.ONE_SHOT_MESSAGES) {
   const out = new Set();
   for (const chunk of reviewChunks(ids)) {
     const rows = db.prepare(`SELECT session_id FROM messages WHERE session_id IN (${reviewMarks(chunk.length)})
       GROUP BY session_id
-      HAVING SUM(CASE WHEN type = 'typed' AND role = 'user' THEN 1 ELSE 0 END) = 1 AND COUNT(*) <= ?`)
-      .all(...chunk, REVIEW.ONE_SHOT_MESSAGES);
+      HAVING SUM(CASE WHEN ${PERSON_PROMPT} THEN 1 ELSE 0 END) = 1 AND COUNT(*) <= ?`)
+      .all(...chunk, max);
     for (const r of rows) out.add(r.session_id);
   }
   return out;
@@ -2393,6 +2469,305 @@ export async function backfillReviews(dbPath = DB_PATH, { quiet = false, write =
   report.links_after = count();
   report.ms = Date.now() - t0;
   if (!quiet) console.log(JSON.stringify(report, null, 2));
+  db.close();
+  return report;
+}
+
+// ---------------------------------------------------------------- headless child runs
+
+/**
+ * The constants of the run rule, each with the measurement that set it (the run_links schema
+ * comment records the finding; docs/desktop-records.md section 7 the rule). Measured on the
+ * author's store, 2026-09-16: three children of one chat (the parent's shell call carried the
+ * child's prompt, the child's first record landed 2.9 s after the call, the call's result 0.9 s
+ * after the child's last record and quoted its 72 character reply), and 888 harness sessions
+ * under one project's tmp folder with no parent chat (808 one-shots by this rule, at most 12
+ * messages, the smallest batch 5 siblings within ten minutes; a person's desktop one-shots reach
+ * at most one sibling within an hour).
+ */
+export const RUN = {
+  MAX_MESSAGES: 16,               // one typed prompt and at most sixteen messages; the corpus maximum is 12
+  SKEW_MS: 5000,                  // how far outside the call's span the child's first record may sit
+  OPEN_SLACK_MS: 3600 * 1000,     // a call with no result time and no later prompt is open for an hour
+  LOOKBACK_MS: 24 * 3600 * 1000,  // how long before the child a spawning call may have begun
+  PROMPT_HEAD: 60,                // the head of the child's prompt looked for in the call's input
+  PROMPT_MIN: 20,                 // a head shorter than this proves nothing
+  QUOTE_MIN: 40,                  // an ASCII reply line this long, quoted by the parent's tool result
+  QUOTE_WANT: 4,                  // how many reply lines are tried, newest first
+  BATCH_MIN: 3,                   // other one-shots sharing the parent or grandparent directory
+  BATCH_WINDOW_MS: 10 * 60 * 1000, // begun within ten minutes of the run
+};
+/** The tiers of evidence for a parent, strongest first; `hits` counts how many agreed. */
+export const RUN_TIERS = ['prompt', 'cwd', 'quoted', 'under'];
+const RUN_SCORE = { prompt: 4, cwd: 3, quoted: 2, under: 1 };
+
+/** A path the way the kernel compares it on Windows: one separator, none at the end, case
+ * folded. `JSON.stringify` doubles the backslashes inside input_preview, and the same fold reads
+ * through that. */
+export function normPath(p) {
+  return String(p ?? '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+const dirAbove = (p) => { const i = p.lastIndexOf('/'); return i > 0 ? p.slice(0, i) : ''; };
+/** Strictly under: `child` is inside `parent`, not `parent` itself. */
+export function isUnder(child, parent) {
+  return Boolean(parent) && child.length > parent.length && child.startsWith(parent + '/');
+}
+/** Whether `text` (a call's input, folded by normPath) names the folder `dir` as a path: the
+ * match ends at the end of the text or before a character that cannot continue a path segment,
+ * so `p:/x/c4x` is not found inside `p:/x/c4x-main`. A deeper path under the folder counts. */
+export function namesPath(text, dir) {
+  if (!dir) return false;
+  const hay = normPath(text);
+  for (let i = hay.indexOf(dir); i !== -1; i = hay.indexOf(dir, i + 1)) {
+    const next = hay[i + dir.length];
+    if (next === undefined || !/[a-z0-9_.\-]/.test(next)) return true;
+  }
+  return false;
+}
+export const runOneShots = (db, ids) => reviewOneShots(db, ids, RUN.MAX_MESSAGES);
+/** The reply lines worth looking for in the parent's tool results: ASCII, QUOTE_MIN or longer,
+ * newest first, the last 120 characters of each (the review rule's tail). */
+export const runQuoteLines = (text) =>
+  reviewSnippets(text, { want: RUN.QUOTE_WANT, minLen: RUN.QUOTE_MIN });
+
+/**
+ * Tie every one-shot among `sessionIds` to the chat whose shell call spawned it, or mark it as a
+ * batch with no chat behind it. See the run_links schema comment for the rule and the numbers.
+ *
+ * A child: a Bash or PowerShell call of another session, not a one-shot itself, whose span (its
+ * ts to its result_ts, else to the parent's next typed prompt, else an hour) holds the child's
+ * first record within SKEW; among such calls the strongest tier wins (prompt, cwd, quoted,
+ * under), and two parents at the same strength name nobody. A batch: at least BATCH_MIN other
+ * one-shots sharing the cwd's parent or grandparent directory began within BATCH_WINDOW; its
+ * project is the nearest ancestor directory holding a session that is not itself a run.
+ *
+ * `write:false` computes and writes nothing. A linked run is not asked again while it is still
+ * a one-shot; one that grew a second typed prompt is unlinked. A miss is asked again only when
+ * its pool (the calls near it and its sibling count) is different.
+ */
+export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', now = null } = {}) {
+  const result = { sessions: 0, one_shots: 0, already: 0, unchanged: 0, unlinked: 0,
+                   linked: [], batched: [], misses: 0, queries: 0 };
+  const ids = [...new Set(sessionIds.filter(Boolean).map(String))];
+  result.sessions = ids.length;
+  if (!ids.length) return result;
+  const shots = runOneShots(db, ids);
+  result.one_shots = shots.size;
+  const known = new Set();
+  const reviews = new Set();
+  const missed = new Map();
+  const dropLink = db.prepare('DELETE FROM run_links WHERE session_id = ?');
+  for (const chunk of reviewChunks(ids)) {
+    const m = reviewMarks(chunk.length);
+    for (const r of db.prepare(`SELECT session_id FROM run_links WHERE session_id IN (${m})`).all(...chunk)) {
+      // UNLINKED ON GROWTH. A linked run that is no longer a one-shot is a person's chat that
+      // got its second prompt while a parent's command happened to be running: the tie goes.
+      if (shots.has(r.session_id)) known.add(r.session_id);
+      else { result.unlinked++; if (write) dropLink.run(r.session_id); }
+    }
+    for (const r of db.prepare(`SELECT session_id FROM review_links WHERE session_id IN (${m})`).all(...chunk)) reviews.add(r.session_id);
+    for (const r of db.prepare(`SELECT session_id, pool_key FROM run_misses WHERE session_id IN (${m})`).all(...chunk)) missed.set(r.session_id, r.pool_key);
+  }
+  if (!shots.size) return result;
+  const stamp = now ?? new Date().toISOString();
+  const iso = (ms) => new Date(ms).toISOString();
+  const when = db.prepare('SELECT cwd, first_ts FROM sessions WHERE session_id = ?');
+  const promptOf = db.prepare(`SELECT text FROM messages WHERE session_id = ? AND ${PERSON_PROMPT}
+                               ORDER BY ts LIMIT 1`);
+  const promptCount = db.prepare(`SELECT COUNT(*) n FROM messages WHERE session_id = ? AND ${PERSON_PROMPT}`);
+  const replyOf = db.prepare(`SELECT text FROM messages WHERE session_id = ? AND role = 'assistant' ORDER BY ts LIMIT 1`);
+  // Shell calls only: JSON.stringify puts the one key of a Bash or PowerShell input first.
+  const callsNear = db.prepare(`SELECT c.tool_use_id, c.session_id, c.ts, c.result_ts, c.input_preview, s.cwd
+    FROM tool_calls c JOIN sessions s ON s.session_id = c.session_id
+    WHERE c.ts BETWEEN ? AND ? AND c.session_id <> ? AND c.input_preview LIKE '{"command":%'`);
+  const nextPrompt = db.prepare(`SELECT MIN(ts) ts FROM messages WHERE session_id = ? AND ${PERSON_PROMPT}
+                                 AND ts > ?`);
+  const quotedBy = db.prepare(`SELECT 1 FROM messages WHERE session_id = ? AND type = 'tool_result'
+                               AND ts BETWEEN ? AND ? AND instr(text, ?) > 0 LIMIT 1`);
+  const siblingsNear = db.prepare('SELECT session_id, cwd FROM sessions WHERE first_ts BETWEEN ? AND ? AND session_id <> ?');
+  const chatsAt = db.prepare(`SELECT session_id, cwd, first_ts FROM sessions WHERE lower(replace(cwd, '\\', '/')) = ?`);
+  const isRun = db.prepare('SELECT 1 FROM run_links WHERE session_id = ?');
+  const putLink = db.prepare(`INSERT OR REPLACE INTO run_links
+    (session_id, head_id, project, how, call_id, hits, method, linked_at) VALUES (?,?,?,?,?,?,?,?)`);
+  const putMiss = db.prepare('INSERT OR REPLACE INTO run_misses (session_id, pool_key, checked_at) VALUES (?,?,?)');
+  const dropMiss = db.prepare('DELETE FROM run_misses WHERE session_id = ?');
+  // A parent or a sibling is judged a one-shot once per pass.
+  const shotMemo = new Map();
+  const oneShotAmong = (list) => {
+    const ask = list.filter((s) => !shotMemo.has(s));
+    if (ask.length) {
+      const found = runOneShots(db, ask);
+      for (const s of ask) shotMemo.set(s, found.has(s));
+    }
+    return new Set(list.filter((s) => shotMemo.get(s)));
+  };
+  // The one-shots beside a session: begun within the window, in a folder whose parent or
+  // grandparent is the session's folder's parent or grandparent.
+  const siblingsOf = (sid, cwd, first) => {
+    const above = [dirAbove(cwd), dirAbove(dirAbove(cwd))].filter(Boolean);
+    if (!cwd || !above.length) return new Set();
+    const near = siblingsNear.all(iso(first - RUN.BATCH_WINDOW_MS), iso(first + RUN.BATCH_WINDOW_MS), sid)
+      .filter((s) => {
+        const p = normPath(s.cwd);
+        const theirs = [dirAbove(p), dirAbove(dirAbove(p))];
+        return above.some((d) => theirs.includes(d));
+      });
+    return oneShotAmong(near.map((s) => s.session_id));
+  };
+  // A REAL CHAT, for the project walk: a session somebody prompted, that is not a run and would
+  // not be batched itself. Not merely "not in run_links": a batch's members are written one at
+  // a time, and a sibling run in the same folder that has not been written yet would otherwise
+  // pass for the chat the folder is named after (measured on a copy of the author's store: 305
+  // "projects" for one harness, most of them a case folder holding two of its own runs); and a
+  // session with no prompt at all (fifteen empty transcripts in the same harness) is nobody's.
+  const chatMemo = new Map();
+  const isChat = (row) => {
+    if (chatMemo.has(row.session_id)) return chatMemo.get(row.session_id);
+    let chat = !isRun.get(row.session_id) && promptCount.get(row.session_id).n > 0;
+    if (chat && oneShotAmong([row.session_id]).has(row.session_id)) {
+      const began = Date.parse(row.first_ts ?? '');
+      chat = Number.isNaN(began)
+        || siblingsOf(row.session_id, normPath(row.cwd), began).size < RUN.BATCH_MIN;
+    }
+    chatMemo.set(row.session_id, chat);
+    return chat;
+  };
+  for (const shot of shots) {
+    if (known.has(shot) || reviews.has(shot)) { result.already++; continue; }
+    const r = when.get(shot);
+    const first = Date.parse(r?.first_ts ?? '');
+    if (!r || Number.isNaN(first)) continue;
+    const cwd = normPath(r.cwd);
+    // THE POOL: the shell calls that could have spawned it, and the one-shots beside it.
+    result.queries++;
+    const calls = callsNear.all(iso(first - RUN.LOOKBACK_MS - 1000), iso(first + RUN.SKEW_MS + 1000), shot);
+    const parents = [...new Set(calls.map((c) => c.session_id))].sort();
+    const parentShots = oneShotAmong(parents);
+    const siblings = siblingsOf(shot, cwd, first);
+    const key = `${parents.join(',')}|${siblings.size}`;
+    if (missed.get(shot) === key) { result.unchanged++; continue; }
+    // TIER ONE, A PARENT CHAT.
+    const prompt = promptOf.get(shot)?.text ?? '';
+    const head = JSON.stringify(prompt.slice(0, RUN.PROMPT_HEAD)).slice(1, -1);
+    const lines = runQuoteLines(replyOf.get(shot)?.text ?? '');
+    let best = null;
+    let tie = false;
+    for (const c of calls) {
+      if (parentShots.has(c.session_id)) continue;
+      const start = Date.parse(c.ts ?? '');
+      if (Number.isNaN(start)) continue;
+      let end = Date.parse(c.result_ts ?? '');
+      if (Number.isNaN(end)) {
+        const next = Date.parse(nextPrompt.get(c.session_id, c.ts)?.ts ?? '');
+        end = Number.isNaN(next) ? start + RUN.OPEN_SLACK_MS : next;
+      }
+      if (first < start - RUN.SKEW_MS || first > end + RUN.SKEW_MS) continue;
+      const pcwd = normPath(c.cwd);
+      const input = String(c.input_preview ?? '');
+      const inside = Boolean(cwd) && (cwd === pcwd || isUnder(cwd, pcwd));
+      const tiers = [];
+      if (head.length >= RUN.PROMPT_MIN && input.includes(head)) tiers.push('prompt');
+      // THE FOLDER NAMED, and only a folder of the child's own: a child in the parent's OWN
+      // working directory is named by every `cd` the parent ever ran (measured on the author's
+      // store: 78 SDK one-shots tied to whichever command last mentioned the directory they
+      // shared with the chat), so the tier holds only for a folder strictly under the parent's,
+      // and at a path boundary, so `c4x` is not found inside `c4x-main`.
+      if (isUnder(cwd, pcwd) && namesPath(input, cwd)) tiers.push('cwd');
+      if (inside && lines.some((line) => {
+        result.queries++;
+        return quotedBy.get(c.session_id, c.ts, iso(end + RUN.SKEW_MS), line);
+      })) tiers.push('quoted');
+      if (isUnder(cwd, pcwd)) tiers.push('under');
+      if (!tiers.length) continue;
+      const score = RUN_SCORE[tiers[0]] * 10 + tiers.length;
+      if (!best || score > best.score) { best = { score, how: tiers[0], hits: tiers.length, call: c }; tie = false; }
+      else if (score === best.score && c.session_id !== best.call.session_id) tie = true;
+    }
+    if (best && !tie) {
+      const row = { session_id: shot, head_id: best.call.session_id, project: best.call.cwd ?? null,
+                    how: best.how, call_id: best.call.tool_use_id, hits: best.hits };
+      result.linked.push(row);
+      if (write) {
+        putLink.run(shot, row.head_id, row.project, row.how, row.call_id, row.hits, method, stamp);
+        dropMiss.run(shot);
+      }
+      continue;
+    }
+    // TIER TWO, A BATCH WITH NO CHAT BEHIND IT.
+    if (siblings.size >= RUN.BATCH_MIN) {
+      // The project: the run's own folder when a real chat lives there (a workflow's agents
+      // run in the chat's own directory), else the nearest folder above it that holds one.
+      let project = null;
+      for (let dir = cwd; dir; dir = dirAbove(dir)) {
+        result.queries++;
+        const there = chatsAt.all(dir).filter((x) => x.session_id !== shot && isChat(x));
+        if (there.length) { project = there[0].cwd; break; }
+      }
+      const row = { session_id: shot, head_id: null, project, how: 'batch', call_id: null, hits: siblings.size };
+      result.batched.push(row);
+      if (write) { putLink.run(shot, null, project, 'batch', null, siblings.size, method, stamp); dropMiss.run(shot); }
+      continue;
+    }
+    result.misses++;
+    if (write) putMiss.run(shot, key, stamp);
+  }
+  return result;
+}
+
+/** --backfill-runs: every directory the store knows, one transaction each. */
+export async function backfillRuns(dbPath = DB_PATH, { quiet = false, write = true } = {}) {
+  if (!existsSync(dbPath)) { if (!quiet) console.error(`no store at ${dbPath}`); return null; }
+  const t0 = Date.now();
+  const db = openDb(dbPath);
+  const count = () => db.prepare('SELECT COUNT(*) n FROM run_links').get().n;
+  const slugs = db.prepare('SELECT project_slug FROM sessions GROUP BY project_slug').all().map((r) => r.project_slug);
+  const report = { db: posix(dbPath), directories: slugs.length, sessions: 0, one_shots: 0, already: 0,
+                   unchanged: 0, unlinked: 0, linked: 0, batched: 0, misses: 0, by_how: {}, heads: 0,
+                   projects: 0, links_before: count(), links_after: 0,
+                   // Spans end at the call's result time; a call without one is open until the
+                   // parent's next prompt or for an hour. --backfill-tool-outcomes fills them.
+                   calls_without_result_ts: db.prepare(`SELECT COUNT(*) n FROM tool_calls
+                     WHERE input_preview LIKE '{"command":%' AND result_ts IS NULL`).get().n,
+                   wrote: write, ms: 0 };
+  const heads = new Set();
+  const projects = new Set();
+  const bySlug = db.prepare('SELECT session_id FROM sessions WHERE project_slug IS ?');
+  for (const slug of slugs) {
+    const ids = bySlug.all(slug).map((r) => r.session_id);
+    if (write) db.exec('BEGIN');
+    let r;
+    try {
+      r = deriveRuns(db, ids, { write, method: 'backfill-runs' });
+      if (write) db.exec('COMMIT');
+    } catch (e) {
+      if (write) { try { db.exec('ROLLBACK'); } catch { /* nothing to roll back */ } }
+      throw e;
+    }
+    report.sessions += r.sessions;
+    report.one_shots += r.one_shots;
+    report.already += r.already;
+    report.unchanged += r.unchanged;
+    report.unlinked += r.unlinked;
+    report.linked += r.linked.length;
+    report.batched += r.batched.length;
+    report.misses += r.misses;
+    for (const l of r.linked.concat(r.batched)) {
+      if (l.head_id) heads.add(l.head_id);
+      if (l.project) projects.add(normPath(l.project));
+      report.by_how[l.how] = (report.by_how[l.how] ?? 0) + 1;
+    }
+  }
+  report.heads = heads.size;
+  report.projects = projects.size;
+  report.links_after = count();
+  report.ms = Date.now() - t0;
+  if (!quiet) {
+    if (report.calls_without_result_ts) {
+      console.error(`${report.calls_without_result_ts} shell calls carry no result time; `
+        + 'run --backfill-tool-outcomes to tighten the spans');
+    }
+    console.log(JSON.stringify(report, null, 2));
+  }
   db.close();
   return report;
 }
@@ -2835,25 +3210,30 @@ class Harvest {
       putToolCall: db.prepare(`INSERT INTO tool_calls
         (tool_use_id,session_id,turn_uuid,ts,tool_name,server_name,target,input_sha1,input_bytes,
          result_bytes,is_error,is_sidechain,file_path,line_no,subagent_type,input_preview,description,
-         outcome,denial_kind)
+         outcome,denial_kind,result_ts)
         VALUES (?,?,?,?,?,?,?,?,?,
          COALESCE((SELECT result_bytes FROM tool_calls WHERE tool_use_id = ?), NULL),
          COALESCE((SELECT is_error FROM tool_calls WHERE tool_use_id = ?), NULL), ?,?,?,?,?,?,
          COALESCE((SELECT outcome FROM tool_calls WHERE tool_use_id = ?), NULL),
-         COALESCE((SELECT denial_kind FROM tool_calls WHERE tool_use_id = ?), NULL))
+         COALESCE((SELECT denial_kind FROM tool_calls WHERE tool_use_id = ?), NULL),
+         COALESCE((SELECT result_ts FROM tool_calls WHERE tool_use_id = ?), NULL))
         ON CONFLICT(tool_use_id) DO UPDATE SET
          turn_uuid=excluded.turn_uuid, ts=excluded.ts, tool_name=excluded.tool_name,
          server_name=excluded.server_name, target=excluded.target, input_sha1=excluded.input_sha1,
          input_bytes=excluded.input_bytes, result_bytes=excluded.result_bytes, is_error=excluded.is_error,
          is_sidechain=excluded.is_sidechain, file_path=excluded.file_path, line_no=excluded.line_no,
          subagent_type=excluded.subagent_type, input_preview=excluded.input_preview,
-         description=excluded.description, outcome=excluded.outcome, denial_kind=excluded.denial_kind
+         description=excluded.description, outcome=excluded.outcome, denial_kind=excluded.denial_kind,
+         result_ts=excluded.result_ts
         WHERE excluded.session_id IS tool_calls.session_id`),
       // The result arrives on a LATER line than the use, so this fills the row in place. If the
       // two land in different harvest runs the update finds nothing and result_bytes stays NULL,
       // which reads as "not yet seen" rather than as zero bytes.
+      // result_ts is COALESCED: the first result record's time is the one that stands, and a
+      // second tool_result for the same id (a re-read) must not move it.
       setToolResult: db.prepare(
-        'UPDATE tool_calls SET result_bytes = ?, is_error = ?, outcome = ?, denial_kind = ? WHERE tool_use_id = ?'),
+        'UPDATE tool_calls SET result_bytes = ?, is_error = ?, outcome = ?, denial_kind = ?,'
+        + ' result_ts = COALESCE(result_ts, ?) WHERE tool_use_id = ?'),
       bumpAttachment: db.prepare(`INSERT INTO attachments (session_id,type,n) VALUES (?,?,1)
         ON CONFLICT(session_id,type) DO UPDATE SET n = n + 1`),
       // THE WHOLE PLAN, and the same refusal clause the rows beside it use: a resumed transcript
@@ -3481,9 +3861,10 @@ class Harvest {
           // storing "" would make `description IS NOT NULL` stop meaning "this call has a note".
           (typeof input.description === 'string' && input.description.trim())
             ? input.description.trim() : null,
-          // The two subselect binds for the outcome columns, which keep a result already stored
-          // from being wiped by a re-read of this line.
-          b.id, b.id);
+          // The three subselect binds for the result-side columns (outcome, denial_kind,
+          // result_ts), which keep a result already stored from being wiped by a re-read of
+          // this line.
+          b.id, b.id, b.id);
         this.stats.toolCalls++;
         // THE PLAN ITSELF, beside the call rather than inside it. `input_preview` holds 500
         // characters and JSON.stringify puts "plan" first, so the preview is the proposal's
@@ -3504,7 +3885,7 @@ class Harvest {
         this.stmt.setToolResult.run(
           bytes, b.is_error ? 1 : 0,
           classifyResult({ isError: !!b.is_error, denialKind: denial, version: d.version }),
-          denial, b.tool_use_id);
+          denial, d.timestamp ?? null, b.tool_use_id);
         this.stats.toolResults++;
         // WHICH CALL LAUNCHED A WORKFLOW, read from the same record the denial comes from. A
         // Workflow launch answers with toolUseResult {status:'async_launched', runId, taskId,
@@ -3634,7 +4015,7 @@ async function run({ full, recordsRoots = null }) {
   // transcript in a directory that already holds its predecessor; deriving links for that one
   // directory is what folds it into its chat on the next render without anyone running anything.
   // Bounded by the directory, which is why it is affordable on every hook-driven harvest.
-  const chains = { directories: touched.size, links: 0, reviews: 0, failed: [],
+  const chains = { directories: touched.size, links: 0, reviews: 0, runs: 0, failed: [],
                    rows_moved: { turns: 0, messages: 0, compactions: 0, tool_calls: 0 },
                    rows_repaired: { cwd: 0, project_slug: 0, transcript_path: 0 } };
   if (touched.size) {
@@ -3661,9 +4042,13 @@ async function run({ full, recordsRoots = null }) {
           const ids = db.prepare('SELECT session_id FROM sessions WHERE project_slug = ?')
             .all(basename(dir)).map((row) => row.session_id);
           const rv = deriveReviews(db, ids, { write: true, method: 'harvest' });
+          // THE CHILD RUNS OF THIS DIRECTORY, the same way: a harness's one-shots tied to the
+          // chat whose shell call spawned them, or to the project above a batch.
+          const rn = deriveRuns(db, ids, { write: true, method: 'harvest' });
           db.exec('COMMIT');
           chains.links += r.links;
           chains.reviews += rv.linked.length + rv.orphans.length;
+          chains.runs += rn.linked.length + rn.batched.length;
           for (const k of Object.keys(chains.rows_moved)) chains.rows_moved[k] += r.moved[k];
           for (const k of Object.keys(chains.rows_repaired)) chains.rows_repaired[k] += r.repaired[k];
         } catch (e) {
@@ -3835,6 +4220,8 @@ function stats() {
     record_types: q('SELECT type, n FROM record_types ORDER BY n DESC LIMIT 20'),
     session_links: q('SELECT COUNT(*) n, COUNT(DISTINCT head_id) chains FROM session_links')[0],
     review_links: q('SELECT COUNT(*) n, COUNT(DISTINCT head_id) heads FROM review_links')[0],
+    run_links: q(`SELECT COUNT(*) n, COUNT(DISTINCT head_id) heads, SUM(head_id IS NULL) batched,
+      COUNT(DISTINCT project) projects FROM run_links`)[0],
     top_attachments: q('SELECT type, SUM(n) n FROM attachments GROUP BY type ORDER BY n DESC LIMIT 12'),
     runs: q('SELECT ts, mode, files_read, turns, compactions, ms FROM harvest_runs ORDER BY ts DESC LIMIT 5'),
   };
@@ -3904,6 +4291,9 @@ async function selfTest() {
   checks.push(['CLI: --backfill-chains is dispatched', src.includes("argv.includes('--backfill-chains')")]);
   checks.push(['CLI: --backfill-reviews is dispatched and documented',
     src.includes("argv.includes('--backfill-reviews')") && src.includes('node harvest.mjs --backfill-reviews [--dry-run]')]);
+  checks.push(['CLI: --backfill-runs is dispatched, known and documented',
+    src.includes("argv.includes('--backfill-runs')") && KNOWN_FLAGS.has('--backfill-runs')
+    && src.includes('node harvest.mjs --backfill-runs [--dry-run]')]);
   // The refusal runs in a child process, because it is the entry-point dispatch under test and
   // this process was entered with --self-test.
   {
@@ -5138,6 +5528,182 @@ async function selfTest() {
       JSON.stringify({ l: rep.linked, o: rep.orphans, v: rep.by_verdict, h: rep.heads, n: fcount() })]);
   }
 
+  // HEADLESS CHILD RUNS: a child a parent's shell call spawned with its prompt inline, one the
+  // same call cannot reach in time, one a script file spawned two folders down, a person's chat
+  // in a subfolder, a batch with no parent under a real project, a batch with nothing above it,
+  // the result time behind every span, and the unlink when a run grows a second prompt.
+  {
+    const udir = join(tmp, 'runs', 'projects', 'P--runs');
+    mkdirSync(udir, { recursive: true });
+    const sid = (tag) => `${tag}-0000-4000-8000-00000000000b`;
+    const U = { P: sid('aaaa000b'), C1: sid('bbbb000b'), C2: sid('cccc000b'), C3: sid('dddd000b'),
+                C4: sid('eeee000b'), C5: sid('abcd000b'), C6: sid('abce000b'), C7: sid('abcf000b'),
+                E: sid('eeef000b'), R: sid('ffff000b'),
+                B1: sid('b1b1000b'), B2: sid('b2b2000b'), B3: sid('b3b3000b'), B4: sid('b4b4000b'),
+                B5: sid('b5b5000b'),
+                L1: sid('c1c1000b'), L2: sid('c2c2000b'), L3: sid('c3c3000b'), L4: sid('c4c4000b') };
+    const PROJ = 'P:\\proj', CHILD1 = 'P:\\proj\\tmp\\child1', CHILD2 = 'P:\\proj\\tmp\\child2';
+    const DEEP = 'P:\\proj\\tmp\\deep\\c3', PERSON = 'P:\\proj\\notes';
+    const OTHER = 'P:\\other', LONELY = 'Q:\\lonely\\x';
+    const ts = (s) => new Date(Date.UTC(2026, 5, 1, 10, 0, 0) + s * 1000).toISOString();
+    let un = 0;
+    const user = (s, t, content, cwd) => JSON.stringify({ type: 'user', uuid: `u${++un}`, sessionId: s,
+      timestamp: t, cwd, message: { role: 'user', content } });
+    const said = (s, t, text, cwd) => JSON.stringify({ type: 'assistant', uuid: `u${++un}`, sessionId: s,
+      timestamp: t, cwd, message: { model: 'm', usage: { input_tokens: 1, cache_creation_input_tokens: 0,
+                                                            cache_read_input_tokens: 0, output_tokens: 1 },
+                                      content: [{ type: 'text', text }] } });
+    const ran = (s, t, id, command, cwd) => JSON.stringify({ type: 'assistant', uuid: `u${++un}`, sessionId: s,
+      timestamp: t, cwd, message: { model: 'm', usage: { input_tokens: 1, output_tokens: 1 },
+                                      content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] } });
+    const got = (s, t, id, text, cwd) => JSON.stringify({ type: 'user', uuid: `u${++un}`, sessionId: s,
+      timestamp: t, cwd, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: text }] } });
+    const put = (s, lines) => writeFileSync(join(udir, s + '.jsonl'), lines.join('\n') + '\n');
+    const ASK = 'Create a file at infra/main.tf containing the single line: resource x {}';
+    const REPLY = 'Created infra/main.tf with the single resource line and nothing else in it';
+    // The parent: two typed prompts, three shell calls: the child's prompt inline at 10 s (result
+    // at 20 s, quoting the child's reply), a script file at 100 s (result at 130 s), and one at
+    // 200 s whose result never came (open until the parent's next prompt: there is none).
+    put(U.P, [user(U.P, ts(0), 'set up the harness', PROJ),
+              ran(U.P, ts(10), 'toolu_run1', `cd ${CHILD1} && claude -p "${ASK}"`, PROJ),
+              got(U.P, ts(20), 'toolu_run1', REPLY + '\nexit 0\n', PROJ),
+              ran(U.P, ts(100), 'toolu_run2', 'powershell -File run-fidelity.ps1', PROJ),
+              got(U.P, ts(130), 'toolu_run2', '3 runs finished', PROJ),
+              user(U.P, ts(150), 'and again', PROJ),
+              ran(U.P, ts(200), 'toolu_run3', 'node bench.mjs', PROJ),
+              said(U.P, ts(210), 'running', PROJ)]);
+    put(U.C1, [user(U.C1, ts(13), ASK, CHILD1), said(U.C1, ts(15), REPLY, CHILD1)]);
+    put(U.C2, [user(U.C2, ts(40), ASK, CHILD2), said(U.C2, ts(42), REPLY, CHILD2)]);
+    put(U.C3, [user(U.C3, ts(105), 'Run the fidelity probe and report', DEEP),
+               said(U.C3, ts(108), 'The fidelity probe ran and every check on the list passed cleanly', DEEP)]);
+    put(U.C4, [user(U.C4, ts(105), 'quick question', PERSON), said(U.C4, ts(106), 'an answer', PERSON),
+               user(U.C4, ts(120), 'and another', PERSON), said(U.C4, ts(121), 'a second answer', PERSON)]);
+    // A one-shot in the parent's OWN folder while its last call is still open, with nothing
+    // else to go on: a person asking one question beside a long command, not its child.
+    put(U.C5, [user(U.C5, ts(205), 'what does the bench print', PROJ),
+               said(U.C5, ts(206), 'It prints one line per case with the elapsed time beside it', PROJ)]);
+    // A one-shot in the parent's OWN folder inside the span of a call that names a folder
+    // under it (the call's `cd P:\proj\tmp\child1` contains `P:\proj`): the folder tier must
+    // not fire for a folder that is the parent's own. Measured: 78 SDK one-shots tied that way.
+    put(U.C6, [user(U.C6, ts(12), 'list the cases', PROJ),
+               said(U.C6, ts(13), 'The cases are listed in the table above and nothing else needs doing here', PROJ)]);
+    // A child a Stop hook talked back to: the feedback is a user message the store files as
+    // typed, and it is nobody's prompt, so the run is still a one-shot (65 of the harness's).
+    // Begun inside the parent's open third call, and past the second child's ten minutes.
+    put(U.C7, [user(U.C7, ts(700), 'touch the marker file and stop', `${PROJ}\\tmp\\child7`),
+               said(U.C7, ts(701), 'Touched it and stopped', `${PROJ}\\tmp\\child7`),
+               user(U.C7, ts(702), 'Stop hook feedback:\nBLOCKED by dash-guard: your last message contains U+2014', `${PROJ}\\tmp\\child7`),
+               said(U.C7, ts(703), 'Touched it and stopped, without the dash', `${PROJ}\\tmp\\child7`)]);
+    // A session nobody prompted, in a case folder of the batch below (fifteen of the harness's
+    // transcripts hold only hook attachments): it is no chat, so its folder is no project.
+    writeFileSync(join(udir, U.E + '.jsonl'), JSON.stringify({ type: 'attachment', uuid: `u${++un}`, sessionId: U.E,
+      timestamp: ts(311), cwd: `${OTHER}\\tmp\\g\\p1`, attachment: { type: 'hook_success' } }) + '\n');
+    // A real chat above a batch, and the batch: four one-shots in sibling folders, no call near.
+    put(U.R, [user(U.R, ts(0), 'plan the sweep', OTHER), said(U.R, ts(1), 'planned', OTHER),
+              user(U.R, ts(30), 'go', OTHER), said(U.R, ts(31), 'going', OTHER)]);
+    [U.B1, U.B2, U.B3, U.B4].forEach((b, i) => put(b, [user(b, ts(300 + i * 10), 'probe ' + i, `${OTHER}\\tmp\\g\\p${i}`),
+                                                       said(b, ts(302 + i * 10), 'probed', `${OTHER}\\tmp\\g\\p${i}`)]));
+    // A second run in the first case folder (a harness's control and its rule in one folder):
+    // it must not pass for the chat that folder is named after.
+    put(U.B5, [user(U.B5, ts(305), 'probe 0 again', `${OTHER}\\tmp\\g\\p0`),
+               said(U.B5, ts(307), 'probed again', `${OTHER}\\tmp\\g\\p0`)]);
+    [U.L1, U.L2, U.L3, U.L4].forEach((b, i) => put(b, [user(b, ts(600 + i * 10), 'lonely ' + i, `${LONELY}\\p${i}`),
+                                                       said(b, ts(602 + i * 10), 'done', `${LONELY}\\p${i}`)]));
+    const udb = new DatabaseSync(':memory:');
+    udb.exec(SCHEMA);
+    const uh = new Harvest(udb);
+    for (const s of Object.values(U)) await uh.file(join(udir, s + '.jsonl'), true);
+    const uids = Object.values(U);
+    const call = (id) => udb.prepare('SELECT ts, result_ts FROM tool_calls WHERE tool_use_id = ?').get(id);
+    checks.push(['runs: a call carries the time its result came back, and none for a result never seen (gate can fail)',
+      call('toolu_run1')?.result_ts === ts(20) && call('toolu_run2')?.result_ts === ts(130)
+      && call('toolu_run3')?.result_ts === null, JSON.stringify([call('toolu_run1'), call('toolu_run3')])]);
+    await uh.file(join(udir, U.P + '.jsonl'), true);
+    checks.push(['runs: a re-read of the tool_use line keeps the result time (gate can fail)',
+      call('toolu_run1')?.result_ts === ts(20), JSON.stringify(call('toolu_run1'))]);
+    checks.push(['runs: paths fold to one spelling and containment is strict',
+      normPath('P:\\\\proj\\\\tmp\\\\') === 'p:/proj/tmp' && normPath('p:/PROJ/tmp') === 'p:/proj/tmp'
+      && isUnder('p:/proj/tmp/x', 'p:/proj') && !isUnder('p:/proj', 'p:/proj') && !isUnder('p:/projects/x', 'p:/proj')]);
+    checks.push(['runs: a folder is named at a path boundary, a deeper path counts, a longer name does not (gate can fail)',
+      namesPath('cd P:\\\\x\\\\c4x && ls', 'p:/x/c4x') && namesPath('cat "P:/x/c4x/a.md"', 'p:/x/c4x')
+      && namesPath('P:/x/c4x', 'p:/x/c4x') && !namesPath('cd P:/x/c4x-main && ls', 'p:/x/c4x')
+      && !namesPath('P:/x/c4xy', 'p:/x/c4x') && !namesPath('nothing here', 'p:/x/c4x') && !namesPath('p:/x', '')]);
+    const dryRuns = deriveRuns(udb, uids, { write: false });
+    checks.push(['runs: write:false writes nothing and still reports (gate can fail)',
+      udb.prepare('SELECT COUNT(*) n FROM run_links').get().n === 0
+      && udb.prepare('SELECT COUNT(*) n FROM run_misses').get().n === 0
+      && dryRuns.linked.length === 3 && dryRuns.batched.length === 9 && dryRuns.misses === 3,
+      JSON.stringify({ l: dryRuns.linked.length, b: dryRuns.batched.length, m: dryRuns.misses })]);
+    const ru = deriveRuns(udb, uids, { write: true, now: '2026-06-01T12:00:00.000Z' });
+    const rlink = (s) => udb.prepare('SELECT * FROM run_links WHERE session_id = ?').get(s);
+    const missKey = (s) => udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(s)?.pool_key;
+    checks.push(['runs: the one-shots are the children, the batches and the lone questions, never the chats',
+      ru.one_shots === 15 && !rlink(U.P) && !rlink(U.R) && !rlink(U.C4) && !rlink(U.E), String(ru.one_shots)]);
+    checks.push(['runs: a child a Stop hook talked back to is still a one-shot and ties (gate can fail)',
+      rlink(U.C7)?.head_id === U.P && rlink(U.C7)?.how === 'under' && rlink(U.C7)?.call_id === 'toolu_run3',
+      JSON.stringify(rlink(U.C7))]);
+    checks.push(['runs: a one-shot in the parent\'s own folder with nothing but an open span is not its child (gate can fail)',
+      !rlink(U.C5) && missKey(U.C5) === `${U.P}|1`,
+      JSON.stringify({ c5: rlink(U.C5), key: missKey(U.C5) })]);
+    checks.push(['runs: a one-shot in the parent\'s own folder is not tied by a call that names a folder under it (gate can fail)',
+      !rlink(U.C6) && missKey(U.C6) === `${U.P}|1`,
+      JSON.stringify({ c6: rlink(U.C6), key: missKey(U.C6) })]);
+    checks.push(['runs: a child whose prompt the parent\'s call carries, begun inside the span, ties by prompt with every tier agreeing (gate can fail)',
+      rlink(U.C1)?.head_id === U.P && rlink(U.C1)?.how === 'prompt' && rlink(U.C1)?.hits === 4
+      && rlink(U.C1)?.call_id === 'toolu_run1' && rlink(U.C1)?.project === PROJ
+      && rlink(U.C1)?.method === 'harvest' && rlink(U.C1)?.linked_at === '2026-06-01T12:00:00.000Z',
+      JSON.stringify(rlink(U.C1))]);
+    checks.push(['runs: the same child begun after the result came back is not tied (gate can fail)',
+      !rlink(U.C2) && ru.misses === 3 && missKey(U.C2) === `${U.P}|2`,
+      JSON.stringify({ miss: rlink(U.C2), key: missKey(U.C2) })]);
+    checks.push(['runs: a child two folders down, spawned by a script file the call names, ties by containment alone (gate can fail)',
+      rlink(U.C3)?.head_id === U.P && rlink(U.C3)?.how === 'under' && rlink(U.C3)?.hits === 1
+      && rlink(U.C3)?.call_id === 'toolu_run2', JSON.stringify(rlink(U.C3))]);
+    checks.push(['runs: a person\'s chat in a subfolder, two typed prompts, is never a run (gate can fail)',
+      !rlink(U.C4) && !dryRuns.linked.some((l) => l.session_id === U.C4)]);
+    checks.push(['runs: one-shots in sibling folders with no call near them are a batch under the project above (gate can fail)',
+      [U.B1, U.B2, U.B3, U.B4].every((b) => rlink(b)?.head_id === null && rlink(b)?.how === 'batch'
+        && rlink(b)?.hits === 4 && rlink(b)?.project === OTHER), JSON.stringify(rlink(U.B1))]);
+    checks.push(['runs: a case folder holding a second run of its own is not the project (gate can fail)',
+      rlink(U.B5)?.how === 'batch' && rlink(U.B5)?.project === OTHER && rlink(U.B1)?.project === OTHER,
+      JSON.stringify([rlink(U.B5), rlink(U.B1)])]);
+    checks.push(['runs: a case folder holding a session nobody prompted is not the project (gate can fail)',
+      rlink(U.B2)?.project === OTHER, JSON.stringify(rlink(U.B2))]);
+    checks.push(['runs: a batch with no chat above it has no project (gate can fail)',
+      [U.L1, U.L2, U.L3, U.L4].every((b) => rlink(b)?.how === 'batch' && rlink(b)?.project === null),
+      JSON.stringify(rlink(U.L1))]);
+    const againRuns = deriveRuns(udb, uids, { write: true });
+    checks.push(['runs: a second pass asks nothing again',
+      againRuns.already === 12 && againRuns.unchanged === 3 && againRuns.linked.length === 0
+      && againRuns.batched.length === 0 && againRuns.unlinked === 0,
+      JSON.stringify({ a: againRuns.already, u: againRuns.unchanged })]);
+    // THE UNLINK: the child's transcript grows a second typed prompt (a person picked the chat
+    // up), so it is no longer a one-shot and the tie goes on the next pass.
+    put(U.C1, [user(U.C1, ts(13), ASK, CHILD1), said(U.C1, ts(15), REPLY, CHILD1),
+               user(U.C1, ts(1000), 'now change the resource name', CHILD1), said(U.C1, ts(1001), 'changed', CHILD1)]);
+    await uh.file(join(udir, U.C1 + '.jsonl'), true);
+    const grown = deriveRuns(udb, uids, { write: true });
+    checks.push(['runs: a linked run that grows a second typed prompt is unlinked (gate can fail)',
+      grown.unlinked === 1 && !rlink(U.C1) && rlink(U.C3)?.head_id === U.P,
+      JSON.stringify({ unlinked: grown.unlinked, c1: rlink(U.C1) })]);
+    // The backfill, on a file, both ways.
+    const upath = join(tmp, 'runs', 'store.db');
+    const fdb2 = openDb(upath);
+    const fh2 = new Harvest(fdb2);
+    for (const s of Object.values(U)) await fh2.file(join(udir, s + '.jsonl'), true);
+    fdb2.close();
+    const dryRep2 = await backfillRuns(upath, { quiet: true, write: false });
+    const ucount = () => { const d = new DatabaseSync(upath); const n = d.prepare('SELECT COUNT(*) n FROM run_links').get().n; d.close(); return n; };
+    checks.push(['backfill-runs: --dry-run reports and writes nothing (gate can fail)',
+      dryRep2.linked === 2 && dryRep2.batched === 9 && dryRep2.wrote === false && ucount() === 0
+      && dryRep2.calls_without_result_ts === 1, JSON.stringify(dryRep2)]);
+    const rep2 = await backfillRuns(upath, { quiet: true, write: true });
+    checks.push(['backfill-runs: the links and the batches land, counted by how',
+      rep2.linked === 2 && rep2.batched === 9 && rep2.by_how.under === 2 && rep2.by_how.batch === 9
+      && rep2.heads === 1 && rep2.projects === 2 && ucount() === 11 && rep2.links_after === 11 && rep2.links_before === 0,
+      JSON.stringify({ l: rep2.linked, b: rep2.batched, h: rep2.by_how, p: rep2.projects, n: ucount() })]);
+  }
+
   // Chains, fourth directory: a project this machine IMPORTED. The transcript is byte identical to
   // the one on the machine it came from, so every line still names THAT directory, and the session
   // row is the only place the move is recorded. Two things must hold: a harvest pass leaves the row
@@ -5981,6 +6547,12 @@ const USAGE = `harvest.mjs
   node harvest.mjs --backfill-reviews [--dry-run]
                                           tie each one-shot session that quotes another (a hook's
                                           headless reviewer) to the session it read
+  node harvest.mjs --backfill-runs [--dry-run]
+                                          tie each one-shot a chat's shell command spawned (a
+                                          harness's claude -p) to that chat, and a batch with no
+                                          chat behind it to the project above it; run
+                                          --backfill-tool-outcomes first so every call has its
+                                          result time
   node harvest.mjs --backfill-sidecars    read the agent and workflow files beside transcripts
   node harvest.mjs --backfill-work        re-read transcripts for plans and task notifications
   node harvest.mjs --backfill-changes     re-read transcripts for the file changes Claude made
@@ -5988,7 +6560,7 @@ const USAGE = `harvest.mjs
                    | --backfill-tool-outcomes | --backfill-message-source
   any of the above with --db <path> to name the store`;
 const KNOWN_FLAGS = new Set(['--full', '--yes', '--dry-run', '--self-test', '--stats', '--db', '--records',
-  '--backfill-chains', '--backfill-reviews', '--backfill-sidecars', '--backfill-work', '--backfill-changes', '--backfill-survivors', '--backfill-titles', '--backfill-agents',
+  '--backfill-chains', '--backfill-reviews', '--backfill-runs', '--backfill-sidecars', '--backfill-work', '--backfill-changes', '--backfill-survivors', '--backfill-titles', '--backfill-agents',
   '--backfill-tool-outcomes', '--backfill-message-source', '--help', '-h']);
 
 const argv = process.argv.slice(2);
@@ -6021,6 +6593,11 @@ else if (argv.includes('--backfill-message-source'))
 // BEFORE --dry-run, so that --backfill-reviews --dry-run reaches it and reports without writing.
 else if (argv.includes('--backfill-reviews')) {
   const r = await backfillReviews(resolveDbPath(argv), { write: !argv.includes('--dry-run') });
+  code = r ? 0 : 1;
+}
+// The same, for the child runs.
+else if (argv.includes('--backfill-runs')) {
+  const r = await backfillRuns(resolveDbPath(argv), { write: !argv.includes('--dry-run') });
   code = r ? 0 : 1;
 }
 // BEFORE --dry-run, so that --backfill-chains --dry-run reaches it and reports without writing.

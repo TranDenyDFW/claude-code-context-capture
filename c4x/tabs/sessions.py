@@ -46,7 +46,10 @@ WORK_KINDS = (("plans", "plan", "plans"),
               ("changes", "change", "changes"),
               # A reviewer's reading of the chat: a one-shot session tied to it by quotation,
               # listed nowhere on its own. Said here so a search for "review" finds the chat.
-              ("reviews", "review", "reviews"))
+              ("reviews", "review", "reviews"),
+              # A headless child run the chat's shell command spawned (a harness's claude -p),
+              # tied to it by harvest, listed nowhere on its own.
+              ("runs", "run", "runs"))
 
 
 def work_summary(counts) -> str:

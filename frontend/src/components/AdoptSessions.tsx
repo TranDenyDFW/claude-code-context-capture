@@ -110,8 +110,17 @@ export function AdoptSessions({
   if (!state || !state.supported) return null
   const total = state.groups.reduce((n, g) => n + g.count, 0)
   const unnamed = state.untitled_adopted ?? 0
-  const reviewRecords = state.review_records ?? 0
   const reviewRuns = state.review_runs ?? 0
+  // THE RECORDS TO TAKE BACK: an earlier build's records for review runs and for child runs,
+  // one number, since one button takes both back.
+  const runRecords = state.run_records ?? 0
+  const reviewRecords = (state.review_records ?? 0) + runRecords
+  // "review run" while only reviews are there to take back, the wording the page has had; "run"
+  // once child runs are among them, since a review run is a run too.
+  const recordWord = runRecords > 0 ? 'run' : 'review run'
+  const runsPlaced = state.runs_placed ?? 0
+  const runsBatched = state.runs_batched ?? 0
+  const runsUnplaced = state.runs_unplaced ?? 0
   // STAYS while a result is showing: after the last folder is adopted or the last record named the
   // refreshed state has nothing left, and the restart notice is the one thing the reader needs.
   if (total === 0 && state.cli_candidates === 0 && unnamed === 0 && reviewRecords === 0
@@ -211,7 +220,7 @@ export function AdoptSessions({
       : unnamed > 0
         ? `${plural(unnamed, 'adopted chat')} without a name`
         : reviewRecords > 0
-          ? `${plural(reviewRecords, 'review run')} still in Claude`
+          ? `${plural(reviewRecords, recordWord)} still in Claude`
           : 'Adopted Chats'
 
   const link = 'text-ink-dim underline hover:text-ink'
@@ -320,9 +329,10 @@ export function AdoptSessions({
             {reviewRecords > 0 ? (
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <span className="text-ink-dim">
-                  {`${plural(reviewRecords, 'review run')} ${reviewRecords === 1 ? 'is' : 'are'} ` +
-                    'listed in Claude as a chat. Each is a reviewer’s reading of another chat and ' +
-                    'belongs under it, not beside it.'}
+                  {`${plural(reviewRecords, recordWord)} ${reviewRecords === 1 ? 'is' : 'are'} ` +
+                    'listed in Claude as a chat. Each is a reviewer’s reading of another chat' +
+                    (runRecords > 0 ? ', or a one-shot a chat’s command spawned,' : '') +
+                    ' and belongs under it, not beside it.'}
                 </span>
                 <button
                   type="button"
@@ -336,8 +346,30 @@ export function AdoptSessions({
             ) : null}
             {unadopted && unadopted.restart_required ? (
               <p className="rounded-md border border-edge bg-page px-3 py-2 text-sm text-ink-dim">
-                Restart Claude to drop the {plural(unadopted.removed.length, 'review run')} from
-                its list. It reads these records when it starts.
+                Restart Claude to drop the{' '}
+                {plural(unadopted.removed.length,
+                        unadopted.removed.some((r) => r.kind === 'run') ? 'run' : 'review run')}{' '}
+                from its list. It reads these records when it starts.
+              </p>
+            ) : null}
+            {runsPlaced + runsBatched + runsUnplaced > 0 ? (
+              <p className="text-xs text-ink-faint" data-testid="runs-folded">
+                {[
+                  runsPlaced > 0
+                    ? `${plural(runsPlaced, 'run')} on this machine ${runsPlaced === 1 ? 'is' : 'are'} ` +
+                      `folded under the ${runsPlaced === 1 ? 'chat' : 'chats'} that spawned ` +
+                      `${runsPlaced === 1 ? 'it' : 'them'}`
+                    : '',
+                  runsBatched > 0
+                    ? `${plural(runsBatched, 'run')} with no chat behind ${runsBatched === 1 ? 'it' : 'them'} ` +
+                      `${runsBatched === 1 ? 'is' : 'are'} folded under the folder above ` +
+                      `${runsBatched === 1 ? 'it' : 'them'} (the Runs column)`
+                    : '',
+                  runsUnplaced > 0
+                    ? `${plural(runsUnplaced, 'run')} could be placed nowhere and ${runsUnplaced === 1 ? 'is' : 'are'} left out`
+                    : '',
+                ].filter(Boolean).join('; ')}
+                ; none is offered.
               </p>
             ) : null}
             {reviewRuns > 0 ? (

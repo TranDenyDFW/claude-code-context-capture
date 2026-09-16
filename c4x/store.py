@@ -565,6 +565,7 @@ def invalidate():
     # into its head, and an imported chain must start to.
     _links_cache.update({"at": 0.0, "head_of": None, "members_of": None})
     _reviews_cache.update({"at": 0.0, "parent_of": None, "runs_of": None})
+    _runs_cache.update({"at": 0.0, "parent_of": None, "runs_of": None, "project_of": None})
     _deleted_cache.update({"at": 0.0, "ids": None})
     # Derived from that map and from five tables harvest writes, so it is stale for both reasons a
     # removal makes the map stale, and cleared beside it rather than left to its own ttl.
@@ -598,6 +599,12 @@ _work_cache: dict = {"at": 0.0, "totals": None}
 # user chose: it is out of every list and every picker, and it counts toward the chat's numbers
 # only under the subagent scope, since its tokens were never part of the chat's own context.
 _reviews_cache: dict = {"at": 0.0, "parent_of": None, "runs_of": None}
+# HEADLESS CHILD RUNS: which one-shot sessions a chat's shell command spawned (harvest's
+# `run_links`; the schema comment there records the finding). A child folds into the chat that
+# spawned it exactly the way a review run folds into the chat it read; a BATCH (a harness's
+# one-shots with no chat behind them) folds under the project above it: out of every list, its
+# tool bytes in that project's bar, counted on the Adopt page under that folder.
+_runs_cache: dict = {"at": 0.0, "parent_of": None, "runs_of": None, "project_of": None}
 
 
 def _read_links() -> tuple[dict, dict]:
@@ -695,6 +702,60 @@ def review_links(ttl: float = 45.0) -> tuple[dict, dict]:
     return parent_of, runs_of
 
 
+def _read_runs() -> tuple[dict, dict, dict]:
+    """{run: the chat that spawned it, or None for a batch}, {chat: [its runs, newest first]}
+    and {run: the project it folds under, or None}, or three empty dicts.
+
+    Empty on a store from before the table existed and on one harvest has not derived yet, so
+    with no links every one-shot is an ordinary session, which is what the page showed before.
+    """
+    if not tables_present("run_links"):
+        return {}, {}, {}
+    df = q("""SELECT r.session_id, r.head_id, r.project, COALESCE(s.first_ts, '') AS first_ts
+              FROM run_links r LEFT JOIN sessions s ON s.session_id = r.session_id""")
+    if df.empty:
+        return {}, {}, {}
+    parent_of: dict = {}
+    project_of: dict = {}
+    for s, h, p in zip(df["session_id"], df["head_id"], df["project"], strict=True):
+        head = h if isinstance(h, str) and h else None
+        if head == s:
+            continue
+        parent_of[s] = head
+        project_of[s] = p if isinstance(p, str) and p else None
+    started = dict(zip(df["session_id"], df["first_ts"], strict=True))
+    runs_of: dict = {}
+    placed = [run for run, parent in parent_of.items() if parent]
+    for run in sorted(placed, key=lambda sid: str(started.get(sid) or ""), reverse=True):
+        runs_of.setdefault(parent_of[run], []).append(run)
+    return parent_of, runs_of, project_of
+
+
+def run_links(ttl: float = 45.0) -> tuple[dict, dict, dict]:
+    """The run map, cached the way `review_links` is and cleared by the same `invalidate`."""
+    now = _time.time()
+    if _runs_cache["parent_of"] is not None and now - _runs_cache["at"] < ttl:
+        return _runs_cache["parent_of"], _runs_cache["runs_of"], _runs_cache["project_of"]
+    seen = _generation["n"]
+    parent_of, runs_of, project_of = _read_runs()
+    if seen == _generation["n"]:
+        _runs_cache.update({"at": now, "parent_of": parent_of, "runs_of": runs_of,
+                            "project_of": project_of})
+    return parent_of, runs_of, project_of
+
+
+def runs_by_project(ttl: float = 45.0) -> dict:
+    """How many runs fold under each project path (a chat's children under the chat's folder, a
+    batch under the nearest folder above it with a real chat), keyed by the path as `sessions.cwd`
+    spells it. Empty when nothing is a run."""
+    _parent_of, _runs_of, project_of = run_links(ttl)
+    out: dict = {}
+    for project in project_of.values():
+        if project:
+            out[project] = out.get(project, 0) + 1
+    return out
+
+
 _deleted_cache: dict = {"at": 0.0, "ids": None}
 
 
@@ -788,6 +849,10 @@ def hidden_sessions_sql() -> str:
     parts: list = []
     if tables_present("review_links"):
         parts.append("SELECT session_id FROM review_links")
+    # A CHILD RUN IS NOT A CHAT EITHER, placed or a batch: it folds into the chat that spawned it
+    # or under the project above it, and is listed nowhere on its own.
+    if tables_present("run_links"):
+        parts.append("SELECT session_id FROM run_links")
     if tables_present("desktop_records"):
         deleted = "SELECT session_id FROM desktop_records WHERE deleted_at IS NOT NULL"
         parts.append(deleted)
@@ -811,7 +876,10 @@ def chat_head(session_id):
         return session_id
     head_of, _members = chat_links()
     parent_of, _runs = review_links()
-    base = parent_of.get(session_id) or session_id
+    spawned_by, _children, _projects = run_links()
+    # A child run resolves to the chat that spawned it, like a review to the chat it read; a
+    # batch (no chat behind it) resolves to itself.
+    base = parent_of.get(session_id) or spawned_by.get(session_id) or session_id
     return head_of.get(base, base)
 
 
@@ -826,11 +894,16 @@ def chat_members(session_id, reviews: bool = False) -> list:
         return []
     head_of, members_of = chat_links()
     parent_of, runs_of = review_links()
-    base = parent_of.get(session_id) or session_id
+    spawned_by, children_of, _projects = run_links()
+    base = parent_of.get(session_id) or spawned_by.get(session_id) or session_id
     head = head_of.get(base, base)
     members = list(members_of.get(head, [head]))
     if reviews:
-        members.extend(run for m in list(members) for run in runs_of.get(m, []))
+        # The chat's review runs, then the child runs its shell commands spawned: both ran
+        # beside the chat, outside its context, and count under the subagent scope alone.
+        own = list(members)
+        members.extend(run for m in own for run in runs_of.get(m, []))
+        members.extend(run for m in own for run in children_of.get(m, []))
     return members
 
 
@@ -1772,6 +1845,10 @@ def cohort_options() -> list:
     # The VALUE keeps the full path. The label is ambiguous by construction and nothing matches
     # on it; `cohort_parts` below splits the value, and a delete resolves through that.
     labels = project_labels(list(work.index), df)
+    # THE RUNS FOLDED UNDER A PROJECT, said beside the listed count: a harness's one-shots are
+    # listed nowhere on their own, so without this the folder that holds 870 of them reads as
+    # if it held one chat and nothing else happened there.
+    folded = runs_by_project()
     projects = []
     for proj, row in work.iterrows():
         # "listed", the same qualifier the All sessions option above carries. Without it the
@@ -1780,7 +1857,9 @@ def cohort_options() -> list:
         # and a reader comparing it against the store has nothing to reconcile the two. Same
         # defect the first option was fixed for, on the option beside it.
         name = labels[proj]
-        projects.append((name, {"label": f"{name} ({int(row['sessions']):,} listed)",
+        runs = int(folded.get(str(proj), 0))
+        suffix = f"{int(row['sessions']):,} listed" + (f", {runs:,} runs" if runs else "")
+        projects.append((name, {"label": f"{name} ({suffix})",
                                 "value": f"project::{proj}", "path": str(proj)}))
     # A TO Z BY THE NAME SHOWN, the user's rule. The work ranking above decides which forty are
     # offered; the order they are read in is the order a person scans a list: by the name on the
@@ -1944,12 +2023,14 @@ def cohort_sessions(cohort, ttl: float = 45.0, reviews: bool = False) -> list:
     # rows from a scoped tab and, worse, from a backup.
     _head_of, members_of = chat_links(ttl)
     _parent_of, runs_of = review_links(ttl)
+    _spawned_by, children_of, _projects = run_links(ttl)
     out: list = []
     for head in df.loc[mask, "session_id"]:
         members = members_of.get(head, [head])
         out.extend(members)
         if reviews:
             out.extend(run for m in members for run in runs_of.get(m, []))
+            out.extend(run for m in members for run in children_of.get(m, []))
     return out
 
 
@@ -2537,6 +2618,64 @@ def chat_reviews(session_id: str, limit: int = 200) -> pd.DataFrame:
     return df.drop(columns=["head_id"]).reset_index(drop=True)
 
 
+def chat_runs(session_id: str, limit: int = 200) -> pd.DataFrame:
+    """The child runs this chat's shell commands spawned, newest first: when, how the tie was
+    made, the folder the run worked in, its one prompt cut short, and what it cost.
+
+    A run is a one-shot `claude -p` a Bash or PowerShell call of the chat started (a harness, a
+    script, a hook), tied by harvest's `deriveRuns`: the call carried the run's prompt or named
+    its folder, the call's result quoted the run's reply, or the run's folder sits under the
+    chat's and the run began inside the call's span. `leaf` is the run's folder's last segment,
+    which is what a harness names its cases by.
+    """
+    if not tables_present("run_links"):
+        return pd.DataFrame()
+    from c4x.labels import short_path
+    from c4x.pricing import cost_of_rows
+    members = chat_members(session_id)
+    _spawned_by, children_of, _projects = run_links()
+    runs = [run for m in members for run in children_of.get(m, [])]
+    if not runs:
+        return pd.DataFrame()
+    marks = ",".join("?" * len(runs))
+    df = q(f"""
+        SELECT r.session_id, r.how, r.hits, r.call_id, s.cwd,
+               COALESCE((SELECT MIN(t.ts) FROM turns t WHERE t.session_id = r.session_id),
+                        s.first_ts) AS ts,
+               (SELECT substr(replace(replace(m.text, char(10), ' '), char(13), ' '), 1, 120)
+                  FROM messages m WHERE m.session_id = r.session_id AND m.type = 'typed'
+                   AND m.role = 'user' ORDER BY m.ts LIMIT 1) AS prompt,
+               (SELECT COUNT(*) FROM api_calls a WHERE a.session_id = r.session_id) AS calls,
+               (SELECT SUM(COALESCE(input_tokens,0)) FROM api_calls a
+                 WHERE a.session_id = r.session_id) AS input_tokens,
+               (SELECT SUM(COALESCE(cache_read_input_tokens,0)) FROM api_calls a
+                 WHERE a.session_id = r.session_id) AS cache_read,
+               (SELECT SUM(COALESCE(cache_creation_input_tokens,0)) FROM api_calls a
+                 WHERE a.session_id = r.session_id) AS cache_creation,
+               (SELECT SUM(COALESCE(output_tokens,0)) FROM api_calls a
+                 WHERE a.session_id = r.session_id) AS output_tokens
+        FROM run_links r LEFT JOIN sessions s ON s.session_id = r.session_id
+        WHERE r.session_id IN ({marks})
+        ORDER BY ts DESC
+    """, tuple(runs))
+    if df.empty:
+        return df
+    costs = []
+    for row in df.itertuples(index=False):
+        by_model = q("""SELECT model, COUNT(*) AS calls,
+                               SUM(COALESCE(input_tokens,0)) AS input_tokens,
+                               SUM(COALESCE(output_tokens,0)) AS output_tokens,
+                               SUM(COALESCE(cache_read_input_tokens,0)) AS cache_read_input_tokens,
+                               SUM(COALESCE(cache_creation_input_tokens,0))
+                                 AS cache_creation_input_tokens
+                        FROM api_calls WHERE session_id = ? GROUP BY model""", (row.session_id,))
+        usd, priced, _unpriced = cost_of_rows(by_model.to_dict("records"))
+        costs.append(round(usd, 4) if priced else None)
+    df["cost_usd"] = costs
+    df["leaf"] = [short_path(c, 1, mark="") if isinstance(c, str) and c else "" for c in df["cwd"]]
+    return df.head(int(limit)).reset_index(drop=True)
+
+
 def chat_work_counts(session_id: str) -> dict:
     """How much of each kind this chat has, for a column and for the panel's header.
 
@@ -2544,15 +2683,21 @@ def chat_work_counts(session_id: str) -> dict:
     tables this store actually has, so an empty answer can be told from an unharvested one.
     """
     out: dict[str, Any] = {"plans": 0, "agent_runs": 0, "workflow_runs": 0, "task_events": 0,
-           "changes": 0, "changed_files": 0, "reviews": 0,
+           "changes": 0, "changed_files": 0, "reviews": 0, "runs": 0,
            "harvested": {"plans": tables_present("plans"),
                          "agent_runs": tables_present("agent_runs"),
                          "workflow_runs": tables_present("workflow_runs"),
                          "task_events": tables_present("task_events"),
                          "changes": tables_present("changes"),
-                         "reviews": tables_present("review_links")}}
+                         "reviews": tables_present("review_links"),
+                         "runs": tables_present("run_links")}}
+    own = chat_members(session_id)
     if out["harvested"]["reviews"]:
-        out["reviews"] = len(chat_members(session_id, reviews=True)) - len(chat_members(session_id))
+        _parent_of, runs_of = review_links()
+        out["reviews"] = sum(len(runs_of.get(m, [])) for m in own)
+    if out["harvested"]["runs"]:
+        _spawned_by, children_of, _projects = run_links()
+        out["runs"] = sum(len(children_of.get(m, [])) for m in own)
     if out["harvested"]["plans"]:
         where, params = chain_where(session_id, "session_id")
         out["plans"] = int(q(f"SELECT COUNT(*) n FROM plans WHERE {where}", params)["n"].iloc[0])
@@ -2650,6 +2795,10 @@ def chat_work_totals(ttl: float = 45.0) -> dict:
     _parent_of, runs_of = review_links()
     for parent, runs in runs_of.items():
         add("reviews", parent, len(runs))
+    # The child runs each chat's shell commands spawned, counted under the chat the same way.
+    _spawned_by, children_of, _projects = run_links()
+    for parent, children in children_of.items():
+        add("runs", parent, len(children))
     if seen == _generation["n"]:
         _work_cache.update({"at": now, "totals": totals})
     return totals

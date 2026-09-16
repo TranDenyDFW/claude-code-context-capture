@@ -39,6 +39,25 @@ describe('the chat work page', () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/chat/sess-1?limit=2000'))
   })
 
+  it('lists each child run with how it was tied, the folder it worked in and its prompt', async () => {
+    const run = {
+      session_id: 'run-5555-6666', ts: '2026-08-05T10:00:00Z', how: 'under', hits: 1,
+      call_id: 'toolu_1', cwd: 'P:\\proj\\tmp\\A1-write-tool', leaf: 'A1-write-tool',
+      prompt: 'Create a file at infra/main.tf', calls: 2,
+      input_tokens: 1000, cache_read: 200, cache_creation: 30, output_tokens: 4, cost_usd: 0.0123,
+    }
+    answer(body({ runs: [run], runs_total: 3 }))
+    render(<ChatWorkPage session="sess-1" onBack={() => {}} />)
+    await waitFor(() => expect(screen.getByText('A1-write-tool')).toBeTruthy())
+    expect(screen.getByText('tied by under')).toBeTruthy()
+    expect(screen.getByText('Create a file at infra/main.tf')).toBeTruthy()
+    expect(screen.getByText('1,234 tokens')).toBeTruthy()
+    expect(screen.getByText('$0.0123')).toBeTruthy()
+    const text = csv(body({ runs: [run], runs_total: 1 }))
+    expect(text).toContain('"run","run-5555-6666","2026-08-05T10:00:00Z","Create a file at infra/main.tf",'
+      + '"tied by under","A1-write-tool 1234 tokens 0.0123"')
+  })
+
   it('says how many CLI sessions the counts are taken over', async () => {
     answer(body({ plans: [PLAN], plans_total: 1 }))
     render(<ChatWorkPage session="sess-1" onBack={() => {}} />)

@@ -383,6 +383,61 @@ written and taken back stays on record. What the app itself writes on a delete b
 is not mimicked, because it has not been measured beyond the marker's name (`deleted_<record
 uuid>`); that measurement precedes the removal on the laptop.
 
+**A headless child run folds into the chat that spawned it, or under the project above it.** A
+chat's shell command ran `claude -p` in a folder (a benchmark harness, a script, a hook), hundreds
+of times, and each run left a one-prompt session of its own under its own working directory,
+carrying the app's entrypoint it inherited from its environment. Measured on the author's machine,
+2026-09-16: 888 such sessions under one project's `tmp` folder (bashrec 513, fidpool 282, fid2 43,
+crit-live 37, fidelity 8, fid 5), one typed prompt each, at most 12 messages, and the Adopt page
+offered 870 of them as one-chat folders; no shell call anywhere in the store spawned them (the
+harness ran outside any captured chat), and the one session in the folder above them has no tool
+use. Three children of one chat do exist (`P:\WorkNotes\Claude-Access`, 2026-09-14): each began
+2.9 s after a Bash or PowerShell call of the parent whose input carried the child's prompt, and
+the call's result came back 0.9 s after the child's last record and quoted its 72 character
+reply. The review rule cannot reach any of these (it needs a quoted chat in the same folder), so
+harvest derives a second table, `run_links` (`deriveRuns` in `tools/harvest.mjs`; the schema
+comment records the numbers). A candidate is a one-shot: one prompt a person typed, at most 16
+messages. Hook feedback Claude Code injects as a user message ("Stop hook feedback: ..."), the
+note it writes when a request is interrupted, and a block it injects between angle brackets are
+not prompts (65 of the harness's runs read as two or three prompts because a Stop hook talked
+back; measured store-wide, 455 hook feedbacks, 271 interruption notes and 2,762 injected blocks
+sit among the 14,555 typed user messages after a session's first). A
+CHILD is a one-shot begun inside the span of another chat's shell call (from the call's `ts` to
+its `result_ts`, a column added to `tool_calls` for this, else to the parent's next typed prompt,
+else an hour), the parent not a one-shot itself; the tiers of evidence, strongest first, are
+`prompt` (the JSON-escaped head of the child's prompt occurs in the call's input), `cwd` (the
+input names the child's folder at a path boundary, and that folder is strictly under the
+parent's: a child in the parent's own directory is named by every `cd` the parent ever ran,
+which on the author's store tied 78 SDK one-shots to whichever command last mentioned the
+directory they shared with the chat), `quoted` (the child's folder is the parent's or under it
+and a reply line of 40 ASCII characters or more occurs in the parent's tool results inside the
+span) and `under` (strict containment and the span alone: the script-file case); two parents at
+the same strength name nobody, and a one-shot in the parent's own folder with nothing but a span
+is not its child. A BATCH is a one-shot with no such call and at least three other one-shots
+sharing its folder's parent or grandparent directory begun within ten minutes (measured on the
+author's store: the parent level alone batches 805 of the 808 corpus runs and the grandparent
+the 12 nested one level deeper; none of the 137 misses batch at either level; a person's desktop
+one-shots reach at most one sibling within an hour); its `project` is the nearest directory at
+or above its folder that is the working directory of a session somebody prompted which is not
+a run and would not be batched itself (a workflow's SDK agents run in the chat's own directory
+and fold under it; a case folder holding two of its own runs, or an empty transcript, is no
+project), and NULL when there is none. Tried on a copy of the author's store before it shipped:
+1,095 one-shots, 873 batched under `P:\ClaudeExt\ccx-engineering-work`, the three Claude-Access
+children tied to their chat, the 14 SDK one-shots of the c4x and claude-appx-restart dev chats
+batched under those folders, and only the 15 empty transcripts left alone. A linked run whose transcript grows a second
+typed prompt is unlinked on the next pass that touches it: the guard for a person's chat opened
+in a subfolder while a parent's command ran. The store reads the table beside `review_links`: a
+child resolves to the chat that spawned it and counts toward it under "Including Subagents", a
+batch resolves to itself; both are listed nowhere (`hidden_sessions_sql`); the chat's page lists
+its children under Runs (how the tie was made, the folder's leaf, the prompt, the cost); the
+population list says "(N listed, M runs)" for a project that carries runs; the Summary's "Tool
+Bytes by Project" bar folds a run's bytes into its project's and says so on hover; the Adopt
+window offers no run, shows a Runs column per folder and a line saying how many are folded
+where, and takes back the records an earlier build wrote for runs with the review records.
+Derived after every harvest pass for the directories it touched and by `--backfill-runs`
+(`--backfill-tool-outcomes` first, which now also fills `result_ts` on rows from before the
+column, so every call's span has an end); a fresh install's first harvest derives it as it goes.
+
 **The sweep runs itself when the app starts, and restarts the app.** The user's decision: the
 button should not be needed. "The app starts" has one observable in c4x, the SessionStart hook
 finding nobody on the port and starting the server, so the server runs the sweep once, right after

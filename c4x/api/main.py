@@ -1237,6 +1237,7 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
         chat_members,
         chat_plans,
         chat_reviews,
+        chat_runs,
         chat_task_events,
         chat_work_counts,
         chat_workflow_runs,
@@ -1251,6 +1252,7 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
     tasks = chat_task_events(session_id, limit=limit)
     changed = chat_changed_files(session_id, limit=limit)
     reviews = chat_reviews(session_id, limit=limit)
+    spawned = chat_runs(session_id, limit=limit)
     unresolved = 0
     if not tasks.empty and "resolved_to" in tasks.columns:
         unresolved = int(tasks["resolved_to"].isna().sum())
@@ -1282,6 +1284,10 @@ def chat_work(session_id: str, limit: int = Query(200, ge=1, le=2000)):
         # what it decided, which prompt the chat was answering, and what it cost.
         "reviews": records(reviews) if not reviews.empty else [],
         "reviews_total": counts["reviews"],
+        # THE CHILD RUNS THIS CHAT SPAWNED: one-shot `claude -p` sessions its shell commands
+        # started (a harness, a script), tied to it by harvest and listed nowhere on their own.
+        "runs": records(spawned) if not spawned.empty else [],
+        "runs_total": counts["runs"],
     })
 
 
