@@ -5476,7 +5476,7 @@ async function selfTest() {
     mkdirSync(udir, { recursive: true });
     const sid = (tag) => `${tag}-0000-4000-8000-00000000000b`;
     const U = { P: sid('aaaa000b'), C1: sid('bbbb000b'), C2: sid('cccc000b'), C3: sid('dddd000b'),
-                C4: sid('eeee000b'), R: sid('ffff000b'),
+                C4: sid('eeee000b'), C5: sid('abcd000b'), R: sid('ffff000b'),
                 B1: sid('b1b1000b'), B2: sid('b2b2000b'), B3: sid('b3b3000b'), B4: sid('b4b4000b'),
                 L1: sid('c1c1000b'), L2: sid('c2c2000b'), L3: sid('c3c3000b'), L4: sid('c4c4000b') };
     const PROJ = 'P:\\proj', CHILD1 = 'P:\\proj\\tmp\\child1', CHILD2 = 'P:\\proj\\tmp\\child2';
@@ -5515,6 +5515,10 @@ async function selfTest() {
                said(U.C3, ts(108), 'The fidelity probe ran and every check on the list passed cleanly', DEEP)]);
     put(U.C4, [user(U.C4, ts(105), 'quick question', PERSON), said(U.C4, ts(106), 'an answer', PERSON),
                user(U.C4, ts(120), 'and another', PERSON), said(U.C4, ts(121), 'a second answer', PERSON)]);
+    // A one-shot in the parent's OWN folder while its last call is still open, with nothing
+    // else to go on: a person asking one question beside a long command, not its child.
+    put(U.C5, [user(U.C5, ts(205), 'what does the bench print', PROJ),
+               said(U.C5, ts(206), 'It prints one line per case with the elapsed time beside it', PROJ)]);
     // A real chat above a batch, and the batch: four one-shots in sibling folders, no call near.
     put(U.R, [user(U.R, ts(0), 'plan the sweep', OTHER), said(U.R, ts(1), 'planned', OTHER),
               user(U.R, ts(30), 'go', OTHER), said(U.R, ts(31), 'going', OTHER)]);
@@ -5541,19 +5545,22 @@ async function selfTest() {
     checks.push(['runs: write:false writes nothing and still reports (gate can fail)',
       udb.prepare('SELECT COUNT(*) n FROM run_links').get().n === 0
       && udb.prepare('SELECT COUNT(*) n FROM run_misses').get().n === 0
-      && dryRuns.linked.length === 2 && dryRuns.batched.length === 8 && dryRuns.misses === 1,
+      && dryRuns.linked.length === 2 && dryRuns.batched.length === 8 && dryRuns.misses === 2,
       JSON.stringify({ l: dryRuns.linked.length, b: dryRuns.batched.length, m: dryRuns.misses })]);
     const ru = deriveRuns(udb, uids, { write: true, now: '2026-06-01T12:00:00.000Z' });
     const rlink = (s) => udb.prepare('SELECT * FROM run_links WHERE session_id = ?').get(s);
-    checks.push(['runs: the one-shots are the children and the batches, never the chats',
-      ru.one_shots === 11 && !rlink(U.P) && !rlink(U.R) && !rlink(U.C4), String(ru.one_shots)]);
+    checks.push(['runs: the one-shots are the children, the batches and the lone question, never the chats',
+      ru.one_shots === 12 && !rlink(U.P) && !rlink(U.R) && !rlink(U.C4), String(ru.one_shots)]);
+    checks.push(['runs: a one-shot in the parent\'s own folder with nothing but an open span is not its child (gate can fail)',
+      !rlink(U.C5) && udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(U.C5)?.pool_key === `${U.P}|0`,
+      JSON.stringify({ c5: rlink(U.C5), key: udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(U.C5) })]);
     checks.push(['runs: a child whose prompt the parent\'s call carries, begun inside the span, ties by prompt with every tier agreeing (gate can fail)',
       rlink(U.C1)?.head_id === U.P && rlink(U.C1)?.how === 'prompt' && rlink(U.C1)?.hits === 4
       && rlink(U.C1)?.call_id === 'toolu_run1' && rlink(U.C1)?.project === PROJ
       && rlink(U.C1)?.method === 'harvest' && rlink(U.C1)?.linked_at === '2026-06-01T12:00:00.000Z',
       JSON.stringify(rlink(U.C1))]);
     checks.push(['runs: the same child begun after the result came back is not tied (gate can fail)',
-      !rlink(U.C2) && ru.misses === 1
+      !rlink(U.C2) && ru.misses === 2
       && udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(U.C2)?.pool_key === `${U.P}|2`,
       JSON.stringify({ miss: rlink(U.C2), key: udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(U.C2) })]);
     checks.push(['runs: a child two folders down, spawned by a script file the call names, ties by containment alone (gate can fail)',
@@ -5569,7 +5576,7 @@ async function selfTest() {
       JSON.stringify(rlink(U.L1))]);
     const againRuns = deriveRuns(udb, uids, { write: true });
     checks.push(['runs: a second pass asks nothing again',
-      againRuns.already === 10 && againRuns.unchanged === 1 && againRuns.linked.length === 0
+      againRuns.already === 10 && againRuns.unchanged === 2 && againRuns.linked.length === 0
       && againRuns.batched.length === 0 && againRuns.unlinked === 0,
       JSON.stringify({ a: againRuns.already, u: againRuns.unchanged })]);
     // THE UNLINK: the child's transcript grows a second typed prompt (a person picked the chat
