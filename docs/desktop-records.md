@@ -401,15 +401,23 @@ CHILD is a one-shot begun inside the span of another chat's shell call (from the
 its `result_ts`, a column added to `tool_calls` for this, else to the parent's next typed prompt,
 else an hour), the parent not a one-shot itself; the tiers of evidence, strongest first, are
 `prompt` (the JSON-escaped head of the child's prompt occurs in the call's input), `cwd` (the
-input names the child's folder), `quoted` (the child's folder is the parent's or under it and a
-reply line of 40 ASCII characters or more occurs in the parent's tool results inside the span) and
-`under` (strict containment and the span alone: the script-file case); two parents at the same
-strength name nobody, and a one-shot in the parent's own folder with nothing but an open span is
-not its child. A BATCH is a one-shot with no such call and at least three other one-shots sharing
-its folder's parent or grandparent directory begun within ten minutes (the corpus minimum is
-five; a person's desktop one-shots reach at most one sibling within an hour); its `project` is
-the nearest ancestor directory of its folder that is the working directory of a session which
-is not itself a run, and NULL when there is none. A linked run whose transcript grows a second
+input names the child's folder at a path boundary, and that folder is strictly under the
+parent's: a child in the parent's own directory is named by every `cd` the parent ever ran,
+which on the author's store tied 78 SDK one-shots to whichever command last mentioned the
+directory they shared with the chat), `quoted` (the child's folder is the parent's or under it
+and a reply line of 40 ASCII characters or more occurs in the parent's tool results inside the
+span) and `under` (strict containment and the span alone: the script-file case); two parents at
+the same strength name nobody, and a one-shot in the parent's own folder with nothing but a span
+is not its child. A BATCH is a one-shot with no such call and at least three other one-shots
+sharing its folder's parent or grandparent directory begun within ten minutes (measured on the
+author's store: the parent level alone batches 805 of the 808 corpus runs and the grandparent
+the 12 nested one level deeper; none of the 137 misses batch at either level; a person's desktop
+one-shots reach at most one sibling within an hour); its `project` is the nearest directory at
+or above its folder that is the working directory of a session which is not itself a run (a
+workflow's SDK agents run in the chat's own directory and fold under it), and NULL when there
+is none. Tried on a copy of the author's store before it shipped: 1,028 one-shots, 808 batched
+under `P:\ClaudeExt\ccx-engineering-work`, the three Claude-Access children tied to their chat,
+the SDK one-shots of the c4x and claude-appx-restart dev chats batched under those folders. A linked run whose transcript grows a second
 typed prompt is unlinked on the next pass that touches it: the guard for a person's chat opened
 in a subfolder while a parent's command ran. The store reads the table beside `review_links`: a
 child resolves to the chat that spawned it and counts toward it under "Including Subagents", a

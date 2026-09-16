@@ -445,14 +445,19 @@ CREATE TABLE IF NOT EXISTS review_misses (
 -- 12 messages, no shell call anywhere spawned them, the one session in the folder above them has
 -- no tool use at all. The Adopt page offered 870 of them as one-chat folders.
 -- head_id is the parent chat for a child a call spawned (how: prompt, the JSON-escaped head of
--- the child's prompt occurs in the call's input; cwd, the input names the child's cwd; quoted,
--- the child's cwd is the parent's or under it and a reply line of 40 ASCII characters or more
--- occurs in the parent's tool results inside the call's span; under, containment and the span
--- alone) and NULL for a BATCH: at least three other one-shots sharing the cwd's parent or
--- grandparent directory began within ten minutes (the corpus minimum is five; a person's
--- desktop one-shots reach at most one sibling within an hour). project is the cwd the run folds
--- under: the parent's for a child, else the nearest ancestor directory of the run's cwd that is
--- the cwd of a session which is not itself a run, NULL when there is none. Every reader folds a
+-- the child's prompt occurs in the call's input; cwd, the input names the child's cwd at a path
+-- boundary and that cwd is strictly under the parent's, since a child in the parent's own
+-- directory is named by every cd the parent ever ran, which tied 78 SDK one-shots to the wrong
+-- call on the author's store; quoted, the child's cwd is the parent's or under it and a reply
+-- line of 40 ASCII characters or more occurs in the parent's tool results inside the call's
+-- span; under, strict containment and the span alone) and NULL for a BATCH: at least three
+-- other one-shots sharing the cwd's parent or grandparent directory began within ten minutes
+-- (measured on the author's store: the parent level alone batches 805 of the 808, the
+-- grandparent the 12 nested one level deeper; a person's desktop one-shots reach at most one
+-- sibling within an hour; none of the 137 misses batch at either level). project is the cwd
+-- the run folds under: the parent's for a child, else the nearest directory at or above the
+-- run's cwd that is the cwd of a session which is not itself a run (a workflow's agents run in
+-- the chat's own directory), NULL when there is none. Every reader folds a
 -- run the way it folds a review run: out of the lists, into the chat's numbers under the subagent
 -- scope, and a batch into its project's totals. call_id is the spawning call; hits counts the
 -- tiers that agreed (a batch: its siblings). A linked run whose transcript grows a second typed
@@ -2495,6 +2500,18 @@ const dirAbove = (p) => { const i = p.lastIndexOf('/'); return i > 0 ? p.slice(0
 export function isUnder(child, parent) {
   return Boolean(parent) && child.length > parent.length && child.startsWith(parent + '/');
 }
+/** Whether `text` (a call's input, folded by normPath) names the folder `dir` as a path: the
+ * match ends at the end of the text or before a character that cannot continue a path segment,
+ * so `p:/x/c4x` is not found inside `p:/x/c4x-main`. A deeper path under the folder counts. */
+export function namesPath(text, dir) {
+  if (!dir) return false;
+  const hay = normPath(text);
+  for (let i = hay.indexOf(dir); i !== -1; i = hay.indexOf(dir, i + 1)) {
+    const next = hay[i + dir.length];
+    if (next === undefined || !/[a-z0-9_.\-]/.test(next)) return true;
+  }
+  return false;
+}
 export const runOneShots = (db, ids) => reviewOneShots(db, ids, RUN.MAX_MESSAGES);
 /** The reply lines worth looking for in the parent's tool results: ASCII, QUOTE_MIN or longer,
  * newest first, the last 120 characters of each (the review rule's tail). */
@@ -2555,7 +2572,7 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
   const quotedBy = db.prepare(`SELECT 1 FROM messages WHERE session_id = ? AND type = 'tool_result'
                                AND ts BETWEEN ? AND ? AND instr(text, ?) > 0 LIMIT 1`);
   const siblingsNear = db.prepare('SELECT session_id, cwd FROM sessions WHERE first_ts BETWEEN ? AND ? AND session_id <> ?');
-  const chatsAt = db.prepare(`SELECT session_id, cwd FROM sessions WHERE lower(replace(cwd, '\\', '/')) = ?`);
+  const chatsAt = db.prepare(`SELECT session_id, cwd, first_ts FROM sessions WHERE lower(replace(cwd, '\\', '/')) = ?`);
   const isRun = db.prepare('SELECT 1 FROM run_links WHERE session_id = ?');
   const putLink = db.prepare(`INSERT OR REPLACE INTO run_links
     (session_id, head_id, project, how, call_id, hits, method, linked_at) VALUES (?,?,?,?,?,?,?,?)`);
@@ -2571,6 +2588,36 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
     }
     return new Set(list.filter((s) => shotMemo.get(s)));
   };
+  // The one-shots beside a session: begun within the window, in a folder whose parent or
+  // grandparent is the session's folder's parent or grandparent.
+  const siblingsOf = (sid, cwd, first) => {
+    const above = [dirAbove(cwd), dirAbove(dirAbove(cwd))].filter(Boolean);
+    if (!cwd || !above.length) return new Set();
+    const near = siblingsNear.all(iso(first - RUN.BATCH_WINDOW_MS), iso(first + RUN.BATCH_WINDOW_MS), sid)
+      .filter((s) => {
+        const p = normPath(s.cwd);
+        const theirs = [dirAbove(p), dirAbove(dirAbove(p))];
+        return above.some((d) => theirs.includes(d));
+      });
+    return oneShotAmong(near.map((s) => s.session_id));
+  };
+  // A REAL CHAT, for the project walk: a session that is not a run and would not be batched
+  // itself. Not merely "not in run_links": a batch's members are written one at a time, and a
+  // sibling run in the same folder that has not been written yet would otherwise pass for the
+  // chat the folder is named after (measured on a copy of the author's store: 305 "projects"
+  // for one harness, most of them a case folder holding two of its own runs).
+  const chatMemo = new Map();
+  const isChat = (row) => {
+    if (chatMemo.has(row.session_id)) return chatMemo.get(row.session_id);
+    let chat = !isRun.get(row.session_id);
+    if (chat && oneShotAmong([row.session_id]).has(row.session_id)) {
+      const began = Date.parse(row.first_ts ?? '');
+      chat = Number.isNaN(began)
+        || siblingsOf(row.session_id, normPath(row.cwd), began).size < RUN.BATCH_MIN;
+    }
+    chatMemo.set(row.session_id, chat);
+    return chat;
+  };
   for (const shot of shots) {
     if (known.has(shot) || reviews.has(shot)) { result.already++; continue; }
     const r = when.get(shot);
@@ -2582,14 +2629,7 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
     const calls = callsNear.all(iso(first - RUN.LOOKBACK_MS - 1000), iso(first + RUN.SKEW_MS + 1000), shot);
     const parents = [...new Set(calls.map((c) => c.session_id))].sort();
     const parentShots = oneShotAmong(parents);
-    const above = [dirAbove(cwd), dirAbove(dirAbove(cwd))].filter(Boolean);
-    const near = cwd ? siblingsNear.all(iso(first - RUN.BATCH_WINDOW_MS), iso(first + RUN.BATCH_WINDOW_MS), shot)
-      .filter((s) => {
-        const p = normPath(s.cwd);
-        const theirs = [dirAbove(p), dirAbove(dirAbove(p))];
-        return above.some((d) => theirs.includes(d));
-      }) : [];
-    const siblings = oneShotAmong(near.map((s) => s.session_id));
+    const siblings = siblingsOf(shot, cwd, first);
     const key = `${parents.join(',')}|${siblings.size}`;
     if (missed.get(shot) === key) { result.unchanged++; continue; }
     // TIER ONE, A PARENT CHAT.
@@ -2613,7 +2653,12 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
       const inside = Boolean(cwd) && (cwd === pcwd || isUnder(cwd, pcwd));
       const tiers = [];
       if (head.length >= RUN.PROMPT_MIN && input.includes(head)) tiers.push('prompt');
-      if (cwd && normPath(input).includes(cwd)) tiers.push('cwd');
+      // THE FOLDER NAMED, and only a folder of the child's own: a child in the parent's OWN
+      // working directory is named by every `cd` the parent ever ran (measured on the author's
+      // store: 78 SDK one-shots tied to whichever command last mentioned the directory they
+      // shared with the chat), so the tier holds only for a folder strictly under the parent's,
+      // and at a path boundary, so `c4x` is not found inside `c4x-main`.
+      if (isUnder(cwd, pcwd) && namesPath(input, cwd)) tiers.push('cwd');
       if (inside && lines.some((line) => {
         result.queries++;
         return quotedBy.get(c.session_id, c.ts, iso(end + RUN.SKEW_MS), line);
@@ -2636,10 +2681,12 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
     }
     // TIER TWO, A BATCH WITH NO CHAT BEHIND IT.
     if (siblings.size >= RUN.BATCH_MIN) {
+      // The project: the run's own folder when a real chat lives there (a workflow's agents
+      // run in the chat's own directory), else the nearest folder above it that holds one.
       let project = null;
-      for (let dir = dirAbove(cwd); dir; dir = dirAbove(dir)) {
+      for (let dir = cwd; dir; dir = dirAbove(dir)) {
         result.queries++;
-        const there = chatsAt.all(dir).filter((x) => x.session_id !== shot && !isRun.get(x.session_id));
+        const there = chatsAt.all(dir).filter((x) => x.session_id !== shot && isChat(x));
         if (there.length) { project = there[0].cwd; break; }
       }
       const row = { session_id: shot, head_id: null, project, how: 'batch', call_id: null, hits: siblings.size };
@@ -5476,8 +5523,9 @@ async function selfTest() {
     mkdirSync(udir, { recursive: true });
     const sid = (tag) => `${tag}-0000-4000-8000-00000000000b`;
     const U = { P: sid('aaaa000b'), C1: sid('bbbb000b'), C2: sid('cccc000b'), C3: sid('dddd000b'),
-                C4: sid('eeee000b'), C5: sid('abcd000b'), R: sid('ffff000b'),
+                C4: sid('eeee000b'), C5: sid('abcd000b'), C6: sid('abce000b'), R: sid('ffff000b'),
                 B1: sid('b1b1000b'), B2: sid('b2b2000b'), B3: sid('b3b3000b'), B4: sid('b4b4000b'),
+                B5: sid('b5b5000b'),
                 L1: sid('c1c1000b'), L2: sid('c2c2000b'), L3: sid('c3c3000b'), L4: sid('c4c4000b') };
     const PROJ = 'P:\\proj', CHILD1 = 'P:\\proj\\tmp\\child1', CHILD2 = 'P:\\proj\\tmp\\child2';
     const DEEP = 'P:\\proj\\tmp\\deep\\c3', PERSON = 'P:\\proj\\notes';
@@ -5519,11 +5567,20 @@ async function selfTest() {
     // else to go on: a person asking one question beside a long command, not its child.
     put(U.C5, [user(U.C5, ts(205), 'what does the bench print', PROJ),
                said(U.C5, ts(206), 'It prints one line per case with the elapsed time beside it', PROJ)]);
+    // A one-shot in the parent's OWN folder inside the span of a call that names a folder
+    // under it (the call's `cd P:\proj\tmp\child1` contains `P:\proj`): the folder tier must
+    // not fire for a folder that is the parent's own. Measured: 78 SDK one-shots tied that way.
+    put(U.C6, [user(U.C6, ts(12), 'list the cases', PROJ),
+               said(U.C6, ts(13), 'The cases are listed in the table above and nothing else needs doing here', PROJ)]);
     // A real chat above a batch, and the batch: four one-shots in sibling folders, no call near.
     put(U.R, [user(U.R, ts(0), 'plan the sweep', OTHER), said(U.R, ts(1), 'planned', OTHER),
               user(U.R, ts(30), 'go', OTHER), said(U.R, ts(31), 'going', OTHER)]);
     [U.B1, U.B2, U.B3, U.B4].forEach((b, i) => put(b, [user(b, ts(300 + i * 10), 'probe ' + i, `${OTHER}\\tmp\\g\\p${i}`),
                                                        said(b, ts(302 + i * 10), 'probed', `${OTHER}\\tmp\\g\\p${i}`)]));
+    // A second run in the first case folder (a harness's control and its rule in one folder):
+    // it must not pass for the chat that folder is named after.
+    put(U.B5, [user(U.B5, ts(305), 'probe 0 again', `${OTHER}\\tmp\\g\\p0`),
+               said(U.B5, ts(307), 'probed again', `${OTHER}\\tmp\\g\\p0`)]);
     [U.L1, U.L2, U.L3, U.L4].forEach((b, i) => put(b, [user(b, ts(600 + i * 10), 'lonely ' + i, `${LONELY}\\p${i}`),
                                                        said(b, ts(602 + i * 10), 'done', `${LONELY}\\p${i}`)]));
     const udb = new DatabaseSync(':memory:');
@@ -5541,42 +5598,52 @@ async function selfTest() {
     checks.push(['runs: paths fold to one spelling and containment is strict',
       normPath('P:\\\\proj\\\\tmp\\\\') === 'p:/proj/tmp' && normPath('p:/PROJ/tmp') === 'p:/proj/tmp'
       && isUnder('p:/proj/tmp/x', 'p:/proj') && !isUnder('p:/proj', 'p:/proj') && !isUnder('p:/projects/x', 'p:/proj')]);
+    checks.push(['runs: a folder is named at a path boundary, a deeper path counts, a longer name does not (gate can fail)',
+      namesPath('cd P:\\\\x\\\\c4x && ls', 'p:/x/c4x') && namesPath('cat "P:/x/c4x/a.md"', 'p:/x/c4x')
+      && namesPath('P:/x/c4x', 'p:/x/c4x') && !namesPath('cd P:/x/c4x-main && ls', 'p:/x/c4x')
+      && !namesPath('P:/x/c4xy', 'p:/x/c4x') && !namesPath('nothing here', 'p:/x/c4x') && !namesPath('p:/x', '')]);
     const dryRuns = deriveRuns(udb, uids, { write: false });
     checks.push(['runs: write:false writes nothing and still reports (gate can fail)',
       udb.prepare('SELECT COUNT(*) n FROM run_links').get().n === 0
       && udb.prepare('SELECT COUNT(*) n FROM run_misses').get().n === 0
-      && dryRuns.linked.length === 2 && dryRuns.batched.length === 8 && dryRuns.misses === 2,
+      && dryRuns.linked.length === 2 && dryRuns.batched.length === 9 && dryRuns.misses === 3,
       JSON.stringify({ l: dryRuns.linked.length, b: dryRuns.batched.length, m: dryRuns.misses })]);
     const ru = deriveRuns(udb, uids, { write: true, now: '2026-06-01T12:00:00.000Z' });
     const rlink = (s) => udb.prepare('SELECT * FROM run_links WHERE session_id = ?').get(s);
-    checks.push(['runs: the one-shots are the children, the batches and the lone question, never the chats',
-      ru.one_shots === 12 && !rlink(U.P) && !rlink(U.R) && !rlink(U.C4), String(ru.one_shots)]);
+    const missKey = (s) => udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(s)?.pool_key;
+    checks.push(['runs: the one-shots are the children, the batches and the lone questions, never the chats',
+      ru.one_shots === 14 && !rlink(U.P) && !rlink(U.R) && !rlink(U.C4), String(ru.one_shots)]);
     checks.push(['runs: a one-shot in the parent\'s own folder with nothing but an open span is not its child (gate can fail)',
-      !rlink(U.C5) && udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(U.C5)?.pool_key === `${U.P}|0`,
-      JSON.stringify({ c5: rlink(U.C5), key: udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(U.C5) })]);
+      !rlink(U.C5) && missKey(U.C5) === `${U.P}|1`,
+      JSON.stringify({ c5: rlink(U.C5), key: missKey(U.C5) })]);
+    checks.push(['runs: a one-shot in the parent\'s own folder is not tied by a call that names a folder under it (gate can fail)',
+      !rlink(U.C6) && missKey(U.C6) === `${U.P}|1`,
+      JSON.stringify({ c6: rlink(U.C6), key: missKey(U.C6) })]);
     checks.push(['runs: a child whose prompt the parent\'s call carries, begun inside the span, ties by prompt with every tier agreeing (gate can fail)',
       rlink(U.C1)?.head_id === U.P && rlink(U.C1)?.how === 'prompt' && rlink(U.C1)?.hits === 4
       && rlink(U.C1)?.call_id === 'toolu_run1' && rlink(U.C1)?.project === PROJ
       && rlink(U.C1)?.method === 'harvest' && rlink(U.C1)?.linked_at === '2026-06-01T12:00:00.000Z',
       JSON.stringify(rlink(U.C1))]);
     checks.push(['runs: the same child begun after the result came back is not tied (gate can fail)',
-      !rlink(U.C2) && ru.misses === 2
-      && udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(U.C2)?.pool_key === `${U.P}|2`,
-      JSON.stringify({ miss: rlink(U.C2), key: udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(U.C2) })]);
+      !rlink(U.C2) && ru.misses === 3 && missKey(U.C2) === `${U.P}|2`,
+      JSON.stringify({ miss: rlink(U.C2), key: missKey(U.C2) })]);
     checks.push(['runs: a child two folders down, spawned by a script file the call names, ties by containment alone (gate can fail)',
       rlink(U.C3)?.head_id === U.P && rlink(U.C3)?.how === 'under' && rlink(U.C3)?.hits === 1
       && rlink(U.C3)?.call_id === 'toolu_run2', JSON.stringify(rlink(U.C3))]);
     checks.push(['runs: a person\'s chat in a subfolder, two typed prompts, is never a run (gate can fail)',
       !rlink(U.C4) && !dryRuns.linked.some((l) => l.session_id === U.C4)]);
-    checks.push(['runs: four one-shots in sibling folders with no call near them are a batch under the project above (gate can fail)',
+    checks.push(['runs: one-shots in sibling folders with no call near them are a batch under the project above (gate can fail)',
       [U.B1, U.B2, U.B3, U.B4].every((b) => rlink(b)?.head_id === null && rlink(b)?.how === 'batch'
-        && rlink(b)?.hits === 3 && rlink(b)?.project === OTHER), JSON.stringify(rlink(U.B1))]);
+        && rlink(b)?.hits === 4 && rlink(b)?.project === OTHER), JSON.stringify(rlink(U.B1))]);
+    checks.push(['runs: a case folder holding a second run of its own is not the project (gate can fail)',
+      rlink(U.B5)?.how === 'batch' && rlink(U.B5)?.project === OTHER && rlink(U.B1)?.project === OTHER,
+      JSON.stringify([rlink(U.B5), rlink(U.B1)])]);
     checks.push(['runs: a batch with no chat above it has no project (gate can fail)',
       [U.L1, U.L2, U.L3, U.L4].every((b) => rlink(b)?.how === 'batch' && rlink(b)?.project === null),
       JSON.stringify(rlink(U.L1))]);
     const againRuns = deriveRuns(udb, uids, { write: true });
     checks.push(['runs: a second pass asks nothing again',
-      againRuns.already === 10 && againRuns.unchanged === 2 && againRuns.linked.length === 0
+      againRuns.already === 11 && againRuns.unchanged === 3 && againRuns.linked.length === 0
       && againRuns.batched.length === 0 && againRuns.unlinked === 0,
       JSON.stringify({ a: againRuns.already, u: againRuns.unchanged })]);
     // THE UNLINK: the child's transcript grows a second typed prompt (a person picked the chat
@@ -5597,12 +5664,12 @@ async function selfTest() {
     const dryRep2 = await backfillRuns(upath, { quiet: true, write: false });
     const ucount = () => { const d = new DatabaseSync(upath); const n = d.prepare('SELECT COUNT(*) n FROM run_links').get().n; d.close(); return n; };
     checks.push(['backfill-runs: --dry-run reports and writes nothing (gate can fail)',
-      dryRep2.linked === 1 && dryRep2.batched === 8 && dryRep2.wrote === false && ucount() === 0
+      dryRep2.linked === 1 && dryRep2.batched === 9 && dryRep2.wrote === false && ucount() === 0
       && dryRep2.calls_without_result_ts === 1, JSON.stringify(dryRep2)]);
     const rep2 = await backfillRuns(upath, { quiet: true, write: true });
     checks.push(['backfill-runs: the links and the batches land, counted by how',
-      rep2.linked === 1 && rep2.batched === 8 && rep2.by_how.under === 1 && rep2.by_how.batch === 8
-      && rep2.heads === 1 && rep2.projects === 2 && ucount() === 9 && rep2.links_after === 9 && rep2.links_before === 0,
+      rep2.linked === 1 && rep2.batched === 9 && rep2.by_how.under === 1 && rep2.by_how.batch === 9
+      && rep2.heads === 1 && rep2.projects === 2 && ucount() === 10 && rep2.links_after === 10 && rep2.links_before === 0,
       JSON.stringify({ l: rep2.linked, b: rep2.batched, h: rep2.by_how, p: rep2.projects, n: ucount() })]);
   }
 
