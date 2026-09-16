@@ -396,7 +396,12 @@ use. Three children of one chat do exist (`P:\WorkNotes\Claude-Access`, 2026-09-
 the call's result came back 0.9 s after the child's last record and quoted its 72 character
 reply. The review rule cannot reach any of these (it needs a quoted chat in the same folder), so
 harvest derives a second table, `run_links` (`deriveRuns` in `tools/harvest.mjs`; the schema
-comment records the numbers). A candidate is a one-shot: one typed prompt, at most 16 messages. A
+comment records the numbers). A candidate is a one-shot: one prompt a person typed, at most 16
+messages. Hook feedback Claude Code injects as a user message ("Stop hook feedback: ..."), the
+note it writes when a request is interrupted, and a block it injects between angle brackets are
+not prompts (65 of the harness's runs read as two or three prompts because a Stop hook talked
+back; measured store-wide, 455 hook feedbacks, 271 interruption notes and 2,762 injected blocks
+sit among the 14,555 typed user messages after a session's first). A
 CHILD is a one-shot begun inside the span of another chat's shell call (from the call's `ts` to
 its `result_ts`, a column added to `tool_calls` for this, else to the parent's next typed prompt,
 else an hour), the parent not a one-shot itself; the tiers of evidence, strongest first, are
@@ -413,11 +418,13 @@ sharing its folder's parent or grandparent directory begun within ten minutes (m
 author's store: the parent level alone batches 805 of the 808 corpus runs and the grandparent
 the 12 nested one level deeper; none of the 137 misses batch at either level; a person's desktop
 one-shots reach at most one sibling within an hour); its `project` is the nearest directory at
-or above its folder that is the working directory of a session which is not itself a run (a
-workflow's SDK agents run in the chat's own directory and fold under it), and NULL when there
-is none. Tried on a copy of the author's store before it shipped: 1,028 one-shots, 808 batched
-under `P:\ClaudeExt\ccx-engineering-work`, the three Claude-Access children tied to their chat,
-the SDK one-shots of the c4x and claude-appx-restart dev chats batched under those folders. A linked run whose transcript grows a second
+or above its folder that is the working directory of a session somebody prompted which is not
+a run and would not be batched itself (a workflow's SDK agents run in the chat's own directory
+and fold under it; a case folder holding two of its own runs, or an empty transcript, is no
+project), and NULL when there is none. Tried on a copy of the author's store before it shipped:
+1,095 one-shots, 873 batched under `P:\ClaudeExt\ccx-engineering-work`, the three Claude-Access
+children tied to their chat, the 14 SDK one-shots of the c4x and claude-appx-restart dev chats
+batched under those folders, and only the 15 empty transcripts left alone. A linked run whose transcript grows a second
 typed prompt is unlinked on the next pass that touches it: the guard for a person's chat opened
 in a subfolder while a parent's command ran. The store reads the table beside `review_links`: a
 child resolves to the chat that spawned it and counts toward it under "Including Subagents", a

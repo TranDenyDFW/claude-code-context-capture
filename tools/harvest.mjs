@@ -2278,14 +2278,26 @@ const reviewChunks = (items, size = REVIEW.CHUNK) => {
 };
 const reviewMarks = (n) => Array(n).fill('?').join(',');
 
-/** The sessions among `ids` with exactly one typed prompt and at most `max` messages: three for
- * the review rule, RUN.MAX_MESSAGES for the run rule. */
+/**
+ * A PROMPT A PERSON TYPED, as SQL over `messages`. The store files every user message that is
+ * not a tool result as `typed`, and three shapes of those are nobody's prompt: hook feedback
+ * Claude Code injects as a user message ("Stop hook feedback: ..."), the note it writes when a
+ * request is interrupted, and a block it injects between angle brackets (a command's output, a
+ * system reminder). Measured on the author's store: of 14,555 typed user messages after a
+ * session's first, 455 were hook feedback, 271 interruption notes and 2,762 injected blocks, and
+ * 65 harness one-shots read as two or three prompts because a Stop hook talked back.
+ */
+export const PERSON_PROMPT = "type = 'typed' AND role = 'user' AND text NOT LIKE '<%'"
+  + " AND text NOT LIKE '[Request interrupted%' AND substr(text, 1, 40) NOT LIKE '% hook feedback:%'";
+
+/** The sessions among `ids` with exactly one prompt a person typed and at most `max` messages:
+ * three for the review rule, RUN.MAX_MESSAGES for the run rule. */
 export function reviewOneShots(db, ids, max = REVIEW.ONE_SHOT_MESSAGES) {
   const out = new Set();
   for (const chunk of reviewChunks(ids)) {
     const rows = db.prepare(`SELECT session_id FROM messages WHERE session_id IN (${reviewMarks(chunk.length)})
       GROUP BY session_id
-      HAVING SUM(CASE WHEN type = 'typed' AND role = 'user' THEN 1 ELSE 0 END) = 1 AND COUNT(*) <= ?`)
+      HAVING SUM(CASE WHEN ${PERSON_PROMPT} THEN 1 ELSE 0 END) = 1 AND COUNT(*) <= ?`)
       .all(...chunk, max);
     for (const r of rows) out.add(r.session_id);
   }
@@ -2560,15 +2572,16 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
   const stamp = now ?? new Date().toISOString();
   const iso = (ms) => new Date(ms).toISOString();
   const when = db.prepare('SELECT cwd, first_ts FROM sessions WHERE session_id = ?');
-  const promptOf = db.prepare(`SELECT text FROM messages WHERE session_id = ? AND type = 'typed' AND role = 'user'
+  const promptOf = db.prepare(`SELECT text FROM messages WHERE session_id = ? AND ${PERSON_PROMPT}
                                ORDER BY ts LIMIT 1`);
+  const promptCount = db.prepare(`SELECT COUNT(*) n FROM messages WHERE session_id = ? AND ${PERSON_PROMPT}`);
   const replyOf = db.prepare(`SELECT text FROM messages WHERE session_id = ? AND role = 'assistant' ORDER BY ts LIMIT 1`);
   // Shell calls only: JSON.stringify puts the one key of a Bash or PowerShell input first.
   const callsNear = db.prepare(`SELECT c.tool_use_id, c.session_id, c.ts, c.result_ts, c.input_preview, s.cwd
     FROM tool_calls c JOIN sessions s ON s.session_id = c.session_id
     WHERE c.ts BETWEEN ? AND ? AND c.session_id <> ? AND c.input_preview LIKE '{"command":%'`);
-  const nextPrompt = db.prepare(`SELECT MIN(ts) ts FROM messages WHERE session_id = ? AND type = 'typed'
-                                 AND role = 'user' AND ts > ?`);
+  const nextPrompt = db.prepare(`SELECT MIN(ts) ts FROM messages WHERE session_id = ? AND ${PERSON_PROMPT}
+                                 AND ts > ?`);
   const quotedBy = db.prepare(`SELECT 1 FROM messages WHERE session_id = ? AND type = 'tool_result'
                                AND ts BETWEEN ? AND ? AND instr(text, ?) > 0 LIMIT 1`);
   const siblingsNear = db.prepare('SELECT session_id, cwd FROM sessions WHERE first_ts BETWEEN ? AND ? AND session_id <> ?');
@@ -2601,15 +2614,16 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
       });
     return oneShotAmong(near.map((s) => s.session_id));
   };
-  // A REAL CHAT, for the project walk: a session that is not a run and would not be batched
-  // itself. Not merely "not in run_links": a batch's members are written one at a time, and a
-  // sibling run in the same folder that has not been written yet would otherwise pass for the
-  // chat the folder is named after (measured on a copy of the author's store: 305 "projects"
-  // for one harness, most of them a case folder holding two of its own runs).
+  // A REAL CHAT, for the project walk: a session somebody prompted, that is not a run and would
+  // not be batched itself. Not merely "not in run_links": a batch's members are written one at
+  // a time, and a sibling run in the same folder that has not been written yet would otherwise
+  // pass for the chat the folder is named after (measured on a copy of the author's store: 305
+  // "projects" for one harness, most of them a case folder holding two of its own runs); and a
+  // session with no prompt at all (fifteen empty transcripts in the same harness) is nobody's.
   const chatMemo = new Map();
   const isChat = (row) => {
     if (chatMemo.has(row.session_id)) return chatMemo.get(row.session_id);
-    let chat = !isRun.get(row.session_id);
+    let chat = !isRun.get(row.session_id) && promptCount.get(row.session_id).n > 0;
     if (chat && oneShotAmong([row.session_id]).has(row.session_id)) {
       const began = Date.parse(row.first_ts ?? '');
       chat = Number.isNaN(began)
@@ -5523,7 +5537,8 @@ async function selfTest() {
     mkdirSync(udir, { recursive: true });
     const sid = (tag) => `${tag}-0000-4000-8000-00000000000b`;
     const U = { P: sid('aaaa000b'), C1: sid('bbbb000b'), C2: sid('cccc000b'), C3: sid('dddd000b'),
-                C4: sid('eeee000b'), C5: sid('abcd000b'), C6: sid('abce000b'), R: sid('ffff000b'),
+                C4: sid('eeee000b'), C5: sid('abcd000b'), C6: sid('abce000b'), C7: sid('abcf000b'),
+                E: sid('eeef000b'), R: sid('ffff000b'),
                 B1: sid('b1b1000b'), B2: sid('b2b2000b'), B3: sid('b3b3000b'), B4: sid('b4b4000b'),
                 B5: sid('b5b5000b'),
                 L1: sid('c1c1000b'), L2: sid('c2c2000b'), L3: sid('c3c3000b'), L4: sid('c4c4000b') };
@@ -5572,6 +5587,17 @@ async function selfTest() {
     // not fire for a folder that is the parent's own. Measured: 78 SDK one-shots tied that way.
     put(U.C6, [user(U.C6, ts(12), 'list the cases', PROJ),
                said(U.C6, ts(13), 'The cases are listed in the table above and nothing else needs doing here', PROJ)]);
+    // A child a Stop hook talked back to: the feedback is a user message the store files as
+    // typed, and it is nobody's prompt, so the run is still a one-shot (65 of the harness's).
+    // Begun inside the parent's open third call, and past the second child's ten minutes.
+    put(U.C7, [user(U.C7, ts(700), 'touch the marker file and stop', `${PROJ}\\tmp\\child7`),
+               said(U.C7, ts(701), 'Touched it and stopped', `${PROJ}\\tmp\\child7`),
+               user(U.C7, ts(702), 'Stop hook feedback:\nBLOCKED by dash-guard: your last message contains U+2014', `${PROJ}\\tmp\\child7`),
+               said(U.C7, ts(703), 'Touched it and stopped, without the dash', `${PROJ}\\tmp\\child7`)]);
+    // A session nobody prompted, in a case folder of the batch below (fifteen of the harness's
+    // transcripts hold only hook attachments): it is no chat, so its folder is no project.
+    writeFileSync(join(udir, U.E + '.jsonl'), JSON.stringify({ type: 'attachment', uuid: `u${++un}`, sessionId: U.E,
+      timestamp: ts(311), cwd: `${OTHER}\\tmp\\g\\p1`, attachment: { type: 'hook_success' } }) + '\n');
     // A real chat above a batch, and the batch: four one-shots in sibling folders, no call near.
     put(U.R, [user(U.R, ts(0), 'plan the sweep', OTHER), said(U.R, ts(1), 'planned', OTHER),
               user(U.R, ts(30), 'go', OTHER), said(U.R, ts(31), 'going', OTHER)]);
@@ -5606,13 +5632,16 @@ async function selfTest() {
     checks.push(['runs: write:false writes nothing and still reports (gate can fail)',
       udb.prepare('SELECT COUNT(*) n FROM run_links').get().n === 0
       && udb.prepare('SELECT COUNT(*) n FROM run_misses').get().n === 0
-      && dryRuns.linked.length === 2 && dryRuns.batched.length === 9 && dryRuns.misses === 3,
+      && dryRuns.linked.length === 3 && dryRuns.batched.length === 9 && dryRuns.misses === 3,
       JSON.stringify({ l: dryRuns.linked.length, b: dryRuns.batched.length, m: dryRuns.misses })]);
     const ru = deriveRuns(udb, uids, { write: true, now: '2026-06-01T12:00:00.000Z' });
     const rlink = (s) => udb.prepare('SELECT * FROM run_links WHERE session_id = ?').get(s);
     const missKey = (s) => udb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(s)?.pool_key;
     checks.push(['runs: the one-shots are the children, the batches and the lone questions, never the chats',
-      ru.one_shots === 14 && !rlink(U.P) && !rlink(U.R) && !rlink(U.C4), String(ru.one_shots)]);
+      ru.one_shots === 15 && !rlink(U.P) && !rlink(U.R) && !rlink(U.C4) && !rlink(U.E), String(ru.one_shots)]);
+    checks.push(['runs: a child a Stop hook talked back to is still a one-shot and ties (gate can fail)',
+      rlink(U.C7)?.head_id === U.P && rlink(U.C7)?.how === 'under' && rlink(U.C7)?.call_id === 'toolu_run3',
+      JSON.stringify(rlink(U.C7))]);
     checks.push(['runs: a one-shot in the parent\'s own folder with nothing but an open span is not its child (gate can fail)',
       !rlink(U.C5) && missKey(U.C5) === `${U.P}|1`,
       JSON.stringify({ c5: rlink(U.C5), key: missKey(U.C5) })]);
@@ -5638,12 +5667,14 @@ async function selfTest() {
     checks.push(['runs: a case folder holding a second run of its own is not the project (gate can fail)',
       rlink(U.B5)?.how === 'batch' && rlink(U.B5)?.project === OTHER && rlink(U.B1)?.project === OTHER,
       JSON.stringify([rlink(U.B5), rlink(U.B1)])]);
+    checks.push(['runs: a case folder holding a session nobody prompted is not the project (gate can fail)',
+      rlink(U.B2)?.project === OTHER, JSON.stringify(rlink(U.B2))]);
     checks.push(['runs: a batch with no chat above it has no project (gate can fail)',
       [U.L1, U.L2, U.L3, U.L4].every((b) => rlink(b)?.how === 'batch' && rlink(b)?.project === null),
       JSON.stringify(rlink(U.L1))]);
     const againRuns = deriveRuns(udb, uids, { write: true });
     checks.push(['runs: a second pass asks nothing again',
-      againRuns.already === 11 && againRuns.unchanged === 3 && againRuns.linked.length === 0
+      againRuns.already === 12 && againRuns.unchanged === 3 && againRuns.linked.length === 0
       && againRuns.batched.length === 0 && againRuns.unlinked === 0,
       JSON.stringify({ a: againRuns.already, u: againRuns.unchanged })]);
     // THE UNLINK: the child's transcript grows a second typed prompt (a person picked the chat
@@ -5664,12 +5695,12 @@ async function selfTest() {
     const dryRep2 = await backfillRuns(upath, { quiet: true, write: false });
     const ucount = () => { const d = new DatabaseSync(upath); const n = d.prepare('SELECT COUNT(*) n FROM run_links').get().n; d.close(); return n; };
     checks.push(['backfill-runs: --dry-run reports and writes nothing (gate can fail)',
-      dryRep2.linked === 1 && dryRep2.batched === 9 && dryRep2.wrote === false && ucount() === 0
+      dryRep2.linked === 2 && dryRep2.batched === 9 && dryRep2.wrote === false && ucount() === 0
       && dryRep2.calls_without_result_ts === 1, JSON.stringify(dryRep2)]);
     const rep2 = await backfillRuns(upath, { quiet: true, write: true });
     checks.push(['backfill-runs: the links and the batches land, counted by how',
-      rep2.linked === 1 && rep2.batched === 9 && rep2.by_how.under === 1 && rep2.by_how.batch === 9
-      && rep2.heads === 1 && rep2.projects === 2 && ucount() === 10 && rep2.links_after === 10 && rep2.links_before === 0,
+      rep2.linked === 2 && rep2.batched === 9 && rep2.by_how.under === 2 && rep2.by_how.batch === 9
+      && rep2.heads === 1 && rep2.projects === 2 && ucount() === 11 && rep2.links_after === 11 && rep2.links_before === 0,
       JSON.stringify({ l: rep2.linked, b: rep2.batched, h: rep2.by_how, p: rep2.projects, n: ucount() })]);
   }
 
