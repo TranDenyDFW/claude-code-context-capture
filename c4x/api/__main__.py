@@ -397,10 +397,48 @@ def self_test():
     return 1 if bad else 0
 
 
+def build_version(root=None) -> str:
+    """What this build is, from the stamp the build tool writes beside the exe."""
+    import json
+
+    from c4x.paths import install_root
+    here = install_root() if root is None else root
+    try:
+        stamp = json.loads((here / "BUILD.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "c4x (no BUILD.json beside this program; a source checkout has no build stamp)"
+    return (f"c4x {stamp.get('version', 'unknown')} ({stamp.get('git', 'unknown')}), "
+            f"built {stamp.get('built_at', 'at an unknown time')}")
+
+
+def open_page(port=None) -> None:
+    """Open the dashboard in whatever the machine calls a browser.
+
+    The last step of a first run, and the only one that touches the desktop: the two before it
+    wired the hooks and started the server, so by here there is a page to show.
+    """
+    import webbrowser
+    webbrowser.open(f"http://127.0.0.1:{port or os.environ.get('C4X_API_PORT') or DEFAULT_PORT}/")
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--self-test" in argv:
         return self_test()
+
+    # WHAT THE WORD MEANT, before uvicorn, dash or the store are anywhere near this process. The
+    # download is one program: `c4x.exe install` is the installer, `c4x.exe` on its own is the
+    # first run, and a bare flag list is the server it has always been (`c4x/verbs.py`).
+    from c4x import proc, verbs
+    from c4x.paths import FROZEN as IS_FROZEN
+    from c4x.paths import install_root as root_of
+    from c4x.paths import node_exe
+    decision = verbs.plan(argv, frozen=IS_FROZEN, root=root_of(), exe=sys.executable)
+    if decision["kind"] != "serve":
+        return verbs.run(
+            decision, root=root_of(), node=node_exe(root_of()), serve=lambda rest: main(rest),
+            call=proc.call, open_page=open_page, write=sys.stdout.write, version=build_version)
+    argv = decision["argv"]
 
     reload = "--reload" in argv
     from c4x.paths import FROZEN, install_root

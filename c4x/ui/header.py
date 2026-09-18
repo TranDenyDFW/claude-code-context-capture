@@ -19,6 +19,7 @@ from dash import dcc, html
 
 from c4x import proc
 from c4x.store import (
+    NODE,
     ROOT,
     THRESHOLDS,
     chain_where,
@@ -157,7 +158,7 @@ def refresh_store(min_interval: float = 4.0) -> None:
             return
         _harvest_state["ts"] = now
         done = proc.run(
-            ["node", str(ROOT / "tools" / "harvest.mjs")],
+            [NODE, str(ROOT / "tools" / "harvest.mjs")],
             capture_output=True, text=True, cwd=str(ROOT), timeout=120,
         )
         _harvest_state["error"] = (None if done.returncode == 0

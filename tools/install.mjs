@@ -65,7 +65,19 @@ export const WIRING = [
 ];
 const STATUSLINE_SCRIPT = 'tools/statusline.mjs';
 
-export const cmdFor = (root, script) => `node "${posix(join(root, script))}"`;
+// WHICH NODE THE HOOKS RUN. A checkout says `node` and means whatever is on PATH, which is what
+// every install written so far says and what a developer has. The download carries its own
+// (`node/node.exe` beside `c4x.exe`), because a machine that wanted a program with no
+// prerequisites has no node either, and `node` there resolves to nothing at all.
+//
+// Quoted whichever it is: `C:/Users/Someone Else/c4x` has a space in it.
+export const runtimeFor = (root, exists = existsSync) => {
+  const bundled = join(root, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
+  return exists(bundled) ? `"${posix(bundled)}"` : 'node';
+};
+
+export const cmdFor = (root, script, exists = existsSync) =>
+  `${runtimeFor(root, exists)} "${posix(join(root, script))}"`;
 
 // Ownership used to be `cmd.includes(root)`, and a bare substring is wrong in both directions.
 // Downwards: with root .../c4x, a hook at .../c4x-old/hooks/event-hook.mjs read as ours, and
@@ -424,6 +436,14 @@ export const receiptDescribes = (receipt, settingsPath) => {
  * field a plain `install` or `reset` silently drops: the README promises a re-run changes nothing,
  * and a dashboard opt-out that came back on that promise would be exactly the surprise it forbids.
  */
+/** The executable named by `--launcher <path>`, or null. */
+export function launcherFrom(argv = []) {
+  const at = argv.indexOf('--launcher');
+  if (at === -1) return null;
+  const said = argv[at + 1];
+  return said && !said.startsWith('--') ? said : null;
+}
+
 export function receiptFields(argv = [], prior = null) {
   let dashboard = prior?.dashboard ?? true;
   if (argv.includes('--no-dashboard')) dashboard = false;
@@ -773,10 +793,18 @@ function cmdInstall(argv) {
   if (!rewire) ensureStoreDir(join(ROOT, 'data', 'raw'), { force: true });
   // WHICH LAUNCHER, decided now rather than in the hook: this is the one place that may take its
   // time, and a python probe costs seconds. Written into the receipt so the hook reads it.
-  const resolved = dashboardJson('resolve', ['--fresh'], 60_000);
-  const dashboardLauncher = resolved
-    ? { launcher: resolved.launcher ?? null, why: resolved.why ?? '', resolvedAt: new Date().toISOString() }
-    : null;
+  //
+  // `--launcher <exe>` SKIPS THE PROBE ENTIRELY, and is how the download installs itself: the
+  // program doing the installing is the program that should start the dashboard, there is no
+  // Python on that machine to find, and probing for one would spend seconds to learn nothing.
+  const told = launcherFrom(argv);
+  const resolved = told ? null : dashboardJson('resolve', ['--fresh'], 60_000);
+  const dashboardLauncher = told
+    ? { launcher: { cmd: [posix(told)], module: false, kind: 'exe' },
+        why: 'the program that installed it', resolvedAt: new Date().toISOString() }
+    : resolved
+      ? { launcher: resolved.launcher ?? null, why: resolved.why ?? '', resolvedAt: new Date().toISOString() }
+      : null;
   saveReceipt({ settingsBackup: backup ? posix(backup) : null,
                 ...(priorStatusLine === undefined ? {} : { priorStatusLine }),
                 ...(dashboardLauncher ? { dashboardLauncher } : {}) }, argv);
@@ -1149,6 +1177,35 @@ function selfTest() {
     shouldFirstHarvest([], false, false) === true);
   add('an install over an existing store does not re-harvest',
     shouldFirstHarvest([], false, true) === false);
+  // THE DOWNLOAD RUNS ITS OWN NODE. A machine that unzipped one folder has no node on PATH, so a
+  // hook command reading `node "...\hooks\event-hook.mjs"` there would fail on every event.
+  {
+    const bundled = (p) => String(p).replace(/\\/g, '/').endsWith('/node/node.exe')
+      || String(p).replace(/\\/g, '/').endsWith('/node/node');
+    add('a folder carrying node has its hooks run that node',
+      cmdFor('C:/Users/me/c4x', 'hooks/event-hook.mjs', bundled)
+        === '"C:/Users/me/c4x/node/node.exe" "C:/Users/me/c4x/hooks/event-hook.mjs"'
+      || cmdFor('C:/Users/me/c4x', 'hooks/event-hook.mjs', bundled)
+        === '"C:/Users/me/c4x/node/node" "C:/Users/me/c4x/hooks/event-hook.mjs"');
+    add('a checkout keeps the bare name, which is every existing install',
+      cmdFor('C:/work/c4x', 'hooks/event-hook.mjs', () => false)
+        === 'node "C:/work/c4x/hooks/event-hook.mjs"');
+    add('a path with a space in it is quoted either way',
+      cmdFor('C:/Users/Someone Else/c4x', 'tools/statusline.mjs', () => false)
+        .includes('"C:/Users/Someone Else/c4x/tools/statusline.mjs"'));
+    // OWNERSHIP IS ABOUT THE SCRIPT, NOT THE INTERPRETER: an install that switched from PATH's
+    // node to its own must still recognise, and be able to remove, what it wrote before.
+    add('a command is ours whichever node it names',
+      ownsCommand(cmdFor('C:/Users/me/c4x', 'hooks/event-hook.mjs', bundled), 'C:/Users/me/c4x')
+      && ownsCommand(cmdFor('C:/Users/me/c4x', 'hooks/event-hook.mjs', () => false), 'C:/Users/me/c4x'));
+  }
+
+  add('--launcher names the program that installed it',
+    launcherFrom(['install', '--launcher', 'C:/Users/me/c4x/c4x.exe']) === 'C:/Users/me/c4x/c4x.exe');
+  add('--launcher with nothing after it is not a launcher',
+    launcherFrom(['install', '--launcher']) === null && launcherFrom(['install', '--launcher', '--rewire']) === null);
+  add('no --launcher means the probe still decides', launcherFrom(['install']) === null);
+
   add('--dry-run writes nothing and harvests nothing',
     shouldFirstHarvest([], true, false) === false);
   add('--no-harvest opts out even with no store',

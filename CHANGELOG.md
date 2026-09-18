@@ -11,6 +11,35 @@ removed and nothing here said so.
 
 ### Added
 
+- **A download that is one folder and needs nothing installed.** The user's words: "Make it purely
+  an executable - if someone wants to use CLI options, they can add options after calling the
+  executable." `tools/build_exe.py --bundle` assembles `dist/bundle/c4x/`: the exe, the Node it
+  runs (pinned, fetched from nodejs.org, checked against the digest published beside it), and the
+  tools and hooks Claude and the server shell out to. The folder holds `tools/harvest.mjs`, which
+  is already the marker that makes a directory an install, so it is one wherever it is unzipped.
+  - `c4x.exe` with no arguments installs itself into Claude, starts the dashboard and opens it.
+    `c4x.exe install|status|uninstall|reset|harvest` run the node tools that already do those
+    jobs, with every flag after the verb passed through, so the program and a checkout cannot
+    drift into two behaviours. `c4x.exe serve`, and any bare flag list, is the server it has always
+    been, which is what the hook launches. `c4x/verbs.py` decides that from argv alone, before
+    uvicorn, dash or the store are imported.
+  - The hooks the installer writes now name the Node beside them when the install carries one
+    (`paths.node_exe`, `install.mjs runtimeFor`), and keep the bare `node` a checkout has always
+    used. `install --launcher <exe>` records the program that installed itself, which skips a
+    Python probe that would find nothing on that machine.
+  - Three defects the first real assembly found, none of which a unit test could: the assembler
+    reused a stale exe from `dist/`, so the folder shipped a program built before the verbs
+    existed, and a check passed because the old exe answered it by accident; the smoke pointed the
+    store variable at a path that does not exist inside the folder; and it passed a relative store
+    path to a child running in another directory. The assembler now rebuilds when the exe is older
+    than its source, and the smoke asks `--version` first, precisely so a stale build cannot pass.
+  - CI assembles the folder and runs it with a PATH holding Windows and nothing else, so anything
+    it forgot to carry is absent rather than supplied by the runner. Deleting `node/` turns that
+    red. On a tag the folder is zipped onto the release with its sha256.
+  Tests: `tests/test_verbs.py` (19, every verb shape including the double-clicked first run),
+  `tests/test_paths.py` (the Node lookup both ways), `install.mjs --self-test` 103,
+  `dashboard.mjs --self-test` 46, `build_exe.py --self-test` 44.
+
 - **Every control that closes or restarts Claude, or C4X, asks first, then does it.** The user's
   rule: "prompt the user to continue; for example, if changing to all from current, it requires
   a reboot, prompt the user when they click all and only continue if they confirm." All,

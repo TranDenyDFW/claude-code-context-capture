@@ -24,23 +24,43 @@ c4x keeps lives under `data/` in this folder. [What it keeps.](#what-it-keeps)
 
 ## Install
 
-Needs Node 24 or newer. Python 3.12 or newer for the dashboard.
+Download `c4x-windows.zip` from the
+[latest release](https://github.com/TranDenyDFW/claude-code-context-capture/releases), unzip it,
+and run `c4x.exe`. Nothing else is needed: the folder carries the program and the Node it uses.
+
+Unzip it somewhere that is yours and stays put, `%USERPROFILE%\c4x` for example. **Not** under
+`%APPDATA%` or `%LOCALAPPDATA%`: the Claude desktop app's Store build redirects writes under those
+directories into its own package folder, so a copy that lives there is not quite where it says it
+is. Windows will warn that the program is unrecognised the first time, because it is not signed:
+**More info**, then **Run anyway**.
+
+The first run wires the hooks into Claude, starts the dashboard and opens it. After that:
+
+```
+c4x status        is it wired, is it capturing
+c4x harvest       read the transcripts into the store now
+c4x uninstall     unwire it, keeping the store
+c4x --help        the rest
+```
+
+Any flags after a verb go to the tool that does the work, so `c4x install --no-dashboard` and
+`c4x harvest --stats` behave exactly as the underlying tools always have.
+
+### From source
+
+Needs Node 24 or newer, and Python 3.12 or newer for the dashboard.
 
 ```bash
 git clone https://github.com/TranDenyDFW/claude-code-context-capture
 cd claude-code-context-capture
 node tools/install.mjs install
 pip install -r requirements.txt
-```
-
-Then check it took:
-
-```bash
 node tools/install.mjs status
 ```
 
-The dashboard is at `http://127.0.0.1:8059/`. It starts with Claude and stops itself a minute
-after Claude closes. `node tools/install.mjs uninstall` removes it and keeps your data.
+The dashboard is at `http://127.0.0.1:8059/` either way. It starts with Claude and stops itself a
+minute after Claude closes. `c4x uninstall`, or `node tools/install.mjs uninstall` from a
+checkout, removes it and keeps your data.
 
 ## Switching accounts
 

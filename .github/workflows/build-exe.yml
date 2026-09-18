@@ -1,8 +1,8 @@
 name: build-exe
 
-# Builds the dashboard into an executable and proves the build serves a page, on Windows, the
-# platform the exe is for. It replaces Python on a machine that has node and no Python; the hooks
-# and the harvester stay node, and the exe runs from inside a checkout (c4x/paths.py).
+# Builds the dashboard into an executable, assembles the download around it, and proves both
+# serve a page, on Windows, the platform they are for. The exe replaces Python; the download adds
+# the node the hooks and the harvester need, so the folder needs neither interpreter installed.
 #
 # NOT A MERGE GATE. Branch protection requires `suite` from tests.yml alone. A PyInstaller build
 # of pandas, plotly and dash takes minutes and produces a few hundred megabytes, and doing that on
@@ -73,26 +73,42 @@ jobs:
       - name: Run the executable against the fixture
         run: python tools/build_exe.py --smoke --db tmp/fixture.db
 
+      # THE DOWNLOAD: the same exe, plus the node it needs and the tools it runs. Assembled after
+      # the plain smoke so a failure there is not reported as a packaging problem.
+      - name: Assemble the download
+        run: python tools/build_exe.py --bundle
+
+      # The check that matters for a folder somebody unzips: run it with a PATH holding Windows
+      # and nothing else, so anything the folder forgot to carry is simply not there. A runner has
+      # node and Python installed; this is how the smoke stops being answered by the machine.
+      - name: Run the download with nothing else on PATH
+        run: python tools/build_exe.py --smoke --bundle --db tmp/fixture.db
+
       - name: Say what was built
         run: cat dist/c4x/BUILD.json
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: c4x-windows
-          path: dist/c4x/
+          path: dist/bundle/c4x/
           if-no-files-found: error
           retention-days: 30
 
-      # On a tag, the same directory zipped onto the release. A machine without Python unpacks it
-      # into <checkout>/dist/c4x/ and the SessionStart hook finds it there. No icon here: the app is
-      # not installed on the runner and its icon is not in this repository (tools/build_exe.py).
-      - name: Zip the build for the release
+      # On a tag, the folder zipped onto the release, with the digest beside it so a download can
+      # be checked. It is unpacked ANYWHERE except under AppData (the README says why) and run:
+      # it carries the exe, node, the hooks and the tools, and needs neither Python nor node. No
+      # icon here: the app is not installed on the runner and its icon is not in this repository.
+      - name: Zip the download for the release
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          powershell -NoProfile -Command "Compress-Archive -Path dist/c4x -DestinationPath c4x-windows.zip"
-          ls -l c4x-windows.zip
+          powershell -NoProfile -Command "Compress-Archive -Path dist/bundle/c4x -DestinationPath c4x-windows.zip"
+          powershell -NoProfile -Command "(Get-FileHash c4x-windows.zip -Algorithm SHA256).Hash.ToLower() + '  c4x-windows.zip' | Out-File -Encoding ascii c4x-windows.zip.sha256"
+          ls -l c4x-windows.zip c4x-windows.zip.sha256
+          cat c4x-windows.zip.sha256
 
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: c4x-windows.zip
+          files: |
+            c4x-windows.zip
+            c4x-windows.zip.sha256

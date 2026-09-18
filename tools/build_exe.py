@@ -1,15 +1,21 @@
 """Build the dashboard into an executable, and prove the build serves a page.
 
     python tools/build_exe.py                        # dist/c4x/c4x(.exe)
+    python tools/build_exe.py --bundle               # dist/bundle/c4x/: exe + node + the tools
     python tools/build_exe.py --smoke --db <store>   # run the built exe against a store
+    python tools/build_exe.py --smoke --bundle --db <store>   # run the BUNDLE, with a bare PATH
     python tools/build_exe.py --check-icon           # the exe's icon is the app's (Windows)
     python tools/build_exe.py --self-test            # the argv builder and the smoke plan, no build
 
-WHAT THE EXE REPLACES: Python. Not node, and not the checkout. The hooks and the harvester are
-node, the store they write is under the checkout's data/, and c4x/store.py shells out to the
-checkout's tools/*.mjs for window math. The exe runs from inside an install (dist/c4x/ under
-the checkout is where the SessionStart hook looks for it) and refuses to run anywhere else; see
-c4x/paths.py. It is for a machine that has node and no Python.
+WHAT THE EXE REPLACES: Python. Not node. The hooks and the harvester are node, the store they
+write is what the exe serves, and c4x/store.py shells out to tools/*.mjs for window math. The exe
+runs from inside an install and refuses to run anywhere else; see c4x/paths.py.
+
+SO THE DOWNLOAD CARRIES NODE TOO. `--bundle` assembles dist/bundle/c4x/: the exe, node/node.exe
+fetched from nodejs.org and checked against the release's own SHASUMS256, and the tools and hooks
+the exe and Claude run. That folder IS an install (it holds tools/harvest.mjs, which is the marker
+c4x/paths.py looks for), so it can be unzipped anywhere and needs neither Python nor node. The
+plain build stays what it was: an exe for a checkout that already has node.
 
 THE ICON IS THE APP'S, READ AT BUILD TIME. The user wants the exe to match the Claude desktop app
 in a folder listing, and that icon is Anthropic's, so it is not committed to this public repo:
@@ -67,6 +73,16 @@ EXCLUDES = ("pyspark", "torch", "tensorflow", "matplotlib", "IPython", "ipykerne
             # Not pinned in constraints-ci.txt, so CI runs pandas without it and the local build
             # should not carry a hundred megabytes CI never sees.
             "pyarrow")
+# WHICH NODE THE DOWNLOAD CARRIES. Pinned, because the bundle is reproducible or it is not: a
+# floating "latest" would mean two zips built a week apart run different interpreters over the same
+# transcripts. Long-term support line, which is what the hooks are tested against.
+NODE_VERSION = "24.14.1"
+NODE_BASE = "https://nodejs.org/dist"
+# What goes in the folder beside the exe: everything the hooks, the harvester and the server shell
+# out to, and nothing else. No tests, no frontend source, no .git.
+RUNTIME_DIRS = ("tools", "hooks")
+RUNTIME_FILES = ("package.json", "LICENSE", "README.md")
+
 # The routes the smoke asks for, in order, and what each proves.
 SMOKE_PLAN = (
     ("GET", "/__health__", "the server answers for the store and the port it was given"),
@@ -347,23 +363,79 @@ def _post(url: str, headers: dict, timeout: float = 5.0) -> int:
         return 0
 
 
-def smoke(db: str, port: int | None = None, root: Path = ROOT, startup_s: float = 120.0) -> int:
+def bare_path_env(root: Path, db: str | None = None) -> dict:
+    """The environment the download is actually met in: no node, no Python, no developer PATH.
+
+    A bundle that forgot node.exe still passes a smoke run on a machine that has node, because the
+    hooks and the tools find one anyway. Stripping PATH to Windows itself is what makes the check
+    able to fail: anything the folder does not carry is simply not there.
+    """
+    keep = {"SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+            "PROGRAMDATA", "COMSPEC", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"}
+    system = os.environ.get("SYSTEMROOT", r"C:\Windows")
+    env = {name: value for name, value in os.environ.items() if name.upper() in keep}
+    env["PATH"] = os.pathsep.join([system + r"\System32", system])
+    # The store the smoke was given, not one the folder does not have: importing the module that
+    # reads it is the first thing the exe does, and a missing store is an exception, not a page.
+    # RESOLVED, because the child runs in the folder and not here: `--db tmp/fixture.db` names a
+    # store relative to the checkout, and the harvester read it relative to the bundle and refused.
+    env["C4X_DB"] = str(Path(db).resolve()) if db else str(root / "data" / "context.db")
+    return env
+
+
+def smoke(db: str, port: int | None = None, root: Path = ROOT, startup_s: float = 120.0,
+          bundle: bool = False) -> int:
     """Run the built exe against `db` and walk SMOKE_PLAN. Non-zero on the first miss; the child
-    is killed on any path out, so a failed CI smoke never leaves an exe running."""
-    exe = exe_path(root)
+    is killed on any path out, so a failed CI smoke never leaves an exe running.
+
+    `bundle=True` runs the ASSEMBLED FOLDER instead, with a stripped PATH, and asks it two things
+    a developer machine would answer by accident: that node is the one in the folder, and that the
+    harvester runs at all.
+    """
+    where = bundle_dir(root) if bundle else exe_path(root).parent
+    exe = where / exe_path(root).name
     checks: list[tuple[str, bool, str]] = []
     add = checks.append
     if not exe.is_file():
         add(("the exe exists", False, str(exe)))
         return _report(checks, "SMOKE")
+    env = bare_path_env(where, db) if bundle else None
+    if bundle:
+        node = where / "node" / "node.exe"
+        add(("the folder carries its own node", node.is_file(), str(node)))
+        add(("the folder is an install: it holds the marker paths.py looks for",
+             (where / "tools" / "harvest.mjs").is_file(), str(where / "tools" / "harvest.mjs")))
+        if all(ok for _, ok, _ in checks):
+            # THE EXE IS THIS SOURCE'S. A stale build in dist/ once got copied into the folder and
+            # answered the checks below by accident, so the first question is whether this program
+            # even knows what a verb is.
+            said = subprocess.run([str(exe), "--version"], capture_output=True, text=True,
+                                  cwd=where, env=env, timeout=120)
+            add(("`c4x.exe --version` names the build", said.returncode == 0
+                 and said.stdout.strip().startswith("c4x "), (said.stdout + said.stderr)[-200:]))
+            # THE PROOF THAT THE FOLDER NEEDS NOTHING ELSE: the harvester, run by the node in the
+            # folder, with a PATH that has no node on it. `--stats` prints the store's own numbers,
+            # which nothing else in this program prints.
+            ran = subprocess.run([str(exe), "harvest", "--stats"], capture_output=True,
+                                 text=True, cwd=where, env=env, timeout=600)
+            add(("`c4x.exe harvest --stats` runs the harvester through the bundled node",
+                 ran.returncode == 0 and '"sessions"' in ran.stdout,
+                 (ran.stdout + ran.stderr)[-300:]))
+            told = subprocess.run([str(exe), "status"], capture_output=True, text=True,
+                                  cwd=where, env=env, timeout=300)
+            add(("`c4x.exe status` runs the installer through it too",
+                 "install root" in (told.stdout + told.stderr),
+                 (told.stdout + told.stderr)[-300:]))
+        if any(not ok for _, ok, _ in checks):
+            return _report(checks, "SMOKE")
     store = Path(db).resolve()
     add(("the store exists", store.is_file(), str(store)))
     port = port or pick_free_port()
     base = f"http://127.0.0.1:{port}"
     status, _, _ = _get(f"{base}/__health__", timeout=1.0)
     add((f"nothing answers on {port} before the launch", status == 0, f"status {status}"))
-    own = subprocess.run([str(exe), "--self-test"], capture_output=True, text=True, cwd=root,
-                         timeout=120)
+    own = subprocess.run([str(exe), "--self-test"], capture_output=True, text=True,
+                         cwd=where if bundle else root, env=env, timeout=120)
     add(("the exe's own self-test passes", "SELF-TEST PASS" in own.stdout,
          (own.stdout + own.stderr)[-300:]))
     if any(not ok for _, ok, _ in checks):
@@ -372,6 +444,7 @@ def smoke(db: str, port: int | None = None, root: Path = ROOT, startup_s: float 
     lines: list[str] = []
     token: dict = {}
     child = subprocess.Popen([str(exe), "--db", str(store), "--port", str(port)],
+                             env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              cwd=root, bufsize=1)
 
@@ -536,6 +609,46 @@ def self_test() -> int:
          not any("PyInstaller" in line for line in top_level)),
         ("and is not loaded by running the self-test", "PyInstaller" not in sys.modules),
     ]
+    # ---------------------------------------------------------------- the download's folder
+    runtime = runtime_files(ROOT)
+    names = {rel.as_posix() for rel in runtime}
+    bare = bare_path_env(ROOT / "dist" / "bundle" / "c4x")
+    system = os.environ.get("SYSTEMROOT", r"C:\Windows").lower()
+    url, sums = node_url("24.14.1", "win32")
+    checks += [
+        ("the folder carries the harvester, which also marks it as an install",
+         "tools/harvest.mjs" in names),
+        ("and the hooks Claude runs",
+         "hooks/event-hook.mjs" in names and "hooks/compact-hook.mjs" in names),
+        ("and the tools the server shells out to",
+         {"tools/mirror.mjs", "tools/segments.mjs", "tools/breakdown.mjs"} <= names),
+        ("and says what it is", "README.md" in names and "LICENSE" in names),
+        # NOT THE SOURCE. A download is the program, not the workshop.
+        ("and carries no frontend source, which is already inside the exe",
+         not any(name.startswith("frontend/") for name in names)),
+        ("every runtime file is a real file in this checkout",
+         all((ROOT / rel).is_file() for rel in runtime)),
+        ("node is fetched from the official release, pinned to a version",
+         url == "https://nodejs.org/dist/v24.14.1/node-v24.14.1-win-x64.zip"
+         and sums == "https://nodejs.org/dist/v24.14.1/SHASUMS256.txt"),
+        ("the checksum file is read for the archive's own line",
+         sha_for("abc123  node-v24.14.1-win-x64.zip\ndef456  other.zip",
+                 "node-v24.14.1-win-x64.zip") == "abc123"),
+        ("a checksum file that does not mention it yields nothing rather than a guess",
+         sha_for("def456  other.zip", "node-v24.14.1-win-x64.zip") is None),
+        ("a starred name (binary mode) is the same name",
+         sha_for("abc123 *node-v24.14.1-win-x64.zip", "node-v24.14.1-win-x64.zip") == "abc123"),
+        # THE CHECK THAT MAKES THE BUNDLE SMOKE ABLE TO FAIL: on a developer's machine a folder
+        # that forgot node.exe still works, because the machine has node.
+        ("the bundle smoke runs with a PATH holding Windows and nothing else",
+         all(part.lower().startswith(system) for part in bare["PATH"].split(os.pathsep))),
+        ("so a folder that forgot node cannot be rescued by the machine's own",
+         not any("nodejs" in part.lower() for part in bare["PATH"].split(os.pathsep))),
+        ("the bundle is assembled beside the plain build, not inside it",
+         bundle_dir(ROOT).as_posix().endswith("dist/bundle/c4x")
+         and bundle_dir(ROOT) != exe_path(ROOT).parent),
+    ]
+
     bad = 0
     for what, ok in checks:
         if not ok:
@@ -543,6 +656,138 @@ def self_test() -> int:
             print(f"  FAIL  {what}")
     print(f"SELF-TEST {'PASS' if not bad else 'FAIL'} ({len(checks)} checks)")
     return 1 if bad else 0
+
+
+def bundle_dir(root: Path = ROOT) -> Path:
+    """Where the download is assembled. Beside dist/c4x/ rather than inside it: the zip is this."""
+    return root / "dist" / "bundle" / NAME
+
+
+def node_url(version: str = NODE_VERSION, platform: str = sys.platform) -> tuple[str, str]:
+    """The archive to fetch and the checksum file that names it."""
+    if not platform.startswith("win"):
+        raise SystemExit("the bundle is Windows only for now: node is fetched as the win-x64 zip")
+    return (f"{NODE_BASE}/v{version}/node-v{version}-win-x64.zip",
+            f"{NODE_BASE}/v{version}/SHASUMS256.txt")
+
+
+def sha_for(text: str, filename: str) -> str | None:
+    """The digest SHASUMS256.txt gives for one file, or None when it does not mention it."""
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == filename:
+            return parts[0].lower()
+    return None
+
+
+def fetch_node(into: Path, version: str = NODE_VERSION, fetch=None) -> Path:
+    """Put `node.exe` and its licence in `into`, from the official release, checksum verified.
+
+    CHECKED, NOT TRUSTED. This binary ends up in a zip somebody downloads and runs, so the bytes
+    are compared against the digest the release publishes beside them, and a mismatch stops the
+    build rather than shipping. The archive is fetched once and cached under tmp/, because a build
+    that re-downloads 30 MB on every run is a build nobody runs twice.
+    """
+    import io
+    import zipfile
+
+    get = fetch if fetch is not None else _fetch_bytes
+    archive_url, sums_url = node_url(version)
+    name = archive_url.rsplit("/", 1)[-1]
+    cache = ROOT / "tmp" / "node" / name
+    if cache.is_file():
+        blob = cache.read_bytes()
+    else:
+        blob = get(archive_url)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(blob)
+    sums = get(sums_url).decode("utf-8", "replace")
+    want = sha_for(sums, name)
+    got = hashlib.sha256(blob).hexdigest()
+    if want is None:
+        raise SystemExit(f"SHASUMS256.txt for node v{version} does not mention {name}")
+    if got != want:
+        cache.unlink(missing_ok=True)
+        raise SystemExit(f"node archive digest {got} does not match the published {want}")
+    into.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(blob)) as zipped:
+        for member in zipped.namelist():
+            tail = member.split("/")[-1]
+            if tail in ("node.exe", "LICENSE"):
+                (into / tail).write_bytes(zipped.read(member))
+    exe = into / "node.exe"
+    if not exe.is_file():
+        raise SystemExit(f"node.exe was not in {name}")
+    return exe
+
+
+def _fetch_bytes(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=300) as answer:  # noqa: S310  (a pinned https URL)
+        return bytes(answer.read())
+
+
+def runtime_files(root: Path = ROOT) -> list[Path]:
+    """Every file the folder must carry beside the exe, as paths relative to the root.
+
+    The hooks and the harvester Claude runs, the tools the server shells out to, and the two files
+    that say what this is. Deliberately NOT the tests, the frontend source or the store: the page
+    is already inside the exe, and a store belongs to the machine, not to the download.
+    """
+    out: list[Path] = []
+    for folder in RUNTIME_DIRS:
+        here = root / folder
+        if not here.is_dir():
+            continue
+        out.extend(sorted(p.relative_to(root) for p in here.glob("*.mjs")))
+    out.extend(Path(name) for name in RUNTIME_FILES if (root / name).is_file())
+    return out
+
+
+def newest_source(root: Path = ROOT) -> float:
+    """When the newest thing the exe is built from changed."""
+    seen = [0.0]
+    for folder in ("c4x", "frontend/dist"):
+        here = root / folder
+        if here.is_dir():
+            seen.extend(p.stat().st_mtime for p in here.rglob("*") if p.is_file())
+    for name in ("app.py", "requirements.txt"):
+        if (root / name).is_file():
+            seen.append((root / name).stat().st_mtime)
+    return max(seen)
+
+
+def assemble(root: Path = ROOT, fetch=None) -> Path:
+    """Build the exe when it is missing OR older than the source, then assemble the folder.
+
+    THE STALE BUILD IS THE DEFECT THIS GUARDS. Reusing whatever exe happened to be in dist/ put a
+    program built before the verbs existed into the folder, and the smoke then passed a check that
+    the old exe answered by accident. A download that is a week behind its own source is worse than
+    a build that takes five minutes.
+    """
+    import shutil
+
+    exe = exe_path(root)
+    stale = exe.is_file() and exe.stat().st_mtime < newest_source(root)
+    if stale:
+        print(f"{exe.name} is older than the source it is built from; building again")
+    if not exe.is_file() or stale:
+        code = build()
+        if code:
+            raise SystemExit(code)
+    out = bundle_dir(root)
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+    shutil.copytree(exe.parent, out, dirs_exist_ok=True)
+    for rel in runtime_files(root):
+        target = out / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / rel, target)
+    fetch_node(out / "node", fetch=fetch)
+    size = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
+    print(f"bundle at {out} ({size / (1 << 20):.0f} MB): c4x.exe, node v{NODE_VERSION}, "
+          f"{len(runtime_files(root))} runtime files")
+    return out
 
 
 def main(argv=None) -> int:
@@ -561,7 +806,10 @@ def main(argv=None) -> int:
         port = None
         if "--port" in argv and argv.index("--port") + 1 < len(argv):
             port = int(argv[argv.index("--port") + 1])
-        return smoke(db, port)
+        return smoke(db, port, bundle="--bundle" in argv)
+    if "--bundle" in argv:
+        assemble()
+        return 0
     return build()
 
 

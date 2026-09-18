@@ -4,6 +4,8 @@ Frozen or not is passed in, not patched onto `sys`, because `paths.FROZEN` is re
 and a patch after that would test nothing. One case patches the module constant to prove the
 default path reads it.
 """
+import os
+
 import pytest
 
 from c4x import paths
@@ -97,3 +99,25 @@ def test_the_defaults_read_the_module_and_the_interpreter(tmp_path, monkeypatch)
     monkeypatch.setattr(sys, "executable", str(exe))
     monkeypatch.delenv("C4X_DB", raising=False)
     assert paths.install_root() == root
+
+
+class TestTheNodeItRuns:
+    """The download carries node; a checkout uses PATH's."""
+
+    def test_the_bundled_node_is_named_by_its_path_when_the_folder_has_one(self, tmp_path):
+        root = tmp_path / "c4x"
+        (root / "node").mkdir(parents=True)
+        node = root / "node" / ("node.exe" if os.name == "nt" else "node")
+        node.write_bytes(b"")
+        assert paths.node_exe(root) == str(node)
+
+    def test_a_checkout_keeps_the_bare_name_off_PATH(self, tmp_path):
+        # WHAT WOULD BREAK OTHERWISE: every existing install's hook commands say `node`, and a
+        # developer's checkout has no `node/` directory to find.
+        assert paths.node_exe(tmp_path) == "node"
+
+    def test_the_lookup_asks_the_filesystem_it_is_given(self, tmp_path):
+        asked = []
+        got = paths.node_exe(tmp_path, exists=lambda p: asked.append(p) or True)
+        assert asked and got == asked[0]
+        assert got.endswith("node.exe" if os.name == "nt" else "node")
