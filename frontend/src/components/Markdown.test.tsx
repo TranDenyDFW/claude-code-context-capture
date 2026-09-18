@@ -36,8 +36,8 @@ describe('the renderer', () => {
   })
 
   it('keeps every angle-bracket placeholder, whatever an upgrade decides to do', () => {
-    // WHY THIS IS PINNED. This store's markdown is full of them: measured over the 732 documents
-    // this repo has collected, 343 tokens in 100 files, `<stdin>` 42 times and `<uuid>` 31. A
+    // WHY THIS IS PINNED. This store's markdown is full of them: measured over the markdown this repo
+    // has collected, 343 tokens in 100 files, `<stdin>` 42 times and `<uuid>` 31. A
     // renderer that treated them as markup would delete them and say nothing, which is the one
     // thing a page for reading a store must never do. react-markdown 10.1.0 renders them as text;
     // this is the check that would catch a version that stopped.

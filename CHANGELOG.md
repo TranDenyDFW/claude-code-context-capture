@@ -421,8 +421,8 @@ removed and nothing here said so.
     against 10.1.0, it does not: `<uuid>`, `<div>x</div>` and `<script>...</script>` render as
     their literal characters with the plugin and without it, so the plugin was removed as the dead
     code it was, and the test stayed. It is worth a test because this store's markdown is full of
-    such placeholders: measured here, 343 across 100 of the 732 documents the repo has collected,
-    `<stdin>` 42 times and `<uuid>` 31. A version that started treating them as markup would
+    such placeholders: measured here, 343 across 100 documents in the repo's own
+    collection, `<stdin>` 42 times and `<uuid>` 31. A version that started treating them as markup would
     delete them silently.
   - Rendered: the compaction summary, each plan, and the drawer's full text when the row's own
     `type` says a person or Claude wrote it. A `tool_result` opens raw (86.5% of the records typed

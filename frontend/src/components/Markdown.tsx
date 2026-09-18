@@ -17,8 +17,8 @@ import { downloadMarkdown, downloadTextFile } from './exporters'
  *
  * AND NOTHING IS DROPPED. Measured against react-markdown 10.1.0: `<uuid>`, `<div>x</div>` and
  * `<script>...</script>` all render as their literal characters. That matters because this store's
- * markdown is full of angle-bracket placeholders: 343 of them across 100 of the 732 documents this
- * repo has collected, `<stdin>` 42 times, `<uuid>` 31, `<sid>` 16. A renderer that treated them as
+ * markdown is full of angle-bracket placeholders: 343 of them across 100 documents in this repo's
+ * own collection, `<stdin>` 42 times and `<uuid>` 31, `<sid>` 16. A renderer that treated them as
  * markup would delete them silently, which is the one thing a page for READING a store must never
  * do, so `Markdown.test.tsx` pins the behaviour rather than trusting it.
  *

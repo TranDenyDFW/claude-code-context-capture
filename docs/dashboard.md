@@ -140,8 +140,8 @@ this page behind it; an image is not fetched at all, because an `img src` in a t
 request to a third party saying somebody opened that record. Raw HTML that IS in the text keeps its
 literal characters: measured against react-markdown 10.1.0, `<uuid>`, `<div>x</div>` and
 `<script>...</script>` all render as they were written. That is worth a test rather than trust,
-because this store's markdown is full of angle-bracket placeholders (343 of them across 100 of the
-732 documents this repo has collected, `<stdin>` 42 times and `<uuid>` 31), and a version that
+because this store's markdown is full of angle-bracket placeholders (343 of them across 100 documents in this
+repo's own collection, `<stdin>` 42 times and `<uuid>` 31), and a version that
 started treating them as markup would delete them without a word.
 
 ## Running without Python
