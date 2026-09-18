@@ -200,7 +200,10 @@ describe('the population chip', () => {
       population_scope: 'selection',
     }))
     show('/?tab=tab-session')
-    await screen.findByRole('button', { name: 'Search tabs, populations and sessions' })
+    // WAIT FOR THE PANE'S OWN DATA, not for the static chrome. The search button is on screen
+    // before any payload arrives, so asserting the chip's absence against it passed whatever the
+    // chip did; a cell from this payload is the proof that the header has the tab's population.
+    await screen.findByText('a.json')
     expect(screen.queryByText('This Selection')).toBeNull()
     expect(screen.queryByText('Store-Wide')).toBeNull()
   })
