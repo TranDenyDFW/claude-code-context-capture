@@ -120,6 +120,30 @@ store cannot place: recorded with no chat, listed nowhere, never offered. The dr
 back the records an earlier build wrote for such runs (`POST /api/adopt/unadopt-reviews`), which
 the server does on its own at startup (`GET /api/adopt/sweep` says what the last sweep did).
 
+## Markdown, where the text is markdown
+
+A compaction summary and an `ExitPlanMode` plan are documents Claude wrote in markdown, and they
+were shown as one preformatted wall of 12,000 to 17,000 characters. They render now: headings,
+lists, fenced code, block quotes and tables, with **Raw** one click away showing the same
+preformatted text byte for byte, a **Copy** that copies the source, and **.md** and **.txt**
+buttons that write the source with no byte-order mark. The drawer's FULL TEXT renders the same way
+when the row says the text is a document (`assistant`, `compact_summary` and `typed`); a
+`tool_result` opens raw, because 86.5% of the records typed `user` are tool output, where markdown
+eats the indentation and turns a `#` comment into a heading. A 220-character preview is never
+rendered as markdown: the server already replaced its newlines with spaces, so it is not the
+document any more. Each table's Export menu also offers **Markdown**, a pipe table of the rows on
+screen with the whole message hydrated in.
+
+Nothing raw is ever parsed. There is no `rehype-raw`, so no HTML string is ever built and a
+`<script>` in a transcript is text; a link opens only for http, https and mailto, and never with
+this page behind it; an image is not fetched at all, because an `img src` in a transcript is a
+request to a third party saying somebody opened that record. Raw HTML that IS in the text keeps its
+literal characters: measured against react-markdown 10.1.0, `<uuid>`, `<div>x</div>` and
+`<script>...</script>` all render as they were written. That is worth a test rather than trust,
+because this store's markdown is full of angle-bracket placeholders (343 of them across 100 documents in this
+repo's own collection, `<stdin>` 42 times and `<uuid>` 31), and a version that
+started treating them as markup would delete them without a word.
+
 ## Running without Python
 
 **Without Python.** `tools/build_exe.py` builds the server into `dist/c4x/` (`c4x.exe`) with
@@ -165,8 +189,14 @@ transcript cannot prove which it was.
 ![The Compactions tab: every compaction with its predicted trigger, its overshoot, and the survivors it kept](images/compactions.png)
 
 `overshoot` is how far past the predicted trigger the session actually got. Clicking a row opens the
-summary the compaction wrote, in full, plus the messages absent from its survivor list, recovered
-from the store rather than reconstructed.
+summary the compaction wrote, in full and rendered, plus the messages absent from its survivor
+list, recovered from the store rather than reconstructed. On the compaction's own page those
+messages are a table: outcome, characters, role, type, date and time, and the message, each in a
+column of its own, with the survivors still tinted green. A search box above it narrows the list
+(every word must appear, in any order) and says how many of them match; it reads the first 220
+characters of each message, which is what the server sends and what the page shows, and the line
+beside it says so. The CSV export carries what the page is showing, both the checkbox and the
+search included.
 
 **Two tabs need a reading the install does not take.** Window and Diagnostics stay empty until you
 record one, and say so on the page rather than looking broken. Nothing else depends on either,

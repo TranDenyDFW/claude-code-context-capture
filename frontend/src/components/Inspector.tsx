@@ -3,6 +3,7 @@ import type { Table, TableMeta } from '@/api'
 import { DataTable } from './DataTable'
 import { ResizeHandle } from './ResizeHandle'
 import { clampSize } from './useDragSize'
+import { TextBody } from './Markdown'
 
 /**
  * What one thing on the page is made of: a point somebody clicked on a chart, or a row they opened.
@@ -41,6 +42,15 @@ export interface InspectorContent {
   text?: string | null
   /** A problem with the text, said next to it rather than in place of it. */
   textProblem?: string | null
+  /**
+   * Whether `text` is a document somebody wrote, or output something produced.
+   *
+   * Decided where the text is FETCHED, from the row's own `type`, rather than guessed here from
+   * the characters: a tool result full of hashes and pipes looks exactly like markdown.
+   */
+  textKind?: 'markdown' | 'plain'
+  /** The filename stem an export of `text` gets. */
+  fileName?: string | null
   /**
    * What was REPLACED, when `text` is a summary of something.
    *
@@ -249,10 +259,18 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
           {content.text === null ? (
             <p className="text-xs text-ink-faint">fetching the full text</p>
           ) : (
-            <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded bg-page px-3 py-2
-                            font-mono text-xs leading-relaxed text-ink">
-              {content.text}
-            </pre>
+            // MARKDOWN ONLY WHERE THE ROW SAYS SO. This one slot carries three different things:
+            // a compaction summary and a chat's newest plan, which are documents, and a message's
+            // full text, which is a document only when a person or Claude wrote it. 86.5% of the
+            // records typed `user` are tool results (`c4x/theme.py` records the measurement), and
+            // markdown over a directory listing eats its indentation and turns a `#` comment into
+            // a heading, so anything else opens raw with the toggle one click away.
+            <TextBody
+              source={content.text}
+              name={content.fileName ?? 'text'}
+              boxClass="max-h-[60vh]"
+              defaultView={content.textKind === 'markdown' ? 'markdown' : 'raw'}
+            />
           )}
 
           {content.dropped && content.dropped.length > 0 && (

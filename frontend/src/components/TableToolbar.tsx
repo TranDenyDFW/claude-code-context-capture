@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown, Code2, Columns3, Download, ExternalLink } from 'lucide-react'
 import type { ColumnMeta } from '@/api'
 import {
-  copyToClipboard, downloadCsv, downloadExcel, downloadPdf, hydrate, printSheet, type Sheet,
+  copyToClipboard, downloadCsv, downloadExcel, downloadPdf, downloadSheetMarkdown, hydrate,
+  printSheet, type Sheet,
 } from './exporters'
 
 /**
@@ -243,6 +244,17 @@ export function TableToolbar({
                 }
                 close()
               }}>CSV</Item>
+              {/* A GFM pipe table, so a table can be pasted into a document that holds prose.
+                  Hydrated like the rest: an export carries the whole message, never the
+                  220-character preview the cell shows. */}
+              <Item onClick={async () => {
+                try {
+                  downloadSheetMarkdown(await hydrate(sheet))
+                } catch {
+                  say('Could not fetch the full text')
+                }
+                close()
+              }}>Markdown</Item>
               {/* Excel and PDF load their libraries on click, so nothing is fetched for a reader
                   who never exports. Failures are reported rather than swallowed. */}
               <Item onClick={async () => {

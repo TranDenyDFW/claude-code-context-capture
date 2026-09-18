@@ -110,6 +110,43 @@ export function downloadCsv(sheet: Sheet) {
            `${safeName(sheet.name)}.csv`)
 }
 
+/**
+ * A markdown document, written as it is held: no byte-order mark, no rewriting.
+ *
+ * The CSV writer adds a mark so Excel reads UTF-8; a markdown file must not have one, because some
+ * editors draw it as a stray glyph and it can stop a leading `#` from being read as a heading.
+ * `.md` and `.txt` write the same bytes on purpose: the second exists for anything that will not
+ * open the first. Neither rewrites the document, because an export that quietly stripped its
+ * markers would be a different document under the same name.
+ */
+export function downloadMarkdown(name: string, body: string) {
+  download(new Blob([body], { type: 'text/markdown;charset=utf-8' }), `${safeName(name)}.md`)
+}
+
+export function downloadTextFile(name: string, body: string) {
+  download(new Blob([body], { type: 'text/plain;charset=utf-8' }), `${safeName(name)}.txt`)
+}
+
+/**
+ * A table as a GFM pipe table: the same rows the page is showing, in something a markdown document
+ * can hold.
+ *
+ * Numeric columns are right-aligned by the delimiter row, the same rule the PDF export uses. A
+ * cell's pipes are escaped and its newlines collapsed to a space, because a pipe table is one line
+ * per row and a stray newline would silently split a row in two.
+ */
+export function toMarkdownTable(sheet: Sheet): string {
+  const clean = (text: string) => text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
+  const head = sheet.columns.map((c) => clean(c.label))
+  const rule = sheet.columns.map((c) => (c.numeric ? '---:' : '---'))
+  const body = sheet.rows.map((row) => sheet.columns.map((c) => clean(sheet.format(row[c.id], c))))
+  return [head, rule, ...body].map((row) => `| ${row.join(' | ')} |`).join('\n')
+}
+
+export function downloadSheetMarkdown(sheet: Sheet) {
+  downloadMarkdown(sheet.name, toMarkdownTable(sheet))
+}
+
 export async function copyToClipboard(sheet: Sheet): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(toClipboardText(sheet))

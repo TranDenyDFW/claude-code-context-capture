@@ -133,6 +133,8 @@ export function useRowInspector(
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
           .then((body) => write({
             dropped: body?.dropped ?? null,
+            textKind: 'markdown',
+            fileName: `compaction-${String(key).slice(0, 8)}-summary`,
             text: body?.summary?.text
               ?? 'No summary message was harvested for this compaction. Older boundaries record '
                + 'token counts only.',
@@ -161,10 +163,22 @@ export function useRowInspector(
     const write = (patch: Partial<InspectorContent>) => {
       if (token.current === mine) setContent((was) => (was ? { ...was, ...patch } : was))
     }
+    // WHO WROTE IT DECIDES HOW IT IS SHOWN. `messages.type` is on the row already: `assistant` is
+    // Claude's prose, `compact_summary` is a summary, `typed` is what a person typed, and all
+    // three are markdown. `tool_result` is the 86.5% case, output rather than a document, and
+    // anything unknown is treated the same way: shown exactly as stored, toggle to markdown.
+    const wrote = String(row.type ?? '').toLowerCase()
+    const kind: 'markdown' | 'plain' =
+      ['assistant', 'compact_summary', 'typed'].includes(wrote) ? 'markdown' : 'plain'
+    const stem = `message-${String(row[spec.key] ?? 'text').slice(0, 8)}`
     hydrate({ columns, rows: [row], name: names[index], format: (v) => shown(v), fullText: spec })
-      .then((full) => write({ text: shown(full.rows[0]?.[spec.column]) }))
+      .then((full) => write({
+        text: shown(full.rows[0]?.[spec.column]), textKind: kind, fileName: stem,
+      }))
       .catch(() => write({
         text: shown(row[spec.column]),
+        textKind: kind,
+        fileName: stem,
         textProblem: 'the full text could not be fetched; this is the preview',
       }))
   }

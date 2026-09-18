@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ChangeDetail, ChatChange, ChatWork, DiffHunk } from '@/api'
 import { readableMs } from './chatWork'
+import { TextBody } from './Markdown'
 
 /** One plan as `/api/plan/<call>` answers it: the document, not its opening. */
 interface PlanText {
@@ -292,24 +293,35 @@ export function ChatWorkPage({ session, onBack }: { session: string; onBack: () 
                   {/* THE OPENING UNTIL ASKED. `/api/chat` sends 400 characters per plan and every
                       plan here is longer than that, so the button is the difference between a
                       paragraph and the document. */}
-                  <pre className="mt-1 max-h-[24vh] overflow-auto whitespace-pre-wrap rounded bg-page
-                                  px-2 py-1.5 font-mono text-2xs leading-relaxed text-ink">
-                    {full ? full.text : p.preview}
-                  </pre>
+                  {/* A PLAN IS MARKDOWN, headings and all, because ExitPlanMode wrote it that
+                      way. The opening is markdown too: a prefix of a document still reads better
+                      as one, and a fence cut in half by the 400-character cap closes at the end
+                      rather than swallowing the rest. The file exports appear only once the whole
+                      plan is in hand, so nobody saves a paragraph under the document's name. */}
+                  <div className="mt-1">
+                    <TextBody
+                      source={(full ? full.text : p.preview) ?? ''}
+                      name={`plan-${String(p.tool_use_id).slice(0, 8)}`}
+                      boxClass="max-h-[24vh]"
+                      canExport={Boolean(full)}
+                      actions={
+                        !full && got !== 'failed' ? (
+                          <button
+                            onClick={() => readPlan(p.tool_use_id)}
+                            disabled={got === 'fetching'}
+                            className="rounded border border-edge px-2 py-0.5 text-2xs text-ink-dim
+                                       hover:text-ink disabled:text-ink-faint"
+                          >
+                            {got === 'fetching' ? 'Fetching the whole plan' : 'Read the whole plan'}
+                          </button>
+                        ) : null
+                      }
+                    />
+                  </div>
                   {got === 'failed' && (
                     <p role="alert" className="mt-1 text-2xs text-warn">
                       This plan could not be fetched; the opening is shown.
                     </p>
-                  )}
-                  {!full && got !== 'failed' && (
-                    <button
-                      onClick={() => readPlan(p.tool_use_id)}
-                      disabled={got === 'fetching'}
-                      className="mt-1 rounded border border-edge px-2 py-0.5 text-2xs text-ink-dim
-                                 hover:text-ink disabled:text-ink-faint"
-                    >
-                      {got === 'fetching' ? 'Fetching the whole plan' : 'Read the whole plan'}
-                    </button>
                   )}
                 </Row>
               )

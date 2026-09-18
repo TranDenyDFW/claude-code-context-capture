@@ -30,6 +30,7 @@ import { ProjectMoves } from './components/ProjectMoves'
 import { AdoptSessions } from './components/AdoptSessions'
 import { Sidebar } from './components/Sidebar'
 import { ServerControls } from './components/ServerControls'
+import { TextBody } from './components/Markdown'
 import { Inspector } from './components/Inspector'
 import { TablePage } from './components/TablePage'
 import { api } from './api'
@@ -167,6 +168,17 @@ describe('axe finds no WCAG A or AA violation in', () => {
     // aria-label, so `label-content-name-mismatch` is the rule that would catch a label that
     // stopped containing its own visible text.
     const { container } = render(<ServerControls />)
+    expect(await violations(container)).toEqual([])
+  })
+
+  it('a rendered markdown document', async () => {
+    const source = [
+      '# A heading', '', 'Some **bold** text and a [link](https://example.invalid/a).', '',
+      '- one', '- two', '', '| a | b |', '| --- | ---: |', '| 1 | 2 |', '', '```js',
+      'const a = 1', '```',
+    ].join('\n')
+    const { container } = render(
+      <TextBody source={source} name="a-summary" boxClass="max-h-[40vh]" />)
     expect(await violations(container)).toEqual([])
   })
 
