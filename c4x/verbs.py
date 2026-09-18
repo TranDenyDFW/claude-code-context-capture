@@ -47,6 +47,20 @@ Any flags after the verb go to the tool that does the work, unchanged.
 """
 
 
+def wants_dispatch(argv: list[str], *, frozen: bool) -> bool:
+    """Whether this argv is a verb at all, answered without touching the filesystem.
+
+    THE ROOT IS NOT FREE. Finding the install reads directories and, when it finds none, exits the
+    program with a message about installs, which is the wrong answer to `--reload` and to every
+    other flag the server itself is about to explain. A bare flag list is the server, and the
+    server needs no verb machinery, so nothing is resolved for it.
+    """
+    if not argv:
+        return frozen
+    first = argv[0]
+    return not first.startswith("-") or first in VERSION_FLAGS or first in ("--help", "-h")
+
+
 def plan(argv: list[str], *, frozen: bool, root: Path, exe: str) -> dict:
     """What to do about `argv`, as data.
 

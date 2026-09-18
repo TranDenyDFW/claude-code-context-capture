@@ -374,7 +374,9 @@ def bare_path_env(root: Path, db: str | None = None) -> dict:
             "PROGRAMDATA", "COMSPEC", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"}
     system = os.environ.get("SYSTEMROOT", r"C:\Windows")
     env = {name: value for name, value in os.environ.items() if name.upper() in keep}
-    env["PATH"] = os.pathsep.join([system + r"\System32", system])
+    # A WINDOWS PATH, JOINED THE WINDOWS WAY. `os.pathsep` is a colon on Linux, where this
+    # function is never used for real but its own check still runs.
+    env["PATH"] = ";".join([system + r"\System32", system])
     # The store the smoke was given, not one the folder does not have: importing the module that
     # reads it is the first thing the exe does, and a missing store is an exception, not a page.
     # RESOLVED, because the child runs in the folder and not here: `--db tmp/fixture.db` names a
@@ -641,9 +643,9 @@ def self_test() -> int:
         # THE CHECK THAT MAKES THE BUNDLE SMOKE ABLE TO FAIL: on a developer's machine a folder
         # that forgot node.exe still works, because the machine has node.
         ("the bundle smoke runs with a PATH holding Windows and nothing else",
-         all(part.lower().startswith(system) for part in bare["PATH"].split(os.pathsep))),
+         all(part.lower().startswith(system) for part in bare["PATH"].split(";"))),
         ("so a folder that forgot node cannot be rescued by the machine's own",
-         not any("nodejs" in part.lower() for part in bare["PATH"].split(os.pathsep))),
+         not any("nodejs" in part.lower() for part in bare["PATH"].split(";"))),
         # THE DECISION THAT KEEPS A STALE EXE OUT OF THE FOLDER, which is what this whole change
         # was nearly shipped without.
         ("no exe at all means build", needs_build(None, 1.0)),

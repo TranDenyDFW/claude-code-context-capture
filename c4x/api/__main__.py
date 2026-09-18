@@ -433,12 +433,14 @@ def main(argv=None):
     from c4x.paths import FROZEN as IS_FROZEN
     from c4x.paths import install_root as root_of
     from c4x.paths import node_exe
-    decision = verbs.plan(argv, frozen=IS_FROZEN, root=root_of(), exe=sys.executable)
-    if decision["kind"] != "serve":
-        return verbs.run(
-            decision, root=root_of(), node=node_exe(root_of()), serve=lambda rest: main(rest),
-            call=proc.call, open_page=open_page, write=sys.stdout.write, version=build_version)
-    argv = decision["argv"]
+    if verbs.wants_dispatch(argv, frozen=IS_FROZEN):
+        root = root_of()
+        decision = verbs.plan(argv, frozen=IS_FROZEN, root=root, exe=sys.executable)
+        if decision["kind"] != "serve":
+            return verbs.run(
+                decision, root=root, node=node_exe(root), serve=lambda rest: main(rest),
+                call=proc.call, open_page=open_page, write=sys.stdout.write, version=build_version)
+        argv = decision["argv"]
 
     reload = "--reload" in argv
     from c4x.paths import FROZEN, install_root

@@ -66,6 +66,37 @@ class TestTheVerbs:
         assert plan(["-V"])["kind"] == "version"
 
 
+class TestWhatNeedsAnInstallAtAll:
+    """A bare flag list must not send the program looking for an install.
+
+    THE DEFECT THIS RECORDS. The dispatch resolved the install root before deciding whether it
+    needed one, so a frozen process outside an install exited with a message about installs rather
+    than reaching the check that was about to explain itself. `--reload` under a frozen flag is
+    exactly that case, the API's own self-test drives it, and it failed on two CI legs and nowhere
+    else. Answering "is this a verb" must touch nothing.
+    """
+
+    @pytest.mark.parametrize("argv", [
+        ["--reload"], ["--db", "D:/s.db"], ["--port", "8059", "--watchdog"], ["--no-writes"],
+    ])
+    def test_a_flag_list_is_not_a_verb(self, argv):
+        assert verbs.wants_dispatch(argv, frozen=True) is False
+        assert verbs.wants_dispatch(argv, frozen=False) is False
+
+    @pytest.mark.parametrize("argv", [["install"], ["status"], ["harvest", "--stats"], ["serve"]])
+    def test_a_word_is(self, argv):
+        assert verbs.wants_dispatch(argv, frozen=True) is True
+
+    def test_the_two_that_are_flags_and_still_verbs(self):
+        # These print and exit rather than serving, so they are the program's own business.
+        for argv in (["--version"], ["-V"], ["--help"], ["-h"]):
+            assert verbs.wants_dispatch(argv, frozen=True) is True
+
+    def test_nothing_at_all_is_a_verb_only_for_the_exe(self):
+        assert verbs.wants_dispatch([], frozen=True) is True
+        assert verbs.wants_dispatch([], frozen=False) is False
+
+
 class TestTheFirstRun:
     def test_no_arguments_from_the_exe_installs_starts_and_opens(self):
         # HOW THE DOWNLOAD IS MET: somebody unzips a folder and double-clicks the program. The
