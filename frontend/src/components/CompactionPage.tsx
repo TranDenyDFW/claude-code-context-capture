@@ -1,4 +1,8 @@
 import { useEffect, useState } from 'react'
+import { TextBody } from './Markdown'
+import { matches } from './Palette'
+import { ResizeHandle } from './ResizeHandle'
+import { useColumnWidths } from './useColumnWidths'
 
 /** One message from before a boundary, and whether it crossed it. */
 export interface Crossing {
@@ -50,6 +54,26 @@ export function csv(rows: Crossing[]): string {
   return [head.join(','), ...body].join('\n')
 }
 
+const crossingCell = 'px-2 py-1.5 align-top truncate'
+
+/**
+ * The six columns, declared once so the header, the colgroup and the widths agree.
+ *
+ * `align` is the same word `ColumnMeta` uses, because these go straight into `useColumnWidths`,
+ * which is the main table's own width machinery: the estimate reads every row, so the widths hold
+ * still while the search box narrows the list, and each edge can be dragged.
+ */
+export const CROSSING_COLUMNS = [
+  { id: 'outcome', label: 'Outcome', numeric: false, specifier: null, align: 'left' as const, hidden: false, bands: [] },
+  { id: 'chars', label: 'Chars', numeric: true, specifier: ',', align: 'right' as const, hidden: false, bands: [] },
+  { id: 'role', label: 'Role', numeric: false, specifier: null, align: 'left' as const, hidden: false, bands: [] },
+  { id: 'type', label: 'Type', numeric: false, specifier: null, align: 'left' as const, hidden: false, bands: [] },
+  { id: 'ts', label: 'Date and Time', numeric: false, specifier: null, align: 'left' as const, hidden: false, bands: [] },
+  // The one column long enough to push the others off the screen: 220 characters, capped the same
+  // way the server caps the widest column of every other table.
+  { id: 'preview', label: 'Message', numeric: false, specifier: null, align: 'left' as const, hidden: false, bands: [], wide: true },
+]
+
 /**
  * One compaction, in a window of its own: what it wrote, and what it did to everything before it.
  *
@@ -71,6 +95,7 @@ export function CompactionPage({
   const [detail, setDetail] = useState<CompactionDetail | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
   const [onlyKept, setOnlyKept] = useState(false)
+  const [needle, setNeedle] = useState('')
 
   useEffect(() => {
     let live = true
@@ -90,13 +115,28 @@ export function CompactionPage({
   }, [uuid])
 
   const rows = detail ? crossings(detail) : []
-  const shown = onlyKept ? rows.filter((r) => r.kept) : rows
+  // TWO FILTERS, ONE LIST, AND THE EXPORT FOLLOWS BOTH. The checkbox used to narrow the view while
+  // the CSV carried everything, so the file never matched the screen it was saved from.
+  //
+  // WHAT THE SEARCH CAN SEE is the 220-character preview, which is all the server sends and all
+  // the page shows; the line under the box says so, because a search that quietly reports "no
+  // match" for a word plainly in the message is worse than one that says what it read.
+  const kept = onlyKept ? rows.filter((r) => r.kept) : rows
+  const shown = needle.trim()
+    ? kept.filter((r) => matches(`${r.preview} ${r.role} ${r.type} ${r.ts}`, needle))
+    : kept
+  const widths = useColumnWidths({
+    tableId: 'tbl-crossings',
+    columns: CROSSING_COLUMNS,
+    rows: rows as unknown as Record<string, unknown>[],
+    format: (value) => (value === null || value === undefined ? '' : String(value)),
+  })
 
   // A data: URL rather than a Blob object URL, for the reason the table exports already give:
   // both work, this one needs no revoke, so a page left open all afternoon accumulates nothing.
   const save = () => {
     const a = document.createElement('a')
-    a.href = `data:text/csv;charset=utf-8,${encodeURIComponent(csv(rows))}`
+    a.href = `data:text/csv;charset=utf-8,${encodeURIComponent(csv(shown))}`
     a.download = `compaction-${uuid.slice(0, 8)}.csv`
     a.click()
   }
@@ -135,12 +175,15 @@ export function CompactionPage({
               )}
             </h2>
             {detail.summary ? (
-              <pre
-                className="max-h-[40vh] overflow-auto whitespace-pre-wrap rounded bg-page px-3 py-2
-                           font-mono text-xs leading-relaxed text-ink"
-              >
-                {detail.summary.text}
-              </pre>
+              // RENDERED, because this IS markdown: Claude Code's compactor writes headings, lists
+              // and fenced code, and 12,000 to 17,000 characters of it read as one wall in a `pre`.
+              // Raw is one click away and is the same `pre` byte for byte, and both exports carry
+              // the source rather than what is on screen.
+              <TextBody
+                source={detail.summary.text}
+                name={`compaction-${uuid.slice(0, 8)}-summary`}
+                boxClass="max-h-[40vh]"
+              />
             ) : (
               <p className="text-xs text-ink-faint">
                 No summary message was harvested for this compaction. Older boundaries record token
@@ -180,38 +223,99 @@ export function CompactionPage({
                   row.</>
               )}
             </p>
-            <div className="max-h-[55vh] overflow-auto rounded border border-edge">
-              {shown.map((row) => (
-                <div
-                  key={row.uuid}
-                  data-outcome={row.kept ? 'kept' : 'dropped'}
-                  className={`border-b border-edge/40 px-3 py-2 last:border-0 ${
-                    row.kept ? 'border-l-2 border-l-good bg-good/5' : ''
-                  }`}
-                >
-                  <div className="flex items-baseline gap-2 text-2xs">
-                    <span className={row.kept ? 'font-semibold text-good' : 'text-ink-faint'}>
-                      {row.kept ? 'KEPT' : 'dropped'}
-                    </span>
-                    <span className="tabular-nums text-ink-faint">
-                      {row.chars.toLocaleString()} chars
-                    </span>
-                    <span className="text-ink-faint">{row.role}</span>
-                    <span className="text-ink-faint">{row.type}</span>
-                    <span className="ml-auto tabular-nums text-ink-faint">
-                      {String(row.ts).slice(0, 19)}
-                    </span>
-                  </div>
-                  <p className="mt-0.5 truncate font-mono text-2xs text-ink-dim" title={row.preview}>
-                    {row.preview}
-                  </p>
-                </div>
-              ))}
-              {shown.length === 0 && (
-                <p className="px-3 py-3 text-2xs text-ink-faint">
-                  Nothing from before this boundary can be shown.
-                </p>
-              )}
+            {/*
+              COLUMNS, BECAUSE THIS IS A TABLE. It was a stack of divs with the timestamp pushed
+              right by a margin and the message on a line of its own, which is two columns drawn as
+              one and neither of them alignable. The user asked for the text and the date to be
+              split, so each is now a cell, the widths hold still when the search narrows the list,
+              and every one of them can be dragged (`useColumnWidths`, shared with the main table).
+
+              KEPT STAYS GREEN. The tint and the left border are the fastest way to read which
+              messages crossed the boundary, so the row keeps them rather than relying on a word
+              in a column.
+            */}
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <input
+                type="search"
+                value={needle}
+                onChange={(event) => setNeedle(event.target.value)}
+                aria-label="Search the messages before this boundary"
+                placeholder="Search these messages"
+                className="w-72 rounded border border-edge bg-page px-2 py-1 text-2xs text-ink
+                           outline-none placeholder:text-ink-faint focus:border-accent"
+              />
+              <span className="text-2xs text-ink-faint">
+                {needle.trim()
+                  ? `${shown.length.toLocaleString()} of ${kept.length.toLocaleString()} match`
+                  : 'Searches the first 220 characters of each message, which is what the server sends'}
+              </span>
+            </div>
+            <div ref={widths.containerRef} className="max-h-[55vh] overflow-auto rounded border border-edge">
+              <table className="table-fixed border-collapse text-2xs" style={{ width: widths.total }}>
+                <colgroup>
+                  {CROSSING_COLUMNS.map((column) => (
+                    <col key={column.id} style={{ width: widths.width(column.id) }} />
+                  ))}
+                </colgroup>
+                <thead className="sticky top-0 z-10 bg-panel">
+                  <tr>
+                    {CROSSING_COLUMNS.map((column) => (
+                      <th
+                        key={column.id}
+                        scope="col"
+                        className={`relative border-b border-edge px-2 py-1.5 text-left font-medium
+                                    text-ink-faint ${column.align === 'right' ? 'text-right' : ''}`}
+                      >
+                        {column.label}
+                        <ResizeHandle
+                          label={`Resize the ${column.label} column`}
+                          size={widths.width(column.id)}
+                          min={widths.boundsFor(column).min}
+                          max={widths.boundsFor(column).max}
+                          onSize={(px) => widths.setWidth(column.id, px)}
+                          onReset={() => widths.reset(column.id)}
+                          className="absolute inset-y-0 -right-1 z-20 w-2"
+                        />
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {shown.map((row) => (
+                    <tr
+                      key={row.uuid}
+                      data-outcome={row.kept ? 'kept' : 'dropped'}
+                      className={`border-b border-edge/40 ${
+                        row.kept ? 'border-l-2 border-l-good bg-good/5' : ''
+                      }`}
+                    >
+                      <td className={`${crossingCell} ${row.kept ? 'font-semibold text-good' : 'text-ink-faint'}`}>
+                        {row.kept ? 'KEPT' : 'dropped'}
+                      </td>
+                      <td className={`${crossingCell} text-right tabular-nums text-ink-faint`}>
+                        {row.chars.toLocaleString()}
+                      </td>
+                      <td className={`${crossingCell} text-ink-faint`}>{row.role}</td>
+                      <td className={`${crossingCell} text-ink-faint`}>{row.type}</td>
+                      <td className={`${crossingCell} tabular-nums text-ink-faint`}>
+                        {String(row.ts).slice(0, 19)}
+                      </td>
+                      <td className={`${crossingCell} font-mono text-ink-dim`} title={row.preview}>
+                        {row.preview}
+                      </td>
+                    </tr>
+                  ))}
+                  {shown.length === 0 && (
+                    <tr>
+                      <td colSpan={CROSSING_COLUMNS.length} className="px-3 py-3 text-2xs text-ink-faint">
+                        {needle
+                          ? 'Nothing from before this boundary matches that search.'
+                          : 'Nothing from before this boundary can be shown.'}
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </section>
         </>

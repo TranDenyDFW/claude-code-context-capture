@@ -406,6 +406,37 @@ removed and nothing here said so.
 
 ### Changed
 
+- **Markdown is rendered where the text is markdown, it can be saved as a file, and the messages a
+  compaction dropped are a table with a search box.** The user's words: "FOR ALL MARKDOWN TEXTS IN
+  THE ENTIRE PROJECT, DISPLAY AS MARKDOWN AND ADD A MARKDOWN/TEXT EXPORT" and "FOR THE 'BEFORE
+  COMPACTION' DATA - SPLIT THE TEXT AND DATE INTO DIFFERENT COLUMNS AND ADD A SEARCH BAR TO THAT
+  DATA".
+  - `react-markdown` and `remark-gfm` are bundled (the user's choice, made with the bundle cost in
+    front of them). No `rehype-raw`, so no HTML string is ever built: a `<script>` in a transcript
+    is text, a link opens only for http, https and mailto and never with this page behind it, and
+    an image is not fetched, since an `img src` in a transcript tells a third party that somebody
+    opened that record.
+  - ONE PLUGIN IS NOT OPTIONAL. react-markdown does not escape raw HTML, it drops it, so
+    `/api/compaction/<uuid>` rendered as `/api/compaction/`. Measured across the 726 markdown
+    documents this repo has collected: 358 disappearances in 98 files. Every `html` node is turned
+    back into the literal characters it was written with, and a test pins it.
+  - Rendered: the compaction summary, each plan, and the drawer's full text when the row's own
+    `type` says a person or Claude wrote it. A `tool_result` opens raw (86.5% of the records typed
+    `user` are tool output), and a 220-character preview is never markdown, because the server
+    already replaced its newlines with spaces. Raw is the same preformatted text as before, byte
+    for byte, so the renderer can always be checked; Copy and both file exports carry the source,
+    never what is on screen.
+  - The messages before a boundary are a table: outcome, chars, role, type, date and time, and the
+    message, each a column, the survivors still tinted green, the widths held still by the same
+    machinery as every other table and each edge draggable. A search box narrows it with the
+    matcher the Adopt window uses, says how many of the rows match, and says that it reads the
+    first 220 characters, which is what the server sends. The CSV now follows both the checkbox and
+    the search; it used to ignore the checkbox, so the file never matched the screen.
+  - The table Export menu gains Markdown, a pipe table whose cells escape a pipe and collapse a
+    newline, so no row can silently split.
+  Tests: `Markdown.test.tsx` (12), cases in `exporters.test.ts`, four in `Windows.test.tsx`, and
+  the axe gate over a rendered document.
+
 - **A column keeps its width when the table is sorted, and every column, both side panels and the
   Adopt window's table can be dragged wider.** The user's words: "CHANGE ALL TABLES TO NOT RESIZE
   COLUMNS WHEN SORTING", "CHANGE ALL TABLES TO ALLOW RESIZING", "ALL SIDE PANELS (LEFT AND RIGHT),

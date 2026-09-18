@@ -119,6 +119,58 @@ describe('a compaction, ordered by size with what survived marked', () => {
     expect(line.textContent).toMatch(/largest, not every\s+row/)
   })
 
+  it('puts the date and the message in columns of their own', async () => {
+    // THE USER'S ASK. The timestamp used to be a span pushed right by a margin and the message a
+    // line underneath, which is two columns drawn as one: nothing lined up down the page.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => detail })))
+    const { container } = render(<CompactionPage uuid="c-1" onBack={() => {}} />)
+    await screen.findByText(/recorded 695 survivors/)
+    expect([...container.querySelectorAll('thead th')].map((th) => th.textContent?.trim()))
+      .toEqual(['Outcome', 'Chars', 'Role', 'Type', 'Date and Time', 'Message'])
+    const first = container.querySelector('tbody tr')!
+    expect([...first.children].map((td) => td.textContent?.trim()))
+      .toEqual(['dropped', '900', 'user', 'typed', '09:00', 'dropped big'])
+  })
+
+  it('has a search box that says how much of the list it left, and what it read', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => detail })))
+    const { container } = render(<CompactionPage uuid="c-1" onBack={() => {}} />)
+    await screen.findByText(/recorded 695 survivors/)
+    // Before a search, the line says what the box can see rather than a count of nothing.
+    expect(screen.getByText(/Searches the first 220 characters/)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Search the messages before this boundary'),
+                     { target: { value: 'dropped small' } })
+    expect(screen.getByText('1 of 3 match')).toBeTruthy()
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(1)
+    expect(container.querySelector('tbody tr')!.textContent).toContain('dropped small')
+  })
+
+  it('says nothing matches rather than looking empty', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => detail })))
+    render(<CompactionPage uuid="c-1" onBack={() => {}} />)
+    await screen.findByText(/recorded 695 survivors/)
+    fireEvent.change(screen.getByLabelText('Search the messages before this boundary'),
+                     { target: { value: 'nothing here says this' } })
+    expect(screen.getByText(/matches that search/)).toBeTruthy()
+  })
+
+  it('exports what the page is showing, both filters included (gate can fail)', async () => {
+    // The checkbox used to narrow the view while the CSV carried every fetched row, so the file
+    // never matched the screen it was saved from.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => detail })))
+    const saved: string[] = []
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(function (this: HTMLAnchorElement) { saved.push(this.href) })
+    render(<CompactionPage uuid="c-1" onBack={() => {}} />)
+    await screen.findByText(/recorded 695 survivors/)
+    fireEvent.click(screen.getByLabelText('Only what it kept'))
+    fireEvent.click(screen.getByText('Export CSV'))
+    const written = decodeURIComponent(saved[0] ?? '')
+    expect(written).toContain('kept one')
+    expect(written).not.toContain('dropped big')
+    click.mockRestore()
+  })
+
   it('marks the survivors and can narrow to them', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => detail })))
     const { container } = render(<CompactionPage uuid="c-1" onBack={() => {}} />)
