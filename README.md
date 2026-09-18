@@ -28,6 +28,10 @@ Download `c4x-windows.zip` from the
 [latest release](https://github.com/TranDenyDFW/claude-code-context-capture/releases), unzip it,
 and run `c4x.exe`. Nothing else is needed: the folder carries the program and the Node it uses.
 
+`c4x-windows.zip.sha256` sits beside it, so the download can be checked before it is unzipped:
+`sha256sum -c c4x-windows.zip.sha256` in a shell that has it, or
+`(Get-FileHash c4x-windows.zip -Algorithm SHA256).Hash` in PowerShell, compared with the file.
+
 Unzip it somewhere that is yours and stays put, `%USERPROFILE%\c4x` for example. **Not** under
 `%APPDATA%` or `%LOCALAPPDATA%`: the Claude desktop app's Store build redirects writes under those
 directories into its own package folder, so a copy that lives there is not quite where it says it

@@ -102,7 +102,13 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           powershell -NoProfile -Command "Compress-Archive -Path dist/bundle/c4x -DestinationPath c4x-windows.zip"
-          powershell -NoProfile -Command "(Get-FileHash c4x-windows.zip -Algorithm SHA256).Hash.ToLower() + '  c4x-windows.zip' | Out-File -Encoding ascii c4x-windows.zip.sha256"
+          # WRITTEN THE WAY IT IS READ. The digest exists so a download can be checked, and the
+          # command that checks it is `sha256sum -c`. Out-File wrote the line with a CRLF, which
+          # that command reads as part of the FILENAME, so it answered "No such file" about a file
+          # sitting beside it. sha256sum writes its own format with one LF, and then verifies it
+          # here, on the runner, so a sidecar that cannot be read never reaches a release.
+          sha256sum c4x-windows.zip > c4x-windows.zip.sha256
+          sha256sum -c c4x-windows.zip.sha256
           ls -l c4x-windows.zip c4x-windows.zip.sha256
           cat c4x-windows.zip.sha256
 
