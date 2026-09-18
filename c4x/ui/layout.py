@@ -160,7 +160,7 @@ STORE, SELECTION = "store", "selection"
 
 TABS = [
     ("tab-summary", "Summary", summary_layout, STORE),
-    ("tab-sessions", "All Sessions", sessions_table_layout, STORE),
+    ("tab-sessions", "Sessions", sessions_table_layout, STORE),
     ("tab-diagnostics", "Diagnostics", diagnostics_layout, STORE),
     ("tab-session", "Session", session_layout, SELECTION),
     ("tab-compactions", "Compactions", compactions_layout, SELECTION),

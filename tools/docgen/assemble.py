@@ -23,7 +23,7 @@ DOCGEN = ROOT / "docs" / "docgen"
 # alongside the running dashboard.
 ORDER = [
     ("summary", "Summary", "Store-wide findings, totals, and where the tokens went."),
-    ("sessions", "All sessions", "Every session as a row and as a point."),
+    ("sessions", "Sessions", "Every session as a row and as a point."),
     ("session", "Session", "One session in detail: growth, thresholds, compactions, messages."),
     ("compactions", "Compactions", "Every compaction, its predicted trigger, and what it dropped."),
     ("window-composition", "Window / Composition",

@@ -12,8 +12,8 @@ and, when nobody is, starts the server detached; the server watches for Claude p
 itself about a minute after the last one exits. `node tools/install.mjs status` says whether it is
 up and how to stop it by hand; `install --no-dashboard` turns the autostart off (`--dashboard` turns
 it back on), as does `C4X_NO_DASHBOARD=1`. `python -m c4x.api` by hand still works and does not
-stop itself unless asked to with `--watchdog`. The header's **Stop C4X** stops the server from the
-page (it asks first; the next Claude session starts one again) and **Restart C4X** starts a fresh
+stop itself unless asked to with `--watchdog`. The header's **Stop** stops the server from the
+page (it asks first; the next Claude session starts one again) and **Restart** starts a fresh
 one with the same flags and reloads the page once a different process answers. Once the server is
 up it runs one sweep: the records c4x wrote for review runs (below) are taken back and, when that
 removed any, Claude is restarted so its sidebar reflects it; never twice within ten minutes, only
@@ -58,14 +58,14 @@ line follows Claude running, closed, back); the outcome stays on screen: "Claude
 started again", "through the task scheduler" when the app's own activation brought nothing back,
 or "Claude is closed: ... start it by hand", the one outcome that asks for something. The same
 window guards Adopt, Name them, Remove them, Import (each writes a file Claude reads when it
-starts, so those act first and restart after), Stop C4X and Restart C4X. The CLI is never
+starts, so those act first and restart after), and the Stop and Restart pair. The CLI is never
 touched: `claude.exe` in a terminal shares the app's image name, and the server tells the two
 apart by the executable's path. The Current hover says where its number came from: the account
 each chat was made under (harvest's tag, with the count of chats no tag names an account for),
 or the sharing backup's manifest, or the directories themselves.
 
 **The account a chat was made under.** The population list offers "Signed-in account's chats
-(N)", one "Account <id>" entry per account seen, and "No account known"; All sessions carries an
+(N)", one "Account <id>" entry per account seen, and "No account known"; Sessions carries an
 `account` column; `docs/desktop-records.md` section 6 says how the tag is decided and what it
 cannot know.
 
@@ -92,7 +92,7 @@ and says what to do: finish a chat under the account it started with.
 
 ## Adopt, and review runs
 
-After Restart C4X, the **Adopt (N)** button (the hover says what N is) opens a window over the
+After Restart, the **Adopt (N)** button (the hover says what N is) opens a window over the
 page (the page dimmed behind it, the way the Project dialog opens; Escape or the backdrop closes
 it) listing the chats on this machine that the desktop app has no record of, as a table with one
 row per folder: the folder (a folder holding one chat shows that chat's title under it), how many
@@ -139,7 +139,7 @@ parallel implementation of it.
 | Tab | What it answers | Dump it |
 |---|---|---|
 | Summary | what is worth doing about this store | `python -m c4x.cli dump --tab tab-summary` |
-| All sessions | every chat as a point and a row, with a resumed chat's sessions folded into its newest one | `--tab tab-sessions` |
+| Sessions | every chat as a point and a row, with a resumed chat's sessions folded into its newest one | `--tab tab-sessions` |
 | Session | where one session's window went | `--tab tab-session --session <id>` |
 | Compactions | what each compaction discarded | `--tab tab-compactions` |
 | Window | what is in the window right now | `--tab tab-window --session <id>` |

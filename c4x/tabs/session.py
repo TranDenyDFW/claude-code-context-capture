@@ -250,7 +250,7 @@ def session_layout(session_id=None, scope="main", cohort=None):
         # question does not hover the chart heading to find the answer.
         defaulted = chart_note(
             "Nothing is selected in the header, so this is the most recently active session in "
-            "the population. Pick one in the header, or click a row on All sessions, to change it.",
+            "the population. Pick one in the header, or click a row on Sessions, to change it.",
             style={"color": WARN}, level="warn")
     turns = session_turns(session_id, include_sidechain=(scope != "main"))
     n = max(len(turns), 1)

@@ -79,9 +79,13 @@ export function Pane({
   for (const entry of figureMeta) {
     for (const line of entry.absorbed ?? []) claim(line)
   }
+  // THE POPULATION SENTENCE IS DROPPED ONLY WHERE THE HEADER IS SAYING IT. The header's chip
+  // carries it, and the chip now appears for a store-wide tab alone, so suppressing the line
+  // unconditionally lost the sentence outright on every tab describing the selection.
+  const chipSaysIt = (payload.population_scope ?? 'store') !== 'selection'
   const prose = payload.text.filter(
     (line) =>
-      line !== payload.population &&
+      !(chipSaysIt && line === payload.population) &&
       !isClaimed(line) &&
       !sections.some((s) => s.summary.includes(line)),
   )

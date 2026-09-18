@@ -378,6 +378,20 @@ describe('one number for the signed-in account', () => {
       "Every account's chats: 489 listed here; 191 in the app across 9 account directories")
   })
 
+  it('gives the two sides one width, so the switch does not lean', async () => {
+    // "All" is four characters and "Current" is seven. jsdom lays nothing out, so the rule is
+    // what can be asserted, and the rule had to be measured first: `flex-1 basis-0` on the two
+    // buttons leaves them at 34px and 61px in Chrome, because the box shrinks to fit and there
+    // is no surplus to share. Two grid tracks take the wider content (measured: 61 and 61).
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
+    draw()
+    const all = await screen.findByRole('button', { name: 'All' })
+    const current = screen.getByRole('button', { name: 'Current' })
+    expect(all.parentElement).toBe(current.parentElement)
+    expect(all.parentElement!.className).toContain('grid-cols-2')
+    for (const option of [all, current]) expect(option.className).toContain('text-center')
+  })
+
   it('says the app count is not known when it is not, and still leads with the page count', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(
       state({ intended: 'all', mode: 'all', current_chats: null, current_source: null,
