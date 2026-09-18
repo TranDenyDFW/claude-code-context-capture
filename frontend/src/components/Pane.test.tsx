@@ -351,7 +351,7 @@ describe('every table can be filtered', () => {
 
 describe('the headline figures', () => {
   const stats = [
-    { label: 'sessions', value: '1,325', sub: 'in the store, 317 listed on All sessions' },
+    { label: 'sessions', value: '1,325', sub: 'in the store, 317 listed on Sessions' },
     { label: 'API calls', value: '158,835', sub: '346,909 transcript rows behind them' },
   ]
 
@@ -502,12 +502,12 @@ describe('a card caption', () => {
     /**
      * On at least half of these the caption is what the number MEANS: "Peak Resident" is the
      * largest single API call in the store and not any session's peak, "Sessions" counts every
-     * session while only some are listed on All sessions, and "API Calls" exists to be told apart
+     * session while only some are listed on Sessions, and "API Calls" exists to be told apart
      * from the transcript row count that its own caption gives. A reader cannot hover for a
      * qualifier they have no reason to suspect is there.
      */
     render(<Pane payload={payload({ stats: [
-      { label: 'Sessions', value: '1,325', sub: 'in the store, 317 listed on All sessions' },
+      { label: 'Sessions', value: '1,325', sub: 'in the store, 317 listed on Sessions' },
       { label: 'Peak Resident', value: '999.8k', sub: 'largest single API call, any session' },
     ] })} />)
     // Shown under every figure the caption wrapped and the card width cut it off, so half
@@ -520,10 +520,10 @@ describe('a card caption', () => {
     // in a `title` and nowhere else, so it was missing from the accessibility tree and from
     // anything copied or exported, and `aria-description` is a draft attribute with essentially no
     // support. `sr-only` is zero pixels, so the visual rule above holds exactly as before.
-    const caption = screen.getByText('in the store, 317 listed on All sessions')
+    const caption = screen.getByText('in the store, 317 listed on Sessions')
     expect(caption.className).toBe('sr-only')
     const card = screen.getByText('1,325').closest('div')!
-    expect(card.getAttribute('title')).toBe('in the store, 317 listed on All sessions')
+    expect(card.getAttribute('title')).toBe('in the store, 317 listed on Sessions')
   })
 
   it('and the caption is reachable without a mouse', () => {
@@ -532,10 +532,10 @@ describe('a card caption', () => {
      * who cannot hover, or who copies the card, was left with two figures and nothing joining
      * them. */
     render(<Pane payload={payload({ stats: [
-      { label: 'Sessions in Store', value: '51', sub: '18 of them listed on All sessions' },
+      { label: 'Sessions in Store', value: '51', sub: '18 of them listed on Sessions' },
     ] })} />)
     const card = screen.getByText('51').closest('div')!
-    expect(card.textContent).toContain('18 of them listed on All sessions')
+    expect(card.textContent).toContain('18 of them listed on Sessions')
   })
 })
 
@@ -580,7 +580,8 @@ describe('every table is named and explained the same way', () => {
     expect(heading).toBe('One')
   })
 
-  it('names the table and nothing else, whatever the row count', () => {
+  it('names the table and nothing else, whatever the row count', () => {
+
     render(
       <Pane payload={payload({ tables: [table('t', [{ a: 1 }, { a: 2 }, { a: 3 }])], meta: [meta({ title: 'Three' })] })} />,
     )
