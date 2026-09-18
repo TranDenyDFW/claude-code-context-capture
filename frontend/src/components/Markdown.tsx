@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { remarkKeepRaw, safeHref } from './markdownRules'
+import { safeHref } from './markdownRules'
 import { downloadMarkdown, downloadTextFile } from './exporters'
 
 /**
@@ -13,8 +13,14 @@ import { downloadMarkdown, downloadTextFile } from './exporters'
  * SQL is not markdown at all. Those stay exactly as they were.
  *
  * NO RAW HTML IS EVER PARSED. `rehype-raw` is deliberately absent, so nothing ever reaches
- * `dangerouslySetInnerHTML` and a `<script>` in a transcript is text. What raw HTML there is comes
- * back as its literal characters (`markdownRules.ts` says why that matters here).
+ * `dangerouslySetInnerHTML` and a `<script>` in a transcript is text.
+ *
+ * AND NOTHING IS DROPPED. Measured against react-markdown 10.1.0: `<uuid>`, `<div>x</div>` and
+ * `<script>...</script>` all render as their literal characters. That matters because this store's
+ * markdown is full of angle-bracket placeholders: 343 of them across 100 of the 732 documents this
+ * repo has collected, `<stdin>` 42 times, `<uuid>` 31, `<sid>` 16. A renderer that treated them as
+ * markup would delete them silently, which is the one thing a page for READING a store must never
+ * do, so `Markdown.test.tsx` pins the behaviour rather than trusting it.
  *
  * NO IMAGES ARE FETCHED. An `img src` in a transcript is a request to a third party that says the
  * reader opened a particular record; the alt text and the address are shown as text instead.
@@ -73,7 +79,7 @@ const PIECES = {
 export function Markdown({ source }: { source: string }) {
   // NOT AN OPTIMISATION. The longest plan this store holds is 80,428 characters and the drawer
   // re-renders whenever the page behind it does.
-  const plugins = useMemo(() => [remarkGfm, remarkKeepRaw], [])
+  const plugins = useMemo(() => [remarkGfm], [])
   return (
     <ReactMarkdown remarkPlugins={plugins} urlTransform={safeHref} components={PIECES}>
       {source}

@@ -35,12 +35,17 @@ describe('the renderer', () => {
     expect(container.querySelector('hr')).not.toBeNull()
   })
 
-  it('keeps an angle-bracket placeholder, which the renderer alone would delete (gate can fail)', () => {
-    // MEASURED: 358 of these across 98 of the 726 markdown documents in this repo's own .md folder.
-    // react-markdown drops raw HTML rather than escaping it, so without the plugin this sentence
-    // renders as "Read /api/compaction/ for the rest".
-    const { container } = render(<Markdown source="Read /api/compaction/<uuid> for the rest" />)
+  it('keeps every angle-bracket placeholder, whatever an upgrade decides to do', () => {
+    // WHY THIS IS PINNED. This store's markdown is full of them: measured over the 732 documents
+    // this repo has collected, 343 tokens in 100 files, `<stdin>` 42 times and `<uuid>` 31. A
+    // renderer that treated them as markup would delete them and say nothing, which is the one
+    // thing a page for reading a store must never do. react-markdown 10.1.0 renders them as text;
+    // this is the check that would catch a version that stopped.
+    const { container } = render(
+      <Markdown source={'Read /api/compaction/<uuid> for <stdin>, and a <div>block</div>'} />)
     expect(container.textContent).toContain('/api/compaction/<uuid>')
+    expect(container.textContent).toContain('<stdin>')
+    expect(container.textContent).toContain('<div>block</div>')
   })
 
   it('does not run a script, and shows it as text', () => {

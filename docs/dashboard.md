@@ -138,9 +138,11 @@ Nothing raw is ever parsed. There is no `rehype-raw`, so no HTML string is ever 
 `<script>` in a transcript is text; a link opens only for http, https and mailto, and never with
 this page behind it; an image is not fetched at all, because an `img src` in a transcript is a
 request to a third party saying somebody opened that record. Raw HTML that IS in the text keeps its
-literal characters, which is not the renderer's default: it deletes them, and a sentence reading
-`/api/compaction/<uuid>` would render as `/api/compaction/`. Measured across the 726 markdown
-documents this repo has collected: 358 such disappearances in 98 files.
+literal characters: measured against react-markdown 10.1.0, `<uuid>`, `<div>x</div>` and
+`<script>...</script>` all render as they were written. That is worth a test rather than trust,
+because this store's markdown is full of angle-bracket placeholders (343 of them across 100 of the
+732 documents this repo has collected, `<stdin>` 42 times and `<uuid>` 31), and a version that
+started treating them as markup would delete them without a word.
 
 ## Running without Python
 

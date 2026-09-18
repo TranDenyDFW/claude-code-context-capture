@@ -416,10 +416,14 @@ removed and nothing here said so.
     is text, a link opens only for http, https and mailto and never with this page behind it, and
     an image is not fetched, since an `img src` in a transcript tells a third party that somebody
     opened that record.
-  - ONE PLUGIN IS NOT OPTIONAL. react-markdown does not escape raw HTML, it drops it, so
-    `/api/compaction/<uuid>` rendered as `/api/compaction/`. Measured across the 726 markdown
-    documents this repo has collected: 358 disappearances in 98 files. Every `html` node is turned
-    back into the literal characters it was written with, and a test pins it.
+  - NOTHING IS DROPPED, AND THAT IS PINNED RATHER THAN TRUSTED. The plan for this change said
+    react-markdown deletes raw HTML and that a remark plugin was needed to put it back. Measured
+    against 10.1.0, it does not: `<uuid>`, `<div>x</div>` and `<script>...</script>` render as
+    their literal characters with the plugin and without it, so the plugin was removed as the dead
+    code it was, and the test stayed. It is worth a test because this store's markdown is full of
+    such placeholders: measured here, 343 across 100 of the 732 documents the repo has collected,
+    `<stdin>` 42 times and `<uuid>` 31. A version that started treating them as markup would
+    delete them silently.
   - Rendered: the compaction summary, each plan, and the drawer's full text when the row's own
     `type` says a person or Claude wrote it. A `tool_result` opens raw (86.5% of the records typed
     `user` are tool output), and a 220-character preview is never markdown, because the server
