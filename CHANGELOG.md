@@ -406,6 +406,40 @@ removed and nothing here said so.
 
 ### Changed
 
+- **A column keeps its width when the table is sorted, and every column, both side panels and the
+  Adopt window's table can be dragged wider.** The user's words: "CHANGE ALL TABLES TO NOT RESIZE
+  COLUMNS WHEN SORTING", "CHANGE ALL TABLES TO ALLOW RESIZING", "ALL SIDE PANELS (LEFT AND RIGHT),
+  ALLOW RESIZING".
+  - The table had no width rule at all: `table-layout` was never set, so the browser measured the
+    cells in the DOM, and only one page of rows ever is. Sorting changed which values were measured,
+    so the columns re-fitted and the whole table jumped. It is now `table-layout: fixed` with an
+    explicit colgroup, and the widths come from `columnWidths.ts`, a pure function handed EVERY row
+    of the table and nothing about sorting, paging or filtering. That is the fix: the widths cannot
+    follow the page because the function cannot see it. `w-full` had to go with it, since under
+    fixed layout a 100% width redistributes the surplus and overrides the colgroup; the surplus now
+    goes to one column. Every cell gained `truncate`, because a fixed layout clips regardless and
+    the choice is an ellipsis or a cut mid-character; the whole value is still in each cell's
+    `title`. The sort arrow's space is reserved on every header, so the first click no longer widens
+    the sorted column by a glyph, and the header gained `aria-sort` for readers who cannot see it.
+  - One primitive does every resize (`useDragSize.ts`, `ResizeHandle.tsx`): a `role="separator"`
+    with arrow keys, Home and End, Escape to put the size back, double-click to reset, and a hit
+    area that cannot start the column reorder that shares the same header cell. Column widths are
+    remembered per table (the table's id plus its column ids, never the slot it was drawn in, which
+    is the defect `PaneTableIdentity.test.tsx` exists for), and the Columns menu gains Reset Widths
+    once anything has been dragged. The left rail and the right drawer remember their widths too,
+    and the rail keeps its collapse preference separate, so collapsing does not forget a width.
+  - Three defects the running browser found that no jsdom test could: the window listeners were
+    bound by an effect keyed on state, so a `pointermove` in the same tick as the `pointerdown`
+    reached nothing and a quick drag did nothing at all (they are bound at pointerdown now); the
+    `wide` column's 24rem cap was applied to the DRAG as well as to the estimate, so the widest
+    column, the one most worth widening, refused to move; and the rail's width transition turned a
+    drag into a rail lagging a fifth of a second behind the pointer, so it now animates the collapse
+    alone.
+  Tests: `useDragSize.test.tsx` (18), `columnWidths.test.ts` (13), `TableColumnWidths.test.tsx`
+  (18, including the case that fails on the old code), `PanelResize.test.tsx` (7), plus cases in
+  `Sidebar.test.tsx` and `AdoptSessions.test.tsx`, and the axe gate over every surface that now
+  carries a separator.
+
 - **The header and the sidebar say less, and say it once.** The user's list, after looking at the
   running page: uppercase the sidebar's two group headings, rename the tab that reads "All Sessions"
   to "Sessions", make "All" and "Current" the same width, combine "Stop C4X" and "Restart C4X" into

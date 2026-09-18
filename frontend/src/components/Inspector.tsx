@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Table, TableMeta } from '@/api'
 import { DataTable } from './DataTable'
+import { ResizeHandle } from './ResizeHandle'
+import { clampSize } from './useDragSize'
 
 /**
  * What one thing on the page is made of: a point somebody clicked on a chart, or a row they opened.
@@ -68,9 +70,48 @@ export interface InspectorContent {
   onSelectSession?: (() => void) | null
 }
 
+const WIDTH = 'c4x.inspector.width'
+/** `max-w-xl`, the width this drawer has had; below the floor its field grid stops working. */
+export const DRAWER = { DEFAULT: 576, MIN: 320, MAX: 1400 } as const
+
+/**
+ * The widest the drawer may get: always leaving a strip of the page beside it.
+ *
+ * Not an arbitrary margin. This drawer is non-modal precisely so the chart or table behind it
+ * stays live and the reader can click the next point; one that reaches the left edge destroys the
+ * only reason it is not a modal.
+ */
+export function drawerCeiling(viewport = window.innerWidth): number {
+  return Math.max(DRAWER.MIN, Math.min(DRAWER.MAX, viewport - 160))
+}
+
+export function useInspectorWidth(): [number, (next: number) => void] {
+  const [width, setWidth] = useState(() => {
+    try {
+      const said = Number(localStorage.getItem(WIDTH))
+      return Number.isFinite(said) && said > 0 ? clampSize(said, DRAWER.MIN, DRAWER.MAX) : DRAWER.DEFAULT
+    } catch {
+      return DRAWER.DEFAULT
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(WIDTH, String(width))
+    } catch {
+      /* a preference that cannot be saved is not worth an error */
+    }
+  }, [width])
+  return [width, setWidth]
+}
+
 export function Inspector({ content, onClose }: { content: InspectorContent; onClose: () => void }) {
   const panel = useRef<HTMLDivElement>(null)
   const [copied, setCopied] = useState(false)
+  const [width, setWidth] = useInspectorWidth()
+  // Read by the Escape handler below, which is bound once and must see the current value.
+  const [resizing, setResizing] = useState(false)
+  const dragging = useRef(false)
+  dragging.current = resizing
   // Read at event time, so a new closure from the parent never rebinds the handlers below.
   const close = useRef(onClose)
   close.current = onClose
@@ -89,8 +130,13 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
 
   useEffect(() => {
     // Escape only. This is a non-modal dialog and it must not swallow Tab; see the docstring.
+    //
+    // EXCEPT WHILE THE EDGE IS BEING DRAGGED, where Escape belongs to the drag: it puts the width
+    // back. Without this, cancelling a resize closed the panel and threw the width away. A flag,
+    // not event ordering: both listeners sit on `window`, and when the event's target IS `window`
+    // a capturing listener cannot stop a bubbling one that was registered first.
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close.current()
+      if (event.key === 'Escape' && !dragging.current) close.current()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -102,9 +148,28 @@ export function Inspector({ content, onClose }: { content: InspectorContent; onC
       role="dialog"
       aria-label={content.title}
       tabIndex={-1}
-      className="fixed inset-y-0 right-0 z-30 flex w-full max-w-xl flex-col gap-3 overflow-y-auto
+      // `max-w-full` is load bearing: it keeps the full-bleed drawer a narrow screen has always
+      // had, and it makes a remembered 900px harmless on a phone.
+      style={{ width }}
+      className="fixed inset-y-0 right-0 z-30 flex max-w-full flex-col gap-3 overflow-y-auto
                  border-l border-edge bg-panel p-4 shadow-panel outline-none"
     >
+      {/*
+        THE HANDLE SITS INSIDE THE EDGE, not straddling it like a column's. This panel floats over
+        live table rows, and a handle hanging into the page would put a divider on top of a row
+        somebody is trying to click.
+      */}
+      <ResizeHandle
+        label="Resize the details panel"
+        size={width}
+        min={DRAWER.MIN}
+        max={drawerCeiling()}
+        direction={-1}
+        onSize={setWidth}
+        onReset={() => setWidth(DRAWER.DEFAULT)}
+        onDragChange={setResizing}
+        className="absolute inset-y-0 left-0 z-20 w-2"
+      />
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-md font-semibold text-ink">{content.title}</h2>

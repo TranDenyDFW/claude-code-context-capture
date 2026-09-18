@@ -4,6 +4,8 @@ import type { AdoptGroup, AdoptReport, AdoptState, RetitleReport, SweepState, Un
 import { Confirm } from './Confirm'
 import { Dialog } from './Dialog'
 import { matches } from './Palette'
+import { ResizeHandle } from './ResizeHandle'
+import { COLUMN } from './columnWidths'
 import { restartOutcome, restartQuestion } from './restart'
 import type { Outcome } from './restart'
 
@@ -50,6 +52,18 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 const haystack = (g: AdoptGroup) =>
   [g.project, g.cwd, ...g.sessions.map((s) => s.title)].join(' ')
 
+/**
+ * What each column starts at, and the reader can drag any of them.
+ *
+ * WRITTEN DOWN RATHER THAN MEASURED, unlike the main table's: this one has six declared columns
+ * whose content is known (a folder name, two counts, a date, a path), so an estimate would be
+ * arithmetic over a shape that never changes. Not remembered either: this is a window somebody
+ * opens to adopt a few folders, not a table they live in.
+ */
+const ADOPT_WIDTHS: Record<string, number> = {
+  adopt: 56, project: 260, chats: 72, newest: 132, runs: 72, path: 320,
+}
+
 const cell = 'px-2 py-1.5 align-top'
 const head = 'border-b border-edge px-2 py-2 text-left text-xs font-medium text-ink-faint'
 
@@ -63,6 +77,18 @@ export function AdoptSessions({
   const [state, setState] = useState<AdoptState | null>(null)
   const [includeCli, setIncludeCli] = useState(false)
   const [chosen, setChosen] = useState<string[]>([])
+  const [widths, setWidths] = useState<Record<string, number>>(ADOPT_WIDTHS)
+
+  // The columns this window draws, in order. `Runs` appears only when the server sends the field,
+  // so the list is built once and the header, the colgroup and the width map all read it.
+  const adoptColumns = (runs: boolean) => [
+    { id: 'adopt', label: 'Adopt', right: false },
+    { id: 'project', label: 'Folder', right: false },
+    { id: 'chats', label: 'Chats', right: true },
+    { id: 'newest', label: 'Newest', right: false },
+    ...(runs ? [{ id: 'runs', label: 'Runs', right: true }] : []),
+    { id: 'path', label: 'Path', right: false },
+  ]
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
@@ -146,6 +172,7 @@ export function AdoptSessions({
       && g.sessions.some((s) => matches(s.title, needle))
   const isOpen = (g: AdoptGroup) => expanded.includes(g.cwd) || titleHit(g)
   const hasRuns = state.groups.some((g) => typeof g.runs === 'number')
+  const shownColumns = adoptColumns(hasRuns)
   const columns = hasRuns ? 6 : 5
 
   function toggle(cwd: string) {
@@ -479,29 +506,37 @@ export function AdoptSessions({
             {report?.note ? <p className="text-xs text-ink-faint">{report.note}</p> : null}
             {error ? <Problem error={error} /> : null}
             {state.groups.length > 0 ? (
-              <table className="w-full border-collapse text-sm">
+              // FIXED LAYOUT, the same rule the main table follows: the columns are declared
+              // rather than measured from whichever rows the search left on screen, so typing in
+              // the box above cannot move them.
+              <table className="table-fixed border-collapse text-sm"
+                     style={{ width: shownColumns.reduce((n, c) => n + widths[c.id], 0) }}>
+                <colgroup>
+                  {shownColumns.map((column) => (
+                    <col key={column.id} style={{ width: widths[column.id] }} />
+                  ))}
+                </colgroup>
                 <thead className="sticky top-0 z-10 bg-panel">
                   <tr>
-                    <th scope="col" className={`${head} w-12`}>
-                      Adopt
-                    </th>
-                    <th scope="col" className={head}>
-                      Folder
-                    </th>
-                    <th scope="col" className={`${head} text-right`}>
-                      Chats
-                    </th>
-                    <th scope="col" className={head}>
-                      Newest
-                    </th>
-                    {hasRuns ? (
-                      <th scope="col" className={`${head} text-right`}>
-                        Runs
+                    {shownColumns.map((column) => (
+                      <th
+                        key={column.id}
+                        scope="col"
+                        className={`relative ${head} ${column.right ? 'text-right' : ''}`}
+                      >
+                        {column.label}
+                        <ResizeHandle
+                          label={`Resize the ${column.label} column`}
+                          size={widths[column.id]}
+                          min={COLUMN.MIN}
+                          max={COLUMN.MAX}
+                          onSize={(px) => setWidths((was) => ({ ...was, [column.id]: px }))}
+                          onReset={() =>
+                            setWidths((was) => ({ ...was, [column.id]: ADOPT_WIDTHS[column.id] }))}
+                          className="absolute inset-y-0 -right-1 z-20 w-2"
+                        />
                       </th>
-                    ) : null}
-                    <th scope="col" className={head}>
-                      Path
-                    </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>

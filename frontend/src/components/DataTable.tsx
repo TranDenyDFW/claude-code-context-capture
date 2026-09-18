@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { Band, ColumnMeta, Table, TableMeta } from '@/api'
+import { ResizeHandle } from './ResizeHandle'
+import { useColumnWidths } from './useColumnWidths'
 import { useFullText } from './useFullText'
 import { TableToolbar } from './TableToolbar'
 import type { Sheet } from './exporters'
@@ -136,6 +138,19 @@ export function DataTable({
 
   const visible = useMemo(() => columns.filter((c) => !hidden.has(c.id)), [columns, hidden])
 
+  // AN EDGE BEING DRAGGED, which the header cells read to switch their reorder off for the moment.
+  const [resizing, setResizing] = useState(false)
+  // EVERY ROW, NEVER THE PAGE. This is the whole of the fix for "do not resize columns when
+  // sorting": the widths are derived from data the sort cannot change.
+  const widths = useColumnWidths({
+    // A table with no id of its own (the Cost tab draws several) is keyed by its columns alone,
+    // which is what the signature already carries.
+    tableId: meta?.id ?? table.id ?? 'table',
+    columns: visible,
+    rows: table.rows,
+    format: show,
+  })
+
   // FILTERED FIRST, then sorted, then paged. Filtering the visible page instead of the whole table
   // would search the rows that happen to be on screen and report nothing for a value three hundred
   // rows down, which looks exactly like an empty result.
@@ -261,6 +276,8 @@ export function DataTable({
         }
         onShowAll={() => setHidden(new Set())}
         onHideAll={() => setHidden(new Set(columns.map((c) => c.id)))}
+        onResetWidths={() => widths.reset()}
+        widthsChanged={widths.resized}
         onHideEmpty={() =>
           setHidden(new Set(columns
             .filter((c) => table.rows.every((row) => show(row[c.id], c).trim() === ''))
@@ -335,8 +352,22 @@ export function DataTable({
         </div>
       )}
 
-      <div className="max-h-[32rem] overflow-auto">
-        <table className="w-full border-collapse text-sm">
+      {/*
+        FIXED LAYOUT, AND THE WIDTHS COME FROM THE DATA. With `table-layout: auto` the browser
+        measures the cells that happen to be in the DOM, and only one page of rows ever is, so
+        every sort re-fitted the columns and the table jumped sideways. `w-full` goes with it: under
+        fixed layout a 100% width redistributes any surplus across the columns and quietly
+        overrides the colgroup, which is the one thing that has to stay authoritative. The surplus
+        is handed to a single column by `layoutWidths` instead.
+      */}
+      <div ref={widths.containerRef} className="max-h-[32rem] overflow-auto">
+        <table className="table-fixed border-collapse text-sm" style={{ width: widths.total }}>
+          <colgroup>
+            {inspects && <col style={{ width: 32 }} />}
+            {visible.map((column) => (
+              <col key={column.id} style={{ width: widths.width(column.id) }} />
+            ))}
+          </colgroup>
           <thead className="sticky top-0 z-10 bg-panel-raised">
             <tr>
               {inspects && (
@@ -348,9 +379,13 @@ export function DataTable({
                 return (
                   <th
                     key={column.id}
+                    // WHICH WAY THIS COLUMN IS SORTED, for a screen reader. The arrow beside the
+                    // label is `aria-hidden`, so without this the sort was visible and nothing else.
+                    aria-sort={active ? (sort.direction === 1 ? 'ascending' : 'descending') : 'none'}
                     // Dragged to reorder. The reference calls this ColReorder; here it is four
                     // native drag handlers, because the browser implements the hard part already.
-                    draggable
+                    // Off while an edge is being dragged, so a resize cannot start a reorder.
+                    draggable={!resizing}
                     onDragStart={() => setDragging(column.id)}
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={() => {
@@ -371,14 +406,29 @@ export function DataTable({
                           : { column: column.id, direction: -1 },
                       )
                     }
-                    className={`cursor-pointer border-b border-edge px-3 py-2 font-semibold
-                                whitespace-nowrap text-ink-dim select-none hover:text-ink
+                    className={`relative cursor-pointer border-b border-edge px-3 py-2
+                                font-semibold whitespace-nowrap text-ink-dim select-none
+                                hover:text-ink
                                 ${column.align === 'right' ? 'text-right' : 'text-left'}`}
                   >
                     <span className={help ? 'has-help' : undefined}>{column.label}</span>
-                    {active && (
-                      <span className="ml-1 text-accent">{sort.direction === 1 ? '↑' : '↓'}</span>
-                    )}
+                    {/*
+                      THE ARROW'S SPACE IS ALWAYS THERE, empty when the column is not the sorted
+                      one. It used to appear on click, which widened that one header by a glyph.
+                    */}
+                    <span aria-hidden="true" className="ml-1 inline-block w-3 text-accent">
+                      {active ? (sort.direction === 1 ? '↑' : '↓') : ''}
+                    </span>
+                    <ResizeHandle
+                      label={`Resize the ${column.label} column`}
+                      size={widths.width(column.id)}
+                      min={widths.boundsFor(column).min}
+                      max={widths.boundsFor(column).max}
+                      onSize={(px) => widths.setWidth(column.id, px)}
+                      onReset={() => widths.reset(column.id)}
+                      onDragChange={setResizing}
+                      className="absolute inset-y-0 -right-1 z-20 w-2"
+                    />
                   </th>
                 )
               })}
@@ -443,15 +493,16 @@ export function DataTable({
                       // The full value as a tooltip, so a truncated cell is still readable. The
                       // reference does the same and calls it cheap and reliable.
                       title={text || undefined}
-                      // ONE COLUMN PER TABLE IS CAPPED, and the server picks it from the data.
-                      // Measured across every tab: Messages.preview reaches 220 characters,
-                      // Sessions.title 200, Cost.target 161 and Findings."do this" 153, while
-                      // Last Active is 19 and Compactions 11. Capping every column would cut the
-                      // wrong ones; capping the widest two still left the table scrolling.
+                      // EVERY CELL TRUNCATES NOW. Under fixed layout a value wider than its
+                      // column is clipped whatever this says, so the choice is an ellipsis or a
+                      // hard cut mid-character. The `wide` column keeps its 24rem cap through the
+                      // width estimate instead (the server still picks which column that is:
+                      // measured across every tab, Messages.preview reaches 220 characters,
+                      // Sessions.title 200, Cost.target 161, while Last Active is 19).
                       //
                       // The value is not lost: `title` above carries the whole of it, and an
                       // export reads the rows rather than the cells.
-                      className={`${column.wide ? 'max-w-96 truncate' : ''} px-3 py-1.5 whitespace-nowrap ${
+                      className={`truncate px-3 py-1.5 whitespace-nowrap ${
                         column.align === 'right' ? 'text-right font-mono tabular-nums' : ''
                       } ${value === null || value === undefined ? 'text-ink-faint' : ''}`}
                     >
@@ -464,7 +515,7 @@ export function DataTable({
             {rows.length === 0 && (
               <tr>
                 <td
-                  colSpan={Math.max(1, visible.length)}
+                  colSpan={Math.max(1, visible.length + (inspects ? 1 : 0))}
                   className="px-3 py-6 text-center text-xs text-ink-dim"
                 >
                   {filtering ? 'Nothing matches that filter.' : 'This table has no rows.'}

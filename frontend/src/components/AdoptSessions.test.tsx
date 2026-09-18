@@ -149,6 +149,17 @@ describe('AdoptSessions', () => {
       screen.getAllByRole('checkbox', { name: /^Adopt / }).map((b) => b.getAttribute('aria-label'))
     expect(screen.getAllByRole('columnheader').map((h) => h.textContent))
       .toEqual(['Adopt', 'Folder', 'Chats', 'Newest', 'Path'])
+    // THE REASON THE HANDLE CARRIES NO TEXT. It sits inside each of those headers, and the
+    // assertion above reads their exact text.
+    for (const bar of screen.getAllByRole('separator')) expect(bar.textContent).toBe('')
+    const folder = screen.getByRole('separator', { name: 'Resize the Folder column' })
+    const widthsBefore = [...document.querySelectorAll('col')].map((c) => (c as HTMLElement).style.width)
+    fireEvent.pointerDown(folder, { clientX: 0, pointerId: 1 })
+    fireEvent.pointerMove(window, { clientX: 40 })
+    fireEvent.pointerUp(window, { clientX: 40 })
+    const widthsAfter = [...document.querySelectorAll('col')].map((c) => (c as HTMLElement).style.width)
+    expect(parseFloat(widthsAfter[1])).toBe(parseFloat(widthsBefore[1]) + 40)
+    expect(widthsAfter.filter((_, i) => i !== 1)).toEqual(widthsBefore.filter((_, i) => i !== 1))
     expect(offered()).toEqual(['Adopt Gamma', 'Adopt Alpha', 'Adopt Beta'])
     // A folder holding one chat carries that chat's title, the way the population list names it.
     expect(screen.getByText('Fix the exporter')).not.toBeNull()
