@@ -5,6 +5,16 @@ runner, CI and a linted tree.
 
 ## Unreleased
 
+### Fixed
+
+- **The release's checksum file can be read by the command that checks it.** It was written with a
+  CRLF, which `sha256sum -c` reads as part of the filename, so it reported "No such file" about the
+  zip sitting beside it. The digest itself was always correct. The release job now writes the
+  sidecar with `sha256sum` and verifies it on the runner, so one that cannot be read never reaches
+  a release, and the README says how to check a download.
+
+## 0.2.0 - 2026-09-18
+
 Everything since 0.1.0. This section exists because the file sat at one entry for 58 commits, long
 enough that it described a build nobody was running: the privacy line it lists under 0.1.0 had been
 removed and nothing here said so.
