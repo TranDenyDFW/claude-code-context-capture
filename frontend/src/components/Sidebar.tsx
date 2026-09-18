@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { ResizeHandle } from './ResizeHandle'
+import { clampSize } from './useDragSize'
 import {
   Activity, BarChart3, Columns3, GaugeCircle, LayoutGrid, PanelLeftClose, PanelLeftOpen,
   Receipt, Stethoscope, Table2,
@@ -43,6 +45,42 @@ const GROUPS: { key: string; heading: string; holds: (scoped?: boolean) => boole
 ]
 
 const REMEMBERED = 'c4x.sidebar.collapsed'
+const WIDTH = 'c4x.sidebar.width'
+/** `w-52`, the width this rail has had; the floor is where the group headings stop being readable. */
+export const SIDEBAR = { DEFAULT: 208, MIN: 144, MAX: 420 } as const
+
+/** The widest this may get: never more than half the window, whatever is remembered. */
+export function sidebarCeiling(viewport = window.innerWidth): number {
+  return Math.max(SIDEBAR.MIN, Math.min(SIDEBAR.MAX, Math.floor(viewport / 2)))
+}
+
+/**
+ * How wide the rail is, remembered.
+ *
+ * Kept apart from the collapsed preference on purpose: collapsing does not forget the width, and
+ * dragging does not un-collapse. Somebody who narrows the rail and then collapses it gets their
+ * own width back when they expand it again. A drag below the minimum CLAMPS; it does not collapse,
+ * because a gesture that silently flips a different remembered choice is a surprise, and the
+ * collapse button is an inch away.
+ */
+export function useSidebarWidth(): [number, (next: number) => void] {
+  const [width, setWidth] = useState(() => {
+    try {
+      const said = Number(localStorage.getItem(WIDTH))
+      return Number.isFinite(said) && said > 0 ? clampSize(said, SIDEBAR.MIN, SIDEBAR.MAX) : SIDEBAR.DEFAULT
+    } catch {
+      return SIDEBAR.DEFAULT
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(WIDTH, String(width))
+    } catch {
+      /* a preference that cannot be saved is not worth an error */
+    }
+  }, [width])
+  return [width, setWidth]
+}
 
 export function useCollapsed(): [boolean, (next: boolean) => void] {
   const [collapsed, setCollapsed] = useState(() => {
@@ -87,12 +125,46 @@ export function Sidebar({
   about?: string[]
 }) {
   const Toggle = collapsed ? PanelLeftOpen : PanelLeftClose
+  const [width, setWidth] = useSidebarWidth()
+  // THE TRANSITION IS FOR THE COLLAPSE, NOT FOR THE HANDLE. A width transition turns a drag into
+  // a rail that lags a fifth of a second behind the pointer, and under `prefers-reduced-motion`
+  // it is worse than that: measured in Chrome, the 0.01ms transition the reduced-motion rule
+  // forces sat at time zero in a page that was not painting, so the rail kept its OLD width while
+  // the style said the new one. So any change that comes from the handle turns it off for that
+  // commit, and the collapse keeps its animation.
+  const [adjusting, setAdjusting] = useState(false)
+  const size = (next: number) => {
+    setAdjusting(true)
+    setWidth(next)
+  }
+  useEffect(() => {
+    if (!adjusting) return
+    const settle = setTimeout(() => setAdjusting(false), 250)
+    return () => clearTimeout(settle)
+  }, [adjusting, width])
   return (
     <nav
       aria-label="Tabs"
-      className={`sticky top-0 flex h-dvh shrink-0 flex-col gap-1 border-r border-edge/60 bg-panel
-                  px-2 py-3 transition-[width] duration-200 ${collapsed ? 'w-[3.5rem]' : 'w-52'}`}
+      style={collapsed ? undefined : { width }}
+      className={`relative sticky top-0 flex h-dvh shrink-0 flex-col gap-1 border-r border-edge/60
+                  bg-panel px-2 py-3 ${adjusting ? '' : 'transition-[width] duration-200'}
+                  ${collapsed ? 'w-[3.5rem]' : ''}`}
     >
+      {/*
+        NO HANDLE ON THE RAIL. Collapsed it is 3.5rem of icons, there is nothing to resize, and a
+        divider that does nothing is worse than none.
+      */}
+      {!collapsed && (
+        <ResizeHandle
+          label="Resize the sidebar"
+          size={width}
+          min={SIDEBAR.MIN}
+          max={sidebarCeiling()}
+          onSize={size}
+          onReset={() => size(SIDEBAR.DEFAULT)}
+          className="absolute inset-y-0 -right-1 z-20 w-2"
+        />
+      )}
       <div className={`mb-2 flex items-center ${collapsed ? 'justify-center' : 'px-2'}`}>
         <span className="text-lg font-semibold tracking-tight text-ink">
           {collapsed ? 'C' : 'C4X'}

@@ -80,3 +80,56 @@ describe('the sidebar', () => {
     expect(screen.getByRole('navigation', { name: 'Tabs' })).toBeTruthy()
   })
 })
+
+describe('the sidebar can be made wider', () => {
+  it('starts at the width it has always had, and drags from there', () => {
+    const { container } = show()
+    const nav = container.querySelector('nav')!
+    expect(nav.style.width).toBe('208px')
+    const bar = screen.getByRole('separator', { name: 'Resize the sidebar' })
+    fireEvent.pointerDown(bar, { clientX: 208, pointerId: 1 })
+    fireEvent.pointerMove(window, { clientX: 268 })
+    fireEvent.pointerUp(window, { clientX: 268 })
+    expect(nav.style.width).toBe('268px')
+  })
+
+  it('offers no handle on the collapsed rail, where there is nothing to resize', () => {
+    show(true)
+    expect(screen.queryByRole('separator')).toBeNull()
+  })
+
+  it('remembers the width without touching the collapsed preference', () => {
+    const { unmount } = show()
+    const bar = screen.getByRole('separator', { name: 'Resize the sidebar' })
+    fireEvent.pointerDown(bar, { clientX: 0, pointerId: 1 })
+    fireEvent.pointerMove(window, { clientX: 60 })
+    fireEvent.pointerUp(window, { clientX: 60 })
+    expect(localStorage.getItem('c4x.sidebar.width')).toBe('268')
+    // COLLAPSING MUST NOT FORGET THE WIDTH, and a drag must not un-collapse.
+    expect(localStorage.getItem('c4x.sidebar.collapsed')).toBeNull()
+    unmount()
+    const again = show()
+    expect(again.container.querySelector('nav')!.style.width).toBe('268px')
+  })
+
+  it('never takes more than half a narrow window', () => {
+    const was = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { value: 600, configurable: true })
+    const { container } = show()
+    const bar = screen.getByRole('separator', { name: 'Resize the sidebar' })
+    fireEvent.pointerDown(bar, { clientX: 0, pointerId: 1 })
+    fireEvent.pointerMove(window, { clientX: 900 })
+    fireEvent.pointerUp(window, { clientX: 900 })
+    expect(container.querySelector('nav')!.style.width).toBe('300px')
+    Object.defineProperty(window, 'innerWidth', { value: was, configurable: true })
+  })
+
+  it('puts a stored width that makes no sense back to the default', () => {
+    localStorage.setItem('c4x.sidebar.width', 'not a number')
+    const { container, unmount } = show()
+    expect(container.querySelector('nav')!.style.width).toBe('208px')
+    unmount()
+    localStorage.setItem('c4x.sidebar.width', '99999')
+    expect(show().container.querySelector('nav')!.style.width).toBe('420px')
+  })
+})

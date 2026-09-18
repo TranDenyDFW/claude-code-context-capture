@@ -100,6 +100,8 @@ export function TableToolbar({
   onShowAll,
   onHideAll,
   onHideEmpty,
+  onResetWidths,
+  widthsChanged,
   pageSize,
   onPageSize,
   children,
@@ -117,6 +119,10 @@ export function TableToolbar({
   onShowAll: () => void
   onHideAll: () => void
   onHideEmpty: () => void
+  /** Put every column back to the width the data suggests. */
+  onResetWidths?: () => void
+  /** Whether anything has been dragged, so the control appears only when it would do work. */
+  widthsChanged?: boolean
   pageSize: number
   onPageSize: (size: number) => void
   children?: React.ReactNode
@@ -164,6 +170,11 @@ export function TableToolbar({
               {/* The reference calls this "Uncheck Empty". Worth keeping: a column that is blank
                   for every row is a column that costs width and says nothing. */}
               <Item onClick={() => { onHideEmpty(); close() }}>Hide Empty</Item>
+              {/* Only once something has been dragged: an item that always says "reset" invites
+                  the question of what it would undo. */}
+              {widthsChanged && onResetWidths ? (
+                <Item onClick={() => { onResetWidths(); close() }}>Reset Widths</Item>
+              ) : null}
               <div className="my-1 border-t border-edge/60" />
               {allColumns.map((column) => (
                 <Item
