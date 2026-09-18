@@ -4,7 +4,11 @@ import { Confirm } from './Confirm'
 import type { Outcome } from './restart'
 
 /**
- * Stop C4X and Restart C4X: the server that serves this page, from the page.
+ * Stop and Restart: the server that serves this page, from the page.
+ *
+ * ONE PAIR, NOT TWO BUTTONS. They read "Stop" and "Restart" inside a group named "C4X server",
+ * the way the Account switch reads "All" and "Current"; each keeps "Stop C4X" and "Restart C4X"
+ * as its accessible name, because the dialog it opens has a button of the shorter name.
  *
  * BOTH ASK FIRST, the user's rule ("prompt the user to continue ... and only continue if they
  * confirm"): once the server is gone this page answers nothing, and the SessionStart hook starts
@@ -100,8 +104,12 @@ export function ServerControls({
     return { ok: false, text: gaveUp }
   }
 
-  const button =
-    'rounded-md border border-edge bg-panel px-2.5 py-1.5 text-sm text-ink-dim transition-colors ' +
+  // ONE CONTROL WITH TWO SIDES, the shape the Account switch already uses. The visible text is
+  // the verb alone: the group is named "C4X server", so repeating "C4X" on both buttons spent
+  // the width twice on a word the group had already said. Neither side is "active", so they
+  // share one background and are told apart by a divider rather than by a fill.
+  const side =
+    'flex-1 basis-0 bg-panel px-2.5 py-1.5 text-center text-sm text-ink-dim transition-colors ' +
     'hover:text-ink disabled:opacity-50'
 
   if (phase === 'stopped') {
@@ -113,24 +121,34 @@ export function ServerControls({
   }
   return (
     <div ref={group} role="group" aria-label="C4X server" className="ml-1 border-l border-edge pl-3 flex flex-wrap items-center gap-2">
-      <button
-        type="button"
-        disabled={asking !== null}
-        onClick={() => setAsking('stop')}
-        title="Stop the server that serves this page, after asking. The next Claude session starts it again."
-        className={button}
-      >
-        Stop C4X
-      </button>
-      <button
-        type="button"
-        disabled={asking !== null}
-        onClick={() => setAsking('restart')}
-        title="Start a fresh server with the same settings, after asking, then reload this page's data."
-        className={button}
-      >
-        Restart C4X
-      </button>
+      {/*
+        THE ACCESSIBLE NAME KEEPS THE WHOLE THING, and that is not decoration: the dialog each
+        side opens has its own action button reading "Stop" and "Restart", and nothing marks the
+        page behind a dialog inert, so a bare name would answer to two buttons at once. The
+        visible text is still a prefix of the name, so Label in Name holds.
+      */}
+      <div className="inline-flex overflow-hidden rounded-md border border-edge">
+        <button
+          type="button"
+          disabled={asking !== null}
+          aria-label="Stop C4X"
+          onClick={() => setAsking('stop')}
+          title="Stop the server that serves this page, after asking. The next Claude session starts it again."
+          className={side}
+        >
+          Stop
+        </button>
+        <button
+          type="button"
+          disabled={asking !== null}
+          aria-label="Restart C4X"
+          onClick={() => setAsking('restart')}
+          title="Start a fresh server with the same settings, after asking, then reload this page's data."
+          className={`${side} border-l border-edge`}
+        >
+          Restart
+        </button>
+      </div>
       {phase === 'back' ? <span className="text-xs text-good">C4X is back.</span> : null}
       {phase === 'failed' && why ? <span className="text-xs text-bad">{why}</span> : null}
       {asking === 'stop' ? (

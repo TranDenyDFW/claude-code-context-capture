@@ -67,3 +67,15 @@ def test_the_dash_page_still_draws_every_tab():
     drawn = extract.texts(build_layout())
     missing = [label for _, label, _, _ in TABS if label not in drawn]
     assert missing == [], f"these tabs are not on the page: {missing}"
+
+
+def test_the_sessions_tab_is_not_named_after_a_population_it_does_not_list():
+    """It read "All Sessions" while listing only sessions with five or more transcript rows.
+
+    The name is the ONE place the label lives: the React sidebar, the Dash tab strip and
+    `c4x.cli tabs` all read it from here. The id is a separate thing and is not renamed, because
+    it is the `?tab=` value, the icon key and the button id `tools/screenshots.py` selects on.
+    """
+    labels = {t[0]: t[1] for t in TABS}
+    assert labels["tab-sessions"] == "Sessions"
+    assert "tab-sessions" in TAB_IDS

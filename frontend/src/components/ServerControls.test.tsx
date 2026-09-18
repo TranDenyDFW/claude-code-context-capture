@@ -33,6 +33,31 @@ describe('ServerControls', () => {
     expect(screen.queryByRole('button', { name: /Stop/ })).toBeNull()
   })
 
+  it('reads as one control with two sides, and says the verb once', () => {
+    render(<ServerControls />)
+    const stop = screen.getByRole('button', { name: 'Stop C4X' })
+    const restart = screen.getByRole('button', { name: 'Restart C4X' })
+    // The group is already named "C4X server", so the buttons say the verb alone.
+    expect(stop.textContent).toBe('Stop')
+    expect(restart.textContent).toBe('Restart')
+    // One bordered box, the shape the Account switch uses, not two buttons with a gap.
+    expect(stop.parentElement).toBe(restart.parentElement)
+    expect(stop.parentElement!.className).toContain('inline-flex')
+    expect(stop.parentElement!.className).toContain('rounded-md')
+    // Equal width by rule; jsdom lays nothing out, so the rule is what can be asserted.
+    for (const side of [stop, restart]) expect(side.className).toContain('basis-0')
+  })
+
+  it('keeps a name the dialog cannot collide with', () => {
+    // WHY THE ARIA-LABEL IS NOT DECORATION. The dialog's own action button reads "Stop", and
+    // nothing marks the page behind a dialog inert. Were the header button named "Stop" too,
+    // two buttons would answer to one name and every query here would break.
+    render(<ServerControls />)
+    fireEvent.click(screen.getByRole('button', { name: 'Stop C4X' }))
+    expect(screen.getByRole('button', { name: 'Stop' }).closest('[role="dialog"]')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Stop C4X' }).closest('[role="dialog"]')).toBeNull()
+  })
+
   it('asks before restarting too, and restarts only on Restart', async () => {
     const restart = vi.spyOn(api.server, 'restart')
     render(<ServerControls />)

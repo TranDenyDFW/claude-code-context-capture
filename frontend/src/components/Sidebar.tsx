@@ -125,10 +125,13 @@ export function Sidebar({
             ) : (
               // BIGGER THAN A TAB IS NOT THE GOAL; DIFFERENT FROM ONE IS. A tab is text-sm and
               // normal weight, so the group label reads as a peer at that size. It sits one step
-              // down at text-xs, semibold, wide-tracked and faint, which is a heading rather than
-              // a thing you click. No uppercase: the words are "All" and "Selection", and
-              // shouting them made a two-word label look like a section of its own.
-              <h2 className="mt-2.5 px-2.5 pb-1 text-xs font-semibold tracking-wider
+              // down at text-xs, semibold, wide-tracked, faint and uppercased, which reads as a
+              // heading rather than as a thing you click.
+              //
+              // THE SHOUT IS A CSS TRANSFORM, NOT THE STRING. The words in the DOM stay "All" and
+              // "Selection", so the accessible name, a find-in-page and every assertion on this
+              // text still see what was written.
+              <h2 className="mt-2.5 px-2.5 pb-1 text-xs font-semibold tracking-wider uppercase
                              text-ink-faint">
                 {heading}
               </h2>

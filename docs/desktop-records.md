@@ -231,7 +231,7 @@ re-decided: `dir` follows the record when the app moves it, `owner_*` does not. 
 is a best guess under sharing (every organisation of an account lists the same directory), so
 every reader keys on the account. Limits: a chat created and switched away from before its first
 prompt is tagged with the next account; an adopted chat is tagged with the adopting account. The
-page reads the tag on the All sessions `account` column, in the population list ("Signed-in
+page reads the tag on the Sessions `account` column, in the population list ("Signed-in
 account's chats", one entry per account, "No account known"), and in the header's Current hover,
 whose number is the live records tagged with the signed-in account (`current_source: tags` on
 `/api/accounts`, else `manifest` or `directory` as before).

@@ -62,7 +62,7 @@ def summary_layout(session_id=None, scope="main", cohort=None):
         # two numbers for one word with nothing to reconcile them. Naming the population in the
         # label costs nothing and does not put a wrapped second line back on every card.
         ("sessions in store", f"{int(s['sessions']):,}",
-         f"{int(s['listed'] or 0):,} of them listed on All sessions, which needs five or more "
+         f"{int(s['listed'] or 0):,} of them listed on Sessions, which needs five or more "
          f"transcript rows"),
         ("API calls", f"{api_calls:,}", f"{int(s['turn_rows']):,} transcript rows behind them"),
         ("subagent share", f"{(100.0 * sub_calls / api_calls) if api_calls else 0:.0f}%",
@@ -463,7 +463,7 @@ def decisions() -> list:
             "evidence": f"half of all {total:,} API calls come from {few} of "
                         f"{len(ranked):,} sessions; the median session made {median}",
             "do this": "Read the totals above as store-wide sums, not as anything divided by the "
-                       "session count. Sort All sessions by transcript rows to find the few that "
+                       "session count. Sort Sessions by transcript rows to find the few that "
                        "matter.",
             "goes to": "tab-sessions",
         })

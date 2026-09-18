@@ -190,6 +190,20 @@ describe('the population chip', () => {
     expect(chip.textContent).not.toContain('?')
     expect(chip.getAttribute('title')).toBe('Store-wide. Not affected by the header selection.')
   })
+
+  it('says nothing at all when the tab is describing the selection', async () => {
+    // THE CASE THE CHIP WAS REMOVED FOR. It used to read "This Selection" here, on screen
+    // whatever was picked, which is decoration rather than a fact anybody can act on. What
+    // survives is the warning above: a tab describing the whole store while a selection is set.
+    vi.mocked(api.tab).mockResolvedValue(payload({
+      population: 'Describing session s-1.',
+      population_scope: 'selection',
+    }))
+    show('/?tab=tab-session')
+    await screen.findByRole('button', { name: 'Search tabs, populations and sessions' })
+    expect(screen.queryByText('This Selection')).toBeNull()
+    expect(screen.queryByText('Store-Wide')).toBeNull()
+  })
 })
 
 describe('the page', () => {

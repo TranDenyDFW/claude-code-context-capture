@@ -345,34 +345,28 @@ export default function App() {
             never changed. It is a property of the current view, not content, so it belongs beside
             the selection controls. The full sentence is the tooltip.
           */}
-          {pane.data?.population && (
-            // FROM WHAT THE TAB IS DESCRIBING, not from whether it COULD respond to a selection.
-            // Those are different facts and the chip used the wrong one: with nothing selected,
-            // Compactions, Window, Cost and Compare each described the whole store while the chip
-            // said "This Selection". `scoped` stays on the element for anything measuring which
-            // tabs answer to the header.
-            (() => {
-              const onSelection = (pane.data.population_scope ?? 'store') === 'selection'
-              // THE CHIP CARRIES THE POPULATION AND NOTHING ELSE. It briefly carried the
-              // view-level statements too, and on the Diagnostics tab that was 826
-              // characters across six paragraphs as the tooltip of a chip 61 pixels wide.
-              // A tooltip that long is not a hover, it is a wall with no scrollbar. Those
-              // lines are drawn as a named, collapsed disclosure below instead.
-              const about = pane.data.population ?? ''
-              return (
-                <span
-                  data-scoped={pane.data.scoped ? 'true' : 'false'}
-                  data-population={pane.data.population_scope ?? 'store'}
-                  title={about || undefined}
-                  aria-description={about || undefined}
-                  className={`rounded-md px-2 py-1 text-2xs ${
-                    onSelection ? 'bg-panel text-ink-faint' : 'bg-warn/10 text-warn'
-                  }`}
-                >
-                  {onSelection ? 'This Selection' : 'Store-Wide'}
-                </span>
-              )
-            })()
+          {/*
+            ONLY WHEN IT HAS SOMETHING TO SAY. This used to render in both states, and the
+            ordinary one ("This Selection") said nothing anybody could act on: it was on screen
+            whatever you picked, so it read as decoration. What is left is the state worth an
+            interruption, a tab describing the whole store while the header says a selection is
+            set, which is a different fact from `scoped`: with nothing selected, Compactions,
+            Window, Cost and Compare each describe the whole store and none of them says so.
+
+            THE CHIP CARRIES THE POPULATION AND NOTHING ELSE. It briefly carried the view-level
+            statements too, and on the Diagnostics tab that was 826 characters across six
+            paragraphs as the tooltip of a chip 61 pixels wide. A tooltip that long is not a
+            hover, it is a wall with no scrollbar. Those lines are drawn as a named, collapsed
+            disclosure below instead.
+          */}
+          {pane.data?.population && (pane.data.population_scope ?? 'store') !== 'selection' && (
+            <span
+              title={pane.data.population}
+              aria-description={pane.data.population}
+              className="rounded-md bg-warn/10 px-2 py-1 text-2xs text-warn"
+            >
+              Store-Wide
+            </span>
           )}
 
           <div className="ml-auto flex flex-wrap items-center gap-2">

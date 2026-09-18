@@ -378,6 +378,21 @@ describe('one number for the signed-in account', () => {
       "Every account's chats: 489 listed here; 191 in the app across 9 account directories")
   })
 
+  it('gives the two sides one width, so the switch does not lean', async () => {
+    // "All" is four characters and "Current" is seven. jsdom lays nothing out, so the rule is
+    // what can be asserted: both sides grow from a zero basis, which makes each as wide as the
+    // wider label. A fixed rem would pass this and still lean the day a label changes.
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
+    draw()
+    const all = await screen.findByRole('button', { name: 'All' })
+    const current = screen.getByRole('button', { name: 'Current' })
+    for (const option of [all, current]) {
+      expect(option.className).toContain('flex-1')
+      expect(option.className).toContain('basis-0')
+      expect(option.className).toContain('text-center')
+    }
+  })
+
   it('says the app count is not known when it is not, and still leads with the page count', async () => {
     vi.spyOn(api.accounts, 'state').mockResolvedValue(
       state({ intended: 'all', mode: 'all', current_chats: null, current_source: null,

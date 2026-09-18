@@ -29,6 +29,7 @@ import { CompareArms } from './components/CompareArms'
 import { ProjectMoves } from './components/ProjectMoves'
 import { AdoptSessions } from './components/AdoptSessions'
 import { Sidebar } from './components/Sidebar'
+import { ServerControls } from './components/ServerControls'
 import { Inspector } from './components/Inspector'
 import { TablePage } from './components/TablePage'
 import { api } from './api'
@@ -158,6 +159,14 @@ describe('axe finds no WCAG A or AA violation in', () => {
     const { container } = render(
       <Sidebar tabs={tabs} active="tab-summary" collapsed onPick={() => {}} onToggle={() => {}} />,
     )
+    expect(await violations(container)).toEqual([])
+  })
+
+  it('the C4X server pair', async () => {
+    // WHY THIS ONE IS HERE. Both sides show the verb alone and carry the longer name in an
+    // aria-label, so `label-content-name-mismatch` is the rule that would catch a label that
+    // stopped containing its own visible text.
+    const { container } = render(<ServerControls />)
     expect(await violations(container)).toEqual([])
   })
 

@@ -406,6 +406,36 @@ removed and nothing here said so.
 
 ### Changed
 
+- **The header and the sidebar say less, and say it once.** The user's list, after looking at the
+  running page: uppercase the sidebar's two group headings, rename the tab that reads "All Sessions"
+  to "Sessions", make "All" and "Current" the same width, combine "Stop C4X" and "Restart C4X" into
+  one pair reading "Stop" and "Restart", and remove the "This Selection" chip, which "doesn't change
+  based on what you select". Each one, and what it cost:
+  - The group headings are uppercased by CSS, not by the string: the words in the DOM stay "All" and
+    "Selection", so the accessible name, find-in-page and every assertion still see what was written.
+  - The tab label has exactly one definition (`c4x/ui/layout.py`), which the React sidebar, the Dash
+    tab strip and `c4x.cli tabs` all read; the id `tab-sessions` is untouched, since it is the
+    `?tab=` value, the icon key and the button id `tools/screenshots.py` selects on. The three
+    sentences on the page that pointed a reader at the tab by name were renamed with it. The
+    population dropdown's "All sessions (N listed)" is a different thing and keeps its name.
+  - Both sides of a switch now grow from a zero basis, so each is as wide as the wider label and the
+    pair stays symmetric through a font change or a longer word.
+  - The two server buttons became one bordered pair, the shape the Account switch already used, and
+    say the verb alone because the group is already named "C4X server". Each keeps "Stop C4X" and
+    "Restart C4X" as its accessible name: the dialog each opens has its own button reading "Stop"
+    and "Restart", nothing marks the page behind a dialog inert, and two buttons answering to one
+    name is both a screen-reader ambiguity and a broken query. All seven existing tests passed
+    untouched, which is what that decision bought.
+  - The chip now renders only when a tab is describing the whole store while a selection is set,
+    which is the one state worth an interruption. "This Selection" is gone, and so are the two data
+    attributes it carried, which nothing in the repo read. The pane body stops suppressing the
+    population sentence except where the chip is actually saying it, so the selection case keeps it.
+  Tests: `SidebarGroups.test.tsx` (the shout is CSS), `AccountSharing.test.tsx` (one width rule for
+  both sides), `ServerControls.test.tsx` (one pair, the verb alone, and the dialog's "Stop" is the
+  one inside the dialog), `App.test.tsx` (nothing at all when the tab describes the selection),
+  `tests/test_tab_groups.py` (the tab is not named after a population it does not list), and
+  `ServerControls` joins the axe gate, where `label-content-name-mismatch` guards the labels above.
+
 - **The dashboard header no longer carries a privacy paragraph.** 0.1.0 added it; it repeated the
   same three sentences on every tab of every session, which is how a standing notice becomes
   furniture. The store's path is in the header and what is in the store is in the README.

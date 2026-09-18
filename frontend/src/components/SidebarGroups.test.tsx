@@ -1,7 +1,7 @@
 /**
  * The navigation says which tabs the header selection reaches, on the page rather than on hover.
  *
- * The list interleaved them: Summary, All sessions, Session, Compactions, Window, Cost, Compare,
+ * The list interleaved them: Summary, Sessions, Session, Compactions, Window, Cost, Compare,
  * Diagnostics, so the three tabs whose numbers never move sat at positions 1, 2 and 8. Picking a
  * session changed five of the eight and left three identical, and the only thing on screen saying
  * so was a line of tooltip.
@@ -17,7 +17,7 @@ import { Sidebar } from './Sidebar'
 
 const TABS: TabInfo[] = [
   { id: 'tab-summary', label: 'Summary', scoped: false },
-  { id: 'tab-sessions', label: 'All sessions', scoped: false },
+  { id: 'tab-sessions', label: 'Sessions', scoped: false },
   { id: 'tab-diagnostics', label: 'Diagnostics', scoped: false },
   { id: 'tab-session', label: 'Session', scoped: true },
   { id: 'tab-cost', label: 'Cost', scoped: true },
@@ -57,8 +57,19 @@ describe('the sidebar', () => {
 
   it('puts each tab under the group the server put it in', () => {
     draw()
-    expect(labelsUnder('All')).toEqual(['Summary', 'All sessions', 'Diagnostics'])
+    expect(labelsUnder('All')).toEqual(['Summary', 'Sessions', 'Diagnostics'])
     expect(labelsUnder('Selection')).toEqual(['Session', 'Cost'])
+  })
+
+  it('shouts the group names without changing what they say', () => {
+    // THE SHOUT IS CSS. Writing 'ALL' into the DOM would put a shouted string into the
+    // accessible name and into find-in-page, and would break every assertion above.
+    draw()
+    for (const heading of ['All', 'Selection']) {
+      const said = screen.getByText(heading)
+      expect(said.textContent).toBe(heading)
+      expect(said.className).toContain('uppercase')
+    }
   })
 
   it('still renders every tab it was given (gate can fail)', () => {
