@@ -380,17 +380,16 @@ describe('one number for the signed-in account', () => {
 
   it('gives the two sides one width, so the switch does not lean', async () => {
     // "All" is four characters and "Current" is seven. jsdom lays nothing out, so the rule is
-    // what can be asserted: both sides grow from a zero basis, which makes each as wide as the
-    // wider label. A fixed rem would pass this and still lean the day a label changes.
+    // what can be asserted, and the rule had to be measured first: `flex-1 basis-0` on the two
+    // buttons leaves them at 34px and 61px in Chrome, because the box shrinks to fit and there
+    // is no surplus to share. Two grid tracks take the wider content (measured: 61 and 61).
     vi.spyOn(api.accounts, 'state').mockResolvedValue(state())
     draw()
     const all = await screen.findByRole('button', { name: 'All' })
     const current = screen.getByRole('button', { name: 'Current' })
-    for (const option of [all, current]) {
-      expect(option.className).toContain('flex-1')
-      expect(option.className).toContain('basis-0')
-      expect(option.className).toContain('text-center')
-    }
+    expect(all.parentElement).toBe(current.parentElement)
+    expect(all.parentElement!.className).toContain('grid-cols-2')
+    for (const option of [all, current]) expect(option.className).toContain('text-center')
   })
 
   it('says the app count is not known when it is not, and still leads with the page count', async () => {

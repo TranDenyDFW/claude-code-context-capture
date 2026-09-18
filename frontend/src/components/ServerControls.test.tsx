@@ -42,10 +42,11 @@ describe('ServerControls', () => {
     expect(restart.textContent).toBe('Restart')
     // One bordered box, the shape the Account switch uses, not two buttons with a gap.
     expect(stop.parentElement).toBe(restart.parentElement)
-    expect(stop.parentElement!.className).toContain('inline-flex')
+    expect(stop.parentElement!.className).toContain('grid-cols-2')
     expect(stop.parentElement!.className).toContain('rounded-md')
-    // Equal width by rule; jsdom lays nothing out, so the rule is what can be asserted.
-    for (const side of [stop, restart]) expect(side.className).toContain('basis-0')
+    // Equal width by rule; jsdom lays nothing out, so the rule is what can be asserted. It is a
+    // grid because a shrink-to-fit flex row left the two at their own text widths (45 and 59).
+    for (const side of [stop, restart]) expect(side.className).toContain('text-center')
   })
 
   it('keeps a name the dialog cannot collide with', () => {

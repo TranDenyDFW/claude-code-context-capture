@@ -109,7 +109,7 @@ export function ServerControls({
   // the width twice on a word the group had already said. Neither side is "active", so they
   // share one background and are told apart by a divider rather than by a fill.
   const side =
-    'flex-1 basis-0 bg-panel px-2.5 py-1.5 text-center text-sm text-ink-dim transition-colors ' +
+    'bg-panel px-2.5 py-1.5 text-center text-sm text-ink-dim transition-colors ' +
     'hover:text-ink disabled:opacity-50'
 
   if (phase === 'stopped') {
@@ -127,7 +127,12 @@ export function ServerControls({
         page behind a dialog inert, so a bare name would answer to two buttons at once. The
         visible text is still a prefix of the name, so Label in Name holds.
       */}
-      <div className="inline-flex overflow-hidden rounded-md border border-edge">
+      {/*
+        TWO TRACKS OF ONE WIDTH. A grid, not a flex row: in a box that shrinks to fit, two
+        `flex-1 basis-0` items have no surplus to share and keep their own text widths
+        (measured in Chrome: Stop 45px, Restart 59px). Both grid tracks take the wider one.
+      */}
+      <div className="grid grid-cols-2 overflow-hidden rounded-md border border-edge">
         <button
           type="button"
           disabled={asking !== null}

@@ -158,7 +158,12 @@ export function AccountSharing({
           role="group"
           aria-label="Account"
           data-restart={restart ? 'true' : 'false'}
-          className={`inline-flex overflow-hidden rounded-md border ${
+          // TWO TRACKS OF ONE WIDTH, measured rather than reasoned: `flex-1 basis-0` on the two
+          // buttons does NOT equalise them here, because the box shrinks to fit and there is no
+          // surplus for the grow factors to share (measured in Chrome: All 34px, Current 61px).
+          // A two-track grid sizes both tracks to the wider content, so the pair is symmetric
+          // through a font change or a longer word, with no magic width (measured: 61 and 61).
+          className={`grid grid-cols-2 overflow-hidden rounded-md border ${
             restart ? 'border-warn/70' : 'border-edge'
           }`}
         >
@@ -171,11 +176,10 @@ export function AccountSharing({
               title={hover[option]}
               onClick={() => (option === mode ? undefined : setAsking(option))}
               // ONE WIDTH FOR BOTH SIDES. "All" is four characters and "Current" is seven, so
-              // sizing each to its own text drew a switch that leaned. Two flex items growing
-              // from a zero basis each take the width of the wider label, which keeps the pair
-              // symmetric through a font change or a longer word; a fixed rem would not.
+              // sizing each to its own text drew a switch that leaned. The grid above gives both
+              // sides the wider track; the text is centred in it.
               className={
-                'flex-1 basis-0 px-2.5 py-1.5 text-center text-sm transition-colors ' +
+                'px-2.5 py-1.5 text-center text-sm transition-colors ' +
                 'disabled:opacity-50 ' +
                 (mode === option
                   ? 'bg-panel text-ink'
