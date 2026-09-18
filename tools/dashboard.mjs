@@ -58,8 +58,22 @@ export function candidatesFor(platform = process.platform) {
   return platform === 'win32' ? [['py', '-3'], ['python'], ['python3']] : [['python3'], ['python']];
 }
 
-export function exePath(root = ROOT, platform = process.platform) {
-  return join(root, 'dist', 'c4x', platform === 'win32' ? 'c4x.exe' : 'c4x');
+/**
+ * Where the executable can be, nearest first.
+ *
+ * TWO LAYOUTS, because there are two ways to get one. The download IS the install: one folder
+ * holding `c4x.exe`, `node/`, `tools/` and `hooks/`, so the program sits at the root. A checkout
+ * builds into `dist/c4x/`, which is where every build before the download put it and where an
+ * existing receipt still points.
+ */
+export function exePaths(root = ROOT, platform = process.platform) {
+  const name = platform === 'win32' ? 'c4x.exe' : 'c4x';
+  return [join(root, name), join(root, 'dist', 'c4x', name)];
+}
+
+export function exePath(root = ROOT, platform = process.platform, exists = existsSync) {
+  const seen = exePaths(root, platform);
+  return seen.find((p) => exists(p)) ?? seen[seen.length - 1];
 }
 
 // Every launcher is a path now, python included, and a path that is gone is not a launcher. A
@@ -99,7 +113,7 @@ export function dashboardLauncher({ env = {}, receipt = null, cache = null, now 
                why: `${cmd.join(' ')} imports the dashboard (${posix(interpreter)})`, fromCache: false };
     }
   }
-  const exe = exePath(root, platform);
+  const exe = exePath(root, platform, exists);
   if (exists(exe)) return { launcher: { cmd: [exe], module: false, kind: 'exe' }, why: 'the built executable', fromCache: false };
   return { launcher: null, fromCache: false,
            why: 'no python imports the dashboard (pip install -r requirements.txt) and there is no '
@@ -351,7 +365,13 @@ async function selfTest() {
   const exe = dashboardLauncher({ ...win, exists: (p) => p === exePath(R, 'win32'), tryPython: notFound });
   add('with no python the built exe is used', exe.launcher?.kind === 'exe' && exe.launcher.module === false);
   add('the exe is dist/c4x/c4x.exe on Windows and dist/c4x/c4x elsewhere',
-    posix(exePath(R, 'win32')).endsWith('/dist/c4x/c4x.exe') && posix(exePath('/r', 'linux')).endsWith('/dist/c4x/c4x'));
+    posix(exePath(R, 'win32', () => false)).endsWith('/dist/c4x/c4x.exe')
+    && posix(exePath('/r', 'linux', () => false)).endsWith('/dist/c4x/c4x'));
+  add('the download layout is found first: the exe sits beside the tools, not under dist',
+    posix(exePath('C:/Users/me/c4x', 'win32', (p) => posix(p) === 'C:/Users/me/c4x/c4x.exe'))
+      === 'C:/Users/me/c4x/c4x.exe');
+  add('with neither present the message still names the checkout path a build writes',
+    exePath('C:/work/c4x', 'win32', () => false).includes('dist'));
   const none = dashboardLauncher({ ...win, exists: no, tryPython: notFound });
   add('with neither the answer is null and the reason names both', none.launcher === null
     && none.why.includes('requirements.txt') && none.why.includes('dist/c4x'));

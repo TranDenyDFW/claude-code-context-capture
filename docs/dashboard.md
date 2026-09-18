@@ -144,16 +144,36 @@ because this store's markdown is full of angle-bracket placeholders (343 of them
 repo's own collection, `<stdin>` 42 times and `<uuid>` 31), and a version that
 started treating them as markup would delete them without a word.
 
-## Running without Python
+## The download
 
-**Without Python.** `tools/build_exe.py` builds the server into `dist/c4x/` (`c4x.exe`) with
-PyInstaller, and the `build-exe` workflow attaches that directory to every release as
-`c4x-windows.zip`. Unpack it into `dist/c4x/` under the checkout and the hook uses it when no
-Python imports the dashboard. It replaces Python only: the hooks and the harvester are node, and
-the exe runs from inside a checkout, never on its own. Built on a machine with the Claude desktop
-app installed, the exe carries the app's icon, read out of the installed app at build time and
-never committed (`C4X_ICON=<file.ico or file.exe>` names another source); the release build has
-PyInstaller's icon.
+**One folder, no prerequisites.** `tools/build_exe.py --bundle` assembles `dist/bundle/c4x/`: the
+PyInstaller build of the server (`c4x.exe`), the Node it runs (`node/node.exe`, fetched from
+nodejs.org at a pinned version and checked against the digest the release publishes), and the
+`tools/` and `hooks/` scripts that Claude and the server shell out to. The `build-exe` workflow
+attaches that folder to every release as `c4x-windows.zip`, with its sha256 beside it.
+
+That folder IS an install: it holds `tools/harvest.mjs`, which is the marker `c4x/paths.py` looks
+for, so it can be unzipped anywhere and needs neither Python nor Node on the machine. Anywhere
+except under `%APPDATA%` or `%LOCALAPPDATA%`, where the Claude desktop app's Store build redirects
+writes into its own package directory.
+
+**The program is the CLI.** `c4x.exe` with no arguments installs itself into Claude, starts the
+dashboard and opens it, which is what a person who just unzipped a folder wants. `c4x.exe install`,
+`status`, `uninstall`, `reset` and `harvest` run the node tools that already do those jobs, with
+every flag after the verb passed through unchanged, so the executable and a checkout cannot drift
+into two behaviours. `c4x.exe serve`, and any bare flag list such as `--db ... --port ...`, is the
+server it has always been, which is what the SessionStart hook launches. `c4x/verbs.py` decides all
+of that from argv alone, before anything heavy is imported.
+
+**What proves it.** CI runs the assembled folder with a PATH holding Windows and nothing else, and
+asks it for the harvester's own numbers and the installer's status, so anything the folder forgot
+to carry is simply absent rather than supplied by the machine. Deleting `node/` from the folder
+turns that check red.
+
+Built on a machine with the Claude desktop app installed, the exe carries the app's icon, read out
+of the installed app at build time and never committed (`C4X_ICON=<file.ico or file.exe>` names
+another source); the release build has PyInstaller's icon, and Windows warns once about an
+unrecognised program because the build is not signed.
 
 ## The tabs
 

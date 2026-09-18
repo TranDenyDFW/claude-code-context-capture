@@ -29,6 +29,17 @@ def run(args, **kw):
     return subprocess.run(args, **kw)
 
 
+def call(args, **kw):
+    """`subprocess.run` with the console the caller already has, for a verb somebody is watching.
+
+    The opposite of `run` above, and both are needed. The server has no console, so a child that
+    got one would flash a window on every page load; a verb typed at a prompt (`c4x.exe install`,
+    `c4x.exe harvest`) IS the console, and hiding its output would mean a command that prints
+    nothing and appears to have done nothing.
+    """
+    return subprocess.run(args, **kw)
+
+
 # Windows: a child that survives its parent has to be a process of its own (DETACHED_PROCESS)
 # and in its own group (CREATE_NEW_PROCESS_GROUP), or the console control events and the job
 # the parent belongs to reach it. Both absent elsewhere, where `start_new_session` does the job.

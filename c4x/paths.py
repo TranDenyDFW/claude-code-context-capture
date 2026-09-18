@@ -7,10 +7,13 @@ Three places, and they are one directory until PyInstaller pulls them apart:
     install_root()  where the store, the node tools and `tmp/` live
 
 Not frozen, all three are the checkout. Frozen, the bundle is PyInstaller's extraction directory
-(`_internal` beside the exe in a one-dir build), and the install is the c4x checkout the exe sits
-inside: the hooks and the harvester are node, the store they write is under that checkout's
-`data/`, and `store.py` shells out to that checkout's `tools/*.mjs` for window math. The exe
-replaces Python and nothing else.
+(`_internal` beside the exe in a one-dir build), and the install is whichever directory at or above
+the exe holds `tools/harvest.mjs`: a checkout the exe was dropped into, or the download's own
+folder, which carries the tools beside the exe for exactly this reason.
+
+THE EXE REPLACES PYTHON, NOT NODE, and the download therefore carries node too (`node/node.exe`,
+found by `node_exe`). The hooks and the harvester are node, the store they write is what this
+serves, and a machine that wanted the download has neither interpreter.
 
 FAILS CLOSED. An exe copied to a folder with no checkout above it used to be worth guessing about:
 its own directory as the install would mean a store that does not exist, node scripts that are
@@ -48,6 +51,22 @@ def bundle_root() -> Path:
         if packed:
             return Path(packed)
     return REPO_ROOT
+
+
+def node_exe(root: Path | None = None, exists=None) -> str:
+    """The node to run: the one the install carries, else whatever `node` PATH resolves to.
+
+    THE DOWNLOAD HAS NEITHER PYTHON NOR NODE. It is one folder: `c4x.exe`, `node/node.exe`, and
+    the tools the exe shells out to. Spelling the interpreter `node` and hoping would fail on the
+    machine the download exists for, so the bundled one is named by its path when it is there.
+
+    A checkout keeps the bare name, which is what a developer already has on PATH and what every
+    existing install's hook commands say.
+    """
+    here = REPO_ROOT if root is None else Path(root)
+    bundled = here / "node" / ("node.exe" if os.name == "nt" else "node")
+    is_file = os.path.isfile if exists is None else exists
+    return str(bundled) if is_file(str(bundled)) else "node"
 
 
 def find_install(start: Path) -> Path | None:

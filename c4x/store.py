@@ -32,11 +32,15 @@ from c4x.labels import (
     short_path,
     titled_path,
 )
-from c4x.paths import install_root
+from c4x.paths import install_root, node_exe
 
 # The install, not this file's directory: they differ once the API is frozen into an exe, and
 # this is the root the store and the node tools are found under. See c4x/paths.py.
 ROOT = install_root()
+# THE NODE THIS INSTALL RUNS, resolved once beside the root it belongs to. A checkout gets the
+# bare name off PATH; the download carries `node/node.exe` beside the exe, because a machine that
+# unzipped it has no node either. `c4x/paths.py` has the rule.
+NODE = node_exe(ROOT)
 # C4X_DB, the same override every node tool honours through paths.mjs. That module exists because
 # some tools read the variable and others hardcoded the default, so `C4X_DB=copy.db` silently read
 # one store and wrote another. The Python side never got the same treatment and ignored the
@@ -56,7 +60,7 @@ _window_cache: dict = {}
 def _node_json(script: str):
     """Run a node snippet that prints JSON, return the parsed value."""
     done = proc.run(
-        ["node", "-e", script], capture_output=True, text=True, cwd=str(ROOT), timeout=60,
+        [NODE, "-e", script], capture_output=True, text=True, cwd=str(ROOT), timeout=60,
     )
     if done.returncode != 0:
         raise RuntimeError(f"node exited {done.returncode}: {done.stderr.strip()[:400]}")
@@ -92,7 +96,7 @@ def load_math():
 
 def _node_json_argv(args, timeout=120):
     """Run a node script that prints JSON on stdout, return the parsed value."""
-    done = proc.run(["node", *args], capture_output=True, text=True,
+    done = proc.run([NODE, *args], capture_output=True, text=True,
                     cwd=str(ROOT), timeout=timeout)
     if done.returncode != 0:
         raise RuntimeError(f"node {args[0]} exited {done.returncode}: {done.stderr.strip()[:400]}")
@@ -105,7 +109,7 @@ def _node_json_argv(args, timeout=120):
 def predict(tokens: int, window: int):
     """Ask tools/mirror.mjs, so the answer is the validated implementation's answer."""
     done = proc.run(
-        ["node", str(ROOT / "tools" / "mirror.mjs"),
+        [NODE, str(ROOT / "tools" / "mirror.mjs"),
          "--predict", str(int(tokens)), "--window", str(int(window))],
         capture_output=True, text=True, cwd=str(ROOT), timeout=60,
     )

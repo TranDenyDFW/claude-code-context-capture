@@ -18,7 +18,7 @@ from dash.dash_table.Format import Format, Scheme
 from c4x import proc
 from c4x.dash_compat import DataTable
 from c4x.labels import stamp
-from c4x.store import ROOT, q, scoped
+from c4x.store import NODE, ROOT, q, scoped
 from c4x.theme import (
     ACCENT,
     BORDER,
@@ -75,7 +75,7 @@ def tool_spec(script, flag):
     to a literal, because a stale literal that renders normally is the failure being avoided.
     """
     try:
-        out = proc.run(["node", str(ROOT / "tools" / script), flag],
+        out = proc.run([NODE, str(ROOT / "tools" / script), flag],
                        capture_output=True, text=True, timeout=20, check=True)
         return json.loads(out.stdout), None
     except Exception as exc:
