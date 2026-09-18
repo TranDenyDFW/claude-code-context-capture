@@ -132,6 +132,28 @@ class TestRunning:
         assert verbs.run(plan(["nonsense"]), **doors) == 2
         assert said and "no verb" in said[0]
 
+    def test_a_missing_node_is_a_sentence_and_not_a_traceback(self):
+        # A folder somebody unzipped always has its node. An antivirus that quarantined node.exe
+        # puts it in this state, and every hook then fails with nothing on screen to explain it.
+        _calls, said, _opened, doors = self.each()
+
+        def gone(argv, cwd=None):
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+
+        doors["call"] = gone
+        assert verbs.run(plan(["status"]), **doors) == 2
+        assert said and "node/node.exe" in said[0] and "unzip the download again" in said[0]
+
+    def test_the_first_run_says_the_same_thing_rather_than_raising(self):
+        _calls, said, opened, doors = self.each()
+
+        def gone(argv, cwd=None):
+            raise FileNotFoundError(2, "no such file")
+
+        doors["call"] = gone
+        assert verbs.run(plan([]), **doors) == 2
+        assert opened == [] and said
+
     def test_the_version_comes_from_the_build_stamp(self):
         _calls, said, _opened, doors = self.each()
         assert verbs.run(plan(["--version"]), **doors) == 0

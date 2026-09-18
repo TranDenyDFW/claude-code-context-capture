@@ -84,6 +84,26 @@ def plan(argv: list[str], *, frozen: bool, root: Path, exe: str) -> dict:
     return {"kind": "say", "text": f"c4x: no verb {verb!r}.\n\n{USAGE}", "code": 2}
 
 
+MISSING_NODE = """c4x: {node} is not there, so nothing can be run.
+
+This folder carries the node its tools need, at node/node.exe beside c4x.exe. If it has been
+removed or quarantined, unzip the download again over this folder.
+"""
+
+
+def _spawn(call, node: str, argv: list[str], *, root: Path, write) -> int:
+    """Run a tool, and say what is missing rather than raising through the program's own exit.
+
+    A folder somebody unzipped always has its node. An antivirus that quarantined node.exe puts it
+    in exactly this state, and a traceback is not an answer to that.
+    """
+    try:
+        return int(call([node, *argv], cwd=str(root)).returncode)
+    except FileNotFoundError:
+        write(MISSING_NODE.format(node=node))
+        return 2
+
+
 def run(decision: dict, *, root: Path, node: str, serve, call, open_page, write, version) -> int:
     """Carry out what `plan` decided. Every door is a parameter, so the tests need none of them."""
     kind = decision["kind"]
@@ -96,14 +116,14 @@ def run(decision: dict, *, root: Path, node: str, serve, call, open_page, write,
         write(decision["text"])
         return int(decision["code"])
     if kind == "node":
-        return int(call([node, *decision["argv"]], cwd=str(root)).returncode)
+        return _spawn(call, node, decision["argv"], root=root, write=write)
     if kind == "first-run":
         for step in decision["steps"]:
             if step["kind"] == "open":
                 open_page()
                 continue
-            code = call([node, *step["argv"]], cwd=str(root)).returncode
+            code = _spawn(call, node, step["argv"], root=root, write=write)
             if code != 0:
-                return int(code)
+                return code
         return 0
     raise AssertionError(f"unknown plan {kind!r}")

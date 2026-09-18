@@ -644,6 +644,16 @@ def self_test() -> int:
          all(part.lower().startswith(system) for part in bare["PATH"].split(os.pathsep))),
         ("so a folder that forgot node cannot be rescued by the machine's own",
          not any("nodejs" in part.lower() for part in bare["PATH"].split(os.pathsep))),
+        # THE DECISION THAT KEEPS A STALE EXE OUT OF THE FOLDER, which is what this whole change
+        # was nearly shipped without.
+        ("no exe at all means build", needs_build(None, 1.0)),
+        ("an exe older than its source means build again", needs_build(1.0, 2.0)),
+        ("an exe newer than its source is kept", not needs_build(2.0, 1.0)),
+        ("the same instant is not stale", not needs_build(2.0, 2.0)),
+        ("compiled bytecode is not source: a test run must not force a rebuild",
+         not is_source(ROOT / "c4x" / "__pycache__" / "store.cpython-314.pyc")
+         and not is_source(ROOT / "c4x" / "store.pyc")
+         and is_source(ROOT / "c4x" / "store.py")),
         ("the bundle is assembled beside the plain build, not inside it",
          bundle_dir(ROOT).as_posix().endswith("dist/bundle/c4x")
          and bundle_dir(ROOT) != exe_path(ROOT).parent),
@@ -743,17 +753,39 @@ def runtime_files(root: Path = ROOT) -> list[Path]:
     return out
 
 
+def is_source(path: Path) -> bool:
+    """Whether a file is something the exe is built FROM.
+
+    Compiled bytecode is not: `__pycache__` is written by running the tests, so counting it made
+    every test run look like a source change and forced a three-minute rebuild for nothing.
+    """
+    if path.suffix in (".pyc", ".pyo"):
+        return False
+    return "__pycache__" not in path.parts
+
+
 def newest_source(root: Path = ROOT) -> float:
     """When the newest thing the exe is built from changed."""
     seen = [0.0]
     for folder in ("c4x", "frontend/dist"):
         here = root / folder
         if here.is_dir():
-            seen.extend(p.stat().st_mtime for p in here.rglob("*") if p.is_file())
+            seen.extend(f.stat().st_mtime for f in here.rglob("*") if f.is_file() and is_source(f))
     for name in ("app.py", "requirements.txt"):
         if (root / name).is_file():
             seen.append((root / name).stat().st_mtime)
     return max(seen)
+
+
+def needs_build(exe_mtime: float | None, newest: float) -> bool:
+    """Whether to build: there is no exe, or the one there is predates its own source.
+
+    THE GATE FOR THIS PR'S FOUNDING DEFECT. Reusing whatever exe happened to be in dist/ shipped a
+    program built before the verbs existed, and the smoke then passed a check the old exe answered
+    by accident. An independent review pointed out that the fix itself had no check; this is it,
+    kept as a pure decision so it can have one.
+    """
+    return exe_mtime is None or exe_mtime < newest
 
 
 def assemble(root: Path = ROOT, fetch=None) -> Path:
@@ -767,10 +799,10 @@ def assemble(root: Path = ROOT, fetch=None) -> Path:
     import shutil
 
     exe = exe_path(root)
-    stale = exe.is_file() and exe.stat().st_mtime < newest_source(root)
-    if stale:
-        print(f"{exe.name} is older than the source it is built from; building again")
-    if not exe.is_file() or stale:
+    when = exe.stat().st_mtime if exe.is_file() else None
+    if needs_build(when, newest_source(root)):
+        if when is not None:
+            print(f"{exe.name} is older than the source it is built from; building again")
         code = build()
         if code:
             raise SystemExit(code)
