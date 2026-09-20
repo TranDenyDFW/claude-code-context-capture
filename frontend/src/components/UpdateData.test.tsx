@@ -131,18 +131,28 @@ describe('UpdateData', () => {
   })
 
   it('adopts a run that is already under way instead of calling a 409 an error', async () => {
-    vi.spyOn(api.harvest, 'state')
-      .mockResolvedValueOnce(status())
-      .mockResolvedValueOnce(running(9))
-      .mockResolvedValue(status({ last: outcome({ id: 9 }) }))
+    // HELD RUNNING until the test lets go, because the point is what the page says WHILE it
+    // waits. The job is followed either way (any running job is), so the final state alone
+    // cannot tell "adopted" from "shown as a failure and then overwritten".
+    let calls = 0
+    let finished = false
+    vi.spyOn(api.harvest, 'state').mockImplementation(async () => {
+      calls += 1
+      if (calls === 1) return status()
+      return finished ? status({ last: outcome({ id: 9 }) }) : running(9)
+    })
     vi.spyOn(api.harvest, 'run').mockRejectedValue(
       new ApiError('409 from /api/store/harvest', 409, { error: 'An update is already running.', reason: 'busy' }))
     const onChanged = vi.fn()
     draw({ onChanged })
     fireEvent.click(await button())
+    await waitFor(() => expect(note()).toBe('An update was already running; waiting for it.'))
+    expect((await button()).getAttribute('aria-busy')).toBe('true')
+    expect(screen.getByTestId('update-note').className).not.toContain('text-bad')
+    expect(onChanged).not.toHaveBeenCalled()
+    finished = true
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
     expect(note()).toBe('Updated: 3 transcripts read.')
-    expect(note()).not.toContain('Update failed')
   })
 
   it('a refusal with nothing running is shown as the server worded it, and reloads nothing', async () => {
@@ -181,6 +191,21 @@ describe('UpdateData', () => {
     fireEvent.click(await button())
     await waitFor(() => expect(note()).toContain('interrupted'))
     expect(note()).not.toContain('Updated')
+  })
+
+  it('a finished job with another id is not the run this page started, so it is not called a success', async () => {
+    // A server restarted mid-run can come back naming an OLDER job as its last one. "Not running
+    // any more, and there is a last job that went fine" is exactly what a success looks like
+    // without the id.
+    vi.spyOn(api.harvest, 'state')
+      .mockResolvedValueOnce(status())
+      .mockResolvedValue(status({ last: outcome({ id: 3 }) }))
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 5 })
+    draw()
+    fireEvent.click(await button())
+    await waitFor(() => expect(note()).toContain('interrupted'))
+    expect(note()).not.toContain('Updated')
+    expect(screen.getByTestId('update-note').className).toContain('text-warn')
   })
 
   it('stops saying a success after a moment, so the note does not read as a state', async () => {
