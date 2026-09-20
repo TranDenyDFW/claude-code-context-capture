@@ -14,6 +14,7 @@ import { AccountSharing } from '@/components/AccountSharing'
 import { AdoptSessions } from '@/components/AdoptSessions'
 import { Dropdown } from '@/components/Dropdown'
 import { ServerControls } from '@/components/ServerControls'
+import { UpdateData } from '@/components/UpdateData'
 import { Sidebar, useCollapsed } from '@/components/Sidebar'
 
 /**
@@ -434,8 +435,8 @@ export default function App() {
             <ProjectMoves
               cohort={selection.cohort ?? null}
               cohorts={cohorts.data ?? []}
-              // Two facts, kept apart. `read_only` means this server never harvests and is always
-              // true; `writes_enabled` is whether these three routes answer. Reading the wrong one
+              // Two facts, kept apart. `read_only` means this server never harvests ON ITS OWN and
+              // is always true; `writes_enabled` is whether these three routes answer. Reading the wrong one
               // would disable the controls on every server.
               writesEnabled={health.data?.writes_enabled ?? false}
               // A delete or an import changes what every pane describes, and the cohort list
@@ -470,7 +471,7 @@ export default function App() {
             </button>
             <button
               onClick={() => setLive((was) => !was)}
-              title="Re-read this tab every five seconds. Useful while a session is still running."
+              title="Re-read this tab every five seconds. Useful while a session is still running. It re-reads the store; Update data is what reads new transcripts into it."
               className={`rounded-md border px-2.5 py-1.5 text-sm transition-colors ${
                 live
                   ? 'border-good/60 bg-good/10 text-good'
@@ -479,6 +480,14 @@ export default function App() {
             >
               {live ? 'Live' : 'Paused'}
             </button>
+            <UpdateData
+              // New rows in the store: everything the page holds describes the store, so
+              // everything refetches, and the selection is kept (unlike an import, an update
+              // must not throw away what the reader is looking at).
+              onChanged={() => {
+                void client.invalidateQueries()
+              }}
+            />
             <ServerControls
               // A fresh server has an empty cache and may be running newer code: everything the
               // page holds is refetched once the replacement answers.

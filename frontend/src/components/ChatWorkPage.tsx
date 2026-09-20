@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ChangeDetail, ChatChange, ChatWork, DiffHunk } from '@/api'
 import { readableMs } from './chatWork'
+import { HOW_TO_HARVEST } from './harvest'
 import { TextBody } from './Markdown'
 
 /** One plan as `/api/plan/<call>` answers it: the document, not its opening. */
@@ -250,8 +251,8 @@ export function ChatWorkPage({ session, onBack }: { session: string; onBack: () 
               : 'One CLI session, never resumed.'}
             {missing.length > 0 && (
               <> This store has not harvested {missing.join(', ')} yet, so those sections are empty
-                for a reason that is not about this chat. Run node tools/harvest.mjs, or
-                node tools/harvest.mjs --backfill-sidecars for work already on disk.</>
+                for a reason that is not about this chat. {HOW_TO_HARVEST} Reload this window
+                afterwards.</>
             )}
             {body.task_events_unresolved > 0 && (
               <> {body.task_events_unresolved.toLocaleString()} task notifications name a run this

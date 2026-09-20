@@ -30,6 +30,7 @@ vi.mock('@/api', async (importOriginal) => {
       accounts: { state: vi.fn(), share: vi.fn(), verify: vi.fn(), reconcile: vi.fn() },
       adopt: { state: vi.fn(), run: vi.fn(), retitle: vi.fn(), sweep: vi.fn() },
       server: { stop: vi.fn(), restart: vi.fn() },
+      harvest: { state: vi.fn(), run: vi.fn() },
     },
   }
 })
@@ -91,6 +92,11 @@ beforeEach(() => {
     review_runs: 0, review_records: 0, app_running: false, sharing: null,
   })
   vi.mocked(api.adopt.sweep).mockResolvedValue({ enabled: true, last: null })
+  // A server that will update, nothing running, a store harvested a moment ago.
+  vi.mocked(api.harvest.state).mockResolvedValue({
+    enabled: true, reason: null, why_not: null, fix: null, running: false, job: null,
+    last: null, last_harvest: null,
+  })
   vi.mocked(api.tab).mockResolvedValue(payload())
 })
 
@@ -242,6 +248,19 @@ describe('what a view says about itself', () => {
 })
 
 describe('the header, as the user asked for it', () => {
+  it('puts Update data between the Live toggle and the server controls, a group of its own', async () => {
+    show('/')
+    const update = await screen.findByRole('button', { name: 'Update data' })
+    const live = screen.getByRole('button', { name: /^(Live|Paused)$/ })
+    const server = screen.getByRole('group', { name: 'C4X server' })
+    expect(live.compareDocumentPosition(update) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(update.compareDocumentPosition(server) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByRole('group', { name: 'Store data' }).contains(update)).toBe(true)
+    expect(server.contains(update)).toBe(false)
+    // The Live toggle says what it is NOT, so the two are never taken for each other.
+    expect(live.getAttribute('title')).toContain('Update data is what reads new transcripts')
+  })
+
   it('puts Adopted Chats after the server controls, set apart by a divider', async () => {
     vi.mocked(api.adopt.state).mockResolvedValue({
       supported: true, why_not: '', pair: { account: 'a', org: 'o', root: 'R', source: 's' },
