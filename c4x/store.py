@@ -133,7 +133,9 @@ def write():
 
     Used by `c4x/projects.py` and nothing else. Deleting a project and importing one are deliberate,
     user-initiated operations; the refresh tick is not one of them, which is what `C4X_READ_ONLY`
-    governs and why that flag is about HARVESTING rather than about writing in general.
+    governs and why that flag is about HARVESTING ON A TIMER rather than about writing in general.
+    The store changes a third way that is not this function either: `c4x/harvest.py` starts
+    `tools/harvest.mjs` when the page's Update data button asks, and that program does the writing.
 
     Committed on a clean exit and rolled back on any exception, because the operations that use this
     span several tables with no foreign keys to tidy up after a half-finished one.

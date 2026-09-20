@@ -12,7 +12,8 @@ and, when nobody is, starts the server detached; the server watches for Claude p
 itself about a minute after the last one exits. `node tools/install.mjs status` says whether it is
 up and how to stop it by hand; `install --no-dashboard` turns the autostart off (`--dashboard` turns
 it back on), as does `C4X_NO_DASHBOARD=1`. `python -m c4x.api` by hand still works and does not
-stop itself unless asked to with `--watchdog`. The header's **Stop** stops the server from the
+stop itself unless asked to with `--watchdog` (an update the page asked for counts as Claude
+still running, so a long catch-up is not stopped under it). The header's **Stop** stops the server from the
 page (it asks first; the next Claude session starts one again) and **Restart** starts a fresh
 one with the same flags and reloads the page once a different process answers. Once the server is
 up it runs one sweep: the records c4x wrote for review runs (below) are taken back and, when that
@@ -24,6 +25,24 @@ JSON: `curl 127.0.0.1:8059/api/tab/tab-cost`. The server runs without a console 
 the programs it runs (`c4x/proc.py`), so nothing flashes when the page loads.
 
 ## The header
+
+**Update data.** Between the Live toggle and the server controls. One click reads what Claude
+has written since the last harvest into the store and reloads every pane; it opens no dialog,
+because nothing is closed or restarted and it is the same incremental read the hooks run on
+every prompt (the hover says so, the way the other controls say "after asking"). The result is
+said beside the button ("Updated: 3 transcripts read.", "Nothing new."), a success for a few
+seconds, a failure until the next run and in words ("Update failed: ..."). The hover says how
+fresh the store is, from the newest `harvest_runs` row, whoever wrote it: "Store last updated
+3 min ago: 2 transcripts read in 1.4 s." The button is busy exactly as long as the server says
+a job runs (a catch-up took 54 minutes on one machine, so there is no short timeout), a page
+reloaded mid-run comes up already busy, and a run the server does not name back by its id is
+reported as interrupted, never as a success. It is NOT the Live toggle: Live re-reads the store
+every five seconds, Update data reads new transcripts INTO it. The server still never harvests
+on its own. It will only ever update the install's own store: the harvester reads this
+machine's real transcripts, so a server started on a copy or a fixture (`--db`), on a redacted
+copy, or with `--no-writes` shows the button off with the reason and the remedy on hover, and
+the child process is never told which store is served, so it can open no other
+(`c4x/harvest.py`; `POST` and `GET /api/store/harvest`).
 
 The header says less and shows it on hover: the population list (the unlabelled dropdown after
 Search) names a folder holding one chat by that chat's title and a folder holding several by its

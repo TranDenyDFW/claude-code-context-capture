@@ -5,6 +5,31 @@ runner, CI and a linted tree.
 
 ## Unreleased
 
+### Added
+
+- **Update data, in the header.** The user, on learning the store could only be updated from a
+  terminal: "there's no button for this in the app?" One click starts the same incremental
+  harvest the hooks run, says what came of it beside the button, and reloads every pane; the
+  hover says how fresh the store is. It opens no dialog, because nothing is closed or
+  restarted. The server still never harvests on its own (`read_only` stays true and now means
+  that). What was measured on the way decided the design: an incremental run is usually under
+  a second and once took 53.7 minutes (9,599 transcripts, 12.5 GB), so the POST starts a job
+  and the page follows `GET /api/store/harvest`, with a two hour ceiling that only frees the
+  lock from a hung node; a harvesting process pointed at a redacted copy once un-redacted it,
+  so the child is never told which store is served (no `--db`, `C4X_DB` taken out of its
+  environment) and can only open the install's own, and the route refuses a served copy, a
+  redacted copy and `--no-writes` with the reason; the harvester exits 0 when a sub-pass
+  failed, so its report is read and a failed pass is said as partial; the response cache
+  serves entries under five seconds old after the store moved, so it is emptied when a job
+  ends; a click that races a prompt hook's harvest is retried once; the watchdog waits for a
+  running update. `run()` in `tools/harvest.mjs` had no coverage at all and now takes its
+  inputs as parameters, runs in the self-test on scratch inputs, and exports
+  `RUN_REPORT_KEYS`, which the Python parser is held to. Tests: `tests/test_harvest.py` (60),
+  the harvester self-test (339), `tests/test_api.py` (the server starts nothing on a read),
+  vitest `UpdateData.test.tsx` (15), `harvest.test.ts` (15), `App.test.tsx`, `a11y.test.tsx`;
+  an autouse fixture makes the default runner raise, since the harvester's transcripts root
+  cannot be redirected and no test may run it.
+
 ### Fixed
 
 - **The release's checksum file can be read by the command that checks it.** It was written with a

@@ -30,6 +30,17 @@
         "$env:C4X_DB='tmp/test.db'; $env:C4X_READ_ONLY='1'; python -m c4x.api --port 8062"
       ],
       "port": 8062
+    },
+    {
+      "name": "c4x-api-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "c4x.api",
+        "--port",
+        "8061"
+      ],
+      "port": 8061
     }
   ]
 }

@@ -144,7 +144,10 @@ mistake has already cost an afternoon here.
 - **`api_calls` is the view to sum, never `turns`.** A streamed assistant message is written as
   several transcript rows sharing one request id, so summing `turns` counts the same API call two to
   eight times. This is the single easiest mistake to make in this codebase.
-- **The store is read-only from the app.** `app.py` never writes. Only `harvest.mjs` and the hooks do.
+- **The store is read-only from the app.** `app.py` never writes. Only `harvest.mjs` writes
+  transcripts in, started by the hooks, by hand, or by the page's Update data button
+  (`c4x/harvest.py`, which never tells it which store is served, so it can only open the
+  install's own); `c4x/projects.py` deletes and imports.
 - **`immutable=1` is wrong for this store.** It tells SQLite the file cannot change, so SQLite skips
   the WAL, and against a store the hooks are writing it returns stale data and can report a healthy
   database as malformed. Use `mode=ro` with `PRAGMA busy_timeout`.
