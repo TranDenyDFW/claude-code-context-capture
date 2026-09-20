@@ -47,10 +47,13 @@ export function useHarvest({
     // An arrow, so a test that forgot to mock this gets a query error, not a render crash.
     queryFn: () => api.harvest.state(),
     retry: false,
-    // A HIDDEN TAB DOES NOT POLL (the query library pauses intervals for it, by design), so a
-    // person who clicks and switches away comes back to a page still saying Updating. This is
-    // what catches it up: the return refetches at once, the run is found finished, and the
-    // note and the reload happen then. Seen for real on the first end-to-end run of this.
+    // A HIDDEN TAB DOES NOT POLL: the query library skips interval fetches while the document
+    // is hidden, by design, and this leaves that default alone (no work for a page nobody is
+    // looking at). Seen on the first end-to-end run of this: the run ended while the pane was
+    // hidden and the page still said Updating. It catches up by itself when shown again,
+    // because the same interval resumes on its next tick; the focus refetch below is for the
+    // IDLE case, where the interval is thirty seconds and the freshness line would otherwise
+    // be stale, and a job started in another tab unnoticed, for that long after a return.
     refetchOnWindowFocus: true,
     refetchInterval: (q) =>
       q.state.status === 'error' ? idleMs : q.state.data?.running ? pollMs : idleMs,
