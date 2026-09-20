@@ -47,6 +47,10 @@ export function useHarvest({
     // An arrow, so a test that forgot to mock this gets a query error, not a render crash.
     queryFn: () => api.harvest.state(),
     retry: false,
+    // A HIDDEN TAB DOES NOT POLL (the query library pauses intervals for it, by design), so a
+    // person who clicks and switches away comes back to a page still saying Updating. This is
+    // what catches it up: the return refetches at once, the run is found finished, and the
+    // note and the reload happen then. Seen for real on the first end-to-end run of this.
     refetchOnWindowFocus: true,
     refetchInterval: (q) =>
       q.state.status === 'error' ? idleMs : q.state.data?.running ? pollMs : idleMs,

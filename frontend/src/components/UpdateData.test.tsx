@@ -256,6 +256,30 @@ describe('UpdateData', () => {
     expect((await button()).getAttribute('aria-busy')).toBe('false')
   })
 
+  it('catches up when the page is shown again: a hidden tab does not poll, and the return refetches', async () => {
+    let calls = 0
+    let finished = false
+    vi.spyOn(api.harvest, 'state').mockImplementation(async () => {
+      calls += 1
+      if (calls === 1) return status()
+      return finished ? status({ last: outcome() }) : running()
+    })
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 1 })
+    const onChanged = vi.fn()
+    draw({ onChanged })
+    fireEvent.click(await button())
+    await screen.findByRole('button', { name: 'Updating…' })
+    focusManager.setFocused(false)
+    finished = true
+    const whileHidden = calls
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(calls).toBe(whileHidden)
+    expect(onChanged).not.toHaveBeenCalled()
+    focusManager.setFocused(true)
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
+    expect(note()).toBe('Updated: 3 transcripts read.')
+  })
+
   it('is a group of its own named Store data, with no pressed state, so it cannot be read as the Live toggle', async () => {
     vi.spyOn(api.harvest, 'state').mockResolvedValue(status())
     draw()
