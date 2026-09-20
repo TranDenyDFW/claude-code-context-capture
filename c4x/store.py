@@ -424,6 +424,40 @@ def q_optional(sql: str, params=(), columns=()) -> pd.DataFrame:
         return pd.DataFrame(columns=list(columns))
 
 
+def last_harvest() -> dict | None:
+    """The newest `harvest_runs` row, whoever wrote it: a hook, a terminal, or the page's Update
+    data button. None when there is no store yet, or a store no harvest has finished in.
+
+    HOW FRESH THE STORE IS, which the page never said. `mode` is `incremental` or `full` and does
+    NOT say who ran it; the table has no such column.
+
+    BY ROWID, NOT BY `ts`. The table is append-only and has no index, so `ORDER BY ts` sorts all
+    of it for one row: on the 29,585 rows of the store this was written against, 14.2 ms against
+    0.1 ms. The status route the page polls every half second while an update runs reads this.
+
+    Plain `str` and `int`, because the frame's cells are numpy scalars and the JSON encoder the
+    routes share refuses them.
+    """
+    if not DB_PATH.exists():
+        return None
+    found = q_optional("SELECT ts, mode, files_seen, files_read, ms FROM harvest_runs"
+                       " ORDER BY rowid DESC LIMIT 1",
+                       columns=["ts", "mode", "files_seen", "files_read", "ms"])
+    if found.empty:
+        return None
+    row = found.iloc[0]
+
+    def whole(value) -> int:
+        # A NULL arrives as NaN, which `int` refuses and `or 0` does not catch (NaN is truthy).
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    return {"ts": str(row["ts"]), "mode": str(row["mode"]), "files_seen": whole(row["files_seen"]),
+            "files_read": whole(row["files_read"]), "ms": whole(row["ms"])}
+
+
 def overview_stats() -> dict:
     """Headline figures, each one tied to a stated population.
 

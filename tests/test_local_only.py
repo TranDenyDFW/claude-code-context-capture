@@ -72,6 +72,10 @@ def test_a_cross_origin_multipart_upload_is_refused_before_it_reaches_disk(clien
     ("/api/project/include", {"project": "P:\\Alpha"}),
     ("/api/messages/text", {"uuids": []}),
     ("/api/mirror/predict", {"tokens": 1}),
+    # Kept in this sweep so the list stays the list of every write route. The test that proves a
+    # foreign page cannot START an update, with the server otherwise willing, is
+    # tests/test_harvest.py::TestTheRoutes::test_a_foreign_page_cannot_start_an_update.
+    ("/api/store/harvest", {"kind": "incremental"}),
 ])
 def test_every_mutating_route_refuses_a_cross_origin_caller(client, path, body):
     assert client.post(path, json=body, headers={"Origin": EVIL}).status_code == 403

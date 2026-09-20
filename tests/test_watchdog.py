@@ -197,7 +197,10 @@ class TestTheStopThatCoversFirst:
         assert "Watchdog(stop=reconcile_then_stop," in source
         # A confirmed restart's quit-act-relaunch window counts as Claude alive, so a fold
         # longer than the grace cannot stop the server under it (c4x/desktop.py, with_restart).
-        assert "is_alive=lambda: desktop.restart_in_progress() or claude_alive()" in source
+        # Three things count as alive, and the third is an update the page asked for: a catch-up
+        # can outlast the grace, and the stop kills the harvester with the server (c4x/harvest.py).
+        assert "is_alive=lambda: (desktop.restart_in_progress() or harvest.in_progress()" in source
+        assert "or claude_alive())).start()" in source
         assert "reconcile_at_start()" in source
 
     def test_at_start_it_runs_only_when_the_app_is_closed(self, monkeypatch):

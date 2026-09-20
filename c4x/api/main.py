@@ -26,9 +26,11 @@ from c4x.paths import bundle_root, install_root
 # into an exe. The built page comes from the BUNDLE, resolved where it is mounted below.
 ROOT = install_root()
 
-# THE API IS A READER. The dashboard is not: its refresh tick runs an incremental harvest, so
-# pointing two of those at one store means two writers. This is set before `app` is imported,
-# because that import is what registers the tick.
+# THE API NEVER HARVESTS ON ITS OWN: no tick, no timer. The old dashboard did (its refresh tick
+# ran an incremental harvest), so pointing two of those at one store meant two writers. This is
+# set before `app` is imported, because that import is what registers the tick. The one harvest
+# this process starts is the one a person asks for from the page (`/api/store/harvest`,
+# `c4x/harvest.py`), and that module carries its own guards: this flag was never one.
 os.environ.setdefault("C4X_READ_ONLY", "1")
 
 if str(ROOT) not in sys.path:
@@ -181,7 +183,8 @@ def health():
             # server it asked: both answer here, a quarter of a second apart.
             "pid": os.getpid(),
             # TWO SEPARATE FACTS, reported separately on purpose. `read_only` means this process
-            # never harvests and is always true here. `writes_enabled` means the export, import and
+            # never harvests ON ITS OWN and is always true here; whether it will run one a person
+            # asks for is `GET /api/store/harvest`. `writes_enabled` means the export, import and
             # delete routes will answer. Collapsing them into one flag would leave the UI unable to
             # say WHY a control is disabled, so it would fail on click instead.
             "read_only": bool(os.environ.get("C4X_READ_ONLY")),
@@ -1532,9 +1535,11 @@ def mirror_predict(body: _Predict):
 # ---------------------------------------------------------------------------
 # Moving a project in and out of the store.
 #
-# THE ONLY ROUTES IN THIS FILE THAT WRITE, and they get their own switch rather than borrowing
-# `C4X_READ_ONLY`. That variable means "this process never harvests", which is what stopped two
-# harvesters fighting over one store, and it is set unconditionally at the top of this module.
+# THE ROUTES IN THIS FILE THAT WRITE THROUGH THIS PACKAGE, and they get their own switch rather
+# than borrowing `C4X_READ_ONLY`. That variable means "this process never harvests on its own",
+# which is what stopped two harvesters fighting over one store, and it is set unconditionally at
+# the top of this module. (`/api/store/harvest` further down writes nothing itself: it starts
+# the one program that does, and honours this same switch.)
 # Writing is a different thing. Reusing the harvest flag would make `--no-writes` also claim the
 # server harvests, and `/api/health` would have no way to say which of the two is true.
 # ---------------------------------------------------------------------------
@@ -1870,6 +1875,54 @@ def adopt_sweep():
     what the last one did, read from its stamp file. Nothing is run by asking."""
     from c4x import adopt
     return {"enabled": adopt.sweep_enabled(), "last": adopt.last_sweep()}
+
+
+# UPDATE DATA. Until this existed the only way to update the store by hand was a terminal, and
+# the user's words on finding that out were "there's no button for this in the app?". The POST
+# starts the same incremental harvest the hooks run on every prompt and answers at once; the
+# page follows the GET. `c4x/harvest.py` says why it can only ever write the install's own
+# store. A JSON-bodied POST, so the cross-origin guard below covers it like every other write.
+@api.get("/api/store/harvest")
+def store_harvest_state():
+    """Whether this server will update the store and why not, the job running now, the last one
+    that finished, and how fresh the store is (the newest `harvest_runs` row, whoever wrote it).
+    Nothing is run by asking."""
+    from c4x import harvest
+    return harvest.status()
+
+
+@api.post("/api/store/harvest", status_code=202)
+def store_harvest(body: dict):
+    """Start an update: `{"kind": "incremental"}`. 202 with the status and the job's `id`, which
+    is how the page tells the run it started from one a restart interrupted.
+
+    400 for a job that does not exist. 403 when this server will not harvest, with the sentence
+    and the remedy: `--no-writes`, a served store that is not the install's own, a redacted copy.
+    409 while one is running, naming it, so the page can follow that one instead of failing.
+    A run that fails AFTER it started is not an HTTP error: it is a finished job whose report
+    says so.
+    """
+    from c4x import harvest
+    _require_writes()
+    try:
+        kind, dry_run = harvest.parse_request(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={
+            "error": str(exc), "kinds": list(harvest.KINDS)}) from exc
+    try:
+        # The response cache serves an entry under five seconds old even when the store has
+        # moved (`cache.get`), which would answer the refetch that follows with the pane from
+        # before the update. `drop_entries` keeps the hit and miss counters health reports.
+        job = harvest.start(kind, dry_run, after=cache.drop_entries)
+    except harvest.Disabled as exc:
+        found = exc.capability
+        raise HTTPException(status_code=403, detail={
+            "error": found["why_not"], "fix": found["fix"], "reason": found["reason"]}) from exc
+    except harvest.Busy as exc:
+        raise HTTPException(status_code=409, detail={
+            "error": "An update is already running.", "reason": "busy",
+            "job": exc.job}) from exc
+    return {**harvest.status(), "accepted": True, "id": job["id"]}
 
 
 # THE TWO SERVER BUTTONS. JSON-bodied POSTs, so a browser sends a preflight for them cross-origin

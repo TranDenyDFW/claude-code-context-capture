@@ -95,6 +95,28 @@ def never_the_real_claude_directory(tmp_path_factory, monkeypatch):
                         lambda: str(empty / "appdata" / "Claude" / "claude-code-sessions"))
 
 
+@pytest.fixture(autouse=True)
+def never_the_real_harvester(monkeypatch):
+    """NO TEST EVER RUNS `tools/harvest.mjs` THROUGH `c4x.harvest`.
+
+    The harvester reads this machine's real transcripts: its root is `~/.claude/projects`, a
+    constant with no override (`tools/harvest.mjs`, `PROJECTS`), and `c4x.harvest` deliberately
+    never tells the child which store is served, so a real run from a test would write real
+    conversations into the checkout's own `data/context.db`. Autouse for the reason the fixture
+    above is: the danger is the test that does not know it reaches this, one that posts to
+    `/api/store/harvest` with a patched `store.DB_PATH` and forgets the fake runner.
+
+    Every test that means to drive a job passes its own `run=`. This replaces only the DEFAULT.
+    """
+    from c4x import harvest
+
+    def refuse(args, **kw):
+        raise AssertionError("a test reached the real harvester; pass run= to c4x.harvest "
+                             f"(it would have run {list(args)[:3]})")
+
+    monkeypatch.setattr(harvest, "_default_run", refuse)
+
+
 @pytest.fixture(scope="session")
 def app():
     """The Dash app module, imported once.
