@@ -32,6 +32,7 @@ import { AdoptSessions } from './components/AdoptSessions'
 import { Sidebar } from './components/Sidebar'
 import { ServerControls } from './components/ServerControls'
 import { UpdateData } from './components/UpdateData'
+import { StoreMaintenance } from './components/StoreMaintenance'
 import { TextBody } from './components/Markdown'
 import { Inspector } from './components/Inspector'
 import { TablePage } from './components/TablePage'
@@ -195,6 +196,32 @@ describe('axe finds no WCAG A or AA violation in', () => {
       )
       await screen.findByRole('button', { name: /Update data|Updating/ })
       expect(await violations(container)).toEqual([])
+      unmount()
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('store maintenance: the strip, off, and with its question open', async () => {
+    // WHY THIS ONE IS HERE. Two buttons that disable with `aria-disabled`, a live region mounted
+    // empty, a numbered list, and a dialog opened from inside a section: the off state and the
+    // open dialog are the two a sighted check never looks at.
+    const base = {
+      enabled: true, reason: null, why_not: null, fix: null, running: false, job: null,
+      last: null, last_harvest: null,
+    }
+    for (const state of [base, { ...base, enabled: false, reason: 'no-writes', why_not: 'Started with --no-writes.', fix: 'Restart it without that flag.' }]) {
+      vi.spyOn(api.harvest, 'state').mockResolvedValue(state)
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+      const { container, unmount } = render(
+        <QueryClientProvider client={client}><StoreMaintenance pollMs={60_000} /></QueryClientProvider>,
+      )
+      const record = await screen.findByRole('button', { name: 'Record tool outcomes…' })
+      expect(await violations(container)).toEqual([])
+      if (state.enabled) {
+        fireEvent.click(record)
+        const asked = await screen.findByRole('dialog', { name: 'Record tool outcomes' })
+        expect(await violations(asked)).toEqual([])
+      }
       unmount()
       vi.restoreAllMocks()
     }

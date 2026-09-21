@@ -8,6 +8,57 @@ import type { HarvestKind, HarvestOutcome, HarvestStatus } from '@/api'
 /** What a running job is doing, for the hover. */
 export const DOING: Record<HarvestKind, string> = {
   incremental: 'Reading new transcripts',
+  'tool-outcomes': 'Recording tool outcomes',
+  runs: 'Folding headless runs',
+}
+
+/**
+ * STORE MAINTENANCE: the two one-off passes, each behind a question. They are not the everyday
+ * update: one re-reads every transcript, the other changes what the lists show, so unlike the
+ * header button these ask first. Neither closes or restarts anything, and the questions say so.
+ */
+export const OUTCOMES_QUESTION =
+  'This re-reads every transcript to record how each tool call ended and when its result came ' +
+  'back, for rows from before the store kept those. It only fills empty columns, takes about a ' +
+  'minute on a 2 GB store, and nothing is closed or restarted. Continue?'
+
+const count = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
+
+/**
+ * The question before the fold, from its dry run. The numbers are the harvester's own; a run
+ * that can be placed nowhere is said too, because "nothing happened to those" is the answer to
+ * the question a reader will otherwise ask afterwards.
+ */
+export function runsQuestion(summary: Record<string, unknown> | null | undefined): {
+  question: string
+  detail?: string
+  nothing: boolean
+} {
+  const linked = count(summary?.linked)
+  const batched = count(summary?.batched)
+  const unlinked = count(summary?.unlinked)
+  const misses = count(summary?.misses)
+  const open = count(summary?.calls_without_result_ts)
+  const detail = open > 0
+    ? `${plural(open, 'shell call')} ${open === 1 ? 'has' : 'have'} no result time yet, so some matches would be loose, and a link made on a loose match stays. Cancel and run Record tool outcomes first.`
+    : undefined
+  if (linked + batched + unlinked === 0) {
+    return {
+      question: `Nothing to fold: no run would change (${plural(misses, 'run')} can be placed nowhere). Continue anyway?`,
+      detail,
+      nothing: true,
+    }
+  }
+  const dropped = unlinked > 0 ? `, drop ${plural(unlinked, 'link')} that no longer holds` : ''
+  return {
+    question:
+      `This would fold ${plural(linked, 'run')} under the ${plural(count(summary?.heads), 'chat')} that ` +
+      `spawned them and ${batched.toLocaleString('en-US')} under ${plural(count(summary?.projects), 'project')}${dropped}, ` +
+      `and leave ${misses.toLocaleString('en-US')} it can place nowhere. Folded runs stop being listed as chats ` +
+      'of their own. Nothing is closed or restarted. Continue?',
+    detail,
+    nothing: false,
+  }
 }
 
 /**

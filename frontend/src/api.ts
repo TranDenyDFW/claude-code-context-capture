@@ -577,9 +577,12 @@ export interface AccountsState {
 /** What `/api/accounts/sharing` answers. `restart_required` is always true on a change. */
 /**
  * UPDATE DATA. The page asking the server to run the harvester (`c4x/harvest.py`,
- * `/api/store/harvest`). `incremental` is what the hooks run on every prompt.
+ * `/api/store/harvest`). `incremental` is what the hooks run on every prompt; the other two
+ * are the one-off passes of Store maintenance (Diagnostics): `tool-outcomes` fills how each
+ * tool call ended and when, `runs` folds headless one-shots under their chat or project and is
+ * the only one with a dry run.
  */
-export type HarvestKind = 'incremental'
+export type HarvestKind = 'incremental' | 'tool-outcomes' | 'runs'
 
 /** The job running now. `id` is how the page tells the run it follows from any other, and it
  *  names the server process too (`<boot>-<n>`), so a restarted server never reuses one. */
@@ -610,6 +613,10 @@ export interface HarvestOutcome {
   error: string | null
   started_at: string
   finished_at: string | null
+  /** The job's own numbers. For a `runs` job (dry or not): `linked`, `heads`, `batched`,
+   *  `projects`, `unlinked`, `misses`, and `outcomes_first` when shell calls still lack a
+   *  result time. The confirm before the fold quotes them. */
+  summary?: Record<string, unknown> | null
 }
 
 export interface HarvestStatus {

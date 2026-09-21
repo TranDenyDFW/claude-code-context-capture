@@ -14,6 +14,7 @@ import { AccountSharing } from '@/components/AccountSharing'
 import { AdoptSessions } from '@/components/AdoptSessions'
 import { Dropdown } from '@/components/Dropdown'
 import { ServerControls } from '@/components/ServerControls'
+import { StoreMaintenance } from '@/components/StoreMaintenance'
 import { UpdateData } from '@/components/UpdateData'
 import { Sidebar, useCollapsed } from '@/components/Sidebar'
 
@@ -522,6 +523,11 @@ export default function App() {
             onChange={(next) => setSelection((was) => ({ ...was, ...next }))}
           />
         )}
+        {/*
+          The two one-off passes a store needs after an upgrade. Here and not in the header:
+          the header says less, and this is the tab about whether the capture is healthy.
+        */}
+        {tab === 'tab-diagnostics' && <StoreMaintenance />}
         {pane.isError && <Failure error={pane.error} />}
         {!pane.data && !pane.isError && <Waiting />}
         {pane.data && (
