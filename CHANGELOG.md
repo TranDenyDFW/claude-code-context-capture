@@ -86,6 +86,23 @@ runner, CI and a linted tree.
 
 ### Fixed
 
+- **An install under a folder with a space, an accent, `#`, `%` or a bracket in its name finds
+  itself.** Every node tool and both hooks work out where the install lives from the module's
+  `file://` URL, and `URL.pathname` stays percent-encoded: under `C:\Users\John Smith` the root
+  came out as `...\John%20Smith\...`, a folder that is not there, and under a profile with an
+  accent in it as `...\Jos%C3%A9\...`. Measured end to end on a copy of `tools/` and `hooks/`
+  installed under six such folders: on main five of the six resolved a root that did not exist,
+  and the hook command the installer would write named a script that was not there, so nothing
+  was captured and nothing said why. `rootFrom` (`tools/paths.mjs`) now decodes the path once (a
+  folder really called `p%41q` stays `p%41q`, never `pAq`) and keeps a share's host, which
+  `pathname` alone drops. Four files carried a hand copy of the old expression, the two hooks
+  among them (`hooks/event-hook.mjs`, `hooks/compact-hook.mjs`, `tools/statusline.mjs`,
+  `tools/otel-gate.mjs`); they call `rootFrom` now, and the paths self-test fails if any tool or
+  hook takes a path out of a URL by hand again. Not `fileURLToPath`: it is right only for the
+  platform it runs on, and the self-test, which holds `rootFrom` to it for every URL the platform
+  makes, also feeds a Windows URL to the ubuntu legs. Not settled: whether node can run the
+  tools from a share at all. Started over this machine's own admin share, node 24.19 failed
+  before the module ran. Tests: `node tools/paths.mjs --self-test` (34, six of them new).
 - **The release's checksum file can be read by the command that checks it.** It was written with a
   CRLF, which `sha256sum -c` reads as part of the filename, so it reported "No such file" about the
   zip sitting beside it. The digest itself was always correct. The release job now writes the

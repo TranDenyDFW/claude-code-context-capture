@@ -12,12 +12,26 @@ import http from 'node:http';
 import { existsSync, mkdirSync, chmodSync, readdirSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // import.meta.url is a file:// URL; on Windows that is /C:/... and the drive letter needs the
 // leading slash stripped before it is a usable path. Every tool derived this line for itself.
+//
+// AND A URL IS NOT A PATH: `pathname` stays percent-encoded. Until it was decoded here, an
+// install under a folder whose name held a space, `#`, `%`, a bracket or any non-ASCII letter
+// (`C:\Users\John Smith`, a profile with an accent in it) resolved to a folder that does not
+// exist, `...\John%20Smith\...`, and every tool and both hooks looked for `data/` there; the
+// installer wrote that path into the hook commands. Decoded ONCE: a folder really called
+// `p%41q` arrives as `p%2541q` and must come out as `p%41q`, not `pAq`. A share arrives as
+// `file://server/share/...` and `pathname` alone drops the host, so it is put back. Not
+// `fileURLToPath`: that is right only for the platform it runs on, and the self-test (which
+// holds this to it for every URL the platform makes) also feeds a Windows URL to an ubuntu leg.
 export function rootFrom(importMetaUrl) {
-  return join(dirname(new URL(importMetaUrl).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+  const url = new URL(importMetaUrl);
+  let path = url.pathname;
+  try { path = decodeURIComponent(path); } catch { /* a URL no loader makes; leave it as it came */ }
+  path = path.replace(/^\/([A-Za-z]:)/, '$1');
+  return join(dirname(url.host ? `//${url.host}${path}` : path), '..');
 }
 
 /**
@@ -397,6 +411,50 @@ async function selfTest() {
   add('defaultDb sits under data/', slash(defaultDb('R')) === 'R/data/context.db');
   add('rootFrom strips the leading slash from a Windows file URL',
     /^[A-Za-z]:/.test(slash(rootFrom('file:///C:/a/b/c.mjs'))));
+  // A URL IS NOT A PATH. `URL.pathname` stays percent-encoded, so an install under a folder
+  // with a space in its name resolved to `...%20...`, a folder that is not there, and every
+  // tool and both hooks then looked for the store and the raw log in it. Measured on node 24:
+  // a space, `#`, `%`, brackets, braces and ANY non-ASCII letter (a Windows profile called
+  // Jose with an accent is enough). The URLs below are the ones node itself makes for a module
+  // under such a folder, and `fileURLToPath` is the oracle: it is right on the platform it runs
+  // on, which is exactly why it cannot replace `rootFrom` (the check above feeds a Windows URL
+  // to an ubuntu leg).
+  const awkward = ['plain', 'sp ace', 'a#b', 'p%41q', '100%', 'uni\u00e9', '[br]{ace}', "quo'te", 'amp&eq=x;+'];
+  const under = (name) => join(rootFrom(import.meta.url), 'tmp', 'no-such', name);
+  const wrong = awkward.filter((name) =>
+    rootFrom(pathToFileURL(join(under(name), 'tools', 'x.mjs')).href) !== under(name));
+  add('rootFrom finds the install under a folder a URL escapes: a space, #, %41, an accent (gate can fail)',
+    wrong.length === 0, wrong.map((name) => `${name} -> ${rootFrom(pathToFileURL(join(under(name), 'tools', 'x.mjs')).href)}`).join('; '));
+  const disagrees = awkward.filter((name) => {
+    const url = pathToFileURL(join(under(name), 'tools', 'x.mjs')).href;
+    return rootFrom(url) !== join(dirname(fileURLToPath(url)), '..');
+  });
+  add('and agrees with fileURLToPath for every URL this platform makes (gate can fail)',
+    disagrees.length === 0, disagrees.join('; '));
+  add('an escape in the FOLDER NAME is not decoded twice: p%41q stays p%41q, never pAq (gate can fail)',
+    slash(rootFrom('file:///C:/x/p%2541q/tools/c.mjs')) === 'C:/x/p%41q');
+  // A SHARE. node spells `\\server\share\x` as `file://server/share/x`, host and all, and
+  // `pathname` alone drops the host, which put the root on the current drive. Windows only: a
+  // doubled leading slash means nothing to POSIX `join`, which folds it.
+  add('a share keeps its host (gate can fail)',
+    process.platform === 'win32'
+      ? slash(rootFrom('file://server/share/my%20c4x/tools/c.mjs')) === '//server/share/my c4x'
+      : slash(rootFrom('file://server/share/my%20c4x/tools/c.mjs')).endsWith('/share/my c4x'));
+  add('a URL no loader makes (a lone %) is left as it came rather than thrown on',
+    (() => { try { return slash(rootFrom('file:///C:/a%zz/tools/c.mjs')) === 'C:/a%zz'; } catch { return false; } })());
+  // THE CLASS, not the instance: four files carried a hand copy of the old expression, the two
+  // hooks among them. A root is `rootFrom(import.meta.url)` or `fileURLToPath`, never `.pathname`.
+  const byHand = [];
+  for (const f of sourceFiles(rootFrom(import.meta.url))) {
+    readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
+      if (/\.pathname\b/.test(line) && !/^\s*(\/\/|\*)/.test(line)) {
+        byHand.push(`${slash(f).split('/').slice(-2).join('/')}:${i + 1}`);
+      }
+    });
+  }
+  const allowed = byHand.filter((at) => !at.startsWith('tools/paths.mjs:'));
+  add('no tool or hook takes a path out of a URL by hand (gate can fail)', allowed.length === 0,
+    allowed.join('; '));
 
   // The port, and the store comparison the hook's "is this ours" rests on.
   add('the port is 8059 unless C4X_API_PORT says otherwise',

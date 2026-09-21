@@ -29,11 +29,13 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
+import { rootFrom } from './paths.mjs';
 
-const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+// `rootFrom`, not a copy of it: a URL's pathname is percent-encoded (see tools/paths.mjs).
+const ROOT = rootFrom(import.meta.url);
 const BODY_DIR = join(ROOT, 'tmp', 'otel-bodies');
 
 /**

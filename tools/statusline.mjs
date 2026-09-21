@@ -23,9 +23,10 @@ import { appendFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assess } from './mirror-core.mjs';
-import { ensureStoreDir } from './paths.mjs';
+import { ensureStoreDir, rootFrom } from './paths.mjs';
 
-const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+// `rootFrom`, not a copy of it: a URL's pathname is percent-encoded (see tools/paths.mjs).
+const ROOT = rootFrom(import.meta.url);
 // Production capture path. Tests and benchmarks MUST redirect via C4X_STATUSLINE_OUT so they
 // never land in the real capture file. Samples written through the override are stamped
 // probe:true, so a synthetic sample identifies itself forever instead of needing a heuristic.
