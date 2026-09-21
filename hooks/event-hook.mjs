@@ -26,11 +26,14 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSyn
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { ensureStoreDir, defaultDb, portFrom, probeHealth } from '../tools/paths.mjs';
+import { ensureStoreDir, defaultDb, portFrom, probeHealth, rootFrom } from '../tools/paths.mjs';
 import { pathToFileURL } from 'node:url';
 import { audit, applyWiring, backupSettings, WIRING } from '../tools/install.mjs';
 
-const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+// `rootFrom`, not a copy of it: this line carried one. Neither decoded the URL, so under a
+// profile called `John Smith` this hook took its root to be `...\John%20Smith\...`, which is
+// not the folder it lives in (see tools/paths.mjs). One place to be right is enough.
+const ROOT = rootFrom(import.meta.url);
 const DEFAULT_OUT = join(ROOT, 'data', 'raw', 'events.ndjson');
 const OUT_OVERRIDE = process.env.C4X_EVENTS_OUT || null;
 const OUT = OUT_OVERRIDE || DEFAULT_OUT;

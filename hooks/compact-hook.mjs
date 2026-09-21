@@ -21,9 +21,10 @@ import { appendFileSync, copyFileSync, mkdirSync, readFileSync, statSync, exists
 import { join, dirname, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { ensureStoreDir } from '../tools/paths.mjs';
+import { ensureStoreDir, rootFrom } from '../tools/paths.mjs';
 
-const ROOT = join(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+// `rootFrom`, not a copy of it: a URL's pathname is percent-encoded (see tools/paths.mjs).
+const ROOT = rootFrom(import.meta.url);
 const EVENTS = join(ROOT, 'data', 'raw', 'compaction-events.ndjson');
 const SNAP_DIR = join(ROOT, 'data', 'snapshots');
 

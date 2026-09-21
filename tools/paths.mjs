@@ -12,12 +12,67 @@ import http from 'node:http';
 import { existsSync, mkdirSync, chmodSync, readdirSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { domainToUnicode, fileURLToPath, pathToFileURL } from 'node:url';
 
 // import.meta.url is a file:// URL; on Windows that is /C:/... and the drive letter needs the
 // leading slash stripped before it is a usable path. Every tool derived this line for itself.
+//
+// AND A URL IS NOT A PATH: its path part stays percent-encoded. Until it was decoded here, an
+// install under a folder whose name held a space, `#`, `%`, a square or curly bracket, a tilde,
+// a caret, a backtick or any non-ASCII letter (`C:\Users\John Smith`, a profile with an
+// accent in it, the generated short alias of a long name such as `ADMINI~1`) resolved to
+// `...\John%20Smith\...`, which is not the folder it lives in. That was so for the nine other
+// tools that call this (the tenth caller is this file's own self-test), for two more that
+// carried a copy of the line, and for both hooks; and it is the root `install.mjs` hands to
+// `cmdFor` when it writes the hook commands. Decoded ONCE: a folder really called `p%41q`
+// arrives as `p%2541q` and must come out as `p%41q`, not `pAq`. (An encoded separator, `%2F`,
+// would decode into a real one where `fileURLToPath` throws; no loader makes such a URL.)
+//
+// A SHARE is spelled `file://server/share/...` (that is what `pathToFileURL` makes of one), and
+// the path part alone drops the host, so it goes back in front, spelled as `fileURLToPath`
+// spells it: Unicode where the URL carries punycode, lower case either way. A drive letter
+// loses its slash only when there is NO host. No module has been seen running from a share:
+// started over this machine's own admin share, node 24.19 failed before the module ran.
+//
+// Not a plain `fileURLToPath`: by default it follows the platform it runs on, and the self-test
+// feeds this a Windows URL on the ubuntu legs too. It is the oracle there instead, for the URLs
+// the platform itself makes. ONE KNOWN DIFFERENCE, older than the decoding and left alone: on
+// POSIX a folder at the very top of the file system whose name is a letter and a colon (`/c:/x`)
+// reads as a drive and comes out relative.
 export function rootFrom(importMetaUrl) {
-  return join(dirname(new URL(importMetaUrl).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
+  const url = new URL(importMetaUrl);
+  let path = url.pathname;
+  try { path = decodeURIComponent(path); } catch { /* a URL no loader makes; leave it as it came */ }
+  const whole = url.host
+    ? `//${domainToUnicode(url.host) || url.host}${path}`
+    : path.replace(/^\/([A-Za-z]:)/, '$1');
+  return join(dirname(whole), '..');
+}
+
+// A LINE OF A TOOL OR A HOOK THAT TAKES A PATH OUT OF A MODULE'S URL BY HAND. Two triggers. The
+// word itself, however it is reached (a property, a destructuring, a bracket). And any mention
+// of `import.meta` that is not one of the honest forms this tree has: the URL handed whole to
+// `rootFrom`, `fileURLToPath` or `createRequire`, compared whole with another URL (how a file
+// asks whether it is the entry), or read back whole as source. "Whole": a form followed by a
+// `.` or a `[` is the URL being cut up, and is not honest. An allow-list, because a deny-list on
+// one spelling let most others by (slicing `href`, replacing the scheme, `decodeURI` and a
+// substring, `url.parse`, a bracket, a destructuring). It FAILS CLOSED: a new honest form, such
+// as `new URL('../x', import.meta.url)`, is flagged until it is added here or to LEGIT in the
+// self-test. It is still a LINE rule, and what follows is NOT all it misses: a URL put in a
+// variable on one line and cut up on the next, a module object passed somewhere else.
+// The detector is spelled in two halves so that this file's own lines are not what it finds.
+const PATH_WORD = new RegExp('\\bpath' + 'name\\b');
+const OWN_META = new RegExp('import[.]' + 'meta');
+export function rootByHand(line) {
+  // Block comments first, so that one at the start of a line cannot hide the code after it.
+  const code = line.replace(/\/\*.*?\*\//g, '').trim();
+  if (!code || /^(\/\/|\*|\/\*)/.test(code)) return false;
+  if (PATH_WORD.test(code)) return true;
+  const rest = code
+    .replace(/\b(rootFrom|fileURLToPath|createRequire)\(\s*import[.]meta[.]url\s*\)/g, '')
+    .replace(/[!=]==?\s*import[.]meta[.]url(?![.[\w])|import[.]meta[.]url\s*[!=]==?/g, '')
+    .replace(/readFileSync\(new URL\(import[.]meta[.]url\)(?![.[])/g, '');
+  return OWN_META.test(rest);
 }
 
 /**
@@ -333,7 +388,8 @@ export function shellArgvCalls(source) {
   return found;
 }
 
-/** Every .mjs file under the directories a hook or tool can ship from. */
+/** Every source file (.mjs, and .cjs or .js should one appear; there is none today) under the
+ * directories a hook or tool can ship from. Both source sweeps in the self-test read these. */
 export function sourceFiles(root, dirs = ['tools', 'hooks']) {
   const out = [];
   const walk = (dir) => {
@@ -342,7 +398,7 @@ export function sourceFiles(root, dirs = ['tools', 'hooks']) {
       if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
       const full = join(dir, e.name);
       if (e.isDirectory()) walk(full);
-      else if (e.name.endsWith('.mjs')) out.push(full);
+      else if (/\.(mjs|cjs|js)$/.test(e.name)) out.push(full);
     }
   };
   for (const d of dirs) walk(join(root, d));
@@ -397,6 +453,118 @@ async function selfTest() {
   add('defaultDb sits under data/', slash(defaultDb('R')) === 'R/data/context.db');
   add('rootFrom strips the leading slash from a Windows file URL',
     /^[A-Za-z]:/.test(slash(rootFrom('file:///C:/a/b/c.mjs'))));
+  // A URL IS NOT A PATH: its path part stays percent-encoded, so an install under a folder with
+  // a space in its name resolved to `...%20...`, which is not the folder it lives in. Measured
+  // on node 24 for a space, `#`, `%`, square and curly brackets, a tilde (the generated short
+  // alias of a long name has one: `ADMINI~1`, `PROGRA~1`), a caret, a backtick and several
+  // non-ASCII letters (a Windows profile called Jose with an accent is enough); parentheses,
+  // `&`, `'`, `;` and `+` were always read right. The URLs below are the ones node itself makes
+  // for a module under such a folder, and `fileURLToPath` is the oracle FOR THESE NAMES: by
+  // default it follows the platform it runs on, which is why a plain swap cannot replace
+  // `rootFrom` (the check above feeds a Windows URL to an ubuntu leg).
+  const awkward = ['plain', 'sp ace', 'a#b', 'p%41q', '100%', 'uni\u00e9', '[br]{ace}', "quo'te", 'amp&eq=x;+',
+    'ADMINI~1', 'car^et', 'back`tick'];
+  const under = (name) => join(rootFrom(import.meta.url), 'tmp', 'no-such', name);
+  const wrong = awkward.filter((name) =>
+    rootFrom(pathToFileURL(join(under(name), 'tools', 'x.mjs')).href) !== under(name));
+  add('rootFrom finds the install under a folder a URL escapes: a space, #, %41, an accent (gate can fail)',
+    wrong.length === 0, wrong.map((name) => `${name} -> ${rootFrom(pathToFileURL(join(under(name), 'tools', 'x.mjs')).href)}`).join('; '));
+  const disagrees = awkward.filter((name) => {
+    const url = pathToFileURL(join(under(name), 'tools', 'x.mjs')).href;
+    return rootFrom(url) !== join(dirname(fileURLToPath(url)), '..');
+  });
+  add('and agrees with fileURLToPath for each of those names (gate can fail)',
+    disagrees.length === 0, disagrees.join('; '));
+  add('an escape in the FOLDER NAME is not decoded twice: p%41q stays p%41q, never pAq (gate can fail)',
+    slash(rootFrom('file:///C:/x/p%2541q/tools/c.mjs')) === 'C:/x/p%41q');
+  // A SHARE. node spells `\\server\share\x` as `file://server/share/x`, host and all, and the
+  // path part alone drops the host. A share is a Windows thing, but the checks are exact on
+  // both platforms: POSIX `join` folds the doubled slash, so the host is still there to be seen,
+  // and dropping it fails on an ubuntu leg too. The URLs are put together from pieces so that
+  // no line of this file looks like a share to a tool that reads command lines.
+  const shareUrl = (host, rest) => `file:${'/'.repeat(2)}${host}/${rest}`;
+  const onShare = (host, rest) => (process.platform === 'win32' ? '//' : '/') + `${host}/${rest}`;
+  add('a share keeps its host (gate can fail)',
+    slash(rootFrom(shareUrl('server', 'share/my%20c4x/tools/c.mjs'))) === onShare('server', 'share/my c4x'));
+  add('a drive letter after a host keeps its slash: the host and the drive are not glued together (gate can fail)',
+    slash(rootFrom(shareUrl('server', 'C:/a/tools/c.mjs'))) === onShare('server', 'C:/a'));
+  add('a server name with an accent comes back as fileURLToPath spells it, not as punycode (gate can fail)',
+    slash(rootFrom(shareUrl('s\u00e9rver', 'share/c4x/tools/c.mjs'))) === onShare('s\u00e9rver', 'share/c4x'),
+    slash(rootFrom(shareUrl('s\u00e9rver', 'share/c4x/tools/c.mjs'))));
+  add('a URL no loader makes (a lone %) is left as it came rather than thrown on',
+    (() => { try { return slash(rootFrom('file:///C:/a%zz/tools/c.mjs')) === 'C:/a%zz'; } catch { return false; } })());
+
+  // THE SWEEP, fed what it claims to see before it is trusted with the tree. Each bad line
+  // below resolves the wrong root under SOME folder a URL escapes: most under a space, the
+  // `decodeURI` one only under `#` (it does decode a space). The first is the line four files
+  // carried; most of the others were shown slipping past a sweep that knew only that one, and
+  // the last four past the first allow-list.
+  const M = ['import', 'meta', 'url'].join('.');
+  const META = ['import', 'meta'].join('.');
+  const P = 'path' + 'name';
+  const badLines = [
+    `const ROOT = join(dirname(new URL(${M}).${P}.replace(/^\\/([A-Za-z]:)/, '$1')), '..');`,
+    `const { ${P} } = new URL(${M});`,
+    `const here = new URL(${M})['${P}'];`,
+    `const here = ${M}.slice(8);`,
+    `const here = ${M}.replace('file:///', '');`,
+    `const here = decodeURI(${M}).substring(8);`,
+    `const here = new URL(${M}).href.slice(8);`,
+    `const here = url.parse(${M}).path;`,
+    `const here = ${M}.split('/').slice(3).join('/');`,
+    `const here = ${M}.match(/^file:...(.*)$/)[1];`,
+    // The URL was taken on an earlier line; only the word gives these two away.
+    `const here = decodeURIComponent(u.${P});`,
+    `const { ${P}: here } = u;`,
+    // The URL reached another way, a comment in front, an honest form that is then cut up.
+    `const here = ${META}['url'].slice(8);`,
+    `const { url } = ${META};`,
+    `/* root */ const here = ${M}.slice(8);`,
+    `if (entry === ${M}.slice(8)) run();`,
+    `const src = readFileSync(new URL(${M}).href.slice(8), 'utf8');`,
+  ];
+  const fineLines = [
+    `const require = createRequire(${M});`,
+    `/* the entry check */ const mine = href === ${M};`,
+    `const ROOT = rootFrom(${M});`,
+    `const SELF = fileURLToPath(${M});`,
+    `const ROOT = join(dirname(fileURLToPath(${M})), '..');`,
+    `    return process.argv[1] ? pathToFileURL(process.argv[1]).href === ${M} : false;`,
+    `  const src = readFileSync(new URL(${M}), 'utf8');`,
+    `// a comment may say ${M} and ${P} as often as it likes`,
+    ` * and so may a block comment: ${M}.${P}`,
+    `const d = new DatabaseSync(DB_PATH, { readOnly: true });`,
+  ];
+  const missed = badLines.filter((line) => !rootByHand(line));
+  const falseAlarms = fineLines.filter((line) => rootByHand(line));
+  add('the sweep sees seventeen ways of cutting a path out of a module URL by hand (gate can fail)',
+    badLines.length === 17 && missed.length === 0, missed.join(' | '));
+  add('and lets the honest uses of a module URL, and comments, through (gate can fail)',
+    falseAlarms.length === 0, falseAlarms.join(' | '));
+  // THE TREE. Every source file under tools/ and hooks/, this one included up to its self-test
+  // (whose lines spell the bad forms out in order to look for them). This file is allowed ONE
+  // hit, the line inside `rootFrom`; a new helper here that cut a URL up by hand would be a
+  // second. If this ever flags an HTTP URL's path in a server or a fetch helper, or an honest
+  // use of a module's URL that this tree does not have yet (a relative `new URL('../x', ...)`
+  // handed to `fileURLToPath`), that is not the defect: name the line in LEGIT with the reason,
+  // or teach `rootByHand` the form. What comes after `selfTest` in this file is not swept.
+  const LEGIT = [];   // e.g. 'tools/dashboard.mjs: const route = new URL(req.url, base)...'
+  const byHand = [];
+  for (const f of sourceFiles(rootFrom(import.meta.url))) {
+    const at = slash(f).split('/').slice(-2).join('/');
+    const lines = readFileSync(f, 'utf8').split('\n');
+    const stop = at === 'tools/paths.mjs' ? lines.findIndex((line) => line.startsWith('async function selfTest')) : lines.length;
+    lines.slice(0, stop).forEach((line, i) => {
+      if (rootByHand(line) && !LEGIT.some((known) => known.startsWith(`${at}:`) && line.includes(known.slice(at.length + 1).trim()))) {
+        byHand.push(`${at}:${i + 1}`);
+      }
+    });
+  }
+  const own = byHand.filter((at) => at.startsWith('tools/paths.mjs:'));
+  const others = byHand.filter((at) => !at.startsWith('tools/paths.mjs:'));
+  add('no tool or hook cuts a path out of its own URL by hand: rootFrom or fileURLToPath (gate can fail)',
+    others.length === 0, others.join('; '));
+  add('and this file does it once, inside rootFrom (gate can fail)', own.length === 1, own.join('; '));
 
   // The port, and the store comparison the hook's "is this ours" rests on.
   add('the port is 8059 unless C4X_API_PORT says otherwise',

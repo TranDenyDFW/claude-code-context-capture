@@ -86,6 +86,34 @@ runner, CI and a linted tree.
 
 ### Fixed
 
+- **An install under a folder with a space, an accent, `#`, `%` or a bracket in its name finds
+  itself.** Eleven node tools and both hooks worked out where the install lives from the
+  module's `file://` URL (nine tools through `rootFrom` in `tools/paths.mjs`, four files through
+  a hand copy of its one line), and a URL's path stays percent-encoded: under
+  `C:\Users\John Smith` the root came out as `...\John%20Smith\...`, and under a profile
+  with an accent in it as `...\Jos%C3%A9\...`, neither of which is the folder the install is
+  in. Misread, measured: a space, `#`, `%`, square and curly brackets, a tilde (the generated
+  short alias of a long name has one, `ADMINI~1`), a caret, a backtick and any non-ASCII
+  character. Measured end to end on a copy of `tools/` and `hooks/` installed under six such
+  folders: on main five of the six resolved a root that did not exist, and the hook command
+  `install.mjs` builds from that root named a script that was not there. `rootFrom` now
+  decodes the path once (a folder really called `p%41q` stays `p%41q`, never `pAq`). For a
+  share it puts back the host, which the path part alone drops, spelled as `fileURLToPath`
+  spells it, and a drive letter loses its slash only when there is no host. The four hand
+  copies (`hooks/event-hook.mjs`, `hooks/compact-hook.mjs`, `tools/statusline.mjs`,
+  `tools/otel-gate.mjs`) call `rootFrom`. The paths self-test sweeps the source lines under
+  `tools/` and `hooks/` (its own file up to the self-test) for a path cut out of a module's own
+  URL by hand: the word `pathname` however it is reached, and any mention of `import.meta`
+  other than the URL handed whole to `rootFrom`, `fileURLToPath` or `createRequire`, compared
+  whole, or read back whole. It is fed seventeen such spellings first, so it can fail, and it
+  fails closed; it is a line rule, and a URL cut up across two lines is among what it cannot
+  see. Not a plain `fileURLToPath`: by default it follows the platform it runs on, and the
+  self-test feeds `rootFrom` a Windows URL on the ubuntu legs too; it is the oracle instead,
+  for twelve awkward names. Known and left alone: on POSIX a top-level folder named like a
+  drive (`/c:/x`) comes out relative, as it did before. Not settled: whether node can run the
+  tools from a share at all. Started over this machine's own admin share, node 24.19 failed
+  before the module ran, so no module URL from a share has been observed. Tests:
+  `node tools/paths.mjs --self-test`, eleven new checks.
 - **A store under a folder with `#` or `%` in its name is opened, and it is the right store.**
   Every read-only open built its SQLite URI as `file:` plus the path as it came plus `?mode=ro`,
   and a URI gives those characters a meaning. Measured on SQLite 3.50: under a folder called
