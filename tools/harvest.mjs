@@ -2497,6 +2497,16 @@ export const RUN = {
   QUOTE_WANT: 4,                  // how many reply lines are tried, newest first
   BATCH_MIN: 3,                   // other one-shots sharing the parent or grandparent directory
   BATCH_WINDOW_MS: 10 * 60 * 1000, // begun within ten minutes of the run
+  // THE SAME PROMPT AGAIN (how: same-prompt). Measured on the author's test laptop, 2026-09-20,
+  // full population: 208 one-shots no tier placed, 188 of them begun through the Agent SDK
+  // (entrypoint sdk-py or sdk-cli), and 183 of those one plugin's security review of a change,
+  // started from the chat's OWN folder by no shell call, 178 of them in one folder over twelve
+  // days (so no call, no containment, no ten minute window). What they share is the folder and
+  // the opening of the prompt: the same 183 group at a head of 20, 40, 60 or 120 characters and
+  // fall apart at 200, where the list of changed files begins. Seven more of the same runs hold
+  // 17 to 20 messages; the next SDK one-shot above them holds 76.
+  SDK_PREFIX: 'sdk-',             // an entrypoint no person types into
+  SAME_MAX_MESSAGES: 24,          // this tier's own ceiling; its corpus maximum is 20
 };
 /** The tiers of evidence for a parent, strongest first; `hits` counts how many agreed. */
 export const RUN_TIERS = ['prompt', 'cwd', 'quoted', 'under'];
@@ -2526,6 +2536,9 @@ export function namesPath(text, dir) {
   return false;
 }
 export const runOneShots = (db, ids) => reviewOneShots(db, ids, RUN.MAX_MESSAGES);
+/** One typed prompt and at most SAME_MAX_MESSAGES messages: what the same-prompt tier reads. */
+export const runLongShots = (db, ids) => reviewOneShots(db, ids, RUN.SAME_MAX_MESSAGES);
+export const isSdkEntry = (entrypoint) => String(entrypoint ?? '').startsWith(RUN.SDK_PREFIX);
 /** The reply lines worth looking for in the parent's tool results: ASCII, QUOTE_MIN or longer,
  * newest first, the last 120 characters of each (the review rule's tail). */
 export const runQuoteLines = (text) =>
@@ -2540,11 +2553,16 @@ export const runQuoteLines = (text) =>
  * first record within SKEW; among such calls the strongest tier wins (prompt, cwd, quoted,
  * under), and two parents at the same strength name nobody. A batch: at least BATCH_MIN other
  * one-shots sharing the cwd's parent or grandparent directory began within BATCH_WINDOW; its
- * project is the nearest ancestor directory holding a session that is not itself a run.
+ * project is the nearest ancestor directory holding a session that is not itself a run. The
+ * same prompt again: a one-shot begun through the Agent SDK that neither of those placed, with
+ * at least BATCH_MIN other SDK one-shots in the SAME folder whose prompt opens with the same
+ * PROMPT_HEAD characters, whenever they ran; no chat is named, the project is found the way a
+ * batch's is, and this tier alone reads a run of up to SAME_MAX_MESSAGES messages.
  *
  * `write:false` computes and writes nothing. A linked run is not asked again while it is still
  * a one-shot; one that grew a second typed prompt is unlinked. A miss is asked again only when
- * its pool (the calls near it and its sibling count) is different.
+ * its pool (the calls near it, its sibling count and how many share its prompt) is different;
+ * the key carries the rule's revision, so a miss recorded before a tier existed is asked again.
  */
 export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', now = null } = {}) {
   const result = { sessions: 0, one_shots: 0, already: 0, unchanged: 0, unlinked: 0,
@@ -2553,26 +2571,34 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
   result.sessions = ids.length;
   if (!ids.length) return result;
   const shots = runOneShots(db, ids);
-  result.one_shots = shots.size;
+  // THE LONGER RUNS, for the same-prompt tier and nothing else: an SDK one-shot past the
+  // ceiling the other tiers were measured under. Never a miss when it ties to nothing: it was
+  // never a candidate for a parent or a batch, and counting it would call a person's
+  // eighteen-message chat a run the store could not place.
+  const entryOf = db.prepare('SELECT entrypoint FROM sessions WHERE session_id = ?');
+  const longer = new Set([...runLongShots(db, ids)]
+    .filter((s) => !shots.has(s) && isSdkEntry(entryOf.get(s)?.entrypoint)));
+  result.one_shots = shots.size + longer.size;
   const known = new Set();
   const reviews = new Set();
   const missed = new Map();
   const dropLink = db.prepare('DELETE FROM run_links WHERE session_id = ?');
   for (const chunk of reviewChunks(ids)) {
     const m = reviewMarks(chunk.length);
-    for (const r of db.prepare(`SELECT session_id FROM run_links WHERE session_id IN (${m})`).all(...chunk)) {
+    for (const r of db.prepare(`SELECT session_id, how FROM run_links WHERE session_id IN (${m})`).all(...chunk)) {
       // UNLINKED ON GROWTH. A linked run that is no longer a one-shot is a person's chat that
       // got its second prompt while a parent's command happened to be running: the tie goes.
-      if (shots.has(r.session_id)) known.add(r.session_id);
+      // A same-prompt run is held to its own tier's ceiling, not the one it was never under.
+      if (shots.has(r.session_id) || (r.how === 'same-prompt' && longer.has(r.session_id))) known.add(r.session_id);
       else { result.unlinked++; if (write) dropLink.run(r.session_id); }
     }
     for (const r of db.prepare(`SELECT session_id FROM review_links WHERE session_id IN (${m})`).all(...chunk)) reviews.add(r.session_id);
     for (const r of db.prepare(`SELECT session_id, pool_key FROM run_misses WHERE session_id IN (${m})`).all(...chunk)) missed.set(r.session_id, r.pool_key);
   }
-  if (!shots.size) return result;
+  if (!shots.size && !longer.size) return result;
   const stamp = now ?? new Date().toISOString();
   const iso = (ms) => new Date(ms).toISOString();
-  const when = db.prepare('SELECT cwd, first_ts FROM sessions WHERE session_id = ?');
+  const when = db.prepare('SELECT cwd, first_ts, entrypoint FROM sessions WHERE session_id = ?');
   const promptOf = db.prepare(`SELECT text FROM messages WHERE session_id = ? AND ${PERSON_PROMPT}
                                ORDER BY ts LIMIT 1`);
   const promptCount = db.prepare(`SELECT COUNT(*) n FROM messages WHERE session_id = ? AND ${PERSON_PROMPT}`);
@@ -2586,7 +2612,8 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
   const quotedBy = db.prepare(`SELECT 1 FROM messages WHERE session_id = ? AND type = 'tool_result'
                                AND ts BETWEEN ? AND ? AND instr(text, ?) > 0 LIMIT 1`);
   const siblingsNear = db.prepare('SELECT session_id, cwd FROM sessions WHERE first_ts BETWEEN ? AND ? AND session_id <> ?');
-  const chatsAt = db.prepare(`SELECT session_id, cwd, first_ts FROM sessions WHERE lower(replace(cwd, '\\', '/')) = ?`);
+  const chatsAt = db.prepare(`SELECT session_id, cwd, first_ts, entrypoint FROM sessions
+                              WHERE lower(replace(cwd, '\\', '/')) = ?`);
   const isRun = db.prepare('SELECT 1 FROM run_links WHERE session_id = ?');
   const putLink = db.prepare(`INSERT OR REPLACE INTO run_links
     (session_id, head_id, project, how, call_id, hits, method, linked_at) VALUES (?,?,?,?,?,?,?,?)`);
@@ -2615,6 +2642,37 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
       });
     return oneShotAmong(near.map((s) => s.session_id));
   };
+  // THE SAME PROMPT AGAIN: the other SDK one-shots in the very same folder whose prompt opens
+  // the way this one's does, whenever they ran and whether or not something else placed them.
+  // Empty for a session a person could have typed (any entrypoint but the SDK's), for one that
+  // is not itself a one-shot of this tier's length, and for a prompt too short to prove anything.
+  const longMemo = new Map();
+  const longShotAmong = (list) => {
+    const ask = list.filter((s) => !longMemo.has(s));
+    if (ask.length) {
+      const found = runLongShots(db, ask);
+      for (const s of ask) longMemo.set(s, found.has(s));
+    }
+    return list.filter((s) => longMemo.get(s));
+  };
+  const headMemo = new Map();
+  const headOf = (sid) => {
+    if (!headMemo.has(sid)) headMemo.set(sid, (promptOf.get(sid)?.text ?? '').slice(0, RUN.PROMPT_HEAD));
+    return headMemo.get(sid);
+  };
+  const groupMemo = new Map();
+  const sameAs = (sid, cwd, entrypoint) => {
+    if (!cwd || !isSdkEntry(entrypoint) || !longShotAmong([sid]).length) return new Set();
+    const head = headOf(sid);
+    if (head.length < RUN.PROMPT_MIN) return new Set();
+    const at = `${cwd}\n${head}`;
+    if (!groupMemo.has(at)) {
+      result.queries++;
+      const there = chatsAt.all(cwd).filter((x) => isSdkEntry(x.entrypoint)).map((x) => x.session_id);
+      groupMemo.set(at, longShotAmong(there).filter((s) => headOf(s) === head));
+    }
+    return new Set(groupMemo.get(at).filter((s) => s !== sid));
+  };
   // A REAL CHAT, for the project walk: a session somebody prompted, that is not a run and would
   // not be batched itself. Not merely "not in run_links": a batch's members are written one at
   // a time, and a sibling run in the same folder that has not been written yet would otherwise
@@ -2630,22 +2688,43 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
       chat = Number.isNaN(began)
         || siblingsOf(row.session_id, normPath(row.cwd), began).size < RUN.BATCH_MIN;
     }
+    // Nor is a member of a same-prompt group the chat its folder is named after: in a folder
+    // that holds nothing but one plugin's runs, the walk goes on up to a folder with a chat.
+    if (chat) chat = sameAs(row.session_id, normPath(row.cwd), row.entrypoint).size < RUN.BATCH_MIN;
     chatMemo.set(row.session_id, chat);
     return chat;
   };
-  for (const shot of shots) {
+  // The project a run with no chat behind it folds under: the run's own folder when a real
+  // chat lives there (a workflow's agents run in the chat's own directory), else the nearest
+  // folder above it that holds one.
+  const projectAbove = (shot, cwd) => {
+    for (let dir = cwd; dir; dir = dirAbove(dir)) {
+      result.queries++;
+      const there = chatsAt.all(dir).filter((x) => x.session_id !== shot && isChat(x));
+      if (there.length) return there[0].cwd;
+    }
+    return null;
+  };
+  for (const shot of [...shots, ...longer]) {
     if (known.has(shot) || reviews.has(shot)) { result.already++; continue; }
     const r = when.get(shot);
     const first = Date.parse(r?.first_ts ?? '');
     if (!r || Number.isNaN(first)) continue;
     const cwd = normPath(r.cwd);
-    // THE POOL: the shell calls that could have spawned it, and the one-shots beside it.
+    // A longer run is read by the same-prompt tier alone: no calls, no siblings.
+    const short = shots.has(shot);
+    // THE POOL: the shell calls that could have spawned it, the one-shots beside it, and the
+    // ones that were asked the same thing in the same folder.
     result.queries++;
-    const calls = callsNear.all(iso(first - RUN.LOOKBACK_MS - 1000), iso(first + RUN.SKEW_MS + 1000), shot);
+    const calls = short
+      ? callsNear.all(iso(first - RUN.LOOKBACK_MS - 1000), iso(first + RUN.SKEW_MS + 1000), shot) : [];
     const parents = [...new Set(calls.map((c) => c.session_id))].sort();
     const parentShots = oneShotAmong(parents);
-    const siblings = siblingsOf(shot, cwd, first);
-    const key = `${parents.join(',')}|${siblings.size}`;
+    const siblings = short ? siblingsOf(shot, cwd, first) : new Set();
+    const same = sameAs(shot, cwd, r.entrypoint);
+    // `r2`: the rule's revision. A miss recorded before the same-prompt tier existed carries a
+    // key without it, equals nothing computed here, and so is asked once more.
+    const key = `r2|${parents.join(',')}|${siblings.size}|${same.size}`;
     if (missed.get(shot) === key) { result.unchanged++; continue; }
     // TIER ONE, A PARENT CHAT.
     const prompt = promptOf.get(shot)?.text ?? '';
@@ -2696,19 +2775,22 @@ export function deriveRuns(db, sessionIds, { write = true, method = 'harvest', n
     }
     // TIER TWO, A BATCH WITH NO CHAT BEHIND IT.
     if (siblings.size >= RUN.BATCH_MIN) {
-      // The project: the run's own folder when a real chat lives there (a workflow's agents
-      // run in the chat's own directory), else the nearest folder above it that holds one.
-      let project = null;
-      for (let dir = cwd; dir; dir = dirAbove(dir)) {
-        result.queries++;
-        const there = chatsAt.all(dir).filter((x) => x.session_id !== shot && isChat(x));
-        if (there.length) { project = there[0].cwd; break; }
-      }
+      const project = projectAbove(shot, cwd);
       const row = { session_id: shot, head_id: null, project, how: 'batch', call_id: null, hits: siblings.size };
       result.batched.push(row);
       if (write) { putLink.run(shot, null, project, 'batch', null, siblings.size, method, stamp); dropMiss.run(shot); }
       continue;
     }
+    // TIER THREE, THE SAME PROMPT AGAIN. Counted with the batches: it has no chat behind it and
+    // folds under a project, which is all any reader asks of a run whose head is NULL.
+    if (same.size >= RUN.BATCH_MIN) {
+      const project = projectAbove(shot, cwd);
+      const row = { session_id: shot, head_id: null, project, how: 'same-prompt', call_id: null, hits: same.size };
+      result.batched.push(row);
+      if (write) { putLink.run(shot, null, project, 'same-prompt', null, same.size, method, stamp); dropMiss.run(shot); }
+      continue;
+    }
+    if (!short) continue;
     result.misses++;
     if (write) putMiss.run(shot, key, stamp);
   }
@@ -5693,10 +5775,10 @@ async function selfTest() {
       rlink(U.C7)?.head_id === U.P && rlink(U.C7)?.how === 'under' && rlink(U.C7)?.call_id === 'toolu_run3',
       JSON.stringify(rlink(U.C7))]);
     checks.push(['runs: a one-shot in the parent\'s own folder with nothing but an open span is not its child (gate can fail)',
-      !rlink(U.C5) && missKey(U.C5) === `${U.P}|1`,
+      !rlink(U.C5) && missKey(U.C5) === `r2|${U.P}|1|0`,
       JSON.stringify({ c5: rlink(U.C5), key: missKey(U.C5) })]);
     checks.push(['runs: a one-shot in the parent\'s own folder is not tied by a call that names a folder under it (gate can fail)',
-      !rlink(U.C6) && missKey(U.C6) === `${U.P}|1`,
+      !rlink(U.C6) && missKey(U.C6) === `r2|${U.P}|1|0`,
       JSON.stringify({ c6: rlink(U.C6), key: missKey(U.C6) })]);
     checks.push(['runs: a child whose prompt the parent\'s call carries, begun inside the span, ties by prompt with every tier agreeing (gate can fail)',
       rlink(U.C1)?.head_id === U.P && rlink(U.C1)?.how === 'prompt' && rlink(U.C1)?.hits === 4
@@ -5704,7 +5786,7 @@ async function selfTest() {
       && rlink(U.C1)?.method === 'harvest' && rlink(U.C1)?.linked_at === '2026-06-01T12:00:00.000Z',
       JSON.stringify(rlink(U.C1))]);
     checks.push(['runs: the same child begun after the result came back is not tied (gate can fail)',
-      !rlink(U.C2) && ru.misses === 3 && missKey(U.C2) === `${U.P}|2`,
+      !rlink(U.C2) && ru.misses === 3 && missKey(U.C2) === `r2|${U.P}|2|0`,
       JSON.stringify({ miss: rlink(U.C2), key: missKey(U.C2) })]);
     checks.push(['runs: a child two folders down, spawned by a script file the call names, ties by containment alone (gate can fail)',
       rlink(U.C3)?.head_id === U.P && rlink(U.C3)?.how === 'under' && rlink(U.C3)?.hits === 1
@@ -5755,6 +5837,101 @@ async function selfTest() {
       rep2.linked === 2 && rep2.batched === 9 && rep2.by_how.under === 2 && rep2.by_how.batch === 9
       && rep2.heads === 1 && rep2.projects === 2 && ucount() === 11 && rep2.links_after === 11 && rep2.links_before === 0,
       JSON.stringify({ l: rep2.linked, b: rep2.batched, h: rep2.by_how, p: rep2.projects, n: ucount() })]);
+  }
+
+  // Runs, the same prompt again: one plugin's SDK one-shots, begun from the chat's own folder by
+  // no shell call and days apart, so neither a parent nor a batch. Measured on the author's test
+  // laptop: 183 of 208 unplaced one-shots, plus seven of 17 to 20 messages.
+  {
+    const sdir = join(tmp, 'same-prompt', 'projects', 'P--plug');
+    mkdirSync(sdir, { recursive: true });
+    const sid = (tag) => `${tag}-0000-4000-8000-00000000000c`;
+    const PLUG = 'P:\\plug', ONLY = 'P:\\plug\\tmp\\only', DESK = 'P:\\desk', FEW = 'P:\\few', TERSE = 'P:\\terse';
+    const day = (d, s = 0) => new Date(Date.UTC(2026, 6, 1, 9, 0, 0) + d * 86400000 + s * 1000).toISOString();
+    let sn = 0;
+    const line = (type, s, t, cwd, entrypoint, message) => JSON.stringify({ type, uuid: `s${++sn}`, sessionId: s,
+      timestamp: t, cwd, entrypoint, message });
+    const asked = (s, t, text, cwd, entry) => line('user', s, t, cwd, entry, { role: 'user', content: text });
+    const replied = (s, t, text, cwd, entry) => line('assistant', s, t, cwd, entry, { model: 'm',
+      usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 },
+      content: [{ type: 'text', text }] });
+    // Sixty characters that every run shares, then the part that differs from run to run.
+    const OPENING = 'Review this change for security vulnerabilities.\n\nChanged files (you may read them): ';
+    const made = [];
+    const shot = (tag, d, cwd, entry, prompt, replies = 1) => {
+      const s = sid(tag);
+      const lines = [asked(s, day(d), prompt, cwd, entry)];
+      for (let i = 0; i < replies; i++) lines.push(replied(s, day(d, i + 1), `looked at it, part ${i}`, cwd, entry));
+      writeFileSync(join(sdir, s + '.jsonl'), lines.join('\n') + '\n');
+      made.push(s);
+      return s;
+    };
+    const K = sid('aaaa000c');
+    writeFileSync(join(sdir, K + '.jsonl'), [asked(K, day(0), 'build the plugin', PLUG, 'claude-desktop'),
+      replied(K, day(0, 1), 'built', PLUG, 'claude-desktop'), asked(K, day(0, 60), 'and ship it', PLUG, 'claude-desktop'),
+      replied(K, day(0, 61), 'shipped', PLUG, 'claude-desktop')].join('\n') + '\n');
+    made.push(K);
+    const S = [1, 2, 3, 4, 5].map((i) => shot(`5${i}5${i}000c`, i, PLUG, 'sdk-py', `${OPENING}src/a${i}.py`));
+    const LONG = shot('6161000c', 6, PLUG, 'sdk-py', `${OPENING}src/long.py`, 19);
+    const TOO_LONG = shot('6262000c', 7, PLUG, 'sdk-py', `${OPENING}src/longer.py`, 25);
+    const APART = shot('6363000c', 8, PLUG, 'sdk-py', 'You previously flagged these candidate vulnerabilities: [] and nothing else');
+    const ALONE = [1, 2, 3, 4].map((i) => shot(`7${i}7${i}000c`, 10 + i, ONLY, 'sdk-py', `${OPENING}only/b${i}.py`));
+    const TYPED = [1, 2, 3, 4, 5].map((i) => shot(`8${i}8${i}000c`, 20 + i, DESK, 'claude-desktop', `${OPENING}desk/c${i}.py`));
+    const THREE = [1, 2, 3].map((i) => shot(`9${i}9${i}000c`, 30 + i, FEW, 'sdk-py', `${OPENING}few/d${i}.py`));
+    const SHORT = [1, 2, 3, 4].map((i) => shot(`a${i}a${i}000c`, 40 + i, TERSE, 'sdk-cli', 'reply with OK'));
+    const sdb = new DatabaseSync(':memory:');
+    sdb.exec(SCHEMA);
+    const sh = new Harvest(sdb);
+    for (const s of made) await sh.file(join(sdir, s + '.jsonl'), true);
+    const slink = (s) => sdb.prepare('SELECT * FROM run_links WHERE session_id = ?').get(s);
+    const smiss = (s) => sdb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(s)?.pool_key;
+    const count = (s) => sdb.prepare('SELECT COUNT(*) n FROM messages WHERE session_id = ?').get(s).n;
+    const entry = (s) => sdb.prepare('SELECT entrypoint FROM sessions WHERE session_id = ?').get(s)?.entrypoint;
+    checks.push(['same-prompt: the fixture is what the cases say it is (an SDK entrypoint read, 20 and 26 messages)',
+      entry(S[0]) === 'sdk-py' && entry(TYPED[0]) === 'claude-desktop' && count(LONG) === 20 && count(TOO_LONG) === 26
+      && OPENING.length > RUN.PROMPT_HEAD, JSON.stringify([entry(S[0]), count(LONG), count(TOO_LONG)])]);
+    // A miss the rule recorded before this tier existed, under the key it wrote then.
+    sdb.prepare('INSERT INTO run_misses (session_id, pool_key, checked_at) VALUES (?,?,?)').run(S[0], '|0', day(0));
+    const dry = deriveRuns(sdb, made, { write: false });
+    checks.push(['same-prompt: write:false writes nothing and still reports (gate can fail)',
+      sdb.prepare('SELECT COUNT(*) n FROM run_links').get().n === 0 && dry.batched.length === 10 && dry.misses === 13
+      && dry.one_shots === 23, JSON.stringify({ b: dry.batched.length, m: dry.misses, o: dry.one_shots })]);
+    const first = deriveRuns(sdb, made, { write: true, now: '2026-07-01T12:00:00.000Z' });
+    checks.push(['same-prompt: SDK one-shots asked the same thing in the chat\'s own folder, days apart, fold under it (gate can fail)',
+      S.every((s) => slink(s)?.how === 'same-prompt' && slink(s)?.head_id === null && slink(s)?.call_id === null
+        && slink(s)?.project === PLUG && slink(s)?.hits === 5) && first.linked.length === 0,
+      JSON.stringify(slink(S[1]))]);
+    checks.push(['same-prompt: a miss recorded before the tier existed is asked again (gate can fail)',
+      slink(S[0])?.how === 'same-prompt' && smiss(S[0]) === undefined, JSON.stringify({ l: slink(S[0]), k: smiss(S[0]) })]);
+    checks.push(['same-prompt: a run of twenty messages is read by this tier, one of twenty six by none, and neither is a miss (gate can fail)',
+      slink(LONG)?.how === 'same-prompt' && slink(LONG)?.hits === 5 && !slink(TOO_LONG)
+      && smiss(LONG) === undefined && smiss(TOO_LONG) === undefined,
+      JSON.stringify({ long: slink(LONG), too: slink(TOO_LONG), key: smiss(TOO_LONG) })]);
+    checks.push(['same-prompt: another opening in the same folder is no sibling and is placed nowhere (gate can fail)',
+      !slink(APART) && smiss(APART) === 'r2||0|0', JSON.stringify({ l: slink(APART), k: smiss(APART) })]);
+    checks.push(['same-prompt: the same prompts from an entrypoint a person types into are not runs (gate can fail)',
+      TYPED.every((s) => !slink(s) && smiss(s) === 'r2||0|0'), JSON.stringify({ l: slink(TYPED[0]), k: smiss(TYPED[0]) })]);
+    checks.push(['same-prompt: three are not enough, and the key says how many shared the prompt (gate can fail)',
+      THREE.every((s) => !slink(s) && smiss(s) === 'r2||0|2'), JSON.stringify({ l: slink(THREE[0]), k: smiss(THREE[0]) })]);
+    checks.push(['same-prompt: a prompt shorter than PROMPT_MIN proves nothing (gate can fail)',
+      SHORT.every((s) => !slink(s) && smiss(s) === 'r2||0|0'), JSON.stringify({ l: slink(SHORT[0]), k: smiss(SHORT[0]) })]);
+    checks.push(['same-prompt: a folder holding nothing but the runs is not the project; the chat\'s folder above it is (gate can fail)',
+      ALONE.every((s) => slink(s)?.how === 'same-prompt' && slink(s)?.hits === 3 && slink(s)?.project === PLUG),
+      JSON.stringify(slink(ALONE[0]))]);
+    const again = deriveRuns(sdb, made, { write: true });
+    checks.push(['same-prompt: a second pass asks nothing again and keeps the longer run (gate can fail)',
+      again.already === 10 && again.unchanged === 13 && again.unlinked === 0 && again.batched.length === 0
+      && slink(LONG)?.how === 'same-prompt',
+      JSON.stringify({ a: again.already, u: again.unchanged, x: again.unlinked, long: slink(LONG) })]);
+    // A person picked one of them up: a second typed prompt, and the tie goes.
+    writeFileSync(join(sdir, S[1] + '.jsonl'), [asked(S[1], day(2), `${OPENING}src/a2.py`, PLUG, 'sdk-py'),
+      replied(S[1], day(2, 1), 'looked at it', PLUG, 'sdk-py'), asked(S[1], day(2, 50), 'explain the second finding', PLUG, 'sdk-py'),
+      replied(S[1], day(2, 51), 'explained', PLUG, 'sdk-py')].join('\n') + '\n');
+    await sh.file(join(sdir, S[1] + '.jsonl'), true);
+    const grew = deriveRuns(sdb, made, { write: true });
+    checks.push(['same-prompt: a run that grows a second typed prompt is unlinked, the rest stay (gate can fail)',
+      grew.unlinked === 1 && !slink(S[1]) && slink(S[2])?.how === 'same-prompt',
+      JSON.stringify({ x: grew.unlinked, s2: slink(S[1]) })]);
   }
 
   // Chains, fourth directory: a project this machine IMPORTED. The transcript is byte identical to
