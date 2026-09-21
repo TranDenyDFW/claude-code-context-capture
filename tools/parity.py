@@ -218,7 +218,7 @@ def pinned_store(store, url=None):
     # sqlite's own backup, not a file copy: it takes a consistent page image and includes whatever
     # is still in the write-ahead log. Copying context.db alone would silently drop the newest
     # turns, which is the same class of wrongness this exists to remove.
-    source = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
+    source = sqlite3.connect(store.ro_uri(live), uri=True)
     target = sqlite3.connect(str(snapshot))
     try:
         source.backup(target)

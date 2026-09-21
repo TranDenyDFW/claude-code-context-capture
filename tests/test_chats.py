@@ -14,6 +14,7 @@ import sqlite3
 
 import pytest
 
+from c4x.paths import ro_uri
 from tests.test_projects import build_store, forget_cached_rows
 
 ALPHA = r"P:\Alpha"
@@ -76,7 +77,7 @@ def frame(store):
 
 
 def sql(path, query, params=()):
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(path), uri=True)
     try:
         return con.execute(query, params).fetchall()
     finally:

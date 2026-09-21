@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from c4x import projects
+from c4x.paths import ro_uri
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -188,7 +189,7 @@ def store_at(tmp_path, monkeypatch):
 
 
 def rows_of(path, table):
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(path), uri=True)
     try:
         return con.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
     finally:
@@ -276,7 +277,7 @@ class TestWhichSessionsAProjectOwns:
     def test_an_archived_session_belongs_to_the_archived_project_not_the_plain_one(
             self, store_at, monkeypatch):
         self.mark_archived(monkeypatch, ["s0-0"])
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         plain = projects.session_ids(con, r"P:\Alpha")
         archived = projects.session_ids(con, r"P:\Alpha\archived")
         con.close()
@@ -288,7 +289,7 @@ class TestWhichSessionsAProjectOwns:
         """The consequence, stated as data loss rather than as a count."""
         self.mark_archived(monkeypatch, ["s0-0"])
         projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         left = con.execute("SELECT COUNT(*) FROM turns WHERE session_id = 's0-0'").fetchone()[0]
         con.close()
         assert left == len(AWKWARD), "an archived session was deleted with the plain project"
@@ -337,7 +338,7 @@ class TestWhichSessionsAProjectOwns:
         monkeypatch.setattr(projects_store(), 'archived_sessions', lambda: {'arch': True})
         forget_cached_rows()
 
-        con = sqlite3.connect(f'file:{store_at}?mode=ro', uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             listed = projects.projects()
             assert listed, 'no projects listed, so this gate proved nothing'
@@ -392,7 +393,7 @@ class TestWhichSessionsAProjectOwns:
         assert "quiet" in projects.session_ids(con, r"P:\Alpha")
         con.close()
         projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=store_at.parent)
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         orphan = con.execute(
             "SELECT COUNT(*) FROM messages WHERE session_id = 'quiet'").fetchone()[0]
         con.close()
@@ -407,7 +408,7 @@ class TestExport:
         out = tmp_path / "out.db"
         manifest = projects.export(r"P:\Alpha", out)
         assert manifest["sessions"] == 3
-        con = sqlite3.connect(f"file:{out}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(out), uri=True)
         cwds = {r[0] for r in con.execute("SELECT DISTINCT cwd FROM sessions").fetchall()}
         assert cwds == {r"P:\Alpha"}, f"the export leaked another project: {cwds}"
         con.close()
@@ -416,8 +417,8 @@ class TestExport:
         """Row for row, value for value, against the source. This is the real check."""
         out = tmp_path / "out.db"
         projects.export(r"P:\Alpha", out)
-        source = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
-        got = sqlite3.connect(f"file:{out}?mode=ro", uri=True)
+        source = sqlite3.connect(ro_uri(store_at), uri=True)
+        got = sqlite3.connect(ro_uri(out), uri=True)
         for table in ("turns", "messages", "sessions", "session_titles"):
             mine = source.execute(
                 f"""SELECT * FROM {table} WHERE session_id IN
@@ -457,7 +458,7 @@ class TestExport:
         assert "session_links" not in manifest["digests"]
         assert "session_links" not in manifest["counts"]
         assert projects.verify(out)[0]
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         preview = projects.footprint(con, r"P:\Alpha")
         con.close()
         assert preview["sessions"] == 3 and "session_links" not in preview
@@ -528,7 +529,7 @@ class TestImport:
         con.commit()
         con.close()
         projects.import_(out)
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         got = con.execute("SELECT total_resident FROM turns WHERE uuid = 's0-0-t0'").fetchone()[0]
         con.close()
         assert got == 999999, "the re-import overwrote a row that was already present"
@@ -602,7 +603,7 @@ class TestImport:
         report = projects.import_(out)
         assert report["dropped_columns"]["sessions"] == ["from_the_future"]
         # And the values that DID load are in their own columns, not shifted along by one.
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         cwds = {r[0] for r in con.execute(
             "SELECT DISTINCT cwd FROM sessions WHERE session_id LIKE 's0-%'").fetchall()}
         con.close()
@@ -617,7 +618,7 @@ class TestDelete:
         with pytest.raises(ValueError):
             projects.delete(r"P:\Alpha", confirm=r"P:\alpha", out_dir=tmp_path)
         # Case differs by ONE character and nothing was removed.
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         assert con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
                            (r"P:\Alpha",)).fetchone()[0] == 3
         con.close()
@@ -638,7 +639,7 @@ class TestDelete:
 
     def test_it_removes_survivors_and_the_harvest_offset_too(self, store_at, tmp_path):
         projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         # Orphaned survivors would make "what the compaction kept" wrong rather than missing.
         orphans = con.execute("""SELECT COUNT(*) FROM compaction_survivors
                                  WHERE compaction_uuid NOT IN
@@ -651,7 +652,7 @@ class TestDelete:
 
     def test_it_does_not_touch_the_store_wide_tables(self, store_at, tmp_path):
         projects.delete(r"P:\Alpha", confirm=r"P:\Alpha", out_dir=tmp_path)
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         assert con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 1
         assert con.execute("SELECT COUNT(*) FROM harvest_runs").fetchone()[0] == 1
         con.close()
@@ -735,7 +736,7 @@ def test_every_table_in_the_real_store_is_accounted_for(has_store):
     whether it belongs to a project.
     """
     from c4x import store
-    con = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(store.DB_PATH), uri=True)
     unhandled = projects.unhandled_tables(con)
     con.close()
     assert unhandled == [], (
@@ -759,7 +760,7 @@ def test_an_import_keeps_the_tag_this_store_holds(store_at, tmp_path):
         con.close()
 
     def owner():
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         got = con.execute("SELECT owner_account FROM desktop_records WHERE record_uuid = ?",
                           (uuid,)).fetchone()[0]
         con.close()

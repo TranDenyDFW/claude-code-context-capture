@@ -114,6 +114,27 @@ runner, CI and a linted tree.
   tools from a share at all. Started over this machine's own admin share, node 24.19 failed
   before the module ran, so no module URL from a share has been observed. Tests:
   `node tools/paths.mjs --self-test`, eleven new checks.
+- **A store under a folder with `#` or `%` in its name is opened, and it is the right store.**
+  Every read-only open built its SQLite URI as `file:` plus the path as it came plus `?mode=ro`,
+  and a URI gives those characters a meaning. Measured on SQLite 3.50: under a folder called
+  `a#b` everything from the `#` on is a fragment, `?mode=ro` included, so SQLite opened `.../a`
+  READ-WRITE, created it empty and answered "no such table"; for the gate that keeps Update
+  data off a redacted copy (`carries_mark`, `c4x/harvest.py`) that was a failure OPEN, a marked
+  copy reading as unmarked. Under `p%41q` the escape was decoded: the store under `pAq` was read
+  instead when there was one (the old `tools/redact.py`, asked to redact a six-session store
+  there, redacted the two-session one beside it and reported it clean), and nothing could be
+  opened when there was not, which refused Update data on the install's own store. Eleven
+  places in `c4x/` and `tools/*.py` built the URI that way, plus the test suite's snapshot of
+  the real store, 38 opens in eight test files, and three node tools, one of which
+  (`tools/segments.mjs`) `c4x.store` runs when it is imported, so the package could not be
+  imported at all with its store under such a folder. The Python ones now call `ro_uri`
+  (`c4x/paths.py`, re-exported as `store.ro_uri`; `tools/redact.py` carries a copy, held to the
+  same answers by a test): the posix path percent-encoded from its file-system bytes, with an
+  empty host in front of a share. The node ones pass the path itself, which is never
+  URI-parsed. `tests/test_ro_uri.py` holds every Python line that passes `uri=True` to calling
+  `ro_uri`, fails a node line that carries a SQLite URI parameter or opens through `file:`, is
+  fed known-bad lines first, and asserts some of what a line rule cannot see. Not part of this:
+  how the node tools find their install folder, which has its own entry.
 - **The release's checksum file can be read by the command that checks it.** It was written with a
   CRLF, which `sha256sum -c` reads as part of the filename, so it reported "No such file" about the
   zip sitting beside it. The digest itself was always correct. The release job now writes the

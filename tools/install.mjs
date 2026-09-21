@@ -584,7 +584,8 @@ function captureLiveness(root) {
   const db = defaultDb(root);
   if (!existsSync(db)) return out;
   try {
-    const con = new DatabaseSync(`file:${posix(db)}?mode=ro`, { readOnly: true });
+    // The path itself, not a `file:` URI built from it (`#` and `%41` mean something in one).
+    const con = new DatabaseSync(db, { readOnly: true });
     try {
       const row = con.prepare('SELECT COUNT(*) n, MAX(captured_at) last FROM hook_events').get();
       out.events = row?.n ?? 0;

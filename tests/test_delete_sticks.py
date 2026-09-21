@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from c4x import projects  # noqa: E402
+from c4x.paths import ro_uri  # noqa: E402
 from tests.test_projects import build_store, forget_cached_rows  # noqa: E402
 
 ALPHA = r"P:\Alpha"
@@ -40,7 +41,7 @@ def store_at(tmp_path, monkeypatch):
 
 
 def excluded_cwds(path):
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(path), uri=True)
     try:
         return [r[0] for r in con.execute("SELECT cwd FROM excluded_projects")]
     finally:
@@ -124,7 +125,7 @@ class TestTheBackupAndTheDeleteAgree:
         result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
 
         assert result["appeared_since_backup"] == ["s0-late"], result["appeared_since_backup"]
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             survivors = [r[0] for r in con.execute("SELECT session_id FROM sessions")]
         finally:

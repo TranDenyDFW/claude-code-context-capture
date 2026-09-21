@@ -572,8 +572,9 @@ def app_state_rows(path, with_blobs=True):
     decide whether to delete the files those blobs were read from would spend the memory to learn
     nothing the row did not already say.
     """
+    from c4x import store
     columns = "kind, path, cwd, mtime, sha256, rebased_sha256"
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = sqlite3.connect(store.ro_uri(path), uri=True)
     try:
         if not _has_table(con, APP_STATE_TABLE):
             return []
@@ -591,7 +592,8 @@ def app_state_rows(path, with_blobs=True):
 
 
 def read_manifest(path):
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    from c4x import store
+    con = sqlite3.connect(store.ro_uri(path), uri=True)
     try:
         found = con.execute(
             f"SELECT value FROM {MANIFEST_TABLE} WHERE key = 'manifest'").fetchone()
@@ -662,7 +664,8 @@ def verify(path):
     if problems:
         return False, problems
 
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    from c4x import store
+    con = sqlite3.connect(store.ro_uri(path), uri=True)
     try:
         for table, claimed in (manifest.get("digests") or {}).items():
             actual = app_state_digest(con) if table == APP_STATE_TABLE else digest(con, table)
@@ -787,7 +790,7 @@ def export(project, out_path, app_state=True):
     if out_path.exists():
         out_path.unlink()
 
-    source = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
+    source = sqlite3.connect(store.ro_uri(store.DB_PATH), uri=True)
     try:
         ids = session_ids(source, project)
         if not ids:
@@ -1424,7 +1427,7 @@ def delete(project, confirm, out_dir=None, keep_capturing=False, purge_snapshots
     # AND THE LABEL IS CHECKED BEFORE THE BACKUP IS WRITTEN, for the same reason: it is the
     # cheapest possible refusal, and a delete that cannot say which project it is about must not
     # start by writing a backup of both of them.
-    _ro = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
+    _ro = sqlite3.connect(store.ro_uri(store.DB_PATH), uri=True)
     try:
         one_working_directory(_ro, project)
     finally:
