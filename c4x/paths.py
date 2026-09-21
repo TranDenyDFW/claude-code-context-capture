@@ -26,6 +26,7 @@ import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import quote
 
 # `vars(sys).get`, not `getattr`: tools/table_audit.py reads every `getattr(...)` call as a callee
 # it cannot name (the evasion gate for hidden table constructions) and fails the suite on it. The
@@ -96,3 +97,37 @@ def install_root(frozen: bool | None = None, executable: str | None = None,
         sys.stderr.write(NOT_AN_INSTALL)
         raise SystemExit(2)
     return found
+
+
+def ro_uri(path) -> str:
+    """The SQLite URI that opens `path` read-only. THE ONE PLACE IT IS BUILT in this package,
+    and read as `store.ro_uri` by everything but `tests/conftest.py`, which has to open the real
+    store before `c4x.store` may be imported and is why this lives in a module with no imports
+    of its own. `tools/redact.py` carries a copy; `tests/test_ro_uri.py` holds both to the same
+    answers, and holds every Python module and node tool to building no such URI by hand.
+
+    A URI gives meaning to characters a folder name is free to hold, and eleven places in `c4x/`
+    and `tools/*.py` built this one in an f-string with the path as it came (`file:`, the path,
+    `?mode=ro`); so did the test suite's snapshot of the real store, and three node tools, which
+    now pass the path itself. Measured on SQLite 3.50 before this function existed:
+
+    - `#` starts a fragment, so under a folder called `a#b` everything after it was dropped,
+      `?mode=ro` INCLUDED. SQLite opened `.../a` read-write, CREATED it empty and answered "no
+      such table". For the write gate in `c4x/harvest.py` that was a failure OPEN: a redacted
+      copy under such a folder carried no mark that it could see.
+    - `%41` is an escape, so under `p%41q` the store opened was the one under `pAq`: the wrong
+      store when there was one, "unable to open database file" when there was not.
+    - a share (`\\\\server\\share\\x`) only worked spelled with backslashes. With forward slashes
+      `//server` is a HOST, which SQLite refuses; the path needs an empty host in front of it,
+      hence four slashes.
+
+    So the path is percent-encoded (`/` and the drive's `:` kept) and nothing else is decided here:
+    a store that is not there is still an error, and is not created. Encoded from the BYTES the
+    file system knows it by (`os.fsencode`), which is how `sqlite3.connect` has always turned a
+    path into bytes: a name that is not UTF-8 on Linux reaches Python with surrogate escapes, and
+    quoting the str would raise on a store the old form could open.
+    """
+    posix = Path(path).as_posix()
+    if posix.startswith("//"):
+        posix = "//" + posix
+    return f"file:{quote(os.fsencode(posix), safe='/:')}?mode=ro"

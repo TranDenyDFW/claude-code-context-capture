@@ -61,7 +61,10 @@ function open(dbPath) {
     console.error(`no store at ${dbPath}. Run: node tools/harvest.mjs`);
     process.exit(2);
   }
-  const d = new DatabaseSync(`file:${dbPath.replace(/\\/g, '/')}?mode=ro`, { readOnly: true });
+  // THE PATH ITSELF, never a `file:` URI built from it: a URI gives `#` and `%41` a meaning, so
+  // under a folder called `a#b` this could not open the store and under `p%41q` it read the one
+  // under `pAq`. A string that does not begin `file:` is not URI-parsed, and readOnly is the flag.
+  const d = new DatabaseSync(dbPath, { readOnly: true });
   d.exec(BUSY_TIMEOUT);
   return d;
 }

@@ -19,7 +19,6 @@ import sqlite3
 import time as _time
 from pathlib import Path
 from typing import Any, TypedDict
-from urllib.parse import quote
 
 import pandas as pd
 
@@ -33,7 +32,7 @@ from c4x.labels import (
     short_path,
     titled_path,
 )
-from c4x.paths import install_root, node_exe
+from c4x.paths import install_root, node_exe, ro_uri  # noqa: F401  (ro_uri: re-exported)
 
 # The install, not this file's directory: they differ once the API is frozen into an exe, and
 # this is the root the store and the node tools are found under. See c4x/paths.py.
@@ -177,34 +176,6 @@ def write():
 # cover every session, an export or a delete, must union the listed sessions with the ones this
 # hides; c4x/projects.py does, and it was carrying 58 of one project's 137 sessions until it did.
 SESSION_TURN_FLOOR = 5
-
-
-def ro_uri(path) -> str:
-    """The SQLite URI that opens `path` read-only. THE ONE PLACE IT IS BUILT in this package
-    (`tools/redact.py` carries a copy; `tests/test_ro_uri.py` holds both, and holds every module
-    to calling one of them).
-
-    A URI gives meaning to characters a folder name is free to hold, and eleven places built this
-    one in an f-string with the path as it came (`file:`, the path, `?mode=ro`). Measured on
-    SQLite 3.50 before this function existed:
-
-    - `#` starts a fragment, so under a folder called `a#b` everything after it was dropped,
-      `?mode=ro` INCLUDED. SQLite opened `.../a` read-write, CREATED it empty and answered "no
-      such table". For the write gate in `c4x/harvest.py` that was a failure OPEN: a redacted
-      copy under such a folder carried no mark that it could see.
-    - `%41` is an escape, so under `p%41q` the store opened was the one under `pAq`: the wrong
-      store when there was one, "unable to open database file" when there was not.
-    - a share (`\\\\server\\share\\x`) only worked spelled with backslashes. With forward slashes
-      `//server` is a HOST, which SQLite refuses; the path needs an empty host in front of it,
-      hence four slashes.
-
-    So the path is percent-encoded (`/` and the drive's `:` kept) and nothing else is decided here:
-    a store that is not there is still an error, and is not created.
-    """
-    posix = Path(path).as_posix()
-    if posix.startswith("//"):
-        posix = "//" + posix
-    return f"file:{quote(posix, safe='/:')}?mode=ro"
 
 
 def q(sql: str, params=()) -> pd.DataFrame:

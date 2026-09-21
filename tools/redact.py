@@ -413,14 +413,17 @@ def ro_uri(path) -> str:
     """The SQLite URI that opens `path` read-only. A COPY of `c4x.store.ro_uri`, because this tool
     imports nothing from the package; `tests/test_ro_uri.py` holds the two to the same answers.
 
-    The path is percent-encoded because a URI gives `#` and `%` a meaning: with the path as it
-    came, a store under a folder called `a#b` opened as `.../a`, read-write, CREATED EMPTY, and
-    this tool then backed up that empty file in place of the store. A share needs an empty host
-    in front of it (four slashes), or `//server` is read as one."""
+    The path is percent-encoded because a URI gives `#` and `%` a meaning. Measured on this tool
+    with the path as it came: a store under a folder called `a#b` opened as `.../a`, read-write,
+    CREATED EMPTY, was backed up in place of the store, and the run then died on "no such table:
+    sessions" with nothing stamped (loud); a store under `p%41q` with another under `pAq` beside
+    it meant the OTHER one was redacted, stamped and reported clean (silent). A share needs an
+    empty host in front of it (four slashes), or `//server` is read as one. Encoded from the
+    bytes `os.fsencode` gives, as `sqlite3.connect` does, so a name that is not UTF-8 opens."""
     posix = Path(path).as_posix()
     if posix.startswith("//"):
         posix = "//" + posix
-    return f"file:{quote(posix, safe='/:')}?mode=ro"
+    return f"file:{quote(os.fsencode(posix), safe='/:')}?mode=ro"
 
 
 def main(argv=None):

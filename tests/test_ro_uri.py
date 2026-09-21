@@ -1,14 +1,24 @@
 """A store is opened read-only through a `file:` URI, and a URI gives meaning to characters a
 folder name is free to hold.
 
-Measured with SQLite 3.50 before `store.ro_uri` existed (`f"file:{path}?mode=ro"`, the path as it
-came): under a folder called `a#b` everything from the `#` on is a fragment, `?mode=ro` included,
-so SQLite opened `.../a` READ-WRITE, CREATED it empty, and answered "no such table"; under `p%41q`
-the escape was decoded and the store opened was the one under `pAq`, when there was one, and
-otherwise none. A UNC path survived only because it was spelled with backslashes: the same path
-with forward slashes reads as a host name.
+Measured with SQLite 3.50 before `c4x.paths.ro_uri` existed, the URI being an f-string of `file:`,
+the path as it came, and `?mode=ro`: under a folder called `a#b` everything from the `#` on is a
+fragment, `?mode=ro` included, so SQLite opened `.../a` READ-WRITE, CREATED it empty, and answered
+"no such table"; under `p%41q` the escape was decoded and the store opened was the one under
+`pAq`, when there was one, and otherwise none. A share survived only because it was spelled with
+backslashes: the same path with forward slashes reads as a host name.
 
-So nothing in `c4x/` or `tools/` builds that URI by hand any more, which the last test holds.
+Eleven places in `c4x/` and `tools/*.py` built it that way, and so did the suite's own snapshot of
+the real store (`tests/conftest.py`) and three node tools, one of which `c4x.store` runs when it is
+imported. The Python ones now call `ro_uri`; the node ones pass the path itself, which is never
+URI-parsed. The last test holds both kinds to that. What it does NOT cover is how the node tools
+find the install they belong to (`rootFrom` in `tools/paths.mjs`), which misreads the same
+characters, and a space, in its own way: a separate defect, recorded and not fixed here.
+
+NO TEST HERE SKIPS AGAINST THE FIXTURE. CI's runner fails a skipped test on the fixture leg
+(`tools/run_tests.mjs`, `judgePytest`), so a platform difference is a branch inside the test, the
+way `tests/test_proc.py` does it. The one skip is for a LIVE store too large to copy, which that
+runner allows and reports by name.
 """
 import os
 import re
@@ -17,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from c4x import store
+from c4x import paths, proc, store
 from tests.test_projects import forget_cached_rows
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,7 +54,24 @@ def said(path):
         con.close()
 
 
+def copy_of(source, target):
+    """A consistent copy through SQLite's own backup, the way the suite snapshots a store."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    src = sqlite3.connect(store.ro_uri(source), uri=True)
+    dst = sqlite3.connect(target)
+    try:
+        with dst:
+            src.backup(dst)
+    finally:
+        src.close()
+        dst.close()
+    return target
+
+
 class TestTheUri:
+    def test_the_store_and_the_paths_module_share_one_function(self):
+        assert store.ro_uri is paths.ro_uri
+
     @pytest.mark.parametrize("folder", AWKWARD)
     def test_it_opens_the_file_it_was_given(self, tmp_path, folder):
         target = make(tmp_path / folder / "context.db", folder)
@@ -76,28 +103,47 @@ class TestTheUri:
             sqlite3.connect(store.ro_uri(absent), uri=True).execute("SELECT 1")
         assert not absent.exists() and [p.name for p in tmp_path.iterdir()] == ["a#b"]
 
-    @pytest.mark.skipif(os.name != "nt", reason="a UNC path is a Windows spelling")
     def test_a_share_is_spelled_with_an_empty_host(self):
         """`//server/share/x` after `file:` names the HOST `server`, which SQLite refuses. Four
-        slashes: an empty host, then the path with both of its own."""
-        assert store.ro_uri(r"\\server\share\my store\context.db") == \
+        slashes: an empty host, then the path with both of its own. Both flavours of pathlib keep
+        exactly two leading slashes, so the first line holds everywhere."""
+        assert store.ro_uri("//server/share/my store/context.db") == \
             "file:////server/share/my%20store/context.db?mode=ro"
-        assert store.ro_uri(r"P:\x\a#b\context.db") == "file:P:/x/a%23b/context.db?mode=ro"
+        if os.name == "nt":
+            assert store.ro_uri(r"\\server\share\my store\context.db") == \
+                "file:////server/share/my%20store/context.db?mode=ro"
+            assert store.ro_uri(r"P:\x\a#b\context.db") == "file:P:/x/a%23b/context.db?mode=ro"
+        else:
+            assert store.ro_uri("/x/a#b/context.db") == "file:/x/a%23b/context.db?mode=ro"
 
-    @pytest.mark.skipif(os.name != "nt", reason="a UNC path is a Windows spelling")
-    def test_a_store_on_a_share_opens(self, tmp_path):
-        target = make(tmp_path / "a#b" / "context.db", "over the share")
-        drive = target.drive.rstrip(":")
-        share = Path(rf"\\localhost\{drive}$") / target.relative_to(target.anchor)
-        if len(drive) != 1 or not share.exists():
-            pytest.skip("this machine does not serve its own drive as an admin share")
-        assert said(share) == "over the share"
+    def test_a_path_that_begins_with_two_slashes_opens(self, tmp_path):
+        """The four slashes, LIVE, without needing a share: on Windows the long-path spelling
+        `\\\\?\\P:\\...` has the same two leading slashes once it is posix, and the old URI could
+        not open it; on POSIX `//tmp/x` is `/tmp/x`."""
+        target = make(tmp_path / "a#b" / "context.db", "two slashes")
+        doubled = "\\\\?\\" + str(target) if os.name == "nt" else "/" + str(target)
+        assert Path(doubled).as_posix().startswith("//")
+        assert said(doubled) == "two slashes"
+
+    def test_a_name_that_is_not_utf8_is_encoded_from_its_bytes(self, tmp_path):
+        """Linux hands Python the byte E9 in a name as a lone surrogate. Quoting the STR raises on
+        it; `sqlite3.connect` never did, because it encodes the way `os.fsencode` does."""
+        name = "caf\udce9"
+        uri = store.ro_uri(f"x/{name}/context.db")
+        assert uri.startswith("file:x/caf%") and uri.endswith("/context.db?mode=ro")
+        if os.name != "nt":
+            assert uri == "file:x/caf%E9/context.db?mode=ro"
+            folder = os.fsencode(tmp_path) + b"/caf\xe9"
+            os.mkdir(folder)
+            target = Path(os.fsdecode(folder)) / "context.db"
+            make(target, "bytes, not text")
+            assert said(target) == "bytes, not text"
 
 
 class TestTheReaders:
     @pytest.mark.parametrize("folder", ["a#b", "p%41q"])
     def test_the_store_reads_from_a_folder_with_such_a_name(self, tmp_path, monkeypatch, folder):
-        """`q`, `column_present` and `tables_present` are every read the page makes."""
+        """`q`, `column_present` and `tables_present`: the three opens in `c4x/store.py`."""
         target = make(tmp_path / folder / "context.db", folder)
         monkeypatch.setattr(store, "DB_PATH", target)
         forget_cached_rows()
@@ -138,17 +184,23 @@ class TestTheReaders:
 
     def test_the_redact_tool_builds_the_same_uri(self, tmp_path):
         """`tools/redact.py` imports nothing from the package, so it carries a copy; nothing but
-        this keeps the two in step. It matters there more than anywhere: under `a#b` the old URI
-        made the tool back up an EMPTY file it had just created in place of the store."""
+        this keeps the two in step. Measured on the old tool: under `a#b` it backed up the EMPTY
+        file it had just created and then died in `build_maps` on "no such table: sessions", with
+        nothing stamped or reported (loud); under `p%41q` with a `pAq` beside it, it redacted the
+        WRONG store, stamped it and reported it clean (silent)."""
         import sys
         sys.path.insert(0, str(ROOT / "tools"))
-        import redact
-        paths = [tmp_path / folder / "context.db" for folder in AWKWARD]
+        try:
+            import redact
+        finally:
+            sys.path.remove(str(ROOT / "tools"))
+        shapes = [tmp_path / folder / "context.db" for folder in AWKWARD]
+        shapes += ["//server/share/a#b/context.db", "rel/a#b/context.db", "x/caf\udce9/context.db"]
         if os.name == "nt":
-            paths.append(Path(r"\\server\share\a#b\context.db"))
-        for path in paths:
-            assert redact.ro_uri(path) == store.ro_uri(path), path
-            assert redact.ro_uri(str(path)) == store.ro_uri(path), path
+            shapes.append(r"\\server\share\a#b\context.db")
+        for shape in shapes:
+            assert redact.ro_uri(shape) == store.ro_uri(shape), shape
+            assert redact.ro_uri(str(shape)) == store.ro_uri(shape), shape
         target = make(tmp_path / "a#b" / "context.db", "read by the tool")
         con = sqlite3.connect(redact.ro_uri(target), uri=True)
         try:
@@ -156,18 +208,52 @@ class TestTheReaders:
         finally:
             con.close()
 
-    def test_no_module_builds_a_sqlite_uri_by_hand(self):
-        """THE CLASS, not the instance: eleven places built `f"file:{path}?mode=ro"` when the first
-        of them was found. A new one would bring the defect back for whatever it opens."""
-        by_hand = re.compile(r"""["']file:\{""")
+    def test_the_node_tools_read_the_store_they_were_pointed_at(self, tmp_path):
+        """`c4x.store` runs `tools/segments.mjs` when it is imported, so until that tool stopped
+        building the URI by hand the package could not even be imported with its store under
+        `a#b`, whatever Python did. Asked the same question of one store under three folders, the
+        third with a decoy beside it that the old URI would have read instead."""
+        source = Path(store.DB_PATH)
+        if source.stat().st_size > 64 * 1024 * 1024:
+            pytest.skip("the live store is too large to copy three times; the fixture leg has it")
+        make(tmp_path / "pAq" / "context.db", "the decoy")
+        asked = (("segments.mjs", "--windows-for-compactions"), ("waste.mjs", "--servers"))
+        answers = {}
+        for folder in ("plain", "a#b", "p%41q"):
+            target = copy_of(source, tmp_path / folder / "context.db")
+            env = {**os.environ, "C4X_DB": str(target)}
+            for tool, flag in asked:
+                done = proc.run([store.NODE, str(ROOT / "tools" / tool), flag], cwd=str(ROOT),
+                                env=env, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=120)
+                assert done.returncode == 0, f"{tool} under {folder}: {done.stderr[-400:]}"
+                answers[(folder, tool)] = done.stdout.replace(str(target), "<store>") \
+                                                     .replace(target.as_posix(), "<store>")
+        for tool in ("segments.mjs", "waste.mjs"):
+            assert answers[("plain", tool)].strip(), f"{tool} said nothing about the plain store"
+            assert answers[("a#b", tool)] == answers[("plain", tool)], tool
+            assert answers[("p%41q", tool)] == answers[("plain", tool)], tool
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["a#b", "p%41q", "pAq", "plain"]
+
+    def test_nothing_builds_a_sqlite_uri_by_hand(self):
+        """THE CLASS, not the instance. In Python a hand-built URI is an f-string, a `.format` or a
+        concatenation that starts `file:`; in a node tool it is a template literal or a
+        concatenation on a line that also opens a database or names a mode. A new one would bring
+        the defect back for whatever it opens."""
+        python = re.compile(r"""["']file:(\{|["']\s*\+|%s|\{\})""")
+        node = re.compile(r"""[`"']file:(\$\{|[`"']\s*\+)""")
         found = []
-        for folder, pattern in (("c4x", "**/*.py"), ("tools", "*.py")):
+        for folder, pattern, by_hand, also in (
+                ("c4x", "**/*.py", python, None), ("tools", "**/*.py", python, None),
+                ("tests", "conftest.py", python, None),
+                ("tools", "**/*.mjs", node, re.compile(r"DatabaseSync|mode=|immutable=")),
+                ("hooks", "**/*.mjs", node, re.compile(r"DatabaseSync|mode=|immutable="))):
             for source in sorted((ROOT / folder).glob(pattern)):
                 for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
-                    if by_hand.search(line) and "def ro_uri" not in line:
+                    if by_hand.search(line) and (also is None or also.search(line)):
                         found.append(f"{source.relative_to(ROOT).as_posix()}:{number}")
-        allowed = {"c4x/store.py", "tools/redact.py"}   # where the URI is built, once each
+        allowed = {"c4x/paths.py", "tools/redact.py"}   # where the URI is built, once each
         extra = [f for f in found if f.rsplit(":", 1)[0] not in allowed]
-        assert extra == [], f"open these through store.ro_uri: {extra}"
+        assert extra == [], f"open these through ro_uri, or by the path itself in node: {extra}"
         per_file = {name: sum(1 for f in found if f.startswith(name + ":")) for name in allowed}
-        assert per_file == {"c4x/store.py": 1, "tools/redact.py": 1}, per_file
+        assert per_file == {"c4x/paths.py": 1, "tools/redact.py": 1}, per_file
