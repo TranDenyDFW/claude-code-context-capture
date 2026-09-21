@@ -543,12 +543,18 @@ def _runs_report(base: Report, raw: dict[str, Any], dry_run: bool, took: str,
                       "Update failed: the fold did not do what was asked.")
     linked, batched = _count(raw.get("linked")), _count(raw.get("batched"))
     unlinked, misses = _count(raw.get("unlinked")), _count(raw.get("misses"))
+    # WHAT CAN BE PLACED NOWHERE IS TWO NUMBERS. `misses` counts only the misses this pass
+    # recorded; a run it already knew it could not place, whose circumstances have not changed,
+    # is skipped and counted as `unchanged`. Quoting `misses` alone said "0 can be placed
+    # nowhere" about a store with 271 of them, on the first live run of this.
+    unplaced = misses + _count(raw.get("unchanged"))
     heads, projects = _count(raw.get("heads")), _count(raw.get("projects"))
     open_spans = _count(raw.get("calls_without_result_ts"))
     by_how = raw.get("by_how") if isinstance(raw.get("by_how"), dict) else {}
     summary = {"one_shots": _count(raw.get("one_shots")), "already": _count(raw.get("already")),
                "unchanged": _count(raw.get("unchanged")), "unlinked": unlinked, "linked": linked,
-               "batched": batched, "misses": misses, "heads": heads, "projects": projects,
+               "batched": batched, "misses": misses, "unplaced": unplaced, "heads": heads,
+               "projects": projects,
                "links_before": _count(raw.get("links_before")),
                "links_after": _count(raw.get("links_after")),
                "by_how": {str(k): _count(v) for k, v in (by_how or {}).items()},
@@ -560,14 +566,14 @@ def _runs_report(base: Report, raw: dict[str, Any], dry_run: bool, took: str,
     if dry_run:
         if not changes:
             text = (f"Nothing to fold: none of {plural(summary['one_shots'], 'one-shot run')} "
-                    "would change. Nothing was written.")
+                    f"would change ({unplaced:,} can be placed nowhere). Nothing was written.")
             return {**base, "ok": True, "summary": summary, "sentence": text + loose,
                     "short": "Nothing to fold."}
         return {**base, "ok": True, "summary": summary,
                 "sentence": f"Would fold {plural(linked, 'run')} under the "
                             f"{plural(heads, 'chat')} that spawned them and {batched:,} under "
                             f"{plural(projects, 'project')}; {plural(unlinked, 'existing link')} "
-                            f"would be dropped and {misses:,} can be placed nowhere. Nothing was "
+                            f"would be dropped and {unplaced:,} can be placed nowhere. Nothing was "
                             f"written.{loose}",
                 "short": f"Would fold {plural(linked + batched, 'run')}."}
     if not changes:

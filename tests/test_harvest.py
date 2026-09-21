@@ -531,6 +531,20 @@ class TestTheOneOffPasses:
         assert got["summary"]["linked"] == 4 and got["summary"]["batched"] == 9
         assert got["summary"]["misses"] == 185 and got["summary"]["outcomes_first"] is False
 
+    def test_what_can_be_placed_nowhere_counts_the_misses_it_already_knew_about(self):
+        """Seen live: 1,178 one-shots, 907 links, and a question that said "0 can be placed
+        nowhere", because `misses` counts only what THIS pass recorded and the rest are
+        `unchanged`."""
+        known = runs_report(wrote=False, linked=0, batched=0, misses=0, unchanged=271,
+                            links_after=13)
+        got = job("runs", ran(json.dumps(known)), dry_run=True)
+        assert got["summary"]["unplaced"] == 271 and got["summary"]["misses"] == 0
+        assert "271 can be placed nowhere" in got["sentence"]
+        both = job("runs", ran(json.dumps(runs_report(wrote=False, unchanged=15, links_after=13))),
+                   dry_run=True)
+        assert both["summary"]["unplaced"] == 200
+        assert "200 can be placed nowhere" in both["sentence"]
+
     def test_the_fold_says_what_it_folded(self):
         got = job("runs", ran(json.dumps(runs_report())))
         assert got["ok"] and got["short"] == "Folded 13 runs."

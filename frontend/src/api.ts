@@ -614,7 +614,8 @@ export interface HarvestOutcome {
   started_at: string
   finished_at: string | null
   /** The job's own numbers. For a `runs` job (dry or not): `linked`, `heads`, `batched`,
-   *  `projects`, `unlinked`, `misses`, and `outcomes_first` when shell calls still lack a
+   *  `projects`, `unlinked`, `unplaced` (every run it can place nowhere, not only the ones this
+   *  pass recorded), and `outcomes_first` when shell calls still lack a
    *  result time. The confirm before the fold quotes them. */
   summary?: Record<string, unknown> | null
 }

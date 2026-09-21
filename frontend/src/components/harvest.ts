@@ -37,7 +37,9 @@ export function runsQuestion(summary: Record<string, unknown> | null | undefined
   const linked = count(summary?.linked)
   const batched = count(summary?.batched)
   const unlinked = count(summary?.unlinked)
-  const misses = count(summary?.misses)
+  // `unplaced` is the server's sum of the misses this pass recorded and the ones it already
+  // knew about; `misses` alone said 0 about a store with 271 of them.
+  const misses = count(summary?.unplaced ?? summary?.misses)
   const open = count(summary?.calls_without_result_ts)
   const detail = open > 0
     ? `${plural(open, 'shell call')} ${open === 1 ? 'has' : 'have'} no result time yet, so some matches would be loose, and a link made on a loose match stays. Cancel and run Record tool outcomes first.`

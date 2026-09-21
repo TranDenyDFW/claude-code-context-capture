@@ -21,9 +21,12 @@ runner, CI and a linted tree.
   that raised before the spawn left it held; freeing "whatever is locked" could free a later
   job's). The two backfills' reports are pinned contracts like `run()`'s
   (`TOOL_OUTCOMES_REPORT_KEYS`, `RUNS_REPORT_KEYS`), and the tool-outcomes pass takes its
-  transcripts root as a parameter so the self-test can run it. Tests: `tests/test_harvest.py`
-  (97), the harvester self-test (345), vitest `StoreMaintenance.test.tsx` (10),
-  `UpdateData.test.tsx` (23), `harvest.test.ts` (20), `App.test.tsx`, `a11y.test.tsx`.
+  transcripts root as a parameter so the self-test can run it. The first live run of the
+  fold's question said "0 runs can be placed nowhere" about a store with 271 of them: the
+  harvester's `misses` counts only what this pass recorded and the rest are `unchanged`, so
+  the question now quotes their sum. Tests: `tests/test_harvest.py` (98), the harvester
+  self-test (345), vitest `StoreMaintenance.test.tsx` (10), `UpdateData.test.tsx` (23),
+  `harvest.test.ts` (21), `App.test.tsx`, `a11y.test.tsx`.
 - **Update data, in the header.** The user, on learning the store could only be updated from a
   terminal: "there's no button for this in the app?" One click starts the same incremental
   harvest the hooks run, says what came of it beside the button, and reloads every pane; the

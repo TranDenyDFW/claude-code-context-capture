@@ -138,6 +138,13 @@ describe('runsQuestion', () => {
     expect(asked.nothing).toBe(false)
   })
 
+  it('counts every run it can place nowhere, not only the ones this pass recorded', () => {
+    // Seen live: `misses` was 0 and 271 runs were unplaced, all of them known from before.
+    expect(runsQuestion({ ...dry, misses: 0, unplaced: 271 }).question).toContain('leave 271 it can place nowhere')
+    expect(runsQuestion({ ...dry, linked: 0, batched: 0, misses: 0, unplaced: 271 }).question)
+      .toBe('Nothing to fold: no run would change (271 runs can be placed nowhere). Continue anyway?')
+  })
+
   it('says which links would be dropped, in the singular when it is one', () => {
     expect(runsQuestion({ ...dry, unlinked: 1 }).question).toContain(', drop 1 link that no longer holds,')
   })
