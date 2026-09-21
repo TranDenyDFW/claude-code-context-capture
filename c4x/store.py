@@ -19,6 +19,7 @@ import sqlite3
 import time as _time
 from pathlib import Path
 from typing import Any, TypedDict
+from urllib.parse import quote
 
 import pandas as pd
 
@@ -178,12 +179,40 @@ def write():
 SESSION_TURN_FLOOR = 5
 
 
+def ro_uri(path) -> str:
+    """The SQLite URI that opens `path` read-only. THE ONE PLACE IT IS BUILT in this package
+    (`tools/redact.py` carries a copy; `tests/test_ro_uri.py` holds both, and holds every module
+    to calling one of them).
+
+    A URI gives meaning to characters a folder name is free to hold, and eleven places built this
+    one in an f-string with the path as it came (`file:`, the path, `?mode=ro`). Measured on
+    SQLite 3.50 before this function existed:
+
+    - `#` starts a fragment, so under a folder called `a#b` everything after it was dropped,
+      `?mode=ro` INCLUDED. SQLite opened `.../a` read-write, CREATED it empty and answered "no
+      such table". For the write gate in `c4x/harvest.py` that was a failure OPEN: a redacted
+      copy under such a folder carried no mark that it could see.
+    - `%41` is an escape, so under `p%41q` the store opened was the one under `pAq`: the wrong
+      store when there was one, "unable to open database file" when there was not.
+    - a share (`\\\\server\\share\\x`) only worked spelled with backslashes. With forward slashes
+      `//server` is a HOST, which SQLite refuses; the path needs an empty host in front of it,
+      hence four slashes.
+
+    So the path is percent-encoded (`/` and the drive's `:` kept) and nothing else is decided here:
+    a store that is not there is still an error, and is not created.
+    """
+    posix = Path(path).as_posix()
+    if posix.startswith("//"):
+        posix = "//" + posix
+    return f"file:{quote(posix, safe='/:')}?mode=ro"
+
+
 def q(sql: str, params=()) -> pd.DataFrame:
     if not DB_PATH.exists():
         raise FileNotFoundError(
             f"No store at {DB_PATH}. Run `node tools/harvest.mjs` first."
         )
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(DB_PATH), uri=True)
     try:
         return pd.read_sql_query(sql, con, params=params)
     finally:
@@ -256,7 +285,7 @@ def column_present(table: str, column: str) -> bool:
     """
     if not DB_PATH.exists():
         return False
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(DB_PATH), uri=True)
     try:
         return any(r[1] == column for r in con.execute(f"PRAGMA table_info({table})").fetchall())
     except sqlite3.Error:
@@ -387,7 +416,7 @@ def tables_present(*names) -> bool:
     """
     if not DB_PATH.exists():
         return False
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(DB_PATH), uri=True)
     try:
         have = {r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}

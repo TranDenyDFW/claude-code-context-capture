@@ -133,6 +133,48 @@ class TestWhetherItWill:
         assert found["enabled"] is False and found["reason"] == "unreadable-store"
         assert harvest.carries_mark(tmp_path / "data" / "absent.db") is False
 
+    @pytest.mark.parametrize("folder", ["a#b", "p%41q", "per%cent"])
+    def test_the_mark_is_read_under_a_folder_a_uri_would_misread(self, tmp_path, folder):
+        """The gate opens the store through a `file:` URI. Measured before the path was escaped:
+        under `a#b` everything from the `#` on was dropped, `?mode=ro` with it, so SQLite CREATED
+        an empty `a`, found no mark in it, and the gate said "not a copy, go ahead" about a
+        redacted copy: it failed OPEN. Under `per%cent` the open raised, and Update data was
+        refused on the install's own store."""
+        import sqlite3
+        copy = tmp_path / folder / "copy" / "context.db"
+        real = tmp_path / folder / "real" / "context.db"
+        for path in (copy, real):
+            path.parent.mkdir(parents=True)
+            con = sqlite3.connect(path)
+            con.execute("CREATE TABLE turns (uuid TEXT)")
+            if path is copy:
+                con.execute(f"CREATE TABLE {store.REDACTION_MARK} (at TEXT)")
+            con.commit()
+            con.close()
+        assert harvest.carries_mark(copy) is True
+        assert harvest.carries_mark(real) is False
+        assert [p.name for p in tmp_path.iterdir()] == [folder], "asking created nothing beside it"
+        (tmp_path / folder / "install" / "data").mkdir(parents=True)
+        own = tmp_path / folder / "install" / "data" / "context.db"
+        copy.replace(own)
+        found = harvest.capability(db=own, root=tmp_path / folder / "install", env={})
+        assert found["enabled"] is False and found["reason"] == "redacted-copy"
+
+    def test_the_mark_is_not_read_from_the_store_an_escape_decodes_to(self, tmp_path):
+        """`p%41q` decodes to `pAq`. With a real store there and a redacted copy here, the old URI
+        read the real one's answer for the copy."""
+        import sqlite3
+        for name, marked in (("pAq", False), ("p%41q", True)):
+            (tmp_path / name).mkdir()
+            con = sqlite3.connect(tmp_path / name / "context.db")
+            con.execute("CREATE TABLE turns (uuid TEXT)")
+            if marked:
+                con.execute(f"CREATE TABLE {store.REDACTION_MARK} (at TEXT)")
+            con.commit()
+            con.close()
+        assert harvest.carries_mark(tmp_path / "p%41q" / "context.db") is True
+        assert harvest.carries_mark(tmp_path / "pAq" / "context.db") is False
+
     def test_no_writes_disables_it(self, tmp_path):
         found = harvest.capability(db=tmp_path / "data" / "context.db", root=tmp_path,
                                    env={"C4X_NO_WRITES": "1"}, redacted=lambda: False)

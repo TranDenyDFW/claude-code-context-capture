@@ -193,7 +193,7 @@ def carries_mark(path: Path | str) -> bool:
     target = Path(path)
     if not target.exists():
         return False
-    con = sqlite3.connect(f"file:{target.as_posix()}?mode=ro", uri=True)
+    con = sqlite3.connect(store.ro_uri(target), uri=True)
     try:
         return con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                            (store.REDACTION_MARK,)).fetchone() is not None
