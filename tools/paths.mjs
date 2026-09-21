@@ -434,12 +434,12 @@ async function selfTest() {
   add('an escape in the FOLDER NAME is not decoded twice: p%41q stays p%41q, never pAq (gate can fail)',
     slash(rootFrom('file:///C:/x/p%2541q/tools/c.mjs')) === 'C:/x/p%41q');
   // A SHARE. node spells `\\server\share\x` as `file://server/share/x`, host and all, and
-  // `pathname` alone drops the host, which put the root on the current drive. Windows only: a
-  // doubled leading slash means nothing to POSIX `join`, which folds it.
+  // `pathname` alone drops the host, which put the root on the current drive. A share is a
+  // Windows thing, but the check is exact on both: POSIX `join` folds the doubled slash, so the
+  // host is still there to be seen, and dropping it fails on an ubuntu leg too.
   add('a share keeps its host (gate can fail)',
-    process.platform === 'win32'
-      ? slash(rootFrom('file://server/share/my%20c4x/tools/c.mjs')) === '//server/share/my c4x'
-      : slash(rootFrom('file://server/share/my%20c4x/tools/c.mjs')).endsWith('/share/my c4x'));
+    slash(rootFrom('file://server/share/my%20c4x/tools/c.mjs'))
+      === (process.platform === 'win32' ? '//server/share/my c4x' : '/server/share/my c4x'));
   add('a URL no loader makes (a lone %) is left as it came rather than thrown on',
     (() => { try { return slash(rootFrom('file:///C:/a%zz/tools/c.mjs')) === 'C:/a%zz'; } catch { return false; } })());
   // THE CLASS, not the instance: four files carried a hand copy of the old expression, the two
