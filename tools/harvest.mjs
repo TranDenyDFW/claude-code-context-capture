@@ -3931,16 +3931,47 @@ function flushTypesFast(db, typeCounts, typeKnown) {
   for (const [t, n] of typeCounts) up.run(t, n, typeKnown?.get(t) ?? 1);
 }
 
-async function run({ full, recordsRoots = null }) {
+// THE REPORT `run` PRINTS IS A CONTRACT. `c4x/harvest.py` parses it for the page's Update data
+// button, and no test can run the harvester against real transcripts to notice a renamed key
+// (the transcripts root is this machine's own, by design). So the keys are listed once, here:
+// the self-test runs `run` on scratch inputs and holds its report to this list, and
+// tests/test_harvest.py reads this list out of this file and holds the Python parser to it.
+// Adding a key means adding it here; renaming one fails the self-test.
+export const RUN_REPORT_KEYS = Object.freeze([
+  'mode', 'chains', 'sidecars', 'desktop_records', 'plans', 'task_events', 'workflow_links',
+  'files_seen', 'files_read', 'rewritten_files', 'excluded_files', 'lines', 'mb',
+  'turn_records_seen', 'turn_rows_stored', 'duplicate_turn_records', 'compaction_records_seen',
+  'compaction_rows_stored', 'message_rows_stored', 'message_text_mb', 'unpaired_boundaries',
+  'unknown_record_types', 'seconds',
+]);
+// The keys INSIDE the three nested objects that `c4x/harvest.py` reads, held the same two ways:
+// a renamed `chains.directories` would otherwise leave every suite green and the page saying
+// "0 folders re-chained" for ever.
+export const RUN_REPORT_NESTED = Object.freeze({
+  chains: ['directories', 'links', 'reviews', 'runs', 'failed'],
+  sidecars: ['read', 'failed'],
+  desktop_records: ['deleted', 'gone', 'returned', 'failed'],
+});
+
+// THE INPUTS ARE PARAMETERS SO THE SELF-TEST CAN RUN THIS FUNCTION, which had no coverage at all
+// while being the one thing every hook, every terminal and now the page runs. Every default is
+// what the CLI has always used, and the CLI passes none of them: `projects` the transcripts root,
+// `dbPath` the store, `rawDir` where the hook events file lives, `records` the options of the
+// desktop-records pass (its ledger and backups), `quiet` no progress on stderr, `print` where the
+// report goes.
+async function run({ full, recordsRoots = null, projects = PROJECTS, dbPath = DB_PATH,
+                     rawDir = RAW_DIR, records: recordsOptions = {}, quiet = false,
+                     print = console.log } = {}) {
   const t0 = Date.now();
-  const db = openDb();
+  const say = quiet ? () => {} : (line) => process.stderr.write(line);
+  const db = openDb(dbPath);
   const h = new Harvest(db);
   // IN ORDER OF FIRST TIMESTAMP, not directory order. A resumed or forked transcript is a copy of
   // its predecessor, and the producer must be read first so that the copy is the one the ON
   // CONFLICT clauses refuse. Known files answer from the files table; a new file is head-scanned.
-  const files = orderedTranscripts(db, listTranscripts(PROJECTS));
+  const files = orderedTranscripts(db, listTranscripts(projects));
   h.stats.filesSeen = files.length;
-  process.stderr.write(`harvest: ${files.length} transcripts under ${PROJECTS}\n`);
+  say(`harvest: ${files.length} transcripts under ${projects}\n`);
 
   // Every project directory that gained a NEW transcript this run (or one that has just grown
   // past its head records, see Harvest.file) gets its chains re-derived below. Not every
@@ -3955,11 +3986,11 @@ async function run({ full, recordsRoots = null }) {
     await h.file(files[i], full);
     if ((h.stats.chainRelevant ?? 0) > relevantBefore) {
       const dir = dirname(files[i]);
-      if (dirname(dir) === PROJECTS) touched.add(dir);
+      if (dirname(dir) === projects) touched.add(dir);
     }
     if (++sinceCommit >= 200) { db.exec('COMMIT'); db.exec('BEGIN'); sinceCommit = 0; }
     if ((i + 1) % 500 === 0) {
-      process.stderr.write(`  ${i + 1}/${files.length} files, ${h.stats.turns} turns, ${h.stats.compactions} compactions, ${(h.stats.bytes / 1048576).toFixed(0)} MB\n`);
+      say(`  ${i + 1}/${files.length} files, ${h.stats.turns} turns, ${h.stats.compactions} compactions, ${(h.stats.bytes / 1048576).toFixed(0)} MB\n`);
     }
   }
   // A FULL PASS REPLACES THE CENSUS RATHER THAN ADDING TO IT. record_types is a cumulative upsert,
@@ -4003,12 +4034,13 @@ async function run({ full, recordsRoots = null }) {
   let desktopRecords = { seen: 0, ledger: 0, deleted: 0, gone: 0, returned: 0, failed: null };
   db.exec('BEGIN');
   try {
-    desktopRecords = { ...reconcileDesktopRecords(db, recordsRoots ?? resolveRecordsRoots([])), failed: null };
+    desktopRecords = { ...reconcileDesktopRecords(db, recordsRoots ?? resolveRecordsRoots([]),
+                                                  recordsOptions), failed: null };
     db.exec('COMMIT');
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch { /* nothing left to roll back */ }
     desktopRecords.failed = String(e && e.message ? e.message : e);
-    process.stderr.write(`harvest: desktop records pass failed: ${desktopRecords.failed}\n`);
+    say(`harvest: desktop records pass failed: ${desktopRecords.failed}\n`);
   }
 
   // THE CHAINS, for every directory touched. A resume that happened since the last run is a new
@@ -4055,7 +4087,7 @@ async function run({ full, recordsRoots = null }) {
           try { db.exec('ROLLBACK'); } catch { /* nothing left to roll back */ }
           const error = String(e && e.message ? e.message : e);
           chains.failed.push({ dir, error });
-          process.stderr.write(`harvest: chains pass failed for ${dir}: ${error}\n`);
+          say(`harvest: chains pass failed for ${dir}: ${error}\n`);
         }
       }
     }
@@ -4063,7 +4095,7 @@ async function run({ full, recordsRoots = null }) {
 
   const unpaired = h.stats.compactions - h.stats.paired;
   const ms = Date.now() - t0;
-  ingestEvents(db, join(RAW_DIR, 'events.ndjson'));   // called for its writes
+  ingestEvents(db, join(rawDir, 'events.ndjson'));   // called for its writes
   db.prepare(`INSERT INTO harvest_runs (ts,mode,files_seen,files_read,rewrites,lines,mb,turns,compactions,unpaired,ms)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(new Date().toISOString(), full ? 'full' : 'incremental',
     h.stats.filesSeen, h.stats.filesRead, h.stats.rewrites, h.stats.lines,
@@ -4097,9 +4129,9 @@ async function run({ full, recordsRoots = null }) {
     unknown_record_types: [...h.unknownThisRun],
     seconds: +(ms / 1000).toFixed(1),
   };
-  console.log(JSON.stringify(out, null, 2));
-  if (h.stats.rewrites > 0) process.stderr.write(`WARNING: ${h.stats.rewrites} transcript(s) shrank since last harvest (local GC?). Re-read in full.\n`);
-  if (h.stats.excludedFiles > 0) process.stderr.write(`NOTE: ${h.stats.excludedFiles} transcript(s) skipped, their project is in excluded_projects. Diagnostics lists them.\n`);
+  print(JSON.stringify(out, null, 2));
+  if (h.stats.rewrites > 0) say(`WARNING: ${h.stats.rewrites} transcript(s) shrank since last harvest (local GC?). Re-read in full.\n`);
+  if (h.stats.excludedFiles > 0) say(`NOTE: ${h.stats.excludedFiles} transcript(s) skipped, their project is in excluded_projects. Diagnostics lists them.\n`);
   db.close();
   return 0;
 }
@@ -6507,6 +6539,64 @@ async function selfTest() {
     checks.push(['recognising a type later reclassifies it (gate can fail)', after.known === 1]);
     checks.push(['and its existing count is kept, not reset', after.n === 2, String(after.n)]);
     scratchDb.close();
+  }
+
+  // `run` ITSELF, on scratch inputs: its own transcripts root, store, raw directory, ledger and
+  // backups, so nothing of this machine is read or written. It is what every hook, every terminal
+  // and the page's Update data button run, and `c4x/harvest.py` parses what it prints, so the
+  // report's keys and the three shapes of `failed` are held here (RUN_REPORT_KEYS says why).
+  {
+    const runTmp = join(tmp, 'run-report');
+    const runProjects = join(runTmp, 'projects');
+    mkdirSync(join(runProjects, 'P--run'), { recursive: true });
+    mkdirSync(join(runTmp, 'raw'), { recursive: true });
+    writeFileSync(join(runProjects, 'P--run', 'run1.jsonl'), [
+      { type: 'user', uuid: 'rp1', sessionId: 'run1', timestamp: '2026-09-20T00:00:00Z', cwd: 'C:\\run', message: { role: 'user', content: 'say hello' } },
+      { type: 'assistant', uuid: 'ra1', sessionId: 'run1', timestamp: '2026-09-20T00:00:01Z', requestId: 'rr1', isSidechain: false, cwd: 'C:\\run', message: { model: 'claude-opus-5', content: [{ type: 'text', text: 'hello' }], usage: { input_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 2 } } },
+    ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const drive = async () => {
+      let printed = '';
+      const code = await run({ full: false, recordsRoots: [], projects: runProjects,
+        dbPath: join(runTmp, 'run.db'), rawDir: join(runTmp, 'raw'),
+        records: { ledgerPath: join(runTmp, 'no-ledger.json'), backupsDir: join(runTmp, 'no-backups') },
+        quiet: true, print: (text) => { printed += text; } });
+      let report = null;
+      try { report = JSON.parse(printed); } catch { report = null; }
+      return { code, report };
+    };
+    const first = await drive();
+    const got = first.report ? Object.keys(first.report).sort() : [];
+    const want = [...RUN_REPORT_KEYS].sort();
+    checks.push(['run: prints one JSON report and returns 0', first.code === 0 && first.report !== null]);
+    checks.push(['run: the report has exactly the keys RUN_REPORT_KEYS lists (gate can fail)',
+      JSON.stringify(got) === JSON.stringify(want),
+      `missing ${want.filter((k) => !got.includes(k)).join(',')} extra ${got.filter((k) => !want.includes(k)).join(',')}`]);
+    checks.push(['run: it read the one scratch transcript, and only that',
+      first.report?.files_seen === 1 && first.report?.files_read === 1 && first.report?.mode === 'incremental',
+      JSON.stringify({ seen: first.report?.files_seen, read: first.report?.files_read })]);
+    checks.push(['run: chains.failed is a list, and empty on a clean run',
+      Array.isArray(first.report?.chains?.failed) && first.report.chains.failed.length === 0,
+      JSON.stringify(first.report?.chains?.failed)]);
+    checks.push(['run: sidecars.failed is a list', Array.isArray(first.report?.sidecars?.failed)]);
+    checks.push(['run: desktop_records.failed is null on a clean run (a string when it fails)',
+      first.report?.desktop_records?.failed === null, JSON.stringify(first.report?.desktop_records?.failed)]);
+    const absent = [];
+    const notNumbers = [];
+    for (const [group, keys] of Object.entries(RUN_REPORT_NESTED)) {
+      for (const key of keys) {
+        const inside = first.report?.[group] ?? {};
+        if (!(key in inside)) absent.push(`${group}.${key}`);
+        else if (key !== 'failed' && typeof inside[key] !== 'number') notNumbers.push(`${group}.${key}`);
+      }
+    }
+    checks.push(['run: every nested key RUN_REPORT_NESTED lists is in the report (gate can fail)',
+      absent.length === 0, absent.join(',')]);
+    checks.push(['run: and every one of them but `failed` is a number', notNumbers.length === 0,
+      notNumbers.join(',')]);
+    const second = await drive();
+    checks.push(['run: a second run sees the transcript and reads nothing, which is what "nothing new" is',
+      second.report?.files_seen === 1 && second.report?.files_read === 0,
+      JSON.stringify({ seen: second.report?.files_seen, read: second.report?.files_read })]);
   }
 
   let bad = 0;

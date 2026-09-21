@@ -21,6 +21,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { findByRole, fireEvent, render, screen } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import axe from 'axe-core'
 import { Dropdown } from './components/Dropdown'
 import { Pane } from './components/Pane'
@@ -30,6 +31,7 @@ import { ProjectMoves } from './components/ProjectMoves'
 import { AdoptSessions } from './components/AdoptSessions'
 import { Sidebar } from './components/Sidebar'
 import { ServerControls } from './components/ServerControls'
+import { UpdateData } from './components/UpdateData'
 import { TextBody } from './components/Markdown'
 import { Inspector } from './components/Inspector'
 import { TablePage } from './components/TablePage'
@@ -169,6 +171,33 @@ describe('axe finds no WCAG A or AA violation in', () => {
     // stopped containing its own visible text.
     const { container } = render(<ServerControls />)
     expect(await violations(container)).toEqual([])
+  })
+
+  it('the update control: idle, busy and off', async () => {
+    // WHY THIS ONE IS HERE. It is the one header button that disables itself with
+    // `aria-disabled` rather than `disabled` (so a keyboard user keeps their place), carries
+    // `aria-busy`, stacks two labels of which one is hidden from the tree, and sits beside a
+    // live region that is mounted while empty. Each of those is a thing axe has a rule for.
+    const base = {
+      enabled: true, reason: null, why_not: null, fix: null, running: false, job: null,
+      last: null, last_harvest: null,
+    }
+    const states = [
+      base,
+      { ...base, running: true, job: { id: 'b-1', kind: 'incremental' as const, dry_run: false, started_at: '', elapsed_s: 3 } },
+      { ...base, enabled: false, reason: 'not-own-store', why_not: 'This server is serving a copy.', fix: 'Start it without --db.' },
+    ]
+    for (const state of states) {
+      vi.spyOn(api.harvest, 'state').mockResolvedValue(state)
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+      const { container, unmount } = render(
+        <QueryClientProvider client={client}><UpdateData idleMs={60_000} pollMs={60_000} /></QueryClientProvider>,
+      )
+      await screen.findByRole('button', { name: /Update data|Updating/ })
+      expect(await violations(container)).toEqual([])
+      unmount()
+      vi.restoreAllMocks()
+    }
   })
 
   it('a rendered markdown document', async () => {

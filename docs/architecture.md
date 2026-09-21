@@ -50,7 +50,10 @@ runs in the hook, and nothing it starts is waited for.
 transcript and reads only what was appended, so a re-run is cheap and the first run is retroactive,
 going back as far as your transcripts do.
 
-**Read** never writes. The dashboard opens the store read-only:
+**Read** never writes, and never harvests on its own. The dashboard opens the store read-only;
+the one exception is asked for: **Update data** in the header starts the same incremental
+harvest the hooks run (`c4x/harvest.py`), as a program of its own, against the install's own
+store and nothing else.
 
 | file | holds |
 |---|---|

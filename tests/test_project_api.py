@@ -318,7 +318,10 @@ class TestTheWriteSwitch:
                               json={"cohort": f"project::{ALPHA}", "confirm": ALPHA}),
                   client.post("/api/project/import",
                               files={"file": ("x.db", b"x", "application/x")}),
-                  client.post("/api/project/include", json={"project": ALPHA})):
+                  client.post("/api/project/include", json={"project": ALPHA}),
+                  # The page's Update data: it writes nothing itself, it starts the program that
+                  # does, and it honours the same switch (tests/test_harvest.py has the rest).
+                  client.post("/api/store/harvest", json={"kind": "incremental"})):
             assert r.status_code == 403, r.url
         assert count(ALPHA) == 3, "a refused delete still removed rows"
 

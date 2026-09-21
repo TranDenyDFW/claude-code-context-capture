@@ -176,6 +176,25 @@ def clear():
         _bytes = _hits = _misses = _evictions = 0
 
 
+def drop_entries() -> int:
+    """Forget every cached payload and keep the counters; how many were dropped.
+
+    FOR THE ONE MOMENT THE STAMP IS NOT ENOUGH. `get` serves an entry younger than `MAX_AGE_S`
+    even when the store has moved, which is the right trade for a reader polling a store the hooks
+    write into. It is the wrong one straight after a harvest the PAGE asked for: the person
+    clicked Update data, the harvest took a second, and the refetch that follows would be answered
+    by a four second old entry under a note saying the data was updated. With Live paused that
+    stale pane then stays. `clear` is not used for this because it also zeroes the hit and miss
+    counters `/api/health` reports, and a harvest is not a reason to lose those.
+    """
+    global _bytes
+    with _lock:
+        dropped = len(_entries)
+        _entries.clear()
+        _bytes = 0
+    return dropped
+
+
 def self_test():
     """No store, no server. Every check is about the cache's own contract."""
     global MAX_BYTES

@@ -90,6 +90,10 @@ SMOKE_PLAN = (
     ("GET", "/api/tabs", "app.py imported, so dash and every tab module are in the bundle"),
     ("GET", "/api/tab/{first}/render", "one pane rendered, so plotly's package data is in"),
     ("GET", "/api/health", "the API's own health shape"),
+    # The STATUS only, never the POST: a smoke must not start a harvest. It proves c4x/harvest.py
+    # is in the bundle and that a store which is not the install's own is refused the button.
+    ("GET", "/api/store/harvest", "Update data answers, and is off for a store that is not "
+                                  "the install's own"),
     ("POST", "/__shutdown__", "the token in the announce line stops it"),
 )
 
@@ -496,11 +500,26 @@ def smoke(db: str, port: int | None = None, root: Path = ROOT, startup_s: float 
              f"status {status} bytes {len(body)} log {lines[-3:]}"))
         status, _, body = _get(f"{base}/api/health")
         add((SMOKE_PLAN[4][2], status == 200 and b'"ok"' in body, f"status {status}"))
+        status, _, body = _get(f"{base}/api/store/harvest")
+        state: dict = {}
+        try:
+            state = json.loads(body) if status == 200 else {}
+        except ValueError:
+            state = {}
+        # On for the install's own store and off for any other, which is what a smoke's `--db`
+        # almost always names. Compared here the way the server compares, so the check holds
+        # either way and fails when the two disagree.
+        own = os.path.normcase(str(Path(str(state.get("own", ""))).resolve()))
+        expected = own == os.path.normcase(str(store))
+        add((SMOKE_PLAN[5][2], status == 200 and state.get("enabled") is expected
+             and (expected or state.get("reason") == "not-own-store")
+             and state.get("running") is False and "incremental" in (state.get("kinds") or []),
+             f"status {status} enabled {state.get('enabled')} reason {state.get('reason')}"))
         waited = time.monotonic() + 5
         while "token" not in token and time.monotonic() < waited:
             time.sleep(0.1)
         status = _post(f"{base}/__shutdown__", {"X-C4X-Shutdown": token.get("token", "")})
-        add((SMOKE_PLAN[5][2], status == 200, f"status {status} token seen {'token' in token}"))
+        add((SMOKE_PLAN[6][2], status == 200, f"status {status} token seen {'token' in token}"))
         try:
             child.wait(timeout=15)
             add(("the process exited after the shutdown", True, f"exit {child.returncode}"))
@@ -600,6 +619,11 @@ def self_test() -> int:
         ("the smoke plan asks for the tab list", any(p[1] == "/api/tabs" for p in SMOKE_PLAN)),
         ("and renders a pane", any(p[1].endswith("/render") for p in SMOKE_PLAN)),
         ("and stops the process it started", SMOKE_PLAN[-1][1] == "/__shutdown__"),
+        # The button's status is asked and the button itself is never pressed: a smoke that
+        # POSTed would read this machine's transcripts into whatever store it was given.
+        ("it asks whether Update data is offered, and never starts one",
+         ("GET", "/api/store/harvest") in [(p[0], p[1]) for p in SMOKE_PLAN]
+         and not any(p[0] == "POST" and "harvest" in p[1] for p in SMOKE_PLAN)),
         ("a free port is a port", isinstance(pick_free_port(), int) and pick_free_port() > 0),
         ("the token is read out of the announce line",
          token_from('  stop it with: curl -X POST http://127.0.0.1:1/__shutdown__ '

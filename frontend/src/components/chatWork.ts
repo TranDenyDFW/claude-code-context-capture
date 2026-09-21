@@ -1,4 +1,5 @@
 import type { ChatWork, Table, TableMeta } from '@/api'
+import { HOW_TO_HARVEST } from './harvest'
 import type { InspectorContent } from './Inspector'
 
 /**
@@ -151,8 +152,7 @@ export function chatWorkContent(body: ChatWork): Partial<InspectorContent> {
   const noRows = groups.length
     ? null
     : missing.length
-      ? `This store has not harvested ${missing.join(', ')} yet. Run node tools/harvest.mjs, `
-        + 'or node tools/harvest.mjs --backfill-sidecars for work that is already on disk.'
+      ? `This store has not harvested ${missing.join(', ')} yet. ${HOW_TO_HARVEST}`
       : 'This chat wrote no plan, ran no background work and changed no file.'
 
   const newest = body.plans[0]

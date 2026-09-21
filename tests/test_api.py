@@ -40,10 +40,46 @@ def test_health_names_the_store_it_is_serving(client):
     assert body["db"].endswith(".db")
 
 
-def test_the_api_never_harvests(client):
-    """The dashboard is a writer through its refresh tick. Two writers into one store is how a
-    redacted copy got un-redacted, and an API server is exactly the second one nobody expects."""
+def test_the_api_never_harvests_on_its_own(client, monkeypatch):
+    """The old dashboard was a writer through its refresh tick. Two writers into one store is how
+    a redacted copy got un-redacted, and an API server is exactly the second one nobody expects.
+
+    ON ITS OWN is the whole of it since the page gained Update data: the one harvest this process
+    starts is the one a person asks for (`/api/store/harvest`, tests/test_harvest.py). So beyond
+    the flag, this proves the claim by behaviour: reading health, the tab list, a pane and the
+    harvest status itself starts nothing.
+    """
+    from types import SimpleNamespace
+
+    from c4x import harvest, proc
+    started = []
+    real = proc.run
+
+    def watched(args, **kw):
+        # Recorded, and run UNLESS it is the harvester: a pane may legitimately start node (the
+        # window prediction does), and a stub there would break the pane instead of watching
+        # it; the harvester is never run for real, even by a mutant this test exists to catch.
+        started.append(list(args))
+        if any("harvest.mjs" in str(part) for part in args):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return real(args, **kw)
+
+    # THE GATE IS OPENED AND THE JOB MADE SYNCHRONOUS, or this test sees nothing. Its client
+    # serves a fixture, so `harvest.start` would refuse before any runner was reached, and the
+    # real spawn is a thread that could record after the assertion. With both out of the way,
+    # a read that started a harvest (the natural mutant: `harvest.start()` inside a GET) is
+    # recorded before the response returns.
+    monkeypatch.setattr(proc, "run", watched)
+    monkeypatch.setattr(harvest, "_default_run", watched)
+    monkeypatch.setattr(harvest, "_default_spawn", lambda work: work())
+    monkeypatch.setattr(harvest, "JOBS", harvest.Jobs())
+    monkeypatch.setattr(harvest, "capability", lambda **kw: {
+        "enabled": True, "reason": None, "why_not": None, "fix": None, "db": "a", "own": "a"})
     assert client.get("/api/health").json()["read_only"] is True
+    first = client.get("/api/tabs").json()[0]["id"]
+    assert client.get(f"/api/tab/{first}", params={"no_cache": "1"}).status_code == 200
+    assert client.get("/api/store/harvest").status_code == 200
+    assert [argv for argv in started if any("harvest.mjs" in str(part) for part in argv)] == []
 
 
 def test_the_tab_list_comes_from_the_app(client, app):

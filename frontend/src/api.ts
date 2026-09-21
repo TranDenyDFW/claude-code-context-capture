@@ -437,6 +437,24 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A problem as a sentence. The server's own words when it sent them (`detail.error`, the shape
+ * every refusing route uses), else the message, which names the request that failed.
+ *
+ * Here beside `ApiError` because a fourth component needed it; the three earlier ones carry a
+ * local copy each.
+ */
+export function said(problem: unknown): string {
+  if (problem instanceof ApiError) {
+    const detail = problem.detail
+    if (detail && typeof detail === 'object' && 'error' in detail) {
+      return String((detail as { error: unknown }).error)
+    }
+    return problem.message
+  }
+  return problem instanceof Error ? problem.message : String(problem)
+}
+
 async function get<T>(path: string, params: Record<string, unknown> = {}): Promise<T> {
   const query = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
@@ -557,6 +575,62 @@ export interface AccountsState {
 }
 
 /** What `/api/accounts/sharing` answers. `restart_required` is always true on a change. */
+/**
+ * UPDATE DATA. The page asking the server to run the harvester (`c4x/harvest.py`,
+ * `/api/store/harvest`). `incremental` is what the hooks run on every prompt.
+ */
+export type HarvestKind = 'incremental'
+
+/** The job running now. `id` is how the page tells the run it follows from any other, and it
+ *  names the server process too (`<boot>-<n>`), so a restarted server never reuses one. */
+export interface HarvestJob {
+  id: string
+  kind: HarvestKind
+  dry_run: boolean
+  started_at: string
+  /** Computed by the server, so the page needs no clock of its own to say how long it has run. */
+  elapsed_s: number
+}
+
+/** What the last job THIS SERVER ran came to. Held in its memory: a restart forgets it. */
+export interface HarvestOutcome {
+  id: string
+  kind: HarvestKind
+  dry_run: boolean
+  /** False is a failure: the harvester never started, ran out its ceiling, or left no report. */
+  ok: boolean
+  /** It finished and part of it failed; the sentences say which part, so colour is never the
+   *  only signal. What was read is stored. */
+  partial: boolean
+  /** The whole account of the run, for the hover. */
+  sentence: string
+  /** The header's line, a few words, shown as the server wrote it. */
+  short: string
+  seconds: number
+  error: string | null
+  started_at: string
+  finished_at: string | null
+}
+
+export interface HarvestStatus {
+  /** Whether a POST will be accepted at all. */
+  enabled: boolean
+  /** `no-writes`, `not-own-store` (the served store is a copy or a fixture), `redacted-copy`,
+   *  `unreadable-store`; null when enabled. */
+  reason: string | null
+  /** Why not, as a sentence; the disabled button's hover. */
+  why_not: string | null
+  /** What would turn it on. */
+  fix: string | null
+  /** One job at a time. True is what makes a reloaded page come up already busy. */
+  running: boolean
+  job: HarvestJob | null
+  last: HarvestOutcome | null
+  /** The newest `harvest_runs` row, whoever wrote it: a hook, a terminal, this page. `mode` is
+   *  `incremental` or `full` and does NOT say who ran it. Null on a store never harvested. */
+  last_harvest: { ts: string; mode: string; files_seen: number; files_read: number; ms: number } | null
+}
+
 /**
  * What the server did to Claude around a confirmed write (`desktop.with_restart`): whether it
  * was running, whether it was quit and how many processes that was, whether it came back and
@@ -933,7 +1007,9 @@ export const api = {
       db: string
       /** The server process, so a restart can be told apart from the server it replaced. */
       pid: number
-      /** This process never harvests. Always true on the API server. */
+      /** This process never harvests ON ITS OWN: no tick, no timer. Always true on the API
+       *  server. It does NOT mean the store cannot be updated from the page: whether Update
+       *  data is offered is `harvest.state().enabled`. */
       read_only: boolean
       /** The project export/import/delete routes will answer. Off with `--no-writes`. */
       writes_enabled: boolean
@@ -1006,6 +1082,19 @@ export const api = {
   server: {
     stop: () => post<{ stopped: boolean }>('/api/server/stop', {}),
     restart: () => post<{ restarting: boolean; pid: number; argv: string[] }>('/api/server/restart', {}),
+  },
+
+  /**
+   * Update data. `run` starts a job and answers at once with the status and the job's `id`;
+   * the page follows `state`. 409 while one is running (`detail.reason` is `busy`), 403 when
+   * this server will not harvest, with the sentence in `detail.error`.
+   */
+  harvest: {
+    state: () => get<HarvestStatus>('/api/store/harvest'),
+    run: (kind: HarvestKind = 'incremental', dryRun = false) =>
+      post<HarvestStatus & { accepted: boolean; id: string }>('/api/store/harvest', {
+        kind, dry_run: dryRun,
+      }),
   },
 
   project: {

@@ -20,6 +20,11 @@ from pathlib import Path
 # it; `c4x/paths.py` reads PyInstaller's attributes off `sys` the same way for the same reason.
 NO_WINDOW = int(vars(subprocess).get("CREATE_NO_WINDOW", 0))
 
+# What `run` raises when its `timeout` passes, named here so a caller that has to catch it
+# (`c4x/harvest.py`) never imports `subprocess` itself: `tests/test_proc.py` sweeps the package for
+# a module that spawns on its own, and a second importer is where that starts.
+TimeoutExpired = subprocess.TimeoutExpired
+
 
 def run(args, **kw):
     """`subprocess.run`, with no console window for the child on Windows. Other arguments pass

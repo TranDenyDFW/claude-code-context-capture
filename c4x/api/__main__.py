@@ -484,7 +484,12 @@ def main(argv=None):
 
     print(f"c4x api on http://127.0.0.1:{port}/api/docs")
     print(f"  store: {store.DB_PATH}")
-    print("  read-only: this server never harvests, unlike the dashboard")
+    # Never on its own (no tick, no timer); the page's Update data button asks for one. Said here
+    # with the reason when it is off, so a log line answers "why is the button grey".
+    from c4x import harvest
+    able = harvest.capability()
+    print("  harvest: never on its own; only when the page asks (Update data): "
+          + ("on" if able["enabled"] else f"OFF ({able['reason']})"))
     # The shutdown token, printed here and nowhere else. No route reports it, so a page the browser
     # visits cannot read it, and it dies with the process.
     from c4x.server import announce_shutdown_token
@@ -495,9 +500,12 @@ def main(argv=None):
         from c4x import desktop
         from c4x.watchdog import GRACE, Watchdog, claude_alive
         # A confirmed restart (quit, act, relaunch) is Claude alive to the watchdog, so a fold
-        # longer than the grace cannot stop this server under it.
+        # longer than the grace cannot stop this server under it. So is an update the page asked
+        # for: a catch-up can run for many minutes, the stop kills children, and a harvest killed
+        # after its ingest loses the chains pass for the folders it touched.
         Watchdog(stop=reconcile_then_stop,
-                 is_alive=lambda: desktop.restart_in_progress() or claude_alive()).start()
+                 is_alive=lambda: (desktop.restart_in_progress() or harvest.in_progress()
+                                   or claude_alive())).start()
         print(f"  watchdog: stops once no Claude process has been seen for {int(GRACE)} s, and "
               "first covers any account pair the app created since sharing")
     # THE RECONCILE AT START: a server started with the app closed can cover the pairs now.

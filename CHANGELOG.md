@@ -5,6 +5,43 @@ runner, CI and a linted tree.
 
 ## Unreleased
 
+### Added
+
+- **Update data, in the header.** The user, on learning the store could only be updated from a
+  terminal: "there's no button for this in the app?" One click starts the same incremental
+  harvest the hooks run, says what came of it beside the button, and reloads every pane; the
+  hover says how fresh the store is. It opens no dialog, because nothing is closed or
+  restarted. The server still never harvests on its own (`read_only` stays true and now means
+  that). What was measured on the way decided the design: an incremental run is usually under
+  a second and once took 53.7 minutes (9,599 transcripts, 12.5 GB), so the POST starts a job
+  and the page follows `GET /api/store/harvest`, with a two hour ceiling that only frees the
+  lock from a hung node; a harvesting process pointed at a redacted copy once un-redacted it,
+  so the child is never told which store is served (no `--db`, `C4X_DB` taken out of its
+  environment) and can only open the install's own, and the route refuses a served copy, a
+  redacted copy and `--no-writes` with the reason; the harvester exits 0 when a sub-pass
+  failed, so its report is read and a failed pass is said as partial; the response cache
+  serves entries under five seconds old after the store moved, so it is emptied when a job
+  ends; a click that races a prompt hook's harvest is retried once; the watchdog waits for a
+  running update. `run()` in `tools/harvest.mjs` had no coverage at all and now takes its
+  inputs as parameters, runs in the self-test on scratch inputs, and exports
+  `RUN_REPORT_KEYS` and `RUN_REPORT_NESTED`, which the Python parser is held to. An
+  adversarial review of the diff, each finding checked by a second reader, then found and
+  this fixed: the redacted-copy gate read a memo kept for the life of the process and a
+  helper that turns "file is not a database" into "not a copy", so it now reads the mark from
+  the file on every call and fails closed; job ids restarted at 1 with every server, so a
+  run Restart C4X killed could be reported with a later run's result, and they now name
+  the process; one failed status read dropped the run for good (a red note for ever, no
+  reload), and the page now keeps asking; a 409 whose job had just ended was shown as a
+  failed click; a run the page found under way was not held to its id; `dry_run: "yes"`
+  was read as false and would have run the job that writes; the freshness line printed a
+  UTC wall time with no zone; and the test tripwire could not fail a test, because a job
+  swallows what its runner raises, so it records and fails at teardown. Tests:
+  `tests/test_harvest.py` (73), the harvester self-test (341), `tests/test_api.py` (a read
+  starts nothing, with the gate open and the job synchronous so it could be seen), vitest
+  `UpdateData.test.tsx` (21), `harvest.test.ts` (15), `App.test.tsx` (the page reloads when
+  an update ends), `a11y.test.tsx`. No test may run the harvester: its transcripts root
+  cannot be redirected.
+
 ### Fixed
 
 - **The release's checksum file can be read by the command that checks it.** It was written with a
