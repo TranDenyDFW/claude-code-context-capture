@@ -135,8 +135,9 @@ export function windowForSegment(segment, compactions = [], opts = {}) {
 // ---------------------------------------------------------------------------
 function db() {
   // THE PATH ITSELF, never a `file:` URI built from it: a URI gives `#` and `%41` a meaning, so
-  // under a folder called `a#b` this could not open the store and under `p%41q` it read the one
-  // under `pAq`. A string that does not begin `file:` is not URI-parsed, and readOnly is the flag.
+  // under a folder called `a#b` this could not open the store, and under `p%41q` it read the one
+  // under `pAq` when there was one and could open nothing when there was not. A string that does
+  // not begin `file:` is not URI-parsed, and readOnly is the flag.
   const d = new DatabaseSync(DB_PATH, { readOnly: true });
   d.exec(BUSY_TIMEOUT);
   return d;

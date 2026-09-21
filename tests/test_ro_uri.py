@@ -13,11 +13,12 @@ the real store (`tests/conftest.py`), 38 opens in eight test files (one of them 
 under the checkout, not a tmp path) and three node tools, one of which `c4x.store` runs when it is
 imported. The Python ones now call `ro_uri`; the node ones pass the path itself, which is never
 URI-parsed. The last test looks for a hand-built one in every Python file under `c4x/`, `tools/`
-and `tests/` and every `.mjs` under `tools/` and `hooks/`, and its docstring says which spellings
-it can see and which it cannot. NOT covered here: how the node tools find the install they belong
-to (`rootFrom` in `tools/paths.mjs`), which misreads a space, `#`, `%`, a bracket and any
-non-ASCII letter in the folder's name. That is a separate defect with its own branch
-(`fix/root-from-decoding`).
+and `tests/` (this file excepted) and every `.mjs` under `tools/` and `hooks/`; the test before
+it feeds the rule known-bad lines and ASSERTS the ones it is known to miss. NOT covered here: how
+the node tools find the install they belong to (`rootFrom` in `tools/paths.mjs`). Measured on
+this branch, it misreads a space, `#`, `%`, square and curly brackets, a tilde, a caret, a
+backtick and any non-ASCII character in the folder's name (parentheses, `&`, `'`, `;`, `+` are
+read right). That is a separate defect with its own branch (`fix/root-from-decoding`).
 
 NO TEST HERE SKIPS AGAINST THE FIXTURE. CI's runner fails a skipped test on the fixture leg
 (`tools/run_tests.mjs`, `judgePytest`), so a platform difference is a branch inside the test, the
@@ -40,11 +41,29 @@ if os.name != "nt":
     AWKWARD.append("q?mark")   # not a legal file name on Windows
 
 
-# A hand-built SQLite URI, as one line of source shows it (the last test says what this can and
-# cannot see). Module constants so that a test can feed them known-bad lines.
-BY_HAND_PY = re.compile(r"""["']file:/{0,3}(\{|%[s(]|["']\s*(\+|,|\)|\.|f?["']|$))""")
-BY_HAND_NODE = re.compile(r"""[`"']file:/{0,3}(\$\{|[`"']\s*(\+|,|\)|\.|$))""")
+# WHO MAY TURN A STRING INTO A SQLITE URI. Python has one door: `sqlite3.connect(..., uri=True)`.
+# So the rule is an allow-list on that flag: a line that sets it must be a line that calls `ro_uri`,
+# however the string beside it was put together (an f-string, a constant, four slashes, a template).
+# An earlier sweep tried to recognise the spellings instead, and two reviews in a row found more.
+URI_FLAG = re.compile(r"\buri\s*=\s*True\b")
+# Node has no such flag: a string that starts `file:` is simply parsed as a URI. What gives a
+# hand-built one away is why anyone builds one: a query parameter, or `file:` on the line that
+# opens.
+NODE_PARAM = re.compile(r"\b(mode=(ro|rw|rwc|memory)|immutable=|nolock=|cache=(shared|private))")
+NODE_OPEN = re.compile(r"DatabaseSync\s*\(")
 TELEMETRY = re.compile(r"OTEL_LOG_RAW_API_BODIES")
+
+
+def py_by_hand(line):
+    text = line.strip()
+    return not text.startswith("#") and bool(URI_FLAG.search(text)) and "ro_uri(" not in text
+
+
+def node_by_hand(line):
+    text = line.strip()
+    if text.startswith(("//", "*", "/*")) or TELEMETRY.search(text):
+        return False
+    return bool(NODE_PARAM.search(text)) or ("file:" in text and bool(NODE_OPEN.search(text)))
 
 
 def make(path, name):
@@ -246,71 +265,84 @@ class TestTheReaders:
             assert answers[("p%41q", tool)] == answers[("plain", tool)], tool
         assert sorted(p.name for p in tmp_path.iterdir()) == ["a#b", "p%41q", "pAq", "plain"]
 
-    def test_the_sweep_sees_the_spellings_it_claims_to(self):
-        """Known-bad lines, fed to the sweep's own patterns. Every one of these was either in the
-        tree or was shown slipping past an earlier, narrower pattern by an independent review."""
+    def test_the_sweep_sees_what_it_claims_to_and_says_what_it_does_not(self):
+        """Known-bad lines, fed to the rule before it is trusted with the tree, and the lines it
+        is KNOWN to miss, asserted to be missed, so that this docstring cannot outrun the code.
+        The first of each list was in the tree; the rest were shown slipping past an earlier
+        sweep, or are kept so that a narrower rule cannot come back unnoticed."""
         bad_python = [
             'con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)',
             "con = sqlite3.connect(f'file:{target.as_posix()}?mode=ro', uri=True)",
-            'uri = f"file:///{posix}?mode=ro"',
-            'uri = f"file:/{rel}?immutable=1"',
-            'uri = "file://" + str(path) + "?mode=ro"',
-            'uri = "file:" + str(source) + "?mode=ro"',
-            'uri = "file:%s?mode=ro" % path',
-            'uri = "file:%(p)s?mode=ro" % {"p": path}',
-            'uri = "file:{}?mode=ro".format(path)',
-            'uri = ("file:"',
-            'uri = "".join(["file:", str(path), "?mode=ro"])',
-            'PREFIX = "file:"',
-            'uri = "file:" f"{path}?mode=ro"',
+            'con = sqlite3.connect(f"file:///{posix}?mode=ro", uri=True)',
+            'con = sqlite3.connect(f"file:////{share}?mode=ro", uri=True)',
+            'con = sqlite3.connect(f"file:data/{name}.db?mode=ro", uri=True)',
+            'con = sqlite3.connect("file:" + str(path) + "?mode=ro", uri=True)',
+            'con = sqlite3.connect("file:%s?mode=ro" % path, uri=True)',
+            'con = sqlite3.connect("file:{}?mode=ro".format(path), uri=True)',
+            'con = sqlite3.connect(SCHEME + str(path) + "?mode=ro", uri=True)',
+            'con = sqlite3.connect(Template("file:$p?mode=ro").substitute(p=path), uri=True)',
+            'con = sqlite3.connect(uri, uri=True)',
+            '    uri=True,',
+            'con = sqlite3.connect(path.as_uri() + "?mode=ro", uri = True)',
+        ]
+        fine_python = [
+            'con = sqlite3.connect(ro_uri(path), uri=True)',
+            'src = sqlite3.connect(store.ro_uri(source), uri=True)',
+            '# sqlite3.connect(f"file:{path}?mode=ro", uri=True) is how it used to be written',
+            'con = sqlite3.connect(str(path))',
+        ]
+        slips_python = [
+            'con = sqlite3.connect(text, uri=as_uri)',       # the flag is not the literal True
+            'con = sqlite3.connect(text, **options)',        # nor spelled at all
         ]
         bad_node = [
             "const d = new DatabaseSync(`file:${DB_PATH}?mode=ro`, { readOnly: true });",
             "const d = new DatabaseSync(`file:///${posix(db)}?mode=ro`, { readOnly: true });",
-            "const uri = `file:${posix(db)}`;",
-            "const d = new DatabaseSync('file:' + dbPath + '?mode=ro', { readOnly: true });",
+            "const d = new DatabaseSync('file:' + dbPath, { readOnly: true });",
+            "const d = new DatabaseSync(SCHEME + posix(p) + '?mode=ro', { readOnly: true });",
+            "const uri = `file:data/${name}?mode=ro`;",
             "const uri = 'file://' + posix(db) + '?mode=ro';",
-            "const uri = 'file:'",
-            "const uri = ['file:', p, '?mode=ro'].join('');",
-            "const uri = 'file:'.concat(p, '?mode=ro');",
+            "const uri = `file:${p}?nolock=1`;",
+            "const uri = ['file:', p, '?immutable=1'].join('');",
         ]
-        fine = [
-            'con = sqlite3.connect(ro_uri(path), uri=True)',
-            '"""file:line:col, so a message points somewhere."""',
-            "# a `file:` URI gives `#` a meaning",
-            'print("file: not found")',
+        fine_node = [
             "const d = new DatabaseSync(DB_PATH, { readOnly: true });",
-            "// never a `file:` URI built from it",
+            "// never a `file:` URI built from it: new DatabaseSync(`file:${p}?mode=ro`)",
+            " * `?mode=ro` adds nothing once readOnly is set",
+            "    OTEL_LOG_RAW_API_BODIES: `file:${BODY_DIR}`,",
         ]
-        assert [line for line in bad_python if not BY_HAND_PY.search(line)] == []
-        assert [line for line in bad_node if not BY_HAND_NODE.search(line)] == []
-        assert [line for line in fine if BY_HAND_PY.search(line) or BY_HAND_NODE.search(line)] == []
-        gate = "    OTEL_LOG_RAW_API_BODIES: `file:${BODY_DIR}`,"
-        assert BY_HAND_NODE.search(gate) and TELEMETRY.search(gate), "let through by name"
+        slips_node = [
+            "const SCHEME = 'file:';",                        # no parameter and no open on the line
+            "const uri = `file:${posix(db)}`;",
+        ]
+        assert [line for line in bad_python if not py_by_hand(line)] == []
+        assert [line for line in fine_python if py_by_hand(line)] == []
+        assert [line for line in bad_node if not node_by_hand(line)] == []
+        assert [line for line in fine_node if node_by_hand(line)] == []
+        assert [line for line in slips_python if py_by_hand(line)] == [], "a limit closed: say so"
+        assert [line for line in slips_node if node_by_hand(line)] == [], "a limit closed: say so"
 
     def test_nothing_builds_a_sqlite_uri_by_hand(self):
-        """A LINE SWEEP, and what it can see. A string that starts `file:`, with or without the
-        slashes (`file:///` carries the same defect: measured, it left the same stray file), and
-        then goes on to be built: an interpolation, a `%s` or `{}` to be filled, or the literal
-        ending there to be added to, joined or concatenated. That covers an f-string, `.format`,
-        percent formatting, concatenation even when it wraps onto the next line, a `join` and a
-        prefix constant, in Python and in a node tool. It CANNOT see a URI whose `file:` arrives
-        from somewhere that is not a literal on the line (an import, a function's return), and it
-        does not judge `Path.as_uri()`, which escapes correctly. The only `file:` strings a node
-        tool builds for another purpose name a telemetry folder, and are let through by name."""
+        """THE TREE. Every Python file under `c4x/`, `tools/` and `tests/` (this one excepted: it
+        spells the bad forms out in order to look for them) and every `.mjs` under `tools/` and
+        `hooks/`. In Python the only lines allowed to set `uri=True` are the ones that call
+        `ro_uri`, so there is nothing to allow-list; in node nothing opens through a URI at all.
+        The test above says, and asserts, what this cannot see: a flag that is not the literal
+        `True`, and a node URI with no query parameter that is built away from the line that opens
+        it. `Path.as_uri()` would be flagged too, though it escapes correctly: use `ro_uri`."""
         found = []
         for folder, pattern, by_hand in (
-                ("c4x", "**/*.py", BY_HAND_PY), ("tools", "**/*.py", BY_HAND_PY),
-                ("tests", "**/*.py", BY_HAND_PY),
-                ("tools", "**/*.mjs", BY_HAND_NODE), ("hooks", "**/*.mjs", BY_HAND_NODE)):
+                ("c4x", "**/*.py", py_by_hand), ("tools", "**/*.py", py_by_hand),
+                ("tests", "**/*.py", py_by_hand),
+                ("tools", "**/*.mjs", node_by_hand), ("hooks", "**/*.mjs", node_by_hand)):
             for source in sorted((ROOT / folder).glob(pattern)):
                 if source == Path(__file__).resolve():
-                    continue   # this file spells the forms out in order to look for them
+                    continue
                 for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
-                    if by_hand.search(line) and not TELEMETRY.search(line):
+                    if by_hand(line):
                         found.append(f"{source.relative_to(ROOT).as_posix()}:{number}")
-        allowed = {"c4x/paths.py", "tools/redact.py"}   # where the URI is built, once each
-        extra = [f for f in found if f.rsplit(":", 1)[0] not in allowed]
-        assert extra == [], f"open these through ro_uri, or by the path itself in node: {extra}"
-        per_file = {name: sum(1 for f in found if f.startswith(name + ":")) for name in allowed}
-        assert per_file == {"c4x/paths.py": 1, "tools/redact.py": 1}, per_file
+        assert found == [], f"open these through ro_uri, or by the path itself in node: {found}"
+        built = [f"{rel}:{n}" for rel in ("c4x/paths.py", "tools/redact.py")
+                 for n, line in enumerate((ROOT / rel).read_text(encoding="utf-8").splitlines(), 1)
+                 if line.lstrip().startswith("return f\"file:{quote(")]
+        assert len(built) == 2, f"built once in the package and once in the tool: {built}"
