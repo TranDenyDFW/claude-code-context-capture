@@ -2516,7 +2516,12 @@ export const RUN = {
   // the opening of the prompt: the same 183 group at a head of 20, 40, 60 or 120 characters and
   // fall apart at 200, where the list of changed files begins. Seven more of the same runs hold
   // 17 to 20 messages; the next SDK one-shot above them holds 76.
-  SDK_PREFIX: 'sdk-',             // an entrypoint no person types into
+  // WHAT THE ENTRYPOINT PROVES, and what it does not. The desktop app and the CLI never write
+  // an sdk- entrypoint, so a chat typed into either can never reach this tier. It does not
+  // prove nobody chose the words: a script of one's own that asks the same thing from one
+  // folder four times is folded too, which is what a harness is; a run somebody then picks up
+  // grows a second prompt and is unlinked, like any other.
+  SDK_PREFIX: 'sdk-',             // written by the Agent SDK's callers, never by the app or the CLI
   SAME_MAX_MESSAGES: 24,          // this tier's own ceiling; its corpus maximum is 20
 };
 /** The tiers of evidence for a parent, strongest first; `hits` counts how many agreed. */

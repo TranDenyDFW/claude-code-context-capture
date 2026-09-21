@@ -16,8 +16,10 @@ runner, CI and a linted tree.
   ten minute batch could reach them.
   `deriveRuns` gains a third tier, `how = 'same-prompt'`: an SDK one-shot nothing else placed,
   with at least three other SDK one-shots in the very same folder opening with the same 60
-  characters, whenever they ran (the same 183 group at a head of 20 to 120 characters). An
-  entrypoint a person types into never counts, and a prompt under 20 characters proves
+  characters, whenever they ran (the same 183 group at a head of 20 to 120 characters). A
+  chat typed into the app or the CLI never counts (neither writes an SDK entrypoint; a script
+  of one's own that repeats a prompt is a harness and folds like one), and a prompt under 20
+  characters proves
   nothing. This tier alone reads a run of up to 24 messages (seven more of the same runs
   hold 17 to 20; the next SDK one-shot above them holds 76), and a longer run that ties to
   nothing is not a miss. `run_misses.pool_key` now carries the rule's revision (`r2|`) and

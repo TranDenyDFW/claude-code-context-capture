@@ -436,10 +436,13 @@ the list showed the same row over and over. A one-shot neither
 tier placed folds under its project when its entrypoint is an SDK one and at least three other
 SDK one-shots in the very same folder open with the same 60 characters, whenever they ran (the
 same 183 group at a head of 20, 40, 60 or 120 characters and fall apart at 200, where the list
-of changed files begins); a prompt shorter than 20 characters proves nothing, and an entrypoint a
-person types into never counts, however often the same thing was asked (17 such groups of more
-than three exist on that store, every member of them already placed by the review rule or an
-earlier tier). This tier alone reads a run
+of changed files begins); a prompt shorter than 20 characters proves nothing, and a chat typed
+into the desktop app or the CLI never counts, however often the same thing was asked, because
+neither ever writes an SDK entrypoint (17 such groups of more than three exist on that store,
+every member of them already placed by the review rule or an earlier tier). What the entrypoint
+does NOT prove is that nobody chose the words: a script of one's own that asks the same thing
+from one folder four times folds too, which is what a harness is, and a run somebody then picks
+up grows a second prompt and is unlinked like any other. This tier alone reads a run
 of up to 24 messages: seven more of the same runs hold 17 to 20, and the next SDK one-shot above
 them holds 76; a longer run that ties to nothing is not recorded as a miss, because it was never
 a candidate for a parent or a batch. The project is found the way a batch's is, and a member of
