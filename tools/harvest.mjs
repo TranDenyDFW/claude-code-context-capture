@@ -458,8 +458,9 @@ CREATE TABLE IF NOT EXISTS review_misses (
 -- SAME PROMPT AGAIN (how: same-prompt): an Agent SDK one-shot neither of those placed, with at
 -- least three other SDK one-shots in the very same folder whose prompt opens with the same 60
 -- characters, whenever they ran (RUN, below, records the measurement: 183 of 208 unplaced
--- one-shots were one plugin's review, begun from the chat's own folder by no shell call, 178 of
--- them in one folder across twelve days); this tier alone reads a run of up to 24 messages, and
+-- one-shots were one plugin's review, begun from the chat's own folder by no shell call, 168 of
+-- them in one folder, where 178 runs were asked the same thing across twelve days); this tier
+-- alone reads a run of up to 24 messages, and
 -- hits counts the runs that shared the prompt. project is the cwd
 -- the run folds under: the parent's for a child, else the nearest directory at or above the
 -- run's cwd that is the cwd of a session which is not itself a run (a workflow's agents run in
@@ -2508,8 +2509,9 @@ export const RUN = {
   // THE SAME PROMPT AGAIN (how: same-prompt). Measured on the author's test laptop, 2026-09-20,
   // full population: 208 one-shots no tier placed, 188 of them begun through the Agent SDK
   // (entrypoint sdk-py or sdk-cli), and 183 of those one plugin's security review of a change,
-  // started from the chat's OWN folder by no shell call, 178 of them in one folder over twelve
-  // days (so no call, no containment, no ten minute window). What they share is the folder and
+  // started from the chat's OWN folder by no shell call, 168 of them in one folder, where 178
+  // runs were asked the same thing over twelve days (so no call, no containment, no ten minute
+  // window; ten of the 178 had been batched by chance). What they share is the folder and
   // the opening of the prompt: the same 183 group at a head of 20, 40, 60 or 120 characters and
   // fall apart at 200, where the list of changed files begins. Seven more of the same runs hold
   // 17 to 20 messages; the next SDK one-shot above them holds 76.

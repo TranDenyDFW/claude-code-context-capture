@@ -11,8 +11,9 @@ runner, CI and a linted tree.
   circled the same row repeated down the list, "Review this change for security
   vulnerabilities", and asked "what are these and why are they empty?" Measured on that
   store, full population: 208 one-shots no rule had placed, 183 of them that one review,
-  begun through the Agent SDK from the chat's own folder by no shell call, 178 in one folder
-  across twelve days, so neither a parent's span nor a ten minute batch could reach them.
+  begun through the Agent SDK from the chat's own folder by no shell call, 168 of them in one
+  folder (where 178 runs were asked it across twelve days), so neither a parent's span nor a
+  ten minute batch could reach them.
   `deriveRuns` gains a third tier, `how = 'same-prompt'`: an SDK one-shot nothing else placed,
   with at least three other SDK one-shots in the very same folder opening with the same 60
   characters, whenever they ran (the same 183 group at a head of 20 to 120 characters). An
