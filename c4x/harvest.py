@@ -47,12 +47,26 @@ from c4x.labels import plural
 
 # WHAT THE PAGE MAY ASK FOR. A closed dictionary from a request to the flags it becomes, looked up
 # and never assembled: `--full`, `--yes` and `--db` have no entry, so no request can reach them.
-KINDS: tuple[str, ...] = ("incremental",)
-FLAGS: dict[tuple[str, bool], list[str]] = {("incremental", False): []}
+KINDS: tuple[str, ...] = ("incremental", "tool-outcomes", "runs")
+FLAGS: dict[tuple[str, bool], list[str]] = {
+    ("incremental", False): [],
+    # THE TWO ONE-OFF PASSES (Store maintenance, on the Diagnostics tab). Only the fold has a dry
+    # run: `--backfill-tool-outcomes --dry-run` is dispatched before the harvester looks at
+    # `--dry-run`, so that combination would WRITE, and it has no entry here.
+    ("tool-outcomes", False): ["--backfill-tool-outcomes"],
+    ("runs", False): ["--backfill-runs"],
+    ("runs", True): ["--backfill-runs", "--dry-run"],
+}
 # A ceiling that frees the lock from a node that hung, NOT a bound on a slow run: the 53.7 minute
 # catch-up above is a real run, and the old tick's 120 s would have killed it every time, leaving
 # a run that can never finish (it commits every 200 files, so it would at least creep forward).
-TIMEOUT_S: dict[str, int] = {"incremental": 7200}
+TIMEOUT_S: dict[str, int] = {"incremental": 7200, "tool-outcomes": 7200, "runs": 3600}
+# What makes a printed JSON object the report of THIS job, by kind.
+SENTINELS: dict[str, tuple[str, str]] = {
+    "incremental": ("mode", "files_read"),
+    "tool-outcomes": ("files_scanned", "rows_unchanged"),
+    "runs": ("links_after", "wrote"),
+}
 # The one failure worth a second try. A hook's detached harvest started by the prompt just typed
 # is the likeliest thing to be holding the store at the moment somebody clicks, and a read that
 # has to become a write while another writer commits fails at once rather than waiting out
@@ -65,6 +79,15 @@ READS: frozenset[str] = frozenset({
     "mode", "chains", "sidecars", "desktop_records", "files_seen", "files_read",
     "rewritten_files", "excluded_files", "lines", "mb", "turn_records_seen",
     "compaction_records_seen", "unknown_record_types", "seconds"})
+# The same for the two one-off passes, held to `TOOL_OUTCOMES_REPORT_KEYS` and `RUNS_REPORT_KEYS`.
+READS_TOOL_OUTCOMES: frozenset[str] = frozenset({
+    "files_scanned", "files_unreadable", "rows_before", "rows_after", "rows_unchanged",
+    "outcome", "result_ts_filled", "calls_still_without_an_outcome"})
+READS_OUTCOMES_NESTED: dict[str, frozenset[str]] = {
+    "outcome": frozenset({"filled_from_transcripts", "filled_from_the_stored_flag"})}
+READS_RUNS: frozenset[str] = frozenset({
+    "one_shots", "already", "unchanged", "unlinked", "linked", "batched", "misses", "heads",
+    "projects", "links_before", "links_after", "by_how", "calls_without_result_ts", "wrote"})
 # And the keys read INSIDE its three nested objects, held to `RUN_REPORT_NESTED` the same way.
 READS_NESTED: dict[str, frozenset[str]] = {
     "chains": frozenset({"directories", "links", "reviews", "runs", "failed"}),
@@ -114,6 +137,11 @@ class Disabled(RuntimeError):
     def __init__(self, capability: Capability):
         super().__init__(capability["why_not"] or "harvesting is off on this server")
         self.capability = capability
+
+
+class NoStore(RuntimeError):
+    """A one-off pass was asked for and there is no store yet. The harvester would create an
+    empty one and report zeros, which reads as "nothing to do" and is not. 409."""
 
 
 class Busy(RuntimeError):
@@ -290,12 +318,13 @@ def write_stamp(root: Path | str | None = None, now: Callable[[], str] | None = 
 # What the harvester said
 # ---------------------------------------------------------------------------------------------
 
-def read_report(stdout: str) -> dict[str, Any] | None:
+def read_report(stdout: str, kind: str = "incremental") -> dict[str, Any] | None:
     """The JSON object the harvester printed, or None when there is none this build can read.
 
     The whole text first; failing that, from the first `{` to the last `}`, so one stray line
-    before or after the report does not lose it. It must be an object carrying `mode` and
-    `files_read`: a JSON string or list is not a report.
+    before or after the report does not lose it. It must be an object carrying the two keys
+    that make it THIS job's report (`SENTINELS`): a JSON string or list is not a report, and
+    neither is another job's.
     """
     text = stdout or ""
     for candidate in (text, text[text.find("{"):text.rfind("}") + 1]):
@@ -305,7 +334,8 @@ def read_report(stdout: str) -> dict[str, Any] | None:
             found = json.loads(candidate)
         except ValueError:
             continue
-        if isinstance(found, dict) and "mode" in found and "files_read" in found:
+        first, second = SENTINELS.get(kind, SENTINELS["incremental"])
+        if isinstance(found, dict) and first in found and second in found:
             return found
     return None
 
@@ -411,6 +441,11 @@ def summarise(kind: str, dry_run: bool, raw: dict[str, Any] | None, *, exit_code
                       "build can read, so what it did is unknown. The store may have changed.",
                       "Update failed: no report came back.")
 
+    if kind == "tool-outcomes":
+        return _outcomes_report(base, raw, exit_code, took)
+    if kind == "runs":
+        return _runs_report(base, raw, dry_run, took, failed)
+
     failures = _failures(raw)
     summary = _summary(raw, failures)
     read, seen = summary["files_read"], summary["files_seen"]
@@ -448,6 +483,103 @@ def summarise(kind: str, dry_run: bool, raw: dict[str, Any] | None, *, exit_code
                         f"{plural(summary['compaction_records_seen'], 'compaction')}; "
                         f"{plural(folders, 'folder')} re-chained ({took}).{tail_also}",
             "short": f"Updated: {plural(read, 'transcript')} read."}
+
+
+def _outcomes_report(base: Report, raw: dict[str, Any], exit_code: int | None,
+                     took: str) -> Report:
+    """`--backfill-tool-outcomes`: how each tool call ended and when its result came back, for
+    rows from before those columns existed. It only ever fills empty columns.
+
+    A NON-ZERO EXIT WITH A REPORT IS PARTIAL, NOT A FAILURE. The pass exits 1 when the rows that
+    existed before it are not the rows that exist after it, and its own comment says a harvest
+    replacing a row at the same moment does exactly that, harmlessly.
+    """
+    outcome = raw.get("outcome") or {}
+    filled = (_count(outcome.get("filled_from_transcripts"))
+              + _count(outcome.get("filled_from_the_stored_flag")))
+    timed = _count(raw.get("result_ts_filled"))
+    scanned = _count(raw.get("files_scanned"))
+    unreadable = _count(raw.get("files_unreadable"))
+    still = _count(raw.get("calls_still_without_an_outcome"))
+    before, after = _count(raw.get("rows_before")), _count(raw.get("rows_after"))
+    moved = raw.get("rows_unchanged") is not True
+    summary = {"files_scanned": scanned, "files_unreadable": unreadable, "outcomes_filled": filled,
+               "result_ts_filled": timed, "calls_still_without_an_outcome": still,
+               "rows_before": before, "rows_after": after, "rows_unchanged": not moved}
+    notes: list[str] = []
+    if unreadable:
+        notes.append(f"{plural(unreadable, 'transcript')} could not be read and "
+                     f"{'was' if unreadable == 1 else 'were'} skipped.")
+    if moved or exit_code not in (0, None):
+        notes.append(f"The rows that existed before the pass went from {before:,} to {after:,}; a "
+                     "harvest rewriting a row at the same moment does that. Run it again to "
+                     "confirm.")
+    tail = (" " + " ".join(notes)) if notes else ""
+    if not filled and not timed:
+        return {**base, "ok": True, "partial": bool(notes), "summary": summary,
+                "sentence": f"Nothing to record: {plural(scanned, 'transcript')} scanned and no "
+                            f"tool call was missing an outcome or a result time ({took}).{tail}",
+                "short": "Nothing to record."}
+    return {**base, "ok": True, "partial": bool(notes), "summary": summary,
+            "sentence": f"Recorded the outcome of {plural(filled, 'tool call')} and the result "
+                        f"time of {timed:,}, from {plural(scanned, 'transcript')}; "
+                        f"{plural(still, 'call')} still without an outcome ({took}).{tail}",
+            "short": (f"Recorded{' in part' if notes else ''}: {plural(filled, 'outcome')}, "
+                      f"{plural(timed, 'result time')}.")}
+
+
+def _runs_report(base: Report, raw: dict[str, Any], dry_run: bool, took: str,
+                 failed: Callable[[str, str], Report]) -> Report:
+    """`--backfill-runs`: headless one-shots folded under the chat that spawned them, or under
+    the project above a batch of them. A dry run reports the same numbers and writes nothing, and
+    the page puts them in the question it asks before the real one.
+
+    `wrote` MUST SAY WHAT WAS ASKED. A dry run that reports it wrote, or a real one that reports
+    it did not, is a harvester this build does not understand, and neither is called a success.
+    """
+    if (raw.get("wrote") is True) == dry_run:
+        return failed("The fold reported the opposite of what was asked (a dry run that wrote, or "
+                      "a run that did not), so its numbers are not trusted. Nothing else was done.",
+                      "Update failed: the fold did not do what was asked.")
+    linked, batched = _count(raw.get("linked")), _count(raw.get("batched"))
+    unlinked, misses = _count(raw.get("unlinked")), _count(raw.get("misses"))
+    heads, projects = _count(raw.get("heads")), _count(raw.get("projects"))
+    open_spans = _count(raw.get("calls_without_result_ts"))
+    by_how = raw.get("by_how") if isinstance(raw.get("by_how"), dict) else {}
+    summary = {"one_shots": _count(raw.get("one_shots")), "already": _count(raw.get("already")),
+               "unchanged": _count(raw.get("unchanged")), "unlinked": unlinked, "linked": linked,
+               "batched": batched, "misses": misses, "heads": heads, "projects": projects,
+               "links_before": _count(raw.get("links_before")),
+               "links_after": _count(raw.get("links_after")),
+               "by_how": {str(k): _count(v) for k, v in (by_how or {}).items()},
+               "calls_without_result_ts": open_spans, "outcomes_first": open_spans > 0}
+    loose = (f" {plural(open_spans, 'shell call')} carry no result time, so some spans are loose: "
+             "record tool outcomes first, because a link made on a loose span stays."
+             if open_spans else "")
+    changes = linked + batched + unlinked
+    if dry_run:
+        if not changes:
+            text = (f"Nothing to fold: none of {plural(summary['one_shots'], 'one-shot run')} "
+                    "would change. Nothing was written.")
+            return {**base, "ok": True, "summary": summary, "sentence": text + loose,
+                    "short": "Nothing to fold."}
+        return {**base, "ok": True, "summary": summary,
+                "sentence": f"Would fold {plural(linked, 'run')} under the "
+                            f"{plural(heads, 'chat')} that spawned them and {batched:,} under "
+                            f"{plural(projects, 'project')}; {plural(unlinked, 'existing link')} "
+                            f"would be dropped and {misses:,} can be placed nowhere. Nothing was "
+                            f"written.{loose}",
+                "short": f"Would fold {plural(linked + batched, 'run')}."}
+    if not changes:
+        return {**base, "ok": True, "summary": summary,
+                "sentence": f"Nothing to fold: all {plural(summary['one_shots'], 'one-shot run')} "
+                            f"were already placed or can be placed nowhere ({took}).{loose}",
+                "short": "Nothing to fold."}
+    return {**base, "ok": True, "summary": summary,
+            "sentence": f"Folded {plural(linked, 'run')} under their chats and {batched:,} under "
+                        f"their projects; run links went from {summary['links_before']:,} to "
+                        f"{summary['links_after']:,} ({took}).{loose}",
+            "short": f"Folded {plural(linked + batched, 'run')}."}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -505,7 +637,7 @@ def run_once(kind: str, dry_run: bool = False, *, run: Callable[..., Any] | None
         # UTF-8, SAID ABOVE, because `text=True` alone decodes as the ANSI code page on Windows
         # and the report carries folder names: one non-ASCII name would turn a good run into a
         # report this cannot parse.
-        raw = read_report(out)
+        raw = read_report(out, kind)
         busy = raw is None and code != 0 and bool(BUSY.search(err))
         if busy and kind == "incremental" and attempts < 2:
             pause(RETRY_AFTER_S)
@@ -552,6 +684,8 @@ class Jobs:
         allowed = (capability if capability_of is None else capability_of)()
         if not allowed["enabled"]:
             raise Disabled(allowed)
+        if kind != "incremental" and not Path(allowed["own"]).exists():
+            raise NoStore("There is no store yet; run Update data first.")
         if not self._lock.acquire(blocking=False):
             running = self.snapshot()
             # The worker clears `current` a moment before it frees the lock. Nothing named means
@@ -559,15 +693,30 @@ class Jobs:
             # to free rather than answer 409 about a job nobody can point at.
             if running is not None or not self._lock.acquire(timeout=2.0):
                 raise Busy(running)
-        tick = time.monotonic if clock is None else clock
-        stamp_time = _utc_now if now is None else now
-        with self._state:
-            self._seq += 1
-            job: Job = {"id": f"{self._boot}-{self._seq}", "kind": kind, "dry_run": dry_run,
-                        "state": "running", "started_at": stamp_time(),
-                        "finished_at": None, "report": None}
-            self.current = job
-            self._started = tick()
+        # WHOEVER TOOK THE LOCK FREES IT, ON EVERY PATH, AND ONLY ITS OWN. `freed` is this call's
+        # claim on it. The first version asked `self._lock.locked()` on the way out, which is a
+        # question about the lock and not about this call: it could free one a later job had
+        # taken. And a clock or a stamp that raised before the spawn left it held for good.
+        freed = {"yes": False}
+
+        def free() -> None:
+            if not freed["yes"]:
+                freed["yes"] = True
+                self._lock.release()
+
+        try:
+            tick = time.monotonic if clock is None else clock
+            stamp_time = _utc_now if now is None else now
+            with self._state:
+                self._seq += 1
+                job: Job = {"id": f"{self._boot}-{self._seq}", "kind": kind, "dry_run": dry_run,
+                            "state": "running", "started_at": stamp_time(),
+                            "finished_at": None, "report": None}
+                self._started = tick()
+                self.current = job
+        except BaseException:
+            free()
+            raise
         began: Job = {**job}
 
         def work() -> None:
@@ -593,19 +742,23 @@ class Jobs:
                 with self._state:
                     self.last = {**job, "state": "done", "finished_at": stamp_time(),
                                  "report": report}
-                    self.current = None
             finally:
-                self._lock.release()
+                # Whatever ended the work, this job is no longer the running one.
+                with self._state:
+                    if self.current is job:
+                        self.current = None
+                free()
 
         try:
             (_default_spawn if spawn is None else spawn)(work)
         except BaseException:
-            # The work never ran, so nothing will release the lock: a thread that could not start
-            # would otherwise answer 409 to every click until the server was restarted.
+            # The work never ran, so nothing else will free the lock: a thread that could not
+            # start would otherwise answer 409 to every click until the server was restarted.
+            # (`free` does nothing when the work did run and has freed it already.)
             with self._state:
-                self.current = None
-            if self._lock.locked():
-                self._lock.release()
+                if self.current is job:
+                    self.current = None
+            free()
             raise
         return began
 

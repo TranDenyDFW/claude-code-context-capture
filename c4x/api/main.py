@@ -1893,12 +1893,15 @@ def store_harvest_state():
 
 @api.post("/api/store/harvest", status_code=202)
 def store_harvest(body: dict):
-    """Start an update: `{"kind": "incremental"}`. 202 with the status and the job's `id`, which
-    is how the page tells the run it started from one a restart interrupted.
+    """Start a job: `{"kind": "incremental"}` for the everyday update, `"tool-outcomes"` or `"runs"`
+    for the two one-off passes (`"runs"` also takes `"dry_run": true`). 202 with the status and
+    the job's `id`, which is how the page tells the run it started from one a restart
+    interrupted.
 
     400 for a job that does not exist. 403 when this server will not harvest, with the sentence
     and the remedy: `--no-writes`, a served store that is not the install's own, a redacted copy.
-    409 while one is running, naming it, so the page can follow that one instead of failing.
+    409 while one is running, naming it, so the page can follow that one instead of failing,
+    and 409 `no-store` for a one-off pass on an install that has never harvested.
     A run that fails AFTER it started is not an HTTP error: it is a finished job whose report
     says so.
     """
@@ -1918,6 +1921,9 @@ def store_harvest(body: dict):
         found = exc.capability
         raise HTTPException(status_code=403, detail={
             "error": found["why_not"], "fix": found["fix"], "reason": found["reason"]}) from exc
+    except harvest.NoStore as exc:
+        raise HTTPException(status_code=409, detail={
+            "error": str(exc), "reason": "no-store"}) from exc
     except harvest.Busy as exc:
         raise HTTPException(status_code=409, detail={
             "error": "An update is already running.", "reason": "busy",
