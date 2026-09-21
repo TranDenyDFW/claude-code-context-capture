@@ -105,7 +105,7 @@ runner, CI and a linted tree.
   reading the file back. It is fed ten such spellings first, so it can fail; it is a line
   sweep, and a URL cut up across two lines is not seen. Not a plain `fileURLToPath`: by default
   it follows the platform it runs on, and the self-test feeds `rootFrom` a Windows URL on the
-  ubuntu legs too; it is the oracle instead, for nine awkward names. Known and left alone: on
+  ubuntu legs too; it is the oracle instead, for twelve awkward names (a tilde among them: every 8.3 short name has one). Known and left alone: on
   POSIX a top-level folder named like a drive (`/c:/x`) comes out relative, as it did before.
   Not settled: whether node can run the tools from a share at all. Started over this machine's
   own admin share, node 24.19 failed before the module ran, so no module URL from a share has

@@ -18,8 +18,9 @@ import { domainToUnicode, fileURLToPath, pathToFileURL } from 'node:url';
 // leading slash stripped before it is a usable path. Every tool derived this line for itself.
 //
 // AND A URL IS NOT A PATH: its path part stays percent-encoded. Until it was decoded here, an
-// install under a folder whose name held a space, `#`, `%`, a bracket or any non-ASCII letter
-// (`C:\Users\John Smith`, a profile with an accent in it) resolved to `...\John%20Smith\...`,
+// install under a folder whose name held a space, `#`, `%`, a square or curly bracket, a tilde,
+// a caret, a backtick or any non-ASCII letter (`C:\Users\John Smith`, a profile with an
+// accent in it, an 8.3 short name such as `ADMINI~1`) resolved to `...\John%20Smith\...`,
 // which is not the folder it lives in. That was so for the ten tools that call this, for two
 // more that carried a copy of the line, and for both hooks; and it is the root `install.mjs`
 // hands to `cmdFor` when it writes the hook commands. Decoded ONCE: a folder really called
@@ -445,12 +446,14 @@ async function selfTest() {
     /^[A-Za-z]:/.test(slash(rootFrom('file:///C:/a/b/c.mjs'))));
   // A URL IS NOT A PATH: its path part stays percent-encoded, so an install under a folder with
   // a space in its name resolved to `...%20...`, which is not the folder it lives in. Measured
-  // on node 24 for a space, `#`, `%`, brackets, braces and several non-ASCII letters (a Windows
-  // profile called Jose with an accent is enough). The URLs below are the ones node itself makes
+  // on node 24 for a space, `#`, `%`, square and curly brackets, a tilde (every 8.3 short name
+  // has one: `ADMINI~1`), a caret, a backtick and several non-ASCII letters (a Windows profile
+  // called Jose with an accent is enough); parentheses, `&`, `'`, `;`, `+` were always read right. The URLs below are the ones node itself makes
   // for a module under such a folder, and `fileURLToPath` is the oracle FOR THESE NAMES: by
   // default it follows the platform it runs on, which is why a plain swap cannot replace
   // `rootFrom` (the check above feeds a Windows URL to an ubuntu leg).
-  const awkward = ['plain', 'sp ace', 'a#b', 'p%41q', '100%', 'uni\u00e9', '[br]{ace}', "quo'te", 'amp&eq=x;+'];
+  const awkward = ['plain', 'sp ace', 'a#b', 'p%41q', '100%', 'uni\u00e9', '[br]{ace}', "quo'te", 'amp&eq=x;+',
+    'ADMINI~1', 'car^et', 'back`tick'];
   const under = (name) => join(rootFrom(import.meta.url), 'tmp', 'no-such', name);
   const wrong = awkward.filter((name) =>
     rootFrom(pathToFileURL(join(under(name), 'tools', 'x.mjs')).href) !== under(name));
@@ -498,6 +501,9 @@ async function selfTest() {
     `const here = url.parse(${M}).path;`,
     `const here = ${M}.split('/').slice(3).join('/');`,
     `const here = ${M}.match(/^file:...(.*)$/)[1];`,
+    // The URL was taken on an earlier line; only the word gives these two away.
+    `const here = decodeURIComponent(u.${P});`,
+    `const { ${P}: here } = u;`,
   ];
   const fineLines = [
     `const ROOT = rootFrom(${M});`,
@@ -511,7 +517,7 @@ async function selfTest() {
   ];
   const missed = badLines.filter((line) => !rootByHand(line));
   const falseAlarms = fineLines.filter((line) => rootByHand(line));
-  add('the sweep sees ten ways of cutting a path out of a module URL by hand (gate can fail)',
+  add('the sweep sees twelve ways of cutting a path out of a module URL by hand (gate can fail)',
     missed.length === 0, missed.join(' | '));
   add('and lets the four honest uses of a module URL, and comments, through (gate can fail)',
     falseAlarms.length === 0, falseAlarms.join(' | '));
