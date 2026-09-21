@@ -87,22 +87,29 @@ runner, CI and a linted tree.
 ### Fixed
 
 - **An install under a folder with a space, an accent, `#`, `%` or a bracket in its name finds
-  itself.** Every node tool and both hooks work out where the install lives from the module's
-  `file://` URL, and `URL.pathname` stays percent-encoded: under `C:\Users\John Smith` the root
-  came out as `...\John%20Smith\...`, a folder that is not there, and under a profile with an
-  accent in it as `...\Jos%C3%A9\...`. Measured end to end on a copy of `tools/` and `hooks/`
-  installed under six such folders: on main five of the six resolved a root that did not exist,
-  and the hook command the installer would write named a script that was not there, so nothing
-  was captured and nothing said why. `rootFrom` (`tools/paths.mjs`) now decodes the path once (a
-  folder really called `p%41q` stays `p%41q`, never `pAq`) and keeps a share's host, which
-  `pathname` alone drops. Four files carried a hand copy of the old expression, the two hooks
-  among them (`hooks/event-hook.mjs`, `hooks/compact-hook.mjs`, `tools/statusline.mjs`,
-  `tools/otel-gate.mjs`); they call `rootFrom` now, and the paths self-test fails if any tool or
-  hook takes a path out of a URL by hand again. Not `fileURLToPath`: it is right only for the
-  platform it runs on, and the self-test, which holds `rootFrom` to it for every URL the platform
-  makes, also feeds a Windows URL to the ubuntu legs. Not settled: whether node can run the
-  tools from a share at all. Started over this machine's own admin share, node 24.19 failed
-  before the module ran. Tests: `node tools/paths.mjs --self-test` (34, six of them new).
+  itself.** Twelve node tools and both hooks worked out where the install lives from the
+  module's `file://` URL (ten through `rootFrom` in `tools/paths.mjs`, four files through a hand
+  copy of its one line), and a URL's path stays percent-encoded: under `C:\Users\John Smith`
+  the root came out as `...\John%20Smith\...`, and under a profile with an accent in it as
+  `...\Jos%C3%A9\...`, neither of which is the folder the install is in. Measured end to end
+  on a copy of `tools/` and `hooks/` installed under six such folders: on main five of the six
+  resolved a root that did not exist, and the hook command `install.mjs` builds from that root
+  named a script that was not there. `rootFrom` now decodes the path once (a folder really
+  called `p%41q` stays `p%41q`, never `pAq`). For a share it puts back the host, which the path
+  part alone drops, spelled as the file system spells it, and a drive letter loses its slash
+  only when there is no host. The four hand copies (`hooks/event-hook.mjs`,
+  `hooks/compact-hook.mjs`, `tools/statusline.mjs`, `tools/otel-gate.mjs`) call `rootFrom`.
+  The paths self-test sweeps every source line under `tools/` and `hooks/` for a path cut out
+  of a module's own URL by hand: the word `pathname` however it is reached, and any use of
+  `import.meta.url` other than handing it to `rootFrom` or `fileURLToPath`, comparing it, or
+  reading the file back. It is fed ten such spellings first, so it can fail; it is a line
+  sweep, and a URL cut up across two lines is not seen. Not a plain `fileURLToPath`: by default
+  it follows the platform it runs on, and the self-test feeds `rootFrom` a Windows URL on the
+  ubuntu legs too; it is the oracle instead, for nine awkward names. Known and left alone: on
+  POSIX a top-level folder named like a drive (`/c:/x`) comes out relative, as it did before.
+  Not settled: whether node can run the tools from a share at all. Started over this machine's
+  own admin share, node 24.19 failed before the module ran, so no module URL from a share has
+  been observed. Tests: `node tools/paths.mjs --self-test`, eleven new checks.
 - **The release's checksum file can be read by the command that checks it.** It was written with a
   CRLF, which `sha256sum -c` reads as part of the filename, so it reported "No such file" about the
   zip sitting beside it. The digest itself was always correct. The release job now writes the

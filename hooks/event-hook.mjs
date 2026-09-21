@@ -30,8 +30,9 @@ import { ensureStoreDir, defaultDb, portFrom, probeHealth, rootFrom } from '../t
 import { pathToFileURL } from 'node:url';
 import { audit, applyWiring, backupSettings, WIRING } from '../tools/install.mjs';
 
-// `rootFrom`, not a copy of it: this line carried one, and the copy missed the decoding, so under
-// a profile called `John Smith` this hook wrote its log to a `John%20Smith` that is not there.
+// `rootFrom`, not a copy of it: this line carried one. Neither decoded the URL, so under a
+// profile called `John Smith` this hook took its root to be `...\John%20Smith\...`, which is
+// not the folder it lives in (see tools/paths.mjs). One place to be right is enough.
 const ROOT = rootFrom(import.meta.url);
 const DEFAULT_OUT = join(ROOT, 'data', 'raw', 'events.ndjson');
 const OUT_OVERRIDE = process.env.C4X_EVENTS_OUT || null;
