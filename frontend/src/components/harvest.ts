@@ -42,7 +42,13 @@ export function ago(iso: string, now: number): string {
   if (minutes < 60) return `${minutes} min ago`
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours} h ago`
-  return `on ${iso.slice(0, 16).replace('T', ' ')}`
+  // THE READER'S CLOCK, not the stamp's. The stamp is UTC, and cutting it as text printed a
+  // wall time with no zone: the wrong hour everywhere but Greenwich and, near midnight, the
+  // wrong date.
+  const when = new Date(then)
+  const two = (n: number) => String(n).padStart(2, '0')
+  return `on ${when.getFullYear()}-${two(when.getMonth() + 1)}-${two(when.getDate())} `
+    + `${two(when.getHours())}:${two(when.getMinutes())}`
 }
 
 /** How fresh the store is, whoever updated it last. The table does not record who. */
@@ -76,12 +82,15 @@ export function hoverFor(status: HarvestStatus, now: number): string {
 }
 
 /** What to say beside the button when a run this page followed has ended. */
-export function noteFor(outcome: HarvestOutcome | null, expected: number | null): Note {
-  // THE ID IS THE PROOF. A server restarted mid-run comes back with no last job, or with an
-  // older one, and "not running any more" alone would have been reported as a success.
+export function noteFor(outcome: HarvestOutcome | null, expected: string | null): Note {
+  // THE ID IS THE PROOF. "Not running any more, and the last job went fine" is exactly what a
+  // success looks like, and it is also what a run killed by Restart C4X looks like once some
+  // other run has finished on the new server. The id names the server process, so the two
+  // cannot be confused. The note says what is known (this run's result never came back) and
+  // not why, which the page cannot know.
   if (!outcome || (expected !== null && outcome.id !== expected)) {
     return {
-      text: 'The update was interrupted (the server restarted); the page has reloaded its data.',
+      text: "The update did not report back (C4X was restarted or stopped under it); the page has reloaded its data.",
       tone: 'warn',
       stays: false,
     }

@@ -27,14 +27,14 @@ function status(over: Partial<HarvestStatus> = {}): HarvestStatus {
 
 function outcome(over: Partial<HarvestOutcome> = {}): HarvestOutcome {
   return {
-    id: 1, kind: 'incremental', dry_run: false, ok: true, partial: false,
+    id: 'b-1', kind: 'incremental', dry_run: false, ok: true, partial: false,
     sentence: 'Read 3 of 9,599 transcripts.', short: 'Updated: 3 transcripts read.', seconds: 1.2,
     error: null, started_at: '2026-09-20T17:59:58.000Z', finished_at: '2026-09-20T17:59:59.200Z',
     ...over,
   }
 }
 
-const running = (id = 1) => status({
+const running = (id = 'b-1') => status({
   running: true, job: { id, kind: 'incremental', dry_run: false, started_at: '', elapsed_s: 2 },
 })
 
@@ -67,7 +67,7 @@ describe('UpdateData', () => {
     vi.spyOn(api.harvest, 'state')
       .mockResolvedValueOnce(status())
       .mockResolvedValue(status({ last: outcome() }))
-    const run = vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 1 })
+    const run = vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 'b-1' })
     draw()
     fireEvent.click(await button())
     await waitFor(() => expect(run).toHaveBeenCalledTimes(1))
@@ -77,7 +77,7 @@ describe('UpdateData', () => {
 
   it('is busy and unclickable while a run is under way, and a second click posts nothing', async () => {
     vi.spyOn(api.harvest, 'state').mockResolvedValueOnce(status()).mockResolvedValue(running())
-    const run = vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 1 })
+    const run = vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 'b-1' })
     draw()
     fireEvent.click(await button())
     const busy = await screen.findByRole('button', { name: 'Updating…' })
@@ -94,7 +94,7 @@ describe('UpdateData', () => {
       .mockResolvedValueOnce(status())
       .mockResolvedValueOnce(running())
       .mockResolvedValue(status({ last: outcome() }))
-    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 1 })
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 'b-1' })
     const onChanged = vi.fn()
     draw({ onChanged })
     fireEvent.click(await button())
@@ -108,7 +108,7 @@ describe('UpdateData', () => {
     vi.spyOn(api.harvest, 'state')
       .mockResolvedValueOnce(status())
       .mockResolvedValue(status({ last: outcome() }))
-    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 1 })
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 'b-1' })
     const onChanged = vi.fn()
     draw({ onChanged })
     fireEvent.click(await button())
@@ -118,9 +118,9 @@ describe('UpdateData', () => {
 
   it('comes up already running when the server says a job is under way, and reloads when it ends', async () => {
     vi.spyOn(api.harvest, 'state')
-      .mockResolvedValueOnce(running(4))
-      .mockResolvedValueOnce(running(4))
-      .mockResolvedValue(status({ last: outcome({ id: 4 }) }))
+      .mockResolvedValueOnce(running('b-4'))
+      .mockResolvedValueOnce(running('b-4'))
+      .mockResolvedValue(status({ last: outcome({ id: 'b-4' }) }))
     const run = vi.spyOn(api.harvest, 'run')
     const onChanged = vi.fn()
     draw({ onChanged })
@@ -139,7 +139,7 @@ describe('UpdateData', () => {
     vi.spyOn(api.harvest, 'state').mockImplementation(async () => {
       calls += 1
       if (calls === 1) return status()
-      return finished ? status({ last: outcome({ id: 9 }) }) : running(9)
+      return finished ? status({ last: outcome({ id: 'b-9' }) }) : running('b-9')
     })
     vi.spyOn(api.harvest, 'run').mockRejectedValue(
       new ApiError('409 from /api/store/harvest', 409, { error: 'An update is already running.', reason: 'busy' }))
@@ -171,7 +171,7 @@ describe('UpdateData', () => {
     vi.spyOn(api.harvest, 'state')
       .mockResolvedValueOnce(status())
       .mockResolvedValue(status({ last: outcome({ ok: false, short: 'Update failed: the harvester exited 1.', error: 'x' }) }))
-    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 1 })
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 'b-1' })
     const onChanged = vi.fn()
     draw({ onChanged, noteMs: 10 })
     fireEvent.click(await button())
@@ -186,10 +186,10 @@ describe('UpdateData', () => {
     vi.spyOn(api.harvest, 'state')
       .mockResolvedValueOnce(status())
       .mockResolvedValue(status({ last: null }))
-    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 5 })
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 'b-5' })
     draw()
     fireEvent.click(await button())
-    await waitFor(() => expect(note()).toContain('interrupted'))
+    await waitFor(() => expect(note()).toContain('did not report back'))
     expect(note()).not.toContain('Updated')
   })
 
@@ -199,11 +199,11 @@ describe('UpdateData', () => {
     // without the id.
     vi.spyOn(api.harvest, 'state')
       .mockResolvedValueOnce(status())
-      .mockResolvedValue(status({ last: outcome({ id: 3 }) }))
-    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 5 })
+      .mockResolvedValue(status({ last: outcome({ id: 'b-3' }) }))
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 'b-5' })
     draw()
     fireEvent.click(await button())
-    await waitFor(() => expect(note()).toContain('interrupted'))
+    await waitFor(() => expect(note()).toContain('did not report back'))
     expect(note()).not.toContain('Updated')
     expect(screen.getByTestId('update-note').className).toContain('text-warn')
   })
@@ -212,7 +212,7 @@ describe('UpdateData', () => {
     vi.spyOn(api.harvest, 'state')
       .mockResolvedValueOnce(status())
       .mockResolvedValue(status({ last: outcome() }))
-    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 1 })
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...status(), accepted: true, id: 'b-1' })
     draw({ noteMs: 15 })
     fireEvent.click(await button())
     await waitFor(() => expect(note()).toBe('Updated: 3 transcripts read.'))
@@ -249,11 +249,81 @@ describe('UpdateData', () => {
       .mockResolvedValueOnce(status())
       .mockResolvedValueOnce(running())
       .mockRejectedValue(new ApiError('Failed to fetch', 0))
-    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 1 })
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 'b-1' })
     draw()
     fireEvent.click(await button())
-    await waitFor(() => expect(note()).toBe("C4X stopped answering; the update's outcome is not known."))
+    await waitFor(() => expect(note()).toBe("C4X stopped answering; the update's outcome is not known yet."))
     expect((await button()).getAttribute('aria-busy')).toBe('false')
+  })
+
+  it('one failed poll does not lose the run: it is picked up again and reported, and the page reloads', async () => {
+    // The common case behind "stopped answering" is a laptop lid or a network change while the
+    // server and the harvester carry on. Dropping the run there left a red note for ever and
+    // never reloaded data the run did write.
+    let calls = 0
+    vi.spyOn(api.harvest, 'state').mockImplementation(async () => {
+      calls += 1
+      if (calls === 1) return status()
+      if (calls === 2) return running()
+      if (calls === 3) throw new ApiError('Failed to fetch', 0)
+      return status({ last: outcome() })
+    })
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 'b-1' })
+    const onChanged = vi.fn()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+    render(
+      <QueryClientProvider client={client}>
+        <UpdateData onChanged={onChanged} pollMs={5} idleMs={60_000} noteMs={60_000} />
+      </QueryClientProvider>,
+    )
+    fireEvent.click(await button())
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(3))
+    // Poked rather than waited for: while lost the hook asks again every two seconds at least.
+    await waitFor(async () => {
+      await client.refetchQueries({ queryKey: ['harvest'] })
+      expect(note()).toBe('Updated: 3 transcripts read.')
+    })
+    expect(onChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('a 409 whose job ended before the page could look is a finished run, not a failed click', async () => {
+    vi.spyOn(api.harvest, 'state')
+      .mockResolvedValueOnce(status())
+      .mockResolvedValue(status({ last: outcome({ id: 'b-9' }) }))
+    vi.spyOn(api.harvest, 'run').mockRejectedValue(new ApiError('409 from /api/store/harvest', 409, {
+      error: 'An update is already running.', reason: 'busy', job: { id: 'b-9' },
+    }))
+    const onChanged = vi.fn()
+    draw({ onChanged })
+    fireEvent.click(await button())
+    await waitFor(() => expect(note()).toBe('Updated: 3 transcripts read.'))
+    expect(note()).not.toContain('Update failed')
+    expect(onChanged).toHaveBeenCalledTimes(1)
+    expect((await button()).getAttribute('aria-busy')).toBe('false')
+  })
+
+  it('a run it found under way is held to its id too: a later run of a restarted server is not its result', async () => {
+    // Reloaded mid-run, following job b-7; the server is restarted (which kills b-7) and some
+    // other tab runs c-1 on the new server. "Not running, and the last job went fine" is true,
+    // and it is not this run.
+    let finished = false
+    vi.spyOn(api.harvest, 'state').mockImplementation(async () =>
+      finished ? status({ last: outcome({ id: 'c-1' }) }) : running('b-7'))
+    draw()
+    await screen.findByRole('button', { name: 'Updating…' })
+    finished = true
+    await waitFor(() => expect(note()).toContain('did not report back'))
+    expect(note()).not.toContain('Updated')
+  })
+
+  it('an idle page shown again asks at once, so the freshness line is not thirty seconds stale', async () => {
+    const state = vi.spyOn(api.harvest, 'state').mockResolvedValue(status())
+    draw()
+    await button()
+    const before = state.mock.calls.length
+    focusManager.setFocused(false)
+    focusManager.setFocused(true)
+    await waitFor(() => expect(state.mock.calls.length).toBeGreaterThan(before))
   })
 
   it('catches up when the page is shown again: a hidden tab does not poll, and the return refetches', async () => {
@@ -264,7 +334,7 @@ describe('UpdateData', () => {
       if (calls === 1) return status()
       return finished ? status({ last: outcome() }) : running()
     })
-    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 1 })
+    vi.spyOn(api.harvest, 'run').mockResolvedValue({ ...running(), accepted: true, id: 'b-1' })
     const onChanged = vi.fn()
     draw({ onChanged })
     fireEvent.click(await button())

@@ -96,6 +96,43 @@ class TestWhetherItWill:
         assert found["enabled"] is False and found["reason"] == "redacted-copy"
         assert "real transcripts" in found["why_not"]
 
+    def test_the_mark_is_read_from_the_file_itself(self, tmp_path):
+        """No injected callable here: the production wiring. A store at the install's own path that
+        carries the table redact.py stamps is a copy, and is refused."""
+        import sqlite3
+        (tmp_path / "data").mkdir()
+        own = tmp_path / "data" / "context.db"
+        con = sqlite3.connect(own)
+        con.execute(f"CREATE TABLE {store.REDACTION_MARK} (at TEXT)")
+        con.commit()
+        con.close()
+        found = harvest.capability(db=own, root=tmp_path, env={})
+        assert found["enabled"] is False and found["reason"] == "redacted-copy"
+
+    def test_a_copy_swapped_in_under_a_running_server_is_seen_at_once(self, tmp_path):
+        """The gate is asked at startup and on every status read. A memo would go on saying "the
+        real store" about a copy swapped into place afterwards, and the click would write real
+        transcripts into it; this reads the file each time."""
+        import sqlite3
+        (tmp_path / "data").mkdir()
+        own = tmp_path / "data" / "context.db"
+        sqlite3.connect(own).close()
+        assert harvest.capability(db=own, root=tmp_path, env={})["enabled"] is True
+        con = sqlite3.connect(own)
+        con.execute(f"CREATE TABLE {store.REDACTION_MARK} (at TEXT)")
+        con.commit()
+        con.close()
+        assert harvest.capability(db=own, root=tmp_path, env={})["reason"] == "redacted-copy"
+
+    def test_a_file_that_is_not_a_database_is_unreadable_not_fine(self, tmp_path):
+        """FAILS CLOSED. The helper the title overlay uses reads this as "not a copy"."""
+        (tmp_path / "data").mkdir()
+        own = tmp_path / "data" / "context.db"
+        own.write_bytes(b"this is not a sqlite file, it is a half finished copy" * 40)
+        found = harvest.capability(db=own, root=tmp_path, env={})
+        assert found["enabled"] is False and found["reason"] == "unreadable-store"
+        assert harvest.carries_mark(tmp_path / "data" / "absent.db") is False
+
     def test_no_writes_disables_it(self, tmp_path):
         found = harvest.capability(db=tmp_path / "data" / "context.db", root=tmp_path,
                                    env={"C4X_NO_WRITES": "1"}, redacted=lambda: False)
@@ -169,8 +206,13 @@ class TestTheRequest:
         with pytest.raises(ValueError, match="no dry run"):
             harvest.parse_request({"kind": "incremental", "dry_run": True})
 
-    def test_dry_run_must_be_literal_true(self):
-        assert harvest.parse_request({"kind": "incremental", "dry_run": "yes"}) \
+    @pytest.mark.parametrize("given", ["yes", "true", 1, 0, None, [True]])
+    def test_dry_run_is_a_boolean_or_the_request_is_refused(self, given):
+        """A caller who sends "yes" MEANT a dry run. Reading it as false would run the job that
+        writes, which is the one way to get this wrong that costs something."""
+        with pytest.raises(ValueError, match="true or false"):
+            harvest.parse_request({"kind": "incremental", "dry_run": given})
+        assert harvest.parse_request({"kind": "incremental", "dry_run": False}) \
             == ("incremental", False)
 
 
@@ -241,7 +283,7 @@ class TestWhatItSays:
 
 class TestTheJob:
     def jobs(self):
-        return harvest.Jobs()
+        return harvest.Jobs(boot="t")
 
     def start(self, jobs, run, **kw):
         kw.setdefault("spawn", lambda work: work())
@@ -255,10 +297,10 @@ class TestTheJob:
     def test_a_finished_job_is_the_last_one_and_carries_its_report(self):
         jobs = self.jobs()
         began = self.start(jobs, runner(ran(json.dumps(report()))))
-        assert began["state"] == "running" and began["id"] == 1
+        assert began["state"] == "running" and began["id"] == "t-1"
         assert jobs.in_progress() is False
         done = jobs.finished()
-        assert done["id"] == 1 and done["ok"] is True and done["finished_at"]
+        assert done["id"] == "t-1" and done["ok"] is True and done["finished_at"]
         assert done["short"] == "Updated: 3 transcripts read."
 
     def test_a_second_start_while_one_runs_is_busy(self):
@@ -267,18 +309,53 @@ class TestTheJob:
         assert jobs.in_progress() is True
         with pytest.raises(harvest.Busy) as refusal:
             self.start(jobs, runner(ran(json.dumps(report()))), spawn=held.append)
-        assert refusal.value.job["id"] == 1 and refusal.value.job["kind"] == "incremental"
+        assert refusal.value.job["id"] == "t-1" and refusal.value.job["kind"] == "incremental"
         assert len(held) == 1
         held[0]()
         assert jobs.in_progress() is False
-        assert self.start(jobs, runner(ran(json.dumps(report()))))["id"] == 2
+        assert self.start(jobs, runner(ran(json.dumps(report()))))["id"] == "t-2"
 
     def test_the_lock_is_free_after_a_failure_and_after_a_timeout(self):
         jobs = self.jobs()
         self.start(jobs, runner(ran("", code=1, stderr="boom")))
         self.start(jobs, runner(proc.TimeoutExpired(cmd="node", timeout=1)))
-        assert jobs.finished()["id"] == 2 and jobs.finished()["ok"] is False
-        assert self.start(jobs, runner(ran(json.dumps(report()))))["id"] == 3
+        assert jobs.finished()["id"] == "t-2" and jobs.finished()["ok"] is False
+        assert self.start(jobs, runner(ran(json.dumps(report()))))["id"] == "t-3"
+
+    def test_ids_name_the_process_so_a_restarted_server_cannot_reuse_one(self):
+        """The page calls a run a success only when the server names its id back. A bare counter
+        starts at 1 again with every server, so a run Restart C4X interrupted and the first run
+        of the new server would both be job 1."""
+        one, two = harvest.Jobs(), harvest.Jobs()
+        first = self.start(one, runner(ran(json.dumps(report()))))["id"]
+        second = self.start(two, runner(ran(json.dumps(report()))))["id"]
+        assert first != second and first.endswith("-1") and second.endswith("-1")
+
+    def test_a_job_that_has_just_ended_is_not_busy(self):
+        """The worker clears `current` a moment before it frees the lock. A click in that moment
+        finds the lock held and nobody to name; it waits for the lock instead of answering 409
+        about a job that is over, which the page would have shown as a failed update."""
+        import threading
+        jobs = self.jobs()
+        jobs._lock.acquire()
+        threading.Timer(0.05, jobs._lock.release).start()
+        began = self.start(jobs, runner(ran(json.dumps(report()))))
+        assert began["id"] == "t-1" and jobs.finished()["ok"] is True
+
+    def test_the_default_runner_in_a_test_is_a_tripwire(self, never_the_real_harvester):
+        """The job swallows what its runner raises into a finished report (it must: a bug there
+        cannot be allowed to wedge the lock), so the tripwire cannot fail a test by raising. It
+        RECORDS, and the fixture fails the test when it is torn down. This test is the one
+        place allowed to reach it, and it empties the record to say so."""
+        jobs = self.jobs()
+        jobs.start("incremental", spawn=lambda work: work(), invalidate=lambda: None,
+                   stamp=lambda: False,
+                   capability_of=lambda: {"enabled": True, "reason": None, "why_not": None,
+                                          "fix": None, "db": "a", "own": "a"})
+        assert len(never_the_real_harvester) == 1
+        assert "harvest.mjs" in " ".join(never_the_real_harvester[0])
+        assert jobs.finished()["ok"] is False
+        never_the_real_harvester.clear()
 
     def test_a_spawn_that_cannot_start_frees_the_lock(self):
         jobs = self.jobs()
@@ -288,7 +365,7 @@ class TestTheJob:
         with pytest.raises(RuntimeError):
             self.start(jobs, runner(ran(json.dumps(report()))), spawn=no_threads)
         assert jobs.in_progress() is False
-        assert self.start(jobs, runner(ran(json.dumps(report()))))["id"] == 2
+        assert self.start(jobs, runner(ran(json.dumps(report()))))["id"] == "t-2"
 
     def test_every_finished_job_invalidates_after_the_run(self):
         jobs, order = self.jobs(), []
@@ -406,7 +483,7 @@ def served(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", path)
     monkeypatch.setattr(store, "ROOT", tmp_path)
     monkeypatch.delenv("C4X_NO_WRITES", raising=False)
-    monkeypatch.setattr(harvest, "JOBS", harvest.Jobs())
+    monkeypatch.setattr(harvest, "JOBS", harvest.Jobs(boot="t"))
     monkeypatch.setattr(harvest, "_default_spawn", lambda work: work())
     calls = []
     monkeypatch.setattr(harvest, "_default_run",
@@ -422,10 +499,10 @@ class TestTheRoutes:
         answer = served.client.post("/api/store/harvest", json={"kind": "incremental"})
         assert answer.status_code == 202
         body = answer.json()
-        assert body["accepted"] is True and body["id"] == 1 and len(served.calls) == 1
+        assert body["accepted"] is True and body["id"] == "t-1" and len(served.calls) == 1
         state = served.client.get("/api/store/harvest").json()
         assert state["enabled"] is True and state["running"] is False and state["job"] is None
-        assert state["last"]["id"] == 1 and state["last"]["ok"] is True
+        assert state["last"]["id"] == "t-1" and state["last"]["ok"] is True
         assert state["last"]["short"] == "Updated: 3 transcripts read."
         assert state["last_harvest"]["mode"] == "incremental" and state["kinds"] == ["incremental"]
 
@@ -434,12 +511,12 @@ class TestTheRoutes:
         monkeypatch.setattr(harvest, "_default_spawn", held.append)
         assert served.client.post("/api/store/harvest", json={}).status_code == 202
         state = served.client.get("/api/store/harvest").json()
-        assert state["running"] is True and state["job"]["id"] == 1
+        assert state["running"] is True and state["job"]["id"] == "t-1"
         assert state["job"]["elapsed_s"] >= 0
         again = served.client.post("/api/store/harvest", json={})
         assert again.status_code == 409
         detail = again.json()["detail"]
-        assert detail["reason"] == "busy" and detail["job"]["id"] == 1 and detail["error"]
+        assert detail["reason"] == "busy" and detail["job"]["id"] == "t-1" and detail["error"]
         held[0]()
         assert served.client.get("/api/store/harvest").json()["running"] is False
 
@@ -461,7 +538,8 @@ class TestTheRoutes:
         assert answer.status_code == 403 and served.calls == []
         assert served.client.get("/api/store/harvest").json()["reason"] == "no-writes"
 
-    @pytest.mark.parametrize("body", [{"kind": "full"}, {"kind": "incremental", "dry_run": True}])
+    @pytest.mark.parametrize("body", [{"kind": "full"}, {"kind": "incremental", "dry_run": True},
+                                      {"kind": "incremental", "dry_run": "yes"}])
     def test_a_job_that_does_not_exist_is_400(self, served, body):
         answer = served.client.post("/api/store/harvest", json=body)
         assert answer.status_code == 400 and served.calls == []
@@ -515,6 +593,35 @@ class TestTheContractWithTheHarvester:
         assert set(report()) <= printed
 
     def test_every_key_the_summary_touches_is_declared(self):
+        """EVERY SPELLING of a top-level read: `raw.get("x")`, `raw.get("x", 0)`, `raw["x"]`, either
+        quote, and the `"x" in found` of `read_report`. A scan that knew one spelling let a key
+        the harvester never prints be read through another."""
         source = (ROOT / "c4x" / "harvest.py").read_text(encoding="utf-8")
-        touched = set(re.findall(r'raw\.get\("([a-z_]+)"\)', source))
-        assert touched and touched <= harvest.READS, f"undeclared: {touched - harvest.READS}"
+        touched = set(re.findall(r"""raw(?:\.get\(|\[)\s*["']([a-z_]+)["']""", source))
+        touched |= set(re.findall(r"""["']([a-z_]+)["'] in found""", source))
+        assert len(touched) >= 10
+        assert touched <= harvest.READS, f"undeclared: {touched - harvest.READS}"
+
+    def test_the_nested_keys_are_held_the_same_two_ways(self):
+        source = (ROOT / "tools" / "harvest.mjs").read_text(encoding="utf-8")
+        block = re.search(r"export const RUN_REPORT_NESTED = Object\.freeze\(\{(.*?)\}\);",
+                          source, re.DOTALL)
+        assert block, "tools/harvest.mjs no longer exports RUN_REPORT_NESTED"
+        printed = {group: set(re.findall(r"'([a-z_]+)'", keys))
+                   for group, keys in re.findall(r"(\w+): \[(.*?)\]", block.group(1))}
+        assert set(printed) == set(harvest.READS_NESTED)
+        for group, keys in harvest.READS_NESTED.items():
+            assert keys <= printed[group], \
+                f"{group}: read but never printed: {keys - printed[group]}"
+        # And the other side: every nested read in c4x/harvest.py, through the local name the
+        # summary uses for the group and through the inline `(raw.get("group") or {}).get("key")`.
+        here = (ROOT / "c4x" / "harvest.py").read_text(encoding="utf-8")
+        quoted = r"""["']([a-z_]+)["']"""
+        for name, group in (("chains", "chains"), ("sidecars", "sidecars"),
+                            ("records", "desktop_records")):
+            read = set(re.findall(name + r"\.get\(\s*" + quoted, here))
+            inline = r"raw\.get\(\s*[\"']" + group + r"[\"']\s*\) or \{\}\)\.get\(\s*" + quoted
+            read |= set(re.findall(inline, here))
+            assert read, f"{group}: the scan found no read at all, so it proves nothing"
+            assert read <= harvest.READS_NESTED[group], \
+                f"{group}: undeclared: {read - harvest.READS_NESTED[group]}"

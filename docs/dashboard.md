@@ -35,8 +35,11 @@ seconds, a failure until the next run and in words ("Update failed: ..."). The h
 fresh the store is, from the newest `harvest_runs` row, whoever wrote it: "Store last updated
 3 min ago: 2 transcripts read in 1.4 s." The button is busy exactly as long as the server says
 a job runs (a catch-up took 54 minutes on one machine, so there is no short timeout), a page
-reloaded mid-run comes up already busy, and a run the server does not name back by its id is
-reported as interrupted, never as a success. It is NOT the Live toggle: Live re-reads the store
+reloaded mid-run comes up already busy, and every run the page follows (one it started, one it
+found under way, one a 409 pointed it at) is held to its id: a run the server does not name
+back is said not to have reported back, never called a success, and the id names the server
+process too, so a restarted server cannot reuse one. One failed status read does not lose
+the run; the page keeps asking and reports it when the server answers again. It is NOT the Live toggle: Live re-reads the store
 every five seconds, Update data reads new transcripts INTO it. The server still never harvests
 on its own. It will only ever update the install's own store: the harvester reads this
 machine's real transcripts, so a server started on a copy or a fixture (`--db`), on a redacted

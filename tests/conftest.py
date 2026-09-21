@@ -107,14 +107,23 @@ def never_the_real_harvester(monkeypatch):
     `/api/store/harvest` with a patched `store.DB_PATH` and forgets the fake runner.
 
     Every test that means to drive a job passes its own `run=`. This replaces only the DEFAULT.
+
+    IT RECORDS, AND FAILS THE TEST AT TEARDOWN. Raising alone is not enough, and it was written
+    that way first: a job swallows whatever its runner raises into a finished report (it has
+    to, or a bug there would wedge the lock), so the AssertionError vanished into `last` and
+    the test that reached the harvester went green. Yields the record, which the one test
+    about this fixture empties.
     """
     from c4x import harvest
+    reached: list = []
 
     def refuse(args, **kw):
-        raise AssertionError("a test reached the real harvester; pass run= to c4x.harvest "
-                             f"(it would have run {list(args)[:3]})")
+        reached.append([str(part) for part in list(args)[:3]])
+        raise AssertionError("a test reached the real harvester; pass run= to c4x.harvest")
 
     monkeypatch.setattr(harvest, "_default_run", refuse)
+    yield reached
+    assert not reached, f"this test reached the real harvester: {reached}"
 
 
 @pytest.fixture(scope="session")

@@ -24,11 +24,23 @@ runner, CI and a linted tree.
   ends; a click that races a prompt hook's harvest is retried once; the watchdog waits for a
   running update. `run()` in `tools/harvest.mjs` had no coverage at all and now takes its
   inputs as parameters, runs in the self-test on scratch inputs, and exports
-  `RUN_REPORT_KEYS`, which the Python parser is held to. Tests: `tests/test_harvest.py` (60),
-  the harvester self-test (339), `tests/test_api.py` (the server starts nothing on a read),
-  vitest `UpdateData.test.tsx` (15), `harvest.test.ts` (15), `App.test.tsx`, `a11y.test.tsx`;
-  an autouse fixture makes the default runner raise, since the harvester's transcripts root
-  cannot be redirected and no test may run it.
+  `RUN_REPORT_KEYS` and `RUN_REPORT_NESTED`, which the Python parser is held to. An
+  adversarial review of the diff, each finding checked by a second reader, then found and
+  this fixed: the redacted-copy gate read a memo kept for the life of the process and a
+  helper that turns "file is not a database" into "not a copy", so it now reads the mark from
+  the file on every call and fails closed; job ids restarted at 1 with every server, so a
+  run Restart C4X killed could be reported with a later run's result, and they now name
+  the process; one failed status read dropped the run for good (a red note for ever, no
+  reload), and the page now keeps asking; a 409 whose job had just ended was shown as a
+  failed click; a run the page found under way was not held to its id; `dry_run: "yes"`
+  was read as false and would have run the job that writes; the freshness line printed a
+  UTC wall time with no zone; and the test tripwire could not fail a test, because a job
+  swallows what its runner raises, so it records and fails at teardown. Tests:
+  `tests/test_harvest.py` (73), the harvester self-test (341), `tests/test_api.py` (a read
+  starts nothing, with the gate open and the job synchronous so it could be seen), vitest
+  `UpdateData.test.tsx` (21), `harvest.test.ts` (15), `App.test.tsx` (the page reloads when
+  an update ends), `a11y.test.tsx`. No test may run the harvester: its transcripts root
+  cannot be redirected.
 
 ### Fixed
 

@@ -17,7 +17,7 @@ const status = (over: Partial<HarvestStatus> = {}): HarvestStatus => ({
 })
 
 const outcome = (over: Partial<HarvestOutcome> = {}): HarvestOutcome => ({
-  id: 7, kind: 'incremental', dry_run: false, ok: true, partial: false,
+  id: 'b-7', kind: 'incremental', dry_run: false, ok: true, partial: false,
   sentence: 'Read 3 of 9,599 transcripts.', short: 'Updated: 3 transcripts read.', seconds: 1.2,
   error: null, started_at: '2026-09-20T17:59:58.000Z', finished_at: '2026-09-20T17:59:59.200Z',
   ...over,
@@ -28,7 +28,13 @@ describe('ago', () => {
     expect(ago('2026-09-20T17:59:40.000Z', NOW)).toBe('less than a minute ago')
     expect(ago('2026-09-20T17:57:00.000Z', NOW)).toBe('3 min ago')
     expect(ago('2026-09-20T13:00:00.000Z', NOW)).toBe('5 h ago')
-    expect(ago('2026-09-15T03:41:00.000Z', NOW)).toBe('on 2026-09-15 03:41')
+    // In the READER'S clock. Built from the same Date the code uses, so the test holds in
+    // any zone and still fails if the stamp is cut as text (UTC) again.
+    const then = new Date('2026-09-15T03:41:00.000Z')
+    const two = (n: number) => String(n).padStart(2, '0')
+    const local = `on ${then.getFullYear()}-${two(then.getMonth() + 1)}-${two(then.getDate())} `
+      + `${two(then.getHours())}:${two(then.getMinutes())}`
+    expect(ago('2026-09-15T03:41:00.000Z', NOW)).toBe(local)
   })
 
   it('hands back what it cannot read rather than inventing a time', () => {
@@ -77,7 +83,7 @@ describe('hoverFor', () => {
   it('a running job says what it is doing and for how long', () => {
     const text = hoverFor(status({
       running: true,
-      job: { id: 3, kind: 'incremental', dry_run: false, started_at: '', elapsed_s: 41.6 },
+      job: { id: 'b-3', kind: 'incremental', dry_run: false, started_at: '', elapsed_s: 41.6 },
     }), NOW)
     expect(text).toBe('Reading new transcripts for 42 s. The tables reload when it finishes.')
   })
@@ -91,28 +97,32 @@ describe('hoverFor', () => {
 
 describe('noteFor', () => {
   it('a success is the server’s short line, and goes after a moment', () => {
-    expect(noteFor(outcome(), 7)).toEqual({ text: 'Updated: 3 transcripts read.', tone: 'good', stays: false })
+    expect(noteFor(outcome(), 'b-7')).toEqual({ text: 'Updated: 3 transcripts read.', tone: 'good', stays: false })
   })
 
   it('a failure is said in words, in red, and stays', () => {
-    const note = noteFor(outcome({ ok: false, short: 'Update failed: node would not start.' }), 7)
+    const note = noteFor(outcome({ ok: false, short: 'Update failed: node would not start.' }), 'b-7')
     expect(note).toEqual({ text: 'Update failed: node would not start.', tone: 'bad', stays: true })
   })
 
   it('a partial run is its own tone and stays, since part of it still needs doing', () => {
-    const note = noteFor(outcome({ partial: true, short: 'Updated in part: 3 transcripts read, 1 pass failed.' }), 7)
+    const note = noteFor(outcome({ partial: true, short: 'Updated in part: 3 transcripts read, 1 pass failed.' }), 'b-7')
     expect(note.tone).toBe('warn')
     expect(note.stays).toBe(true)
   })
 
   it('a run the server does not name is interrupted, never a success', () => {
-    expect(noteFor(null, 7).text).toContain('interrupted')
-    expect(noteFor(outcome({ id: 6 }), 7).text).toContain('interrupted')
-    expect(noteFor(outcome({ id: 6 }), 7).tone).toBe('warn')
+    expect(noteFor(null, 'b-7').text).toContain('did not report back')
+    expect(noteFor(outcome({ id: 'b-6' }), 'b-7').text).toContain('did not report back')
+    // A restarted server counts from 1 again; the boot half of the id is what differs.
+    expect(noteFor(outcome({ id: 'c-7' }), 'b-7').text).toContain('did not report back')
+    expect(noteFor(outcome({ id: 'b-6' }), 'b-7').tone).toBe('warn')
   })
 
-  it('an adopted run has no id to hold it to, and is reported as it ended', () => {
-    expect(noteFor(outcome({ id: 12 }), null).text).toBe('Updated: 3 transcripts read.')
+  it('with no id to hold it to, the last job is reported as it ended', () => {
+    // Only when nothing named the run: a 409 whose body carried no job. Every other path
+    // records the id it follows (useHarvest), so this is the rare case, not the adopted one.
+    expect(noteFor(outcome({ id: 'b-12' }), null).text).toBe('Updated: 3 transcripts read.')
   })
 })
 

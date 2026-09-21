@@ -576,20 +576,15 @@ export interface AccountsState {
 
 /** What `/api/accounts/sharing` answers. `restart_required` is always true on a change. */
 /**
- * What the server did to Claude around a confirmed write (`desktop.with_restart`): whether it
- * was running, whether it was quit and how many processes that was, whether it came back and
- * how (`shell`: the app's own activation; `task`: a scheduled task in the interactive session,
- * the way that worked on the test laptop when the activation did not), and a sentence.
- */
-/**
  * UPDATE DATA. The page asking the server to run the harvester (`c4x/harvest.py`,
  * `/api/store/harvest`). `incremental` is what the hooks run on every prompt.
  */
 export type HarvestKind = 'incremental'
 
-/** The job running now. `id` is how the page tells the run it started from any other. */
+/** The job running now. `id` is how the page tells the run it follows from any other, and it
+ *  names the server process too (`<boot>-<n>`), so a restarted server never reuses one. */
 export interface HarvestJob {
-  id: number
+  id: string
   kind: HarvestKind
   dry_run: boolean
   started_at: string
@@ -599,7 +594,7 @@ export interface HarvestJob {
 
 /** What the last job THIS SERVER ran came to. Held in its memory: a restart forgets it. */
 export interface HarvestOutcome {
-  id: number
+  id: string
   kind: HarvestKind
   dry_run: boolean
   /** False is a failure: the harvester never started, ran out its ceiling, or left no report. */
@@ -636,6 +631,12 @@ export interface HarvestStatus {
   last_harvest: { ts: string; mode: string; files_seen: number; files_read: number; ms: number } | null
 }
 
+/**
+ * What the server did to Claude around a confirmed write (`desktop.with_restart`): whether it
+ * was running, whether it was quit and how many processes that was, whether it came back and
+ * how (`shell`: the app's own activation; `task`: a scheduled task in the interactive session,
+ * the way that worked on the test laptop when the activation did not), and a sentence.
+ */
 export interface RestartReport {
   was_running: boolean
   quit: boolean
@@ -1091,7 +1092,7 @@ export const api = {
   harvest: {
     state: () => get<HarvestStatus>('/api/store/harvest'),
     run: (kind: HarvestKind = 'incremental', dryRun = false) =>
-      post<HarvestStatus & { accepted: boolean; id: number }>('/api/store/harvest', {
+      post<HarvestStatus & { accepted: boolean; id: string }>('/api/store/harvest', {
         kind, dry_run: dryRun,
       }),
   },

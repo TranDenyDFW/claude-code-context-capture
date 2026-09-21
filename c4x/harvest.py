@@ -33,8 +33,10 @@ passes its own.
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -63,6 +65,12 @@ READS: frozenset[str] = frozenset({
     "mode", "chains", "sidecars", "desktop_records", "files_seen", "files_read",
     "rewritten_files", "excluded_files", "lines", "mb", "turn_records_seen",
     "compaction_records_seen", "unknown_record_types", "seconds"})
+# And the keys read INSIDE its three nested objects, held to `RUN_REPORT_NESTED` the same way.
+READS_NESTED: dict[str, frozenset[str]] = {
+    "chains": frozenset({"directories", "links", "reviews", "runs", "failed"}),
+    "sidecars": frozenset({"read", "failed"}),
+    "desktop_records": frozenset({"deleted", "gone", "returned", "failed"}),
+}
 ERROR_MAX = 200
 FAILURES_MAX = 5
 
@@ -91,7 +99,7 @@ class Report(TypedDict):
 
 
 class Job(TypedDict):
-    id: int
+    id: str
     kind: str
     dry_run: bool
     state: str
@@ -142,6 +150,29 @@ def same_file(a: Path | str, b: Path | str) -> bool:
         return False
 
 
+def carries_mark(path: Path | str) -> bool:
+    """Whether the file at `path` is a redacted copy: it holds the table `tools/redact.py` stamps
+    into every copy it writes. False when nothing is there yet (a first run has no copy to be).
+
+    READ FROM THE FILE EVERY TIME, and any SQLite error RAISES. `store.store_is_redacted` answers
+    the same question for the title overlay and is wrong for a write gate on both counts: it
+    memoises per path for the life of the process (a copy swapped into place under a running
+    server would still read as the real store, and this server asks once at startup), and it
+    reads through `tables_present`, which turns "database is locked", "file is not a database"
+    and a half-copied file into False, that is into "not a copy, go ahead". One `sqlite_master`
+    read, independent of the store's size.
+    """
+    target = Path(path)
+    if not target.exists():
+        return False
+    con = sqlite3.connect(f"file:{target.as_posix()}?mode=ro", uri=True)
+    try:
+        return con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                           (store.REDACTION_MARK,)).fetchone() is not None
+    finally:
+        con.close()
+
+
 def capability(*, db: Path | str | None = None, root: Path | str | None = None,
                env: Mapping[str, str] | None = None,
                redacted: Callable[[], bool] | None = None) -> Capability:
@@ -151,8 +182,13 @@ def capability(*, db: Path | str | None = None, root: Path | str | None = None,
     must BE the install's own, which is what stops a copy or a fixture (the `c4x-api-fixture`
     launch config serves `tmp/test.db`) from being offered the button; a store that does not exist
     yet still counts as the install's own, so a first run can create it. And a redacted copy
-    placed AT the install's own path passes any path rule, so its own mark is read
-    (`store.store_is_redacted`).
+    placed AT the install's own path passes any path rule, so its own mark is read, from the
+    file, on every call (`carries_mark` says why `store.store_is_redacted` is not used).
+
+    WHAT THIS DOES NOT CLOSE: a file swapped in between this check and the moment the child
+    opens the store. Only a check inside `tools/harvest.mjs` could, and the hooks harvest into
+    that same path with no check at all, so the button is not the way a copy left there gets
+    written; this gate is about not OFFERING the button for a store that says it is a copy.
     """
     served = Path(store.DB_PATH if db is None else db)
     own = own_store(root)
@@ -173,7 +209,7 @@ def capability(*, db: Path | str | None = None, root: Path | str | None = None,
                    "the install's own store.",
                    f"Start the server without --db, or with --db {own}.")
     try:
-        is_copy = (store.store_is_redacted if redacted is None else redacted)()
+        is_copy = (redacted if redacted is not None else (lambda: carries_mark(served)))()
     except Exception as exc:  # noqa: BLE001 - a store that cannot be asked is not offered
         return off("unreadable-store", f"The store could not be read to check what it is: {exc}",
                    "Look at the store file; nothing was changed.")
@@ -187,16 +223,20 @@ def capability(*, db: Path | str | None = None, root: Path | str | None = None,
 def parse_request(body: Any) -> tuple[str, bool]:
     """`{"kind": ..., "dry_run": ...}` as `(kind, dry_run)`, or `ValueError` with the sentence.
 
-    `dry_run` counts only as the literal `true`. A kind with no dry run is REFUSED rather than run
-    without the flag, and the flag is never passed through: `--backfill-tool-outcomes --dry-run`
-    is dispatched before the harvester looks at `--dry-run`, so it would write.
+    `dry_run` is `true` or `false` and nothing else: `"yes"` or `1` from a caller who meant a dry
+    run would otherwise be read as false and run as a job that WRITES. A kind with no dry run is
+    REFUSED rather than run without the flag, and the flag is never passed through:
+    `--backfill-tool-outcomes --dry-run` is dispatched before the harvester looks at `--dry-run`,
+    so it would write.
     """
     if body is not None and not isinstance(body, dict):
         raise ValueError("the body is a JSON object")
     given = (body or {}).get("kind", "incremental")
     if not isinstance(given, str) or given not in KINDS:
         raise ValueError(f"kind is one of: {', '.join(KINDS)}")
-    dry_run = (body or {}).get("dry_run") is True
+    dry_run = (body or {}).get("dry_run", False)
+    if not isinstance(dry_run, bool):
+        raise ValueError("dry_run is true or false")
     if (given, dry_run) not in FLAGS:
         raise ValueError(f"{given} has no dry run")
     return given, dry_run
@@ -219,8 +259,8 @@ def argv_for(kind: str, dry_run: bool = False, *, node: str | None = None,
 def child_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """This process's environment without `C4X_DB`, in any case (Windows folds the name).
 
-    Everything else stays: the harvester reads `C4X_NO_TEXT`, `C4X_UNKNOWN_LOG`,
-    `C4X_SESSIONS_ROOT`, `APPDATA` and `LOCALAPPDATA`.
+    Everything else stays: the harvester reads `C4X_UNKNOWN_LOG`, `C4X_SESSIONS_ROOT`, `APPDATA`
+    and `LOCALAPPDATA`, and none of those names a store.
     """
     environ = os.environ if env is None else env
     return {name: value for name, value in environ.items() if name.upper() != "C4X_DB"}
@@ -278,9 +318,11 @@ def _count(value: Any) -> int:
 
 
 def _failures(raw: dict[str, Any]) -> list[str]:
-    """What failed INSIDE an exit 0, as phrases. The three sub-passes report three shapes, which
-    `tools/harvest.mjs`'s self-test pins: `chains.failed` is a list of `{dir, error}`,
-    `sidecars.failed` a list of strings, `desktop_records.failed` a string or null."""
+    """What failed INSIDE an exit 0, as phrases. The three sub-passes report three shapes:
+    `chains.failed` is a list of `{dir, error}`, `sidecars.failed` a list of strings,
+    `desktop_records.failed` a string or null. The harvester's self-test pins the CLEAN-run shapes
+    (an empty list, a list, null); the failing ones are read defensively here, by shape, and a
+    failure this cannot phrase is still said as a failure with whatever it holds."""
     said: list[str] = []
     chains = (raw.get("chains") or {}).get("failed") or []
     if isinstance(chains, list) and chains:
@@ -480,7 +522,11 @@ class Jobs:
     record. No queue and no cancel: Stop C4X and Restart C4X already end the child.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, boot: str | None = None) -> None:
+        # THE ID NAMES THE PROCESS TOO. The page calls a run a success only when the server names
+        # the same id back, and a counter alone restarts at 1 with every server: a run interrupted
+        # by Restart C4X and a later, unrelated run on the new server would both be job 1.
+        self._boot = uuid.uuid4().hex[:8] if boot is None else boot
         self._lock = threading.Lock()
         self._state = threading.Lock()
         self._seq = 0
@@ -507,13 +553,19 @@ class Jobs:
         if not allowed["enabled"]:
             raise Disabled(allowed)
         if not self._lock.acquire(blocking=False):
-            raise Busy(self.snapshot())
+            running = self.snapshot()
+            # The worker clears `current` a moment before it frees the lock. Nothing named means
+            # the job that held it has just ended, so this is not busy: take the lock it is about
+            # to free rather than answer 409 about a job nobody can point at.
+            if running is not None or not self._lock.acquire(timeout=2.0):
+                raise Busy(running)
         tick = time.monotonic if clock is None else clock
         stamp_time = _utc_now if now is None else now
         with self._state:
             self._seq += 1
-            job: Job = {"id": self._seq, "kind": kind, "dry_run": dry_run, "state": "running",
-                        "started_at": stamp_time(), "finished_at": None, "report": None}
+            job: Job = {"id": f"{self._boot}-{self._seq}", "kind": kind, "dry_run": dry_run,
+                        "state": "running", "started_at": stamp_time(),
+                        "finished_at": None, "report": None}
             self.current = job
             self._started = tick()
         began: Job = {**job}

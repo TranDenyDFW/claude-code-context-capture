@@ -3944,6 +3944,14 @@ export const RUN_REPORT_KEYS = Object.freeze([
   'compaction_rows_stored', 'message_rows_stored', 'message_text_mb', 'unpaired_boundaries',
   'unknown_record_types', 'seconds',
 ]);
+// The keys INSIDE the three nested objects that `c4x/harvest.py` reads, held the same two ways:
+// a renamed `chains.directories` would otherwise leave every suite green and the page saying
+// "0 folders re-chained" for ever.
+export const RUN_REPORT_NESTED = Object.freeze({
+  chains: ['directories', 'links', 'reviews', 'runs', 'failed'],
+  sidecars: ['read', 'failed'],
+  desktop_records: ['deleted', 'gone', 'returned', 'failed'],
+});
 
 // THE INPUTS ARE PARAMETERS SO THE SELF-TEST CAN RUN THIS FUNCTION, which had no coverage at all
 // while being the one thing every hook, every terminal and now the page runs. Every default is
@@ -6572,6 +6580,19 @@ async function selfTest() {
     checks.push(['run: sidecars.failed is a list', Array.isArray(first.report?.sidecars?.failed)]);
     checks.push(['run: desktop_records.failed is null on a clean run (a string when it fails)',
       first.report?.desktop_records?.failed === null, JSON.stringify(first.report?.desktop_records?.failed)]);
+    const absent = [];
+    const notNumbers = [];
+    for (const [group, keys] of Object.entries(RUN_REPORT_NESTED)) {
+      for (const key of keys) {
+        const inside = first.report?.[group] ?? {};
+        if (!(key in inside)) absent.push(`${group}.${key}`);
+        else if (key !== 'failed' && typeof inside[key] !== 'number') notNumbers.push(`${group}.${key}`);
+      }
+    }
+    checks.push(['run: every nested key RUN_REPORT_NESTED lists is in the report (gate can fail)',
+      absent.length === 0, absent.join(',')]);
+    checks.push(['run: and every one of them but `failed` is a number', notNumbers.length === 0,
+      notNumbers.join(',')]);
     const second = await drive();
     checks.push(['run: a second run sees the transcript and reads nothing, which is what "nothing new" is',
       second.report?.files_seen === 1 && second.report?.files_read === 0,

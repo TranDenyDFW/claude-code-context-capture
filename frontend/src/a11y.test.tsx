@@ -184,7 +184,7 @@ describe('axe finds no WCAG A or AA violation in', () => {
     }
     const states = [
       base,
-      { ...base, running: true, job: { id: 1, kind: 'incremental' as const, dry_run: false, started_at: '', elapsed_s: 3 } },
+      { ...base, running: true, job: { id: 'b-1', kind: 'incremental' as const, dry_run: false, started_at: '', elapsed_s: 3 } },
       { ...base, enabled: false, reason: 'not-own-store', why_not: 'This server is serving a copy.', fix: 'Start it without --db.' },
     ]
     for (const state of states) {

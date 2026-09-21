@@ -17,6 +17,10 @@ import { noteFor, type Note } from './harvest'
  * COMPLETION IS ONE PATH: `running` going from true to false. `start` marks that a job exists
  * the moment the POST is accepted, because a harvest usually finishes (p50 under a second)
  * before the first poll could ever see it running.
+ *
+ * EVERY RUN THIS FOLLOWS IS HELD TO ITS ID, whoever started it: the run this page posted, a run
+ * it found already under way, a run a 409 pointed it at. The id names the server process too, so
+ * a run that a restart killed is never reported with the result of some later run.
  */
 export function useHarvest({
   onChanged,
@@ -37,7 +41,12 @@ export function useHarvest({
   // effects, which need it without waiting for a render.
   const [following, setFollowing] = useState(false)
   const was = useRef(false)
-  const expected = useRef<number | null>(null)
+  const expected = useRef<string | null>(null)
+  // The status stopped answering while a run was being followed. NOT the end of following it:
+  // one failed poll (a sleep, a network change) while the server and the harvester carry on is
+  // the common case, and dropping the run there left the page saying the outcome was unknown
+  // for ever and never reloading data the run did write.
+  const lost = useRef(false)
   const waiter = useRef<((outcome: HarvestOutcome | null) => void) | null>(null)
   const changed = useRef(onChanged)
   useEffect(() => { changed.current = onChanged }, [onChanged])
@@ -55,14 +64,17 @@ export function useHarvest({
     // IDLE case, where the interval is thirty seconds and the freshness line would otherwise
     // be stale, and a job started in another tab unnoticed, for that long after a return.
     refetchOnWindowFocus: true,
-    refetchInterval: (q) =>
-      q.state.status === 'error' ? idleMs : q.state.data?.running ? pollMs : idleMs,
+    refetchInterval: (q) => {
+      if (q.state.status === 'error') return lost.current ? Math.max(pollMs, 2_000) : idleMs
+      return q.state.data?.running ? pollMs : idleMs
+    },
   })
   const status: HarvestStatus | undefined = query.data
 
   const finish = useCallback((outcome: HarvestOutcome | null) => {
     const result = noteFor(outcome, expected.current)
     expected.current = null
+    lost.current = false
     setFollowing(false)
     setNote(result)
     // A dry run wrote nothing. Everything else may have, a failure included: what a run stored
@@ -73,24 +85,38 @@ export function useHarvest({
   }, [])
 
   useEffect(() => {
-    const now = Boolean(status?.running)
+    if (!status || query.isError) return
+    const now = Boolean(status.running)
+    if (lost.current) {
+      // The server answers again. Either the run is still going, and following resumes, or it
+      // ended while nobody could see, and its id says whether that was this run.
+      lost.current = false
+      was.current = now
+      if (now) {
+        // Busy again through `status.running`; only the red note has to go.
+        setNote(null)
+      } else {
+        finish(status.last ?? null)
+      }
+      return
+    }
     if (now && !was.current && expected.current === null) {
-      // A job this page did not start: another tab, or a reload mid-run. Follow it.
+      // A job this page did not start: another tab, or a reload mid-run. Follow it, by its id.
+      expected.current = status.job?.id ?? null
       setNote({ text: 'An update is running.', tone: 'dim', stays: true })
     }
-    if (was.current && !now) finish(status?.last ?? null)
+    if (was.current && !now) finish(status.last ?? null)
     was.current = now
-  }, [status, query.dataUpdatedAt, finish])
+  }, [status, query.dataUpdatedAt, query.isError, finish])
 
-  // The server stopped answering while a job ran: say so, and do not stay busy for ever.
+  // The server stopped answering while a job ran: say so and stop looking busy, but keep the
+  // run's id and keep asking (the interval above shortens while `lost`).
   useEffect(() => {
     if (!query.isError || !was.current) return
     was.current = false
-    expected.current = null
+    lost.current = true
     setFollowing(false)
-    setNote({ text: "C4X stopped answering; the update's outcome is not known.", tone: 'bad', stays: true })
-    waiter.current?.(null)
-    waiter.current = null
+    setNote({ text: "C4X stopped answering; the update's outcome is not known yet.", tone: 'bad', stays: true })
   }, [query.isError])
 
   // A success is said for a moment; a note that stayed would read as a state.
@@ -99,6 +125,12 @@ export function useHarvest({
     const timer = setTimeout(() => setNote(null), noteMs)
     return () => clearTimeout(timer)
   }, [note, noteMs])
+
+  // Nothing is left waiting on a page that went away.
+  useEffect(() => () => {
+    waiter.current?.(null)
+    waiter.current = null
+  }, [])
 
   const start = useCallback(async (kind: HarvestKind = 'incremental', dryRun = false) => {
     if (starting || was.current) return null
@@ -112,13 +144,26 @@ export function useHarvest({
       setFollowing(true)
       await query.refetch()
     } catch (problem) {
-      // 409 IS TWO THINGS: a job already running, which is not an error (follow it), and a
-      // refusal. The status says which.
+      const detail = problem instanceof ApiError
+        ? (problem.detail as { reason?: string; job?: { id?: string } | null } | undefined)
+        : undefined
+      const busy = problem instanceof ApiError && problem.status === 409 && detail?.reason === 'busy'
+      const named = detail?.job?.id ?? null
       const now = (await query.refetch()).data
-      if (problem instanceof ApiError && problem.status === 409 && now?.running) {
+      if (busy && now?.running) {
+        // A JOB ALREADY RUNNING IS NOT AN ERROR: follow it, held to the id the refusal named.
+        expected.current = now.job?.id ?? named
         was.current = true
         setFollowing(true)
         setNote({ text: 'An update was already running; waiting for it.', tone: 'dim', stays: true })
+      } else if (busy) {
+        // It ended between the refusal and this look. That is a finished run, not a failed
+        // click: say how it went (by its id, when the refusal named one) and reload.
+        expected.current = named
+        was.current = false
+        setStarting(false)
+        finish(now?.last ?? null)
+        return done
       } else {
         waiter.current = null
         setNote({ text: `Update failed: ${said(problem)}`, tone: 'bad', stays: true })
@@ -128,7 +173,7 @@ export function useHarvest({
     }
     setStarting(false)
     return done
-  }, [query, starting])
+  }, [query, starting, finish])
 
   const busy = (starting || following || Boolean(status?.running)) && !query.isError
   return { status, busy, note, start, now: query.dataUpdatedAt }
