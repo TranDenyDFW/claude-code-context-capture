@@ -7,6 +7,25 @@ runner, CI and a linted tree.
 
 ### Added
 
+- **The same prompt again: one plugin's SDK one-shots fold under their project.** The user
+  circled the same row repeated down the list, "Review this change for security
+  vulnerabilities", and asked "what are these and why are they empty?" Measured on that
+  store, full population: 208 one-shots no rule had placed, 183 of them that one review,
+  begun through the Agent SDK from the chat's own folder by no shell call, 178 in one folder
+  across twelve days, so neither a parent's span nor a ten minute batch could reach them.
+  `deriveRuns` gains a third tier, `how = 'same-prompt'`: an SDK one-shot nothing else placed,
+  with at least three other SDK one-shots in the very same folder opening with the same 60
+  characters, whenever they ran (the same 183 group at a head of 20 to 120 characters). An
+  entrypoint a person types into never counts, and a prompt under 20 characters proves
+  nothing. This tier alone reads a run of up to 24 messages (seven more of the same runs
+  hold 17 to 20; the next SDK one-shot above them holds 76), and a longer run that ties to
+  nothing is not a miss. `run_misses.pool_key` now carries the rule's revision (`r2|`) and
+  how many shared the prompt, so recorded misses are asked once more. No reader changes: a
+  run with no chat behind it already folds under its project everywhere. Tried on a copy of
+  the store: 190 placed, 25 left (18 of them a person's own short chats), a second pass
+  asked nothing. An existing store gets it from Fold headless runs on the Diagnostics tab.
+  Tests: the harvester self-test (358), 13 same-prompt cases on their own
+  (`selfTestSamePrompt`), 12 named mutations red.
 - **Store maintenance, on the Diagnostics tab: the two one-off passes, each asking first.**
   Record tool outcomes and Fold headless runs, numbered in the order they must run. The fold
   runs its dry run before it asks, so the question quotes the harvester's own numbers, the

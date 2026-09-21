@@ -454,7 +454,13 @@ CREATE TABLE IF NOT EXISTS review_misses (
 -- other one-shots sharing the cwd's parent or grandparent directory began within ten minutes
 -- (measured on the author's store: the parent level alone batches 805 of the 808, the
 -- grandparent the 12 nested one level deeper; a person's desktop one-shots reach at most one
--- sibling within an hour; none of the 137 misses batch at either level). project is the cwd
+-- sibling within an hour; none of the 137 misses batch at either level), and also NULL for THE
+-- SAME PROMPT AGAIN (how: same-prompt): an Agent SDK one-shot neither of those placed, with at
+-- least three other SDK one-shots in the very same folder whose prompt opens with the same 60
+-- characters, whenever they ran (RUN, below, records the measurement: 183 of 208 unplaced
+-- one-shots were one plugin's review, begun from the chat's own folder by no shell call, 178 of
+-- them in one folder across twelve days); this tier alone reads a run of up to 24 messages, and
+-- hits counts the runs that shared the prompt. project is the cwd
 -- the run folds under: the parent's for a child, else the nearest directory at or above the
 -- run's cwd that is the cwd of a session which is not itself a run (a workflow's agents run in
 -- the chat's own directory), NULL when there is none. Every reader folds a
@@ -464,7 +470,9 @@ CREATE TABLE IF NOT EXISTS review_misses (
 -- prompt is unlinked on the next pass that touches it: the guard for a person's chat opened in a
 -- subfolder while a parent's command ran. Derived after every harvest pass for the directories
 -- it touched (the span needs tool_calls.result_ts, above) and by --backfill-runs. run_misses
--- remembers a one-shot that tied to nothing with the parents and siblings that were its pool.
+-- remembers a one-shot that tied to nothing with the parents and siblings that were its pool
+-- and how many shared its prompt; the key begins with the rule's revision (r2), so a miss
+-- recorded before a tier existed equals no key computed now and is asked once more.
 CREATE TABLE IF NOT EXISTS run_links (
   session_id TEXT PRIMARY KEY,
   head_id TEXT,

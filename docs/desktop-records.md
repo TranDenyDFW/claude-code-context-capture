@@ -424,7 +424,28 @@ and fold under it; a case folder holding two of its own runs, or an empty transc
 project), and NULL when there is none. Tried on a copy of the author's store before it shipped:
 1,095 one-shots, 873 batched under `P:\ClaudeExt\ccx-engineering-work`, the three Claude-Access
 children tied to their chat, the 14 SDK one-shots of the c4x and claude-appx-restart dev chats
-batched under those folders, and only the 15 empty transcripts left alone. A linked run whose transcript grows a second
+batched under those folders, and only the 15 empty transcripts left alone. THE SAME PROMPT AGAIN
+(`how = 'same-prompt'`) is the third tier, for what those two cannot reach: a plugin that starts
+a fresh SDK session from the chat's OWN folder, by no shell call, every time something changes.
+Measured on the author's test laptop, 2026-09-20, full population: 208 one-shots no tier had
+placed, 188 of them begun through the Agent SDK (`entrypoint` `sdk-py` or `sdk-cli`), and 183 of
+those one plugin's "Review this change for security vulnerabilities", 178 of them in one folder
+across twelve days, which is why the list showed the same row over and over. A one-shot neither
+tier placed folds under its project when its entrypoint is an SDK one and at least three other
+SDK one-shots in the very same folder open with the same 60 characters, whenever they ran (the
+same 183 group at a head of 20, 40, 60 or 120 characters and fall apart at 200, where the list
+of changed files begins); a prompt shorter than 20 characters proves nothing, and an entrypoint a
+person types into never counts, however often the same thing was asked (17 such groups of more
+than three exist on that store, every member of them already placed by the review rule or an
+earlier tier). This tier alone reads a run
+of up to 24 messages: seven more of the same runs hold 17 to 20, and the next SDK one-shot above
+them holds 76; a longer run that ties to nothing is not recorded as a miss, because it was never
+a candidate for a parent or a batch. The project is found the way a batch's is, and a member of
+such a group is never the chat a folder is named after. `run_misses.pool_key` now begins `r2|`
+and ends with how many shared the prompt, so every miss recorded before the tier existed is
+asked once more and a miss is asked again when its group grows. Tried on a copy of that store:
+190 placed (173 under c4x, 17 under claude-appx-restart), 25 left (18 of them a person's own
+short chats), and a second pass asked nothing and unlinked none. A linked run whose transcript grows a second
 typed prompt is unlinked on the next pass that touches it: the guard for a person's chat opened
 in a subfolder while a parent's command ran. The store reads the table beside `review_links`: a
 child resolves to the chat that spawned it and counts toward it under "Including Subagents", a

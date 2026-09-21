@@ -10,7 +10,11 @@ finding and the measurements): a one-shot begun inside the span of another chat'
 that chat's child (the call's input carries its prompt or names its cwd, or the parent's tool
 result quotes its reply, or its cwd sits under the parent's); a one-shot with no such call and at
 least three sibling one-shots begun within ten minutes is a batch, folded under the nearest
-ancestor directory that holds a real chat. Harvest writes the table after every pass and on
+ancestor directory that holds a real chat; and an Agent SDK one-shot neither of those placed, with
+at least three other SDK one-shots in the same folder asked the same thing whenever they ran (a
+plugin's review of every change), folds the same way. Both read here as a run with no chat behind
+it: `how` tells them apart in the table and nothing in this package needs to. Harvest writes the
+table after every pass and on
 `--backfill-runs`; this module only reads it, through `store.run_links`.
 """
 from typing import Any

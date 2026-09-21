@@ -153,3 +153,25 @@ class TestTheProjectSurfaces:
         assert bar[BETA] == own[BETA] and bar[LONE_CWD] == RUN_BYTES
         assert list(fig.data[0].customdata)[cats.index(ALPHA)] == 2
         assert list(fig.data[0].customdata)[cats.index(BETA)] == 0
+
+
+class TestTheSamePromptAgain:
+    def test_a_same_prompt_run_reads_as_a_run_with_no_chat_behind_it(self, runs_store):
+        """`how` is the harvester's business. A row with no head folds under its project whatever
+        tier wrote it, so the tier that places a plugin's SDK one-shots (begun in the chat's OWN
+        folder, which no batch ever is) needed no reader to change. This pins that."""
+        from c4x import runs, store
+        same = "run-same-prompt"
+        con = sqlite3.connect(str(runs_store))
+        _run(con, same, ALPHA)
+        con.execute("INSERT INTO run_links VALUES (?,?,?,?,?,?,?,?)",
+                    (same, None, ALPHA, "same-prompt", None, 182, "test", "2026-08-05T11:00:00Z"))
+        con.commit()
+        con.close()
+        forget_cached_rows()
+        assert runs.spawned_by([same]) == {same: None} and runs.project_of(same) == ALPHA
+        assert store.chat_head(same) == same and store.chat_runs(same).empty
+        assert same not in set(store.session_rows(ttl=0)["session_id"])
+        assert store.runs_by_project(ttl=0) == {ALPHA: 3}
+        labels = {o["value"]: o["label"] for o in store.cohort_options()}
+        assert labels[f"project::{ALPHA}"].endswith("(3 listed, 3 runs)")

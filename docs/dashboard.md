@@ -55,7 +55,8 @@ upgrade that taught the harvester something, numbered in the order they must run
 tool outcomes...** (how each tool call ended and when its result came back, for rows from
 before the store kept those; it only fills empty columns) and **Fold headless runs...** (a
 harness's one-shots folded under the chat that spawned them, or under the project above a
-batch). Unlike Update data these ask first: not because anything is closed or restarted
+batch, and a plugin's SDK one-shots that were asked the same thing in the same folder under
+that folder's project). Unlike Update data these ask first: not because anything is closed or restarted
 (nothing is, and the questions say so) but because one re-reads every transcript and the
 other changes what the lists show. The fold runs its dry run BEFORE it asks, so the question
 quotes the harvester's own numbers, the runs it can place nowhere included ("This would fold 4
@@ -149,8 +150,9 @@ folder writes the records into the signed-in account's directory and Claude list
 a restart. Nothing is preselected: a chat you deleted in the app looks the same to this rule as
 one a reinstall orphaned, and the page says how many of those the app has deleted. The same
 window names the records c4x wrote that carry no name, after the store's name for each. A
-headless child run (a harness's `claude -p` one-shot a chat's shell command spawned, or a batch of
-them with no chat behind it) is never offered: it folds into the chat that spawned it or under
+headless child run (a harness's `claude -p` one-shot a chat's shell command spawned, a batch of
+them with no chat behind it, or a plugin's SDK one-shots asked the same thing over and over in
+one folder) is never offered: it folds into the chat that spawned it or under
 the folder above it, the window's Runs column says how many each folder carries, a line says how
 many are folded where, and the records an earlier build wrote for runs are taken back with the
 review records (`docs/desktop-records.md` section 7 has the rule).
