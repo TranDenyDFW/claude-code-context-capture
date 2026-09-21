@@ -105,8 +105,8 @@ def ro_uri(path) -> str:
     `tests/conftest.py` has to open the real store before `c4x.store` may be imported, which is
     why this lives in a module that imports nothing from the package. `tools/redact.py` carries
     a copy. `tests/test_ro_uri.py` holds the two to the same answers, and holds every Python
-    line under `c4x/`, `tools/` and `tests/` that sets `uri=True` to calling this; it lists, and
-    asserts, the little that rule cannot see.
+    line under `c4x/`, `tools/` and `tests/` (itself excepted) that passes `uri=True` to calling
+    this function; it asserts some of what a line rule cannot see, and says it is not all of it.
 
     A URI gives meaning to characters a folder name is free to hold, and eleven places in `c4x/`
     and `tools/*.py` built this one in an f-string with the path as it came (`file:`, the path,

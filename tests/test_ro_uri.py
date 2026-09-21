@@ -14,7 +14,7 @@ under the checkout, not a tmp path) and three node tools, one of which `c4x.stor
 imported. The Python ones now call `ro_uri`; the node ones pass the path itself, which is never
 URI-parsed. The last test looks for a hand-built one in every Python file under `c4x/`, `tools/`
 and `tests/` (this file excepted) and every `.mjs` under `tools/` and `hooks/`; the test before
-it feeds the rule known-bad lines and ASSERTS the ones it is known to miss. NOT covered here: how
+it feeds the rule known-bad lines and ASSERTS some it is known to miss. NOT covered here: how
 the node tools find the install they belong to (`rootFrom` in `tools/paths.mjs`). Measured on
 this branch, it misreads a space, `#`, `%`, square and curly brackets, a tilde, a caret, a
 backtick and any non-ASCII character in the folder's name (parentheses, `&`, `'`, `;`, `+` are
@@ -41,27 +41,37 @@ if os.name != "nt":
     AWKWARD.append("q?mark")   # not a legal file name on Windows
 
 
-# WHO MAY TURN A STRING INTO A SQLITE URI. Python has one door: `sqlite3.connect(..., uri=True)`.
-# So the rule is an allow-list on that flag: a line that sets it must be a line that calls `ro_uri`,
-# however the string beside it was put together (an f-string, a constant, four slashes, a template).
-# An earlier sweep tried to recognise the spellings instead, and two reviews in a row found more.
-URI_FLAG = re.compile(r"\buri\s*=\s*True\b")
+# WHO MAY TURN A STRING INTO A SQLITE URI. Python has two doors: `sqlite3.connect(..., uri=True)`,
+# and an `ATTACH DATABASE` of a `file:` string on a connection that was opened that way (measured:
+# under `a#b` it created the same stray file). So the rule is an allow-list on the flag: a line
+# that passes it as a keyword argument must be a line that CALLS `ro_uri`, however the string
+# beside it was put together; and an ATTACH may not name `file:`. An earlier sweep tried to
+# recognise the spellings instead, and two reviews in a row found more. Out of reach of any line
+# rule, and not used in this tree: the `sqlite3` command line, and another driver's own URL.
+URI_FLAG = re.compile(r"(^|[,(])\s*uri\s*=\s*True\b")
+RO_URI_CALL = re.compile(r"(?<![A-Za-z0-9_])ro_uri\(")
+ATTACH_URI = re.compile(r"ATTACH\s+DATABASE.*file:", re.I)
 # Node has no such flag: a string that starts `file:` is simply parsed as a URI. What gives a
-# hand-built one away is why anyone builds one: a query parameter, or `file:` on the line that
-# opens.
-NODE_PARAM = re.compile(r"\b(mode=(ro|rw|rwc|memory)|immutable=|nolock=|cache=(shared|private))")
+# hand-built one away is why anyone builds one, a query parameter (any of SQLite's seven, known by
+# the `?` or `&` in front of it), or `file:` on the very line that opens. It FAILS CLOSED: an open
+# whose line holds `file:` for another reason is flagged too, and wants splitting.
+NODE_PARAM = re.compile(r"[?&](mode|immutable|nolock|cache|vfs|psow|modeof)=")
 NODE_OPEN = re.compile(r"DatabaseSync\s*\(")
-TELEMETRY = re.compile(r"OTEL_LOG_RAW_API_BODIES")
 
 
 def py_by_hand(line):
     text = line.strip()
-    return not text.startswith("#") and bool(URI_FLAG.search(text)) and "ro_uri(" not in text
+    if text.startswith("#"):
+        return False
+    code = text.split("  #", 1)[0]   # a trailing comment may not vouch for the line
+    if ATTACH_URI.search(code):
+        return True
+    return bool(URI_FLAG.search(code)) and not RO_URI_CALL.search(code)
 
 
 def node_by_hand(line):
     text = line.strip()
-    if text.startswith(("//", "*", "/*")) or TELEMETRY.search(text):
+    if text.startswith(("//", "*", "/*")):
         return False
     return bool(NODE_PARAM.search(text)) or ("file:" in text and bool(NODE_OPEN.search(text)))
 
@@ -266,10 +276,11 @@ class TestTheReaders:
         assert sorted(p.name for p in tmp_path.iterdir()) == ["a#b", "p%41q", "pAq", "plain"]
 
     def test_the_sweep_sees_what_it_claims_to_and_says_what_it_does_not(self):
-        """Known-bad lines, fed to the rule before it is trusted with the tree, and the lines it
-        is KNOWN to miss, asserted to be missed, so that this docstring cannot outrun the code.
-        The first of each list was in the tree; the rest were shown slipping past an earlier
-        sweep, or are kept so that a narrower rule cannot come back unnoticed."""
+        """Known-bad lines, fed to the rule before it is trusted with the tree, and lines it is
+        KNOWN to miss, asserted to be missed, so that this docstring cannot outrun the code. The
+        first line of each BAD list was in the tree; the others were shown slipping past an
+        earlier sweep, or are kept so that a narrower rule cannot come back unnoticed. The lists
+        of misses are examples, NOT a complete account of what a line rule cannot see."""
         bad_python = [
             'con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)',
             "con = sqlite3.connect(f'file:{target.as_posix()}?mode=ro', uri=True)",
@@ -284,16 +295,23 @@ class TestTheReaders:
             'con = sqlite3.connect(uri, uri=True)',
             '    uri=True,',
             'con = sqlite3.connect(path.as_uri() + "?mode=ro", uri = True)',
+            'con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)  # not ro_uri(p): needs a mode',
+            'con = sqlite3.connect(quick_ro_uri(p), uri=True)',
+            """con.execute(f"ATTACH DATABASE 'file:{other}?mode=ro' AS other")""",
         ]
         fine_python = [
             'con = sqlite3.connect(ro_uri(path), uri=True)',
             'src = sqlite3.connect(store.ro_uri(source), uri=True)',
             '# sqlite3.connect(f"file:{path}?mode=ro", uri=True) is how it used to be written',
             'con = sqlite3.connect(str(path))',
+            'source.execute("ATTACH DATABASE ? AS dest", (str(out_path),))',
+            '    line under `c4x/` that sets `uri=True` to calling this; a docstring may say so',
+            'the flag uri=True is what turns a string into a URI, in prose',
         ]
         slips_python = [
             'con = sqlite3.connect(text, uri=as_uri)',       # the flag is not the literal True
             'con = sqlite3.connect(text, **options)',        # nor spelled at all
+            'con = sqlite3.connect(ro_uri(p) if ok else f"file:{p}", uri=True)',   # the other arm
         ]
         bad_node = [
             "const d = new DatabaseSync(`file:${DB_PATH}?mode=ro`, { readOnly: true });",
@@ -304,16 +322,20 @@ class TestTheReaders:
             "const uri = 'file://' + posix(db) + '?mode=ro';",
             "const uri = `file:${p}?nolock=1`;",
             "const uri = ['file:', p, '?immutable=1'].join('');",
+            "const uri = `file:${p}?mode=${MODE}`;",
+            "const uri = `file:${p}?vfs=unix-none&psow=0`;",
         ]
         fine_node = [
             "const d = new DatabaseSync(DB_PATH, { readOnly: true });",
             "// never a `file:` URI built from it: new DatabaseSync(`file:${p}?mode=ro`)",
             " * `?mode=ro` adds nothing once readOnly is set",
             "    OTEL_LOG_RAW_API_BODIES: `file:${BODY_DIR}`,",
+            "  node harvest.mjs --mode=ro       is a flag on a command line, not a URI",
         ]
         slips_node = [
             "const SCHEME = 'file:';",                        # no parameter and no open on the line
             "const uri = `file:${posix(db)}`;",
+            "const d = new DatabaseSync(SCHEME + posix(p), { readOnly: true });",   # nor here
         ]
         assert [line for line in bad_python if not py_by_hand(line)] == []
         assert [line for line in fine_python if py_by_hand(line)] == []
@@ -325,11 +347,11 @@ class TestTheReaders:
     def test_nothing_builds_a_sqlite_uri_by_hand(self):
         """THE TREE. Every Python file under `c4x/`, `tools/` and `tests/` (this one excepted: it
         spells the bad forms out in order to look for them) and every `.mjs` under `tools/` and
-        `hooks/`. In Python the only lines allowed to set `uri=True` are the ones that call
+        `hooks/`. In Python the only lines allowed to pass `uri=True` are the ones that call
         `ro_uri`, so there is nothing to allow-list; in node nothing opens through a URI at all.
-        The test above says, and asserts, what this cannot see: a flag that is not the literal
-        `True`, and a node URI with no query parameter that is built away from the line that opens
-        it. `Path.as_uri()` would be flagged too, though it escapes correctly: use `ro_uri`."""
+        The test above shows, by asserting them, SOME of what a line rule cannot see; it is not
+        the whole of it. `Path.as_uri()` would be flagged too, though it escapes correctly, and so
+        would a correct call split so that the flag sits on a line of its own: write it on one."""
         found = []
         for folder, pattern, by_hand in (
                 ("c4x", "**/*.py", py_by_hand), ("tools", "**/*.py", py_by_hand),
