@@ -101,10 +101,12 @@ def install_root(frozen: bool | None = None, executable: str | None = None,
 
 def ro_uri(path) -> str:
     """The SQLite URI that opens `path` read-only. THE ONE PLACE IT IS BUILT in this package,
-    and read as `store.ro_uri` by everything but `tests/conftest.py`, which has to open the real
-    store before `c4x.store` may be imported and is why this lives in a module with no imports
-    of its own. `tools/redact.py` carries a copy; `tests/test_ro_uri.py` holds both to the same
-    answers, and holds every Python module and node tool to building no such URI by hand.
+    and read as `store.ro_uri` by the package; the tests import it from here, because
+    `tests/conftest.py` has to open the real store before `c4x.store` may be imported, which is
+    why this lives in a module with no imports of its own. `tools/redact.py` carries a copy.
+    `tests/test_ro_uri.py` holds the two to the same answers and sweeps the Python files under
+    `c4x/`, `tools/` and `tests/` and the node files under `tools/` and `hooks/` for a URI built
+    by hand; it is a line sweep, and its docstring says what such a sweep cannot see.
 
     A URI gives meaning to characters a folder name is free to hold, and eleven places in `c4x/`
     and `tools/*.py` built this one in an f-string with the path as it came (`file:`, the path,

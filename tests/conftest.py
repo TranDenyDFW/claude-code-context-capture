@@ -50,9 +50,9 @@ def _snapshot_the_store():
         if stale.exists():
             stale.unlink()
     # `c4x.paths`, not `c4x.store`: importing the store here would bind it to the live path,
-    # which is what this function exists to prevent. Escaped for the reason `ro_uri` gives: in a
-    # checkout under a folder called `C#` the path as it came opened `...\C`, created it empty,
-    # and the whole suite then ran against a snapshot of nothing.
+    # which is what this function exists to prevent. Escaped for the reason `ro_uri` gives.
+    # Measured on a pretend checkout under a folder called `C#`: the path as it came opened
+    # `...\C`, created it empty beside the checkout, and the snapshot it took had no tables.
     from c4x.paths import ro_uri
     src = sqlite3.connect(ro_uri(source), uri=True)
     src.execute("PRAGMA busy_timeout=30000")

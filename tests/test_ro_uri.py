@@ -9,11 +9,15 @@ fragment, `?mode=ro` included, so SQLite opened `.../a` READ-WRITE, CREATED it e
 backslashes: the same path with forward slashes reads as a host name.
 
 Eleven places in `c4x/` and `tools/*.py` built it that way, and so did the suite's own snapshot of
-the real store (`tests/conftest.py`) and three node tools, one of which `c4x.store` runs when it is
+the real store (`tests/conftest.py`), 38 opens in eight test files (one of them the suite's store
+under the checkout, not a tmp path) and three node tools, one of which `c4x.store` runs when it is
 imported. The Python ones now call `ro_uri`; the node ones pass the path itself, which is never
-URI-parsed. The last test holds both kinds to that. What it does NOT cover is how the node tools
-find the install they belong to (`rootFrom` in `tools/paths.mjs`), which misreads the same
-characters, and a space, in its own way: a separate defect, recorded and not fixed here.
+URI-parsed. The last test looks for a hand-built one in every Python file under `c4x/`, `tools/`
+and `tests/` and every `.mjs` under `tools/` and `hooks/`, and its docstring says which spellings
+it can see and which it cannot. NOT covered here: how the node tools find the install they belong
+to (`rootFrom` in `tools/paths.mjs`), which misreads a space, `#`, `%`, a bracket and any
+non-ASCII letter in the folder's name. That is a separate defect with its own branch
+(`fix/root-from-decoding`).
 
 NO TEST HERE SKIPS AGAINST THE FIXTURE. CI's runner fails a skipped test on the fixture leg
 (`tools/run_tests.mjs`, `judgePytest`), so a platform difference is a branch inside the test, the
@@ -34,6 +38,13 @@ ROOT = Path(__file__).resolve().parents[1]
 AWKWARD = ["plain", "a#b", "p%41q", "per%cent", "sp ace", "amp&eq=x", "uni\u00e9"]
 if os.name != "nt":
     AWKWARD.append("q?mark")   # not a legal file name on Windows
+
+
+# A hand-built SQLite URI, as one line of source shows it (the last test says what this can and
+# cannot see). Module constants so that a test can feed them known-bad lines.
+BY_HAND_PY = re.compile(r"""["']file:/{0,3}(\{|%[s(]|["']\s*(\+|,|\)|\.|f?["']|$))""")
+BY_HAND_NODE = re.compile(r"""[`"']file:/{0,3}(\$\{|[`"']\s*(\+|,|\)|\.|$))""")
+TELEMETRY = re.compile(r"OTEL_LOG_RAW_API_BODIES")
 
 
 def make(path, name):
@@ -235,22 +246,68 @@ class TestTheReaders:
             assert answers[("p%41q", tool)] == answers[("plain", tool)], tool
         assert sorted(p.name for p in tmp_path.iterdir()) == ["a#b", "p%41q", "pAq", "plain"]
 
+    def test_the_sweep_sees_the_spellings_it_claims_to(self):
+        """Known-bad lines, fed to the sweep's own patterns. Every one of these was either in the
+        tree or was shown slipping past an earlier, narrower pattern by an independent review."""
+        bad_python = [
+            'con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)',
+            "con = sqlite3.connect(f'file:{target.as_posix()}?mode=ro', uri=True)",
+            'uri = f"file:///{posix}?mode=ro"',
+            'uri = f"file:/{rel}?immutable=1"',
+            'uri = "file://" + str(path) + "?mode=ro"',
+            'uri = "file:" + str(source) + "?mode=ro"',
+            'uri = "file:%s?mode=ro" % path',
+            'uri = "file:%(p)s?mode=ro" % {"p": path}',
+            'uri = "file:{}?mode=ro".format(path)',
+            'uri = ("file:"',
+            'uri = "".join(["file:", str(path), "?mode=ro"])',
+            'PREFIX = "file:"',
+            'uri = "file:" f"{path}?mode=ro"',
+        ]
+        bad_node = [
+            "const d = new DatabaseSync(`file:${DB_PATH}?mode=ro`, { readOnly: true });",
+            "const d = new DatabaseSync(`file:///${posix(db)}?mode=ro`, { readOnly: true });",
+            "const uri = `file:${posix(db)}`;",
+            "const d = new DatabaseSync('file:' + dbPath + '?mode=ro', { readOnly: true });",
+            "const uri = 'file://' + posix(db) + '?mode=ro';",
+            "const uri = 'file:'",
+            "const uri = ['file:', p, '?mode=ro'].join('');",
+            "const uri = 'file:'.concat(p, '?mode=ro');",
+        ]
+        fine = [
+            'con = sqlite3.connect(ro_uri(path), uri=True)',
+            '"""file:line:col, so a message points somewhere."""',
+            "# a `file:` URI gives `#` a meaning",
+            'print("file: not found")',
+            "const d = new DatabaseSync(DB_PATH, { readOnly: true });",
+            "// never a `file:` URI built from it",
+        ]
+        assert [line for line in bad_python if not BY_HAND_PY.search(line)] == []
+        assert [line for line in bad_node if not BY_HAND_NODE.search(line)] == []
+        assert [line for line in fine if BY_HAND_PY.search(line) or BY_HAND_NODE.search(line)] == []
+        gate = "    OTEL_LOG_RAW_API_BODIES: `file:${BODY_DIR}`,"
+        assert BY_HAND_NODE.search(gate) and TELEMETRY.search(gate), "let through by name"
+
     def test_nothing_builds_a_sqlite_uri_by_hand(self):
-        """THE CLASS, not the instance. In Python a hand-built URI is an f-string, a `.format` or a
-        concatenation that starts `file:`; in a node tool it is a template literal or a
-        concatenation on a line that also opens a database or names a mode. A new one would bring
-        the defect back for whatever it opens."""
-        python = re.compile(r"""["']file:(\{|["']\s*\+|%s|\{\})""")
-        node = re.compile(r"""[`"']file:(\$\{|[`"']\s*\+)""")
+        """A LINE SWEEP, and what it can see. A string that starts `file:`, with or without the
+        slashes (`file:///` carries the same defect: measured, it left the same stray file), and
+        then goes on to be built: an interpolation, a `%s` or `{}` to be filled, or the literal
+        ending there to be added to, joined or concatenated. That covers an f-string, `.format`,
+        percent formatting, concatenation even when it wraps onto the next line, a `join` and a
+        prefix constant, in Python and in a node tool. It CANNOT see a URI whose `file:` arrives
+        from somewhere that is not a literal on the line (an import, a function's return), and it
+        does not judge `Path.as_uri()`, which escapes correctly. The only `file:` strings a node
+        tool builds for another purpose name a telemetry folder, and are let through by name."""
         found = []
-        for folder, pattern, by_hand, also in (
-                ("c4x", "**/*.py", python, None), ("tools", "**/*.py", python, None),
-                ("tests", "conftest.py", python, None),
-                ("tools", "**/*.mjs", node, re.compile(r"DatabaseSync|mode=|immutable=")),
-                ("hooks", "**/*.mjs", node, re.compile(r"DatabaseSync|mode=|immutable="))):
+        for folder, pattern, by_hand in (
+                ("c4x", "**/*.py", BY_HAND_PY), ("tools", "**/*.py", BY_HAND_PY),
+                ("tests", "**/*.py", BY_HAND_PY),
+                ("tools", "**/*.mjs", BY_HAND_NODE), ("hooks", "**/*.mjs", BY_HAND_NODE)):
             for source in sorted((ROOT / folder).glob(pattern)):
+                if source == Path(__file__).resolve():
+                    continue   # this file spells the forms out in order to look for them
                 for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
-                    if by_hand.search(line) and (also is None or also.search(line)):
+                    if by_hand.search(line) and not TELEMETRY.search(line):
                         found.append(f"{source.relative_to(ROOT).as_posix()}:{number}")
         allowed = {"c4x/paths.py", "tools/redact.py"}   # where the URI is built, once each
         extra = [f for f in found if f.rsplit(":", 1)[0] not in allowed]
