@@ -32,7 +32,7 @@ from c4x.labels import (
     short_path,
     titled_path,
 )
-from c4x.paths import install_root, node_exe
+from c4x.paths import install_root, node_exe, ro_uri  # noqa: F401  (ro_uri: re-exported)
 
 # The install, not this file's directory: they differ once the API is frozen into an exe, and
 # this is the root the store and the node tools are found under. See c4x/paths.py.
@@ -183,7 +183,7 @@ def q(sql: str, params=()) -> pd.DataFrame:
         raise FileNotFoundError(
             f"No store at {DB_PATH}. Run `node tools/harvest.mjs` first."
         )
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(DB_PATH), uri=True)
     try:
         return pd.read_sql_query(sql, con, params=params)
     finally:
@@ -256,7 +256,7 @@ def column_present(table: str, column: str) -> bool:
     """
     if not DB_PATH.exists():
         return False
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(DB_PATH), uri=True)
     try:
         return any(r[1] == column for r in con.execute(f"PRAGMA table_info({table})").fetchall())
     except sqlite3.Error:
@@ -387,7 +387,7 @@ def tables_present(*names) -> bool:
     """
     if not DB_PATH.exists():
         return False
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(DB_PATH), uri=True)
     try:
         have = {r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()}

@@ -41,6 +41,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from c4x import projects  # noqa: E402
+from c4x.paths import ro_uri  # noqa: E402
 from tests.test_projects import build_store, forget_cached_rows  # noqa: E402
 
 ALPHA = r"P:\Alpha"
@@ -338,7 +339,7 @@ class TestAnArchivedLabelTakesOnlyItsOwnSession:
 
         assert result["excluded_cwds"] == []
         assert result["still_captured"] == [ALPHA]
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             assert [r[0] for r in con.execute("SELECT cwd FROM excluded_projects")] == []
         finally:
@@ -581,7 +582,7 @@ class TestTheBackupHoldsEveryRowTheDeleteRemoves:
         with pytest.raises(ValueError, match="the store changed while the backup"):
             projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
 
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             assert con.execute("SELECT COUNT(*) FROM turns WHERE uuid = ?",
                                ("s0-0-LATE",)).fetchone()[0] == 1, "the late row is still there"
@@ -669,7 +670,7 @@ class TestTheBackupHoldsEveryRowTheDeleteRemoves:
 
         assert result["unlocated"] is True
         assert result["excluded_cwds"] == [], "no directory means no exclusion harvest could match"
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             assert con.execute("SELECT COUNT(*) FROM excluded_projects").fetchone()[0] == 0
         finally:
@@ -813,7 +814,7 @@ class TestTheRowHalfIsEnforcedByContent:
         with pytest.raises(ValueError, match="the store changed while the backup"):
             projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path / "backups")
 
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             assert con.execute("SELECT parent_uuid FROM turns WHERE uuid = ?",
                                ("s0-0-t0",)).fetchone()[0] == "s0-0-tPARENT"
@@ -910,7 +911,7 @@ class TestTheRowHalfIsEnforcedByContent:
 
         assert "does not parse as JSON" in str(caught.value)
         assert "THE ROWS ARE ALREADY GONE" in str(caught.value)
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             assert con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
                                (ALPHA,)).fetchone()[0] == 0, (
@@ -934,7 +935,7 @@ class TestTheRowHalfIsEnforcedByContent:
         assert not isinstance(caught.value, projects.AfterTheRowsWereRemoved)
         assert "Nothing was removed" in str(caught.value)
         assert "can be discarded" in str(caught.value)
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             assert con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
                                (ALPHA,)).fetchone()[0] == 3
@@ -1010,7 +1011,7 @@ class TestALabelThatNamesTwoProjects:
             projects.delete(label, confirm=label, out_dir=tmp_path / "backups")
 
         assert (machine.base / "s0-0.jsonl").exists(), "nothing is removed by a refusal"
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             left = con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
                                (self.nested_cwd(),)).fetchone()[0]
@@ -1046,7 +1047,7 @@ class TestALabelThatNamesTwoProjects:
         with pytest.raises(ValueError, match="more than one working directory"):
             projects.delete(label, confirm=label, out_dir=tmp_path / "backups")
 
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             assert con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?",
                                (self.nested_cwd(),)).fetchone()[0] == 2, (
@@ -1113,7 +1114,7 @@ class TestATranscriptASurvivingSessionIsAlsoIn:
         """
         self.share(store_at)
         result = projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             kept = con.execute("SELECT COUNT(*) FROM files WHERE path = ?",
                                (r"C:\t\s0-0.jsonl",)).fetchone()[0]

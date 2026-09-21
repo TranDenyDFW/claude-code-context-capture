@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from c4x import projects  # noqa: E402
+from c4x.paths import ro_uri  # noqa: E402
 from tests.test_projects import build_store, forget_cached_rows  # noqa: E402
 
 SOURCE = r"P:\Alpha"
@@ -115,7 +116,7 @@ def wipe(machine):
 
 
 def read_store(path, sql):
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(path), uri=True)
     try:
         return [r[0] for r in con.execute(sql)]
     finally:
@@ -390,7 +391,7 @@ class TestTheRebase:
         wipe(machine)
         projects.import_(export_path, into=DEST)
         landed = str(appstate.project_dir(DEST) / "s0-0.jsonl")
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             got = con.execute("SELECT first_ts FROM files WHERE path = ?", (landed,)).fetchone()
         finally:

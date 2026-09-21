@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from c4x import projects  # noqa: E402
+from c4x.paths import ro_uri  # noqa: E402
 from tests.test_projects import build_store, forget_cached_rows  # noqa: E402
 
 ALPHA = r"P:\Alpha"
@@ -54,7 +55,7 @@ def store_at(tmp_path, monkeypatch):
 
 
 def paths_in(path):
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(path), uri=True)
     try:
         return {r[0] for r in con.execute("SELECT path FROM files")}
     finally:
@@ -76,7 +77,7 @@ class TestTheExportCarriesThem:
         assert OTHER not in paths_in(out), "the export leaked another project's offset"
 
     def test_the_preview_counts_what_the_export_carries(self, store_at):
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             preview = projects.footprint(con, ALPHA)
             carried = con.execute("SELECT COUNT(*) FROM files WHERE path LIKE 'C:\\t\\s0-%'"
@@ -164,7 +165,7 @@ class TestAnImportPutsThemBack:
         projects.export(ALPHA, out)
         projects.delete(ALPHA, confirm=ALPHA, out_dir=tmp_path)
         projects.import_(out)
-        con = sqlite3.connect(f"file:{store_at}?mode=ro", uri=True)
+        con = sqlite3.connect(ro_uri(store_at), uri=True)
         try:
             stamps = dict(con.execute("SELECT path, first_ts FROM files"))
         finally:

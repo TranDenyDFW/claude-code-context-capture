@@ -150,7 +150,9 @@ mistake has already cost an afternoon here.
   install's own); `c4x/projects.py` deletes and imports.
 - **`immutable=1` is wrong for this store.** It tells SQLite the file cannot change, so SQLite skips
   the WAL, and against a store the hooks are writing it returns stale data and can report a healthy
-  database as malformed. Use `mode=ro` with `PRAGMA busy_timeout`.
+  database as malformed. Use `mode=ro` with `PRAGMA busy_timeout`, and get the URI from
+  `store.ro_uri(path)`, never from an f-string: a `#` or a `%41` in a folder's name means
+  something in a URI, and `tests/test_ro_uri.py` fails a line that passes `uri=True` without it.
 - **Numbers stay numbers.** Build column specs with `numeric_columns()` and let Dash format the
   display. The audit will catch you.
 

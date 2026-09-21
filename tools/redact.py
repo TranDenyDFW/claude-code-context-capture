@@ -39,6 +39,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SRC = ROOT / "data" / "context.db"
@@ -408,6 +409,23 @@ def leaks(db, needles):
     return found
 
 
+def ro_uri(path) -> str:
+    """The SQLite URI that opens `path` read-only. A COPY of `c4x.store.ro_uri`, because this tool
+    imports nothing from the package; `tests/test_ro_uri.py` holds the two to the same answers.
+
+    The path is percent-encoded because a URI gives `#` and `%` a meaning. Measured on this tool
+    with the path as it came: a store under a folder called `a#b` opened as `.../a`, read-write,
+    CREATED EMPTY, was backed up in place of the store, and the run then died on "no such table:
+    sessions" with nothing stamped (loud); a store under `p%41q` with another under `pAq` beside
+    it meant the OTHER one was redacted, stamped and reported clean (silent). A share needs an
+    empty host in front of it (four slashes), or `//server` is read as one. Encoded from the
+    bytes `os.fsencode` gives, as `sqlite3.connect` does, so a name that is not UTF-8 opens."""
+    posix = Path(path).as_posix()
+    if posix.startswith("//"):
+        posix = "//" + posix
+    return f"file:{quote(os.fsencode(posix), safe='/:')}?mode=ro"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -428,7 +446,7 @@ def main(argv=None):
 
     # Copied through sqlite's own backup API rather than by copying bytes, so a store being
     # written to right now yields a consistent snapshot instead of a torn one.
-    source = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    source = sqlite3.connect(ro_uri(src), uri=True)
     if out.exists():
         out.unlink()
     target = sqlite3.connect(str(out))

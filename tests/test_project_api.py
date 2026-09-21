@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from c4x import projects, store
 from c4x.api.main import api
+from c4x.paths import ro_uri
 from tests.test_projects import build_store, forget_cached_rows
 
 ALPHA = r"P:\Alpha"
@@ -34,7 +35,7 @@ def client(tmp_path, monkeypatch):
 
 
 def count(project):
-    con = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
+    con = sqlite3.connect(ro_uri(store.DB_PATH), uri=True)
     try:
         return con.execute("SELECT COUNT(*) FROM sessions WHERE cwd = ?", (project,)).fetchone()[0]
     finally:
@@ -103,8 +104,8 @@ class TestExport:
         r = client.get("/api/project/export", params={"cohort": f"project::{ALPHA}"})
         got = tmp_path / "downloaded.db"
         got.write_bytes(r.content)
-        theirs = sqlite3.connect(f"file:{got}?mode=ro", uri=True)
-        mine = sqlite3.connect(f"file:{store.DB_PATH}?mode=ro", uri=True)
+        theirs = sqlite3.connect(ro_uri(got), uri=True)
+        mine = sqlite3.connect(ro_uri(store.DB_PATH), uri=True)
         a = theirs.execute("SELECT * FROM turns ORDER BY uuid").fetchall()
         b = mine.execute("""SELECT * FROM turns WHERE session_id IN
                             (SELECT session_id FROM sessions WHERE cwd = ?)
