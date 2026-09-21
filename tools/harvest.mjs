@@ -4365,6 +4365,107 @@ function stats() {
 // Self-test: build a synthetic transcript containing one of everything, harvest it into a
 // throwaway DB, and assert each record type was picked up. Then corrupt the detector's input
 // and assert the assertions FAIL, so a green run means something.
+// Runs, the same prompt again: one plugin's SDK one-shots, begun from the chat's own folder by
+// no shell call and days apart, so neither a parent nor a batch. Measured on the author's test
+// laptop: 183 of 208 unplaced one-shots, plus seven of 17 to 20 messages.
+// On its own so that a mutation run can ask for these cases alone: the whole self-test takes
+// minutes, and a gate is only shown able to fail by running it against a broken rule.
+export async function selfTestSamePrompt(tmp, checks) {
+  const sdir = join(tmp, 'same-prompt', 'projects', 'P--plug');
+  mkdirSync(sdir, { recursive: true });
+  const sid = (tag) => `${tag}-0000-4000-8000-00000000000c`;
+  const PLUG = 'P:\\plug', ONLY = 'P:\\plug\\tmp\\only', DESK = 'P:\\desk', FEW = 'P:\\few', TERSE = 'P:\\terse';
+  const day = (d, s = 0) => new Date(Date.UTC(2026, 6, 1, 9, 0, 0) + d * 86400000 + s * 1000).toISOString();
+  let sn = 0;
+  const line = (type, s, t, cwd, entrypoint, message) => JSON.stringify({ type, uuid: `s${++sn}`, sessionId: s,
+    timestamp: t, cwd, entrypoint, message });
+  const asked = (s, t, text, cwd, entry) => line('user', s, t, cwd, entry, { role: 'user', content: text });
+  const replied = (s, t, text, cwd, entry) => line('assistant', s, t, cwd, entry, { model: 'm',
+    usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 },
+    content: [{ type: 'text', text }] });
+  // Sixty characters that every run shares, then the part that differs from run to run.
+  const OPENING = 'Review this change for security vulnerabilities.\n\nChanged files (you may read them): ';
+  const made = [];
+  const shot = (tag, d, cwd, entry, prompt, replies = 1) => {
+    const s = sid(tag);
+    const lines = [asked(s, day(d), prompt, cwd, entry)];
+    for (let i = 0; i < replies; i++) lines.push(replied(s, day(d, i + 1), `looked at it, part ${i}`, cwd, entry));
+    writeFileSync(join(sdir, s + '.jsonl'), lines.join('\n') + '\n');
+    made.push(s);
+    return s;
+  };
+  const K = sid('aaaa000c');
+  writeFileSync(join(sdir, K + '.jsonl'), [asked(K, day(0), 'build the plugin', PLUG, 'claude-desktop'),
+    replied(K, day(0, 1), 'built', PLUG, 'claude-desktop'), asked(K, day(0, 60), 'and ship it', PLUG, 'claude-desktop'),
+    replied(K, day(0, 61), 'shipped', PLUG, 'claude-desktop')].join('\n') + '\n');
+  made.push(K);
+  const S = [1, 2, 3, 4, 5].map((i) => shot(`5${i}5${i}000c`, i, PLUG, 'sdk-py', `${OPENING}src/a${i}.py`));
+  const LONG = shot('6161000c', 6, PLUG, 'sdk-py', `${OPENING}src/long.py`, 19);
+  const TOO_LONG = shot('6262000c', 7, PLUG, 'sdk-py', `${OPENING}src/longer.py`, 25);
+  const LONG_ALONE = shot('6464000c', 9, PLUG, 'sdk-py', 'Summarise the layout of this repository in one paragraph, please', 19);
+  const APART = shot('6363000c', 8, PLUG, 'sdk-py', 'You previously flagged these candidate vulnerabilities: [] and nothing else');
+  const ALONE = [1, 2, 3, 4].map((i) => shot(`7${i}7${i}000c`, 10 + i, ONLY, 'sdk-py', `${OPENING}only/b${i}.py`));
+  const TYPED = [1, 2, 3, 4, 5].map((i) => shot(`8${i}8${i}000c`, 20 + i, DESK, 'claude-desktop', `${OPENING}desk/c${i}.py`));
+  const THREE = [1, 2, 3].map((i) => shot(`9${i}9${i}000c`, 30 + i, FEW, 'sdk-py', `${OPENING}few/d${i}.py`));
+  const SHORT = [1, 2, 3, 4].map((i) => shot(`a${i}a${i}000c`, 40 + i, TERSE, 'sdk-cli', 'reply with OK'));
+  const sdb = new DatabaseSync(':memory:');
+  sdb.exec(SCHEMA);
+  const sh = new Harvest(sdb);
+  for (const s of made) await sh.file(join(sdir, s + '.jsonl'), true);
+  const slink = (s) => sdb.prepare('SELECT * FROM run_links WHERE session_id = ?').get(s);
+  const smiss = (s) => sdb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(s)?.pool_key;
+  const count = (s) => sdb.prepare('SELECT COUNT(*) n FROM messages WHERE session_id = ?').get(s).n;
+  const entry = (s) => sdb.prepare('SELECT entrypoint FROM sessions WHERE session_id = ?').get(s)?.entrypoint;
+  checks.push(['same-prompt: the fixture is what the cases say it is (an SDK entrypoint read, 20 and 26 messages)',
+    entry(S[0]) === 'sdk-py' && entry(TYPED[0]) === 'claude-desktop' && count(LONG) === 20 && count(TOO_LONG) === 26
+    && OPENING.length > RUN.PROMPT_HEAD, JSON.stringify([entry(S[0]), count(LONG), count(TOO_LONG)])]);
+  // A miss the rule recorded before this tier existed, under the key it wrote then.
+  sdb.prepare('INSERT INTO run_misses (session_id, pool_key, checked_at) VALUES (?,?,?)').run(S[0], '|0', day(0));
+  const dry = deriveRuns(sdb, made, { write: false });
+  checks.push(['same-prompt: write:false writes nothing and still reports (gate can fail)',
+    sdb.prepare('SELECT COUNT(*) n FROM run_links').get().n === 0 && dry.batched.length === 10 && dry.misses === 13
+    && dry.one_shots === 24, JSON.stringify({ b: dry.batched.length, m: dry.misses, o: dry.one_shots })]);
+  const first = deriveRuns(sdb, made, { write: true, now: '2026-07-01T12:00:00.000Z' });
+  checks.push(['same-prompt: SDK one-shots asked the same thing in the chat\'s own folder, days apart, fold under it (gate can fail)',
+    S.every((s) => slink(s)?.how === 'same-prompt' && slink(s)?.head_id === null && slink(s)?.call_id === null
+      && slink(s)?.project === PLUG && slink(s)?.hits === 5) && first.linked.length === 0,
+    JSON.stringify(slink(S[1]))]);
+  checks.push(['same-prompt: a miss recorded before the tier existed is asked again (gate can fail)',
+    slink(S[0])?.how === 'same-prompt' && smiss(S[0]) === undefined, JSON.stringify({ l: slink(S[0]), k: smiss(S[0]) })]);
+  checks.push(['same-prompt: a run of twenty messages is read by this tier, one of twenty six by none, and neither is a miss (gate can fail)',
+    slink(LONG)?.how === 'same-prompt' && slink(LONG)?.hits === 5 && !slink(TOO_LONG)
+    && smiss(LONG) === undefined && smiss(TOO_LONG) === undefined,
+    JSON.stringify({ long: slink(LONG), too: slink(TOO_LONG), key: smiss(TOO_LONG) })]);
+  checks.push(['same-prompt: a longer SDK run that ties to nothing is not a miss: it was never a candidate for a parent or a batch (gate can fail)',
+    count(LONG_ALONE) === 20 && !slink(LONG_ALONE) && smiss(LONG_ALONE) === undefined && first.misses === 13,
+    JSON.stringify({ l: slink(LONG_ALONE), k: smiss(LONG_ALONE), m: first.misses })]);
+  checks.push(['same-prompt: another opening in the same folder is no sibling and is placed nowhere (gate can fail)',
+    !slink(APART) && smiss(APART) === 'r2||0|0', JSON.stringify({ l: slink(APART), k: smiss(APART) })]);
+  checks.push(['same-prompt: the same prompts from an entrypoint a person types into are not runs (gate can fail)',
+    TYPED.every((s) => !slink(s) && smiss(s) === 'r2||0|0'), JSON.stringify({ l: slink(TYPED[0]), k: smiss(TYPED[0]) })]);
+  checks.push(['same-prompt: three are not enough, and the key says how many shared the prompt (gate can fail)',
+    THREE.every((s) => !slink(s) && smiss(s) === 'r2||0|2'), JSON.stringify({ l: slink(THREE[0]), k: smiss(THREE[0]) })]);
+  checks.push(['same-prompt: a prompt shorter than PROMPT_MIN proves nothing (gate can fail)',
+    SHORT.every((s) => !slink(s) && smiss(s) === 'r2||0|0'), JSON.stringify({ l: slink(SHORT[0]), k: smiss(SHORT[0]) })]);
+  checks.push(['same-prompt: a folder holding nothing but the runs is not the project; the chat\'s folder above it is (gate can fail)',
+    ALONE.every((s) => slink(s)?.how === 'same-prompt' && slink(s)?.hits === 3 && slink(s)?.project === PLUG),
+    JSON.stringify(slink(ALONE[0]))]);
+  const again = deriveRuns(sdb, made, { write: true });
+  checks.push(['same-prompt: a second pass asks nothing again and keeps the longer run (gate can fail)',
+    again.already === 10 && again.unchanged === 13 && again.unlinked === 0 && again.batched.length === 0
+    && slink(LONG)?.how === 'same-prompt',
+    JSON.stringify({ a: again.already, u: again.unchanged, x: again.unlinked, long: slink(LONG) })]);
+  // A person picked one of them up: a second typed prompt, and the tie goes.
+  writeFileSync(join(sdir, S[1] + '.jsonl'), [asked(S[1], day(2), `${OPENING}src/a2.py`, PLUG, 'sdk-py'),
+    replied(S[1], day(2, 1), 'looked at it', PLUG, 'sdk-py'), asked(S[1], day(2, 50), 'explain the second finding', PLUG, 'sdk-py'),
+    replied(S[1], day(2, 51), 'explained', PLUG, 'sdk-py')].join('\n') + '\n');
+  await sh.file(join(sdir, S[1] + '.jsonl'), true);
+  const grew = deriveRuns(sdb, made, { write: true });
+  checks.push(['same-prompt: a run that grows a second typed prompt is unlinked, the rest stay (gate can fail)',
+    grew.unlinked === 1 && !slink(S[1]) && slink(S[2])?.how === 'same-prompt',
+    JSON.stringify({ x: grew.unlinked, s2: slink(S[1]) })]);
+}
+
 async function selfTest() {
   const tmp = join(ROOT, 'tmp', 'selftest');
   rmSync(tmp, { recursive: true, force: true });
@@ -5839,100 +5940,7 @@ async function selfTest() {
       JSON.stringify({ l: rep2.linked, b: rep2.batched, h: rep2.by_how, p: rep2.projects, n: ucount() })]);
   }
 
-  // Runs, the same prompt again: one plugin's SDK one-shots, begun from the chat's own folder by
-  // no shell call and days apart, so neither a parent nor a batch. Measured on the author's test
-  // laptop: 183 of 208 unplaced one-shots, plus seven of 17 to 20 messages.
-  {
-    const sdir = join(tmp, 'same-prompt', 'projects', 'P--plug');
-    mkdirSync(sdir, { recursive: true });
-    const sid = (tag) => `${tag}-0000-4000-8000-00000000000c`;
-    const PLUG = 'P:\\plug', ONLY = 'P:\\plug\\tmp\\only', DESK = 'P:\\desk', FEW = 'P:\\few', TERSE = 'P:\\terse';
-    const day = (d, s = 0) => new Date(Date.UTC(2026, 6, 1, 9, 0, 0) + d * 86400000 + s * 1000).toISOString();
-    let sn = 0;
-    const line = (type, s, t, cwd, entrypoint, message) => JSON.stringify({ type, uuid: `s${++sn}`, sessionId: s,
-      timestamp: t, cwd, entrypoint, message });
-    const asked = (s, t, text, cwd, entry) => line('user', s, t, cwd, entry, { role: 'user', content: text });
-    const replied = (s, t, text, cwd, entry) => line('assistant', s, t, cwd, entry, { model: 'm',
-      usage: { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1 },
-      content: [{ type: 'text', text }] });
-    // Sixty characters that every run shares, then the part that differs from run to run.
-    const OPENING = 'Review this change for security vulnerabilities.\n\nChanged files (you may read them): ';
-    const made = [];
-    const shot = (tag, d, cwd, entry, prompt, replies = 1) => {
-      const s = sid(tag);
-      const lines = [asked(s, day(d), prompt, cwd, entry)];
-      for (let i = 0; i < replies; i++) lines.push(replied(s, day(d, i + 1), `looked at it, part ${i}`, cwd, entry));
-      writeFileSync(join(sdir, s + '.jsonl'), lines.join('\n') + '\n');
-      made.push(s);
-      return s;
-    };
-    const K = sid('aaaa000c');
-    writeFileSync(join(sdir, K + '.jsonl'), [asked(K, day(0), 'build the plugin', PLUG, 'claude-desktop'),
-      replied(K, day(0, 1), 'built', PLUG, 'claude-desktop'), asked(K, day(0, 60), 'and ship it', PLUG, 'claude-desktop'),
-      replied(K, day(0, 61), 'shipped', PLUG, 'claude-desktop')].join('\n') + '\n');
-    made.push(K);
-    const S = [1, 2, 3, 4, 5].map((i) => shot(`5${i}5${i}000c`, i, PLUG, 'sdk-py', `${OPENING}src/a${i}.py`));
-    const LONG = shot('6161000c', 6, PLUG, 'sdk-py', `${OPENING}src/long.py`, 19);
-    const TOO_LONG = shot('6262000c', 7, PLUG, 'sdk-py', `${OPENING}src/longer.py`, 25);
-    const APART = shot('6363000c', 8, PLUG, 'sdk-py', 'You previously flagged these candidate vulnerabilities: [] and nothing else');
-    const ALONE = [1, 2, 3, 4].map((i) => shot(`7${i}7${i}000c`, 10 + i, ONLY, 'sdk-py', `${OPENING}only/b${i}.py`));
-    const TYPED = [1, 2, 3, 4, 5].map((i) => shot(`8${i}8${i}000c`, 20 + i, DESK, 'claude-desktop', `${OPENING}desk/c${i}.py`));
-    const THREE = [1, 2, 3].map((i) => shot(`9${i}9${i}000c`, 30 + i, FEW, 'sdk-py', `${OPENING}few/d${i}.py`));
-    const SHORT = [1, 2, 3, 4].map((i) => shot(`a${i}a${i}000c`, 40 + i, TERSE, 'sdk-cli', 'reply with OK'));
-    const sdb = new DatabaseSync(':memory:');
-    sdb.exec(SCHEMA);
-    const sh = new Harvest(sdb);
-    for (const s of made) await sh.file(join(sdir, s + '.jsonl'), true);
-    const slink = (s) => sdb.prepare('SELECT * FROM run_links WHERE session_id = ?').get(s);
-    const smiss = (s) => sdb.prepare('SELECT pool_key FROM run_misses WHERE session_id = ?').get(s)?.pool_key;
-    const count = (s) => sdb.prepare('SELECT COUNT(*) n FROM messages WHERE session_id = ?').get(s).n;
-    const entry = (s) => sdb.prepare('SELECT entrypoint FROM sessions WHERE session_id = ?').get(s)?.entrypoint;
-    checks.push(['same-prompt: the fixture is what the cases say it is (an SDK entrypoint read, 20 and 26 messages)',
-      entry(S[0]) === 'sdk-py' && entry(TYPED[0]) === 'claude-desktop' && count(LONG) === 20 && count(TOO_LONG) === 26
-      && OPENING.length > RUN.PROMPT_HEAD, JSON.stringify([entry(S[0]), count(LONG), count(TOO_LONG)])]);
-    // A miss the rule recorded before this tier existed, under the key it wrote then.
-    sdb.prepare('INSERT INTO run_misses (session_id, pool_key, checked_at) VALUES (?,?,?)').run(S[0], '|0', day(0));
-    const dry = deriveRuns(sdb, made, { write: false });
-    checks.push(['same-prompt: write:false writes nothing and still reports (gate can fail)',
-      sdb.prepare('SELECT COUNT(*) n FROM run_links').get().n === 0 && dry.batched.length === 10 && dry.misses === 13
-      && dry.one_shots === 23, JSON.stringify({ b: dry.batched.length, m: dry.misses, o: dry.one_shots })]);
-    const first = deriveRuns(sdb, made, { write: true, now: '2026-07-01T12:00:00.000Z' });
-    checks.push(['same-prompt: SDK one-shots asked the same thing in the chat\'s own folder, days apart, fold under it (gate can fail)',
-      S.every((s) => slink(s)?.how === 'same-prompt' && slink(s)?.head_id === null && slink(s)?.call_id === null
-        && slink(s)?.project === PLUG && slink(s)?.hits === 5) && first.linked.length === 0,
-      JSON.stringify(slink(S[1]))]);
-    checks.push(['same-prompt: a miss recorded before the tier existed is asked again (gate can fail)',
-      slink(S[0])?.how === 'same-prompt' && smiss(S[0]) === undefined, JSON.stringify({ l: slink(S[0]), k: smiss(S[0]) })]);
-    checks.push(['same-prompt: a run of twenty messages is read by this tier, one of twenty six by none, and neither is a miss (gate can fail)',
-      slink(LONG)?.how === 'same-prompt' && slink(LONG)?.hits === 5 && !slink(TOO_LONG)
-      && smiss(LONG) === undefined && smiss(TOO_LONG) === undefined,
-      JSON.stringify({ long: slink(LONG), too: slink(TOO_LONG), key: smiss(TOO_LONG) })]);
-    checks.push(['same-prompt: another opening in the same folder is no sibling and is placed nowhere (gate can fail)',
-      !slink(APART) && smiss(APART) === 'r2||0|0', JSON.stringify({ l: slink(APART), k: smiss(APART) })]);
-    checks.push(['same-prompt: the same prompts from an entrypoint a person types into are not runs (gate can fail)',
-      TYPED.every((s) => !slink(s) && smiss(s) === 'r2||0|0'), JSON.stringify({ l: slink(TYPED[0]), k: smiss(TYPED[0]) })]);
-    checks.push(['same-prompt: three are not enough, and the key says how many shared the prompt (gate can fail)',
-      THREE.every((s) => !slink(s) && smiss(s) === 'r2||0|2'), JSON.stringify({ l: slink(THREE[0]), k: smiss(THREE[0]) })]);
-    checks.push(['same-prompt: a prompt shorter than PROMPT_MIN proves nothing (gate can fail)',
-      SHORT.every((s) => !slink(s) && smiss(s) === 'r2||0|0'), JSON.stringify({ l: slink(SHORT[0]), k: smiss(SHORT[0]) })]);
-    checks.push(['same-prompt: a folder holding nothing but the runs is not the project; the chat\'s folder above it is (gate can fail)',
-      ALONE.every((s) => slink(s)?.how === 'same-prompt' && slink(s)?.hits === 3 && slink(s)?.project === PLUG),
-      JSON.stringify(slink(ALONE[0]))]);
-    const again = deriveRuns(sdb, made, { write: true });
-    checks.push(['same-prompt: a second pass asks nothing again and keeps the longer run (gate can fail)',
-      again.already === 10 && again.unchanged === 13 && again.unlinked === 0 && again.batched.length === 0
-      && slink(LONG)?.how === 'same-prompt',
-      JSON.stringify({ a: again.already, u: again.unchanged, x: again.unlinked, long: slink(LONG) })]);
-    // A person picked one of them up: a second typed prompt, and the tie goes.
-    writeFileSync(join(sdir, S[1] + '.jsonl'), [asked(S[1], day(2), `${OPENING}src/a2.py`, PLUG, 'sdk-py'),
-      replied(S[1], day(2, 1), 'looked at it', PLUG, 'sdk-py'), asked(S[1], day(2, 50), 'explain the second finding', PLUG, 'sdk-py'),
-      replied(S[1], day(2, 51), 'explained', PLUG, 'sdk-py')].join('\n') + '\n');
-    await sh.file(join(sdir, S[1] + '.jsonl'), true);
-    const grew = deriveRuns(sdb, made, { write: true });
-    checks.push(['same-prompt: a run that grows a second typed prompt is unlinked, the rest stay (gate can fail)',
-      grew.unlinked === 1 && !slink(S[1]) && slink(S[2])?.how === 'same-prompt',
-      JSON.stringify({ x: grew.unlinked, s2: slink(S[1]) })]);
-  }
+  await selfTestSamePrompt(tmp, checks);
 
   // Chains, fourth directory: a project this machine IMPORTED. The transcript is byte identical to
   // the one on the machine it came from, so every line still names THAT directory, and the session
