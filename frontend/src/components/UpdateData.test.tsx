@@ -343,6 +343,9 @@ describe('UpdateData', () => {
     await button()
     last = outcome({ id: 'b-8', kind: 'incremental', dry_run: true })
     await client.refetchQueries({ queryKey: ['harvest'] })
+    // GIVEN TIME TO BE WRONG. The reload happens in an effect, after the refetch resolves and
+    // the component renders; asserting at once passed for a build that did reload here.
+    await new Promise((resolve) => setTimeout(resolve, 40))
     expect(onChanged).not.toHaveBeenCalled()
     last = outcome({ id: 'b-9' })
     await client.refetchQueries({ queryKey: ['harvest'] })
