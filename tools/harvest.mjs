@@ -2511,7 +2511,8 @@ export const RUN = {
   // (entrypoint sdk-py or sdk-cli), and 183 of those one plugin's security review of a change,
   // started from the chat's OWN folder by no shell call, 168 of them in one folder, where 178
   // runs were asked the same thing over twelve days (so no call, no containment, no ten minute
-  // window; ten of the 178 had been batched by chance). What they share is the folder and
+  // window; of the other ten, five happened to batch and five the review rule tied). What
+  // they share is the folder and
   // the opening of the prompt: the same 183 group at a head of 20, 40, 60 or 120 characters and
   // fall apart at 200, where the list of changed files begins. Seven more of the same runs hold
   // 17 to 20 messages; the next SDK one-shot above them holds 76.

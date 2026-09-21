@@ -430,7 +430,8 @@ a fresh SDK session from the chat's OWN folder, by no shell call, every time som
 Measured on the author's test laptop, 2026-09-20, full population: 208 one-shots no tier had
 placed, 188 of them begun through the Agent SDK (`entrypoint` `sdk-py` or `sdk-cli`), and 183 of
 those one plugin's "Review this change for security vulnerabilities", 168 of them in one folder
-(where 178 runs were asked it across twelve days, ten of them batched by chance), which is why
+(where 178 runs were asked it across twelve days; five of the other ten happened to batch and
+five the review rule had tied), which is why
 the list showed the same row over and over. A one-shot neither
 tier placed folds under its project when its entrypoint is an SDK one and at least three other
 SDK one-shots in the very same folder open with the same 60 characters, whenever they ran (the
