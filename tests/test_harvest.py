@@ -447,6 +447,201 @@ class TestTheJob:
         assert order == [("run", True)]
 
 
+def outcomes_report(**over):
+    """What `--backfill-tool-outcomes` prints, trimmed to what matters here."""
+    base = {"files_scanned": 9634, "files_unreadable": 0, "rows_before": 250000,
+            "rows_after": 250000, "rows_unchanged": True,
+            "outcome": {"before": 1, "after": 2, "filled_from_transcripts": 310,
+                        "filled_from_the_stored_flag": 12},
+            "result_ts_filled": 4100, "calls_still_without_an_outcome": 27}
+    return {**base, **over}
+
+
+def runs_report(**over):
+    """What `--backfill-runs` prints, dry or not (`wrote` says which)."""
+    base = {"one_shots": 1100, "already": 13, "unchanged": 0, "unlinked": 0, "linked": 4,
+            "batched": 9, "misses": 185, "by_how": {"under": 4, "batch": 9}, "heads": 1,
+            "projects": 2, "links_before": 13, "links_after": 26,
+            "calls_without_result_ts": 0, "wrote": True}
+    return {**base, **over}
+
+
+def job(kind, answer, dry_run=False, **kw):
+    return harvest.run_once(kind, dry_run, run=runner(answer), stamp=lambda: False,
+                            sleep=lambda s: None, root="X:/install", **kw)
+
+
+class TestTheOneOffPasses:
+    def test_only_the_fold_has_a_dry_run_and_the_flag_is_never_passed_to_the_other(self):
+        """`--backfill-tool-outcomes --dry-run` WRITES: the harvester dispatches on the first flag
+        before it looks at the second. So that pair has no entry, and a request for it is
+        refused rather than run without the flag."""
+        assert harvest.argv_for("runs", True, node="n", root="X:/i")[2:] \
+            == ["--backfill-runs", "--dry-run"]
+        assert harvest.argv_for("runs", node="n", root="X:/i")[2:] == ["--backfill-runs"]
+        assert harvest.argv_for("tool-outcomes", node="n", root="X:/i")[2:] \
+            == ["--backfill-tool-outcomes"]
+        with pytest.raises(ValueError):
+            harvest.argv_for("tool-outcomes", True)
+        with pytest.raises(ValueError, match="no dry run"):
+            harvest.parse_request({"kind": "tool-outcomes", "dry_run": True})
+        assert harvest.parse_request({"kind": "runs", "dry_run": True}) == ("runs", True)
+        assert not any("--dry-run" in flags for (kind, _), flags in harvest.FLAGS.items()
+                       if kind != "runs")
+
+    def test_a_report_of_another_job_is_not_this_jobs_report(self):
+        assert harvest.read_report(json.dumps(report()), "runs") is None
+        assert harvest.read_report(json.dumps(runs_report()), "incremental") is None
+        assert harvest.read_report(json.dumps(runs_report()), "runs")["linked"] == 4
+
+    def test_tool_outcomes_says_what_it_recorded(self):
+        got = job("tool-outcomes", ran(json.dumps(outcomes_report())))
+        assert got["ok"] and not got["partial"]
+        assert got["short"] == "Recorded: 322 outcomes, 4,100 result times."
+        assert "9,634 transcripts" in got["sentence"] and "27 calls still" in got["sentence"]
+        assert got["summary"]["outcomes_filled"] == 322
+
+    def test_tool_outcomes_with_nothing_to_record_says_so(self):
+        quiet = outcomes_report(result_ts_filled=0, outcome={"filled_from_transcripts": 0,
+                                                             "filled_from_the_stored_flag": 0})
+        got = job("tool-outcomes", ran(json.dumps(quiet)))
+        assert got["ok"] and got["short"] == "Nothing to record."
+
+    def test_tool_outcomes_exit_one_with_a_report_is_partial(self):
+        """It exits 1 when the rows that existed before are not the rows after, and a harvest
+        replacing a row at the same moment does that. The report is whole; the work is done."""
+        moved = outcomes_report(rows_unchanged=False, rows_after=249998)
+        got = job("tool-outcomes", ran(json.dumps(moved), code=1))
+        assert got["ok"] is True and got["partial"] is True and got["exit_code"] == 1
+        assert "250,000 to 249,998" in got["sentence"] and "Run it again" in got["sentence"]
+        assert got["short"].startswith("Recorded in part:")
+
+    def test_tool_outcomes_names_transcripts_it_could_not_read(self):
+        got = job("tool-outcomes", ran(json.dumps(outcomes_report(files_unreadable=1))))
+        assert got["partial"] is True and "1 transcript could not be read and was skipped" \
+            in got["sentence"]
+
+    def test_a_dry_run_of_the_fold_carries_the_numbers_the_page_asks_with(self):
+        got = job("runs", ran(json.dumps(runs_report(wrote=False, links_after=13))), dry_run=True)
+        assert got["ok"] and got["dry_run"] is True
+        assert got["short"] == "Would fold 13 runs."
+        assert "Would fold 4 runs under the 1 chat" in got["sentence"]
+        assert "185 can be placed nowhere" in got["sentence"]
+        assert "Nothing was written" in got["sentence"]
+        assert got["summary"]["linked"] == 4 and got["summary"]["batched"] == 9
+        assert got["summary"]["misses"] == 185 and got["summary"]["outcomes_first"] is False
+
+    def test_what_can_be_placed_nowhere_counts_the_misses_it_already_knew_about(self):
+        """Seen live: 1,178 one-shots, 907 links, and a question that said "0 can be placed
+        nowhere", because `misses` counts only what THIS pass recorded and the rest are
+        `unchanged`."""
+        known = runs_report(wrote=False, linked=0, batched=0, misses=0, unchanged=271,
+                            links_after=13)
+        got = job("runs", ran(json.dumps(known)), dry_run=True)
+        assert got["summary"]["unplaced"] == 271 and got["summary"]["misses"] == 0
+        assert "271 can be placed nowhere" in got["sentence"]
+        both = job("runs", ran(json.dumps(runs_report(wrote=False, unchanged=15, links_after=13))),
+                   dry_run=True)
+        assert both["summary"]["unplaced"] == 200
+        assert "200 can be placed nowhere" in both["sentence"]
+
+    def test_the_fold_says_what_it_folded(self):
+        got = job("runs", ran(json.dumps(runs_report())))
+        assert got["ok"] and got["short"] == "Folded 13 runs."
+        assert "run links went from 13 to 26" in got["sentence"]
+
+    def test_a_fold_with_nothing_to_do_says_so_both_ways(self):
+        nothing = dict(linked=0, batched=0, unlinked=0, links_after=13)
+        assert job("runs", ran(json.dumps(runs_report(**nothing))))["short"] == "Nothing to fold."
+        dry = job("runs", ran(json.dumps(runs_report(wrote=False, **nothing))), dry_run=True)
+        assert dry["short"] == "Nothing to fold." and "Nothing was written" in dry["sentence"]
+
+    @pytest.mark.parametrize("dry_run,wrote", [(True, True), (False, False)])
+    def test_a_fold_that_reports_the_opposite_of_what_was_asked_is_not_a_success(
+            self, dry_run, wrote):
+        got = job("runs", ran(json.dumps(runs_report(wrote=wrote))), dry_run=dry_run)
+        assert got["ok"] is False and "opposite of what was asked" in got["sentence"]
+
+    def test_open_spans_say_tool_outcomes_first_and_never_refuse(self):
+        """The count is never reliably zero (a call in flight has no result yet), so a refusal
+        keyed on it would have no exit. It is said, and the page offers the other pass first."""
+        got = job("runs", ran(json.dumps(runs_report(wrote=False, calls_without_result_ts=41))),
+                  dry_run=True)
+        assert got["ok"] is True and got["summary"]["outcomes_first"] is True
+        assert "41 shell calls carry no result time" in got["sentence"]
+        assert "record tool outcomes first" in got["sentence"]
+
+    def test_a_one_off_pass_is_not_retried_when_the_store_is_held(self):
+        calls = []
+        locked = ran("", code=1, stderr="Error: database is locked")
+        got = harvest.run_once("runs", stamp=lambda: False, sleep=lambda s: None,
+                               run=runner(locked, calls=calls), root="X:/install")
+        assert len(calls) == 1 and got["ok"] is False and got["attempts"] == 1
+        assert "once" in got["sentence"]
+
+    def test_a_one_off_pass_needs_a_store_that_exists(self, tmp_path):
+        """The harvester would create an empty store and report zeros, which reads as "nothing to
+        do". An everyday update on the same install is allowed: that is how the store is made."""
+        jobs, calls = harvest.Jobs(boot="t"), []
+        allowed = {"enabled": True, "reason": None, "why_not": None, "fix": None,
+                   "db": str(tmp_path / "data" / "context.db"),
+                   "own": str(tmp_path / "data" / "context.db")}
+        for kind in ("runs", "tool-outcomes"):
+            with pytest.raises(harvest.NoStore):
+                jobs.start(kind, run=runner(ran("{}"), calls=calls), spawn=lambda work: work(),
+                           capability_of=lambda: allowed, invalidate=lambda: None)
+        assert calls == [] and jobs.in_progress() is False
+        began = jobs.start("incremental", run=runner(ran(json.dumps(report()))),
+                           spawn=lambda work: work(), capability_of=lambda: allowed,
+                           invalidate=lambda: None, stamp=lambda: False)
+        assert began["id"] == "t-1"
+
+    def test_each_kind_has_a_ceiling_and_none_is_short(self):
+        assert set(harvest.TIMEOUT_S) == set(harvest.KINDS) == set(harvest.SENTINELS)
+        assert min(harvest.TIMEOUT_S.values()) >= 3600
+
+
+class TestTheLockIsAlwaysFreed:
+    def start(self, jobs, **kw):
+        kw.setdefault("capability_of", lambda: {"enabled": True, "reason": None, "why_not": None,
+                                                "fix": None, "db": "a", "own": "a"})
+        kw.setdefault("invalidate", lambda: None)
+        kw.setdefault("stamp", lambda: False)
+        kw.setdefault("spawn", lambda work: work())
+        return jobs.start("incremental", run=runner(ran(json.dumps(report()))), **kw)
+
+    def test_a_clock_or_a_stamp_that_raises_before_the_spawn_frees_it(self):
+        jobs = harvest.Jobs(boot="t")
+
+        def broken():
+            raise OSError("no clock")
+        with pytest.raises(OSError):
+            self.start(jobs, now=broken)
+        assert jobs.in_progress() is False
+        assert self.start(jobs)["id"].startswith("t-")
+
+    def test_a_spawn_that_raises_after_the_work_ran_frees_nothing_twice(self):
+        """The work ran and freed the lock; then the spawn raised. Freeing "whatever is locked"
+        there would free a lock a LATER job had taken; freeing it again would raise."""
+        jobs = harvest.Jobs(boot="t")
+
+        def late(work):
+            work()
+            raise RuntimeError("raised after the work")
+        with pytest.raises(RuntimeError, match="after the work"):
+            self.start(jobs, spawn=late)
+        assert jobs.in_progress() is False and jobs.finished()["ok"] is True
+        assert self.start(jobs)["id"] == "t-2"
+
+    def test_a_held_job_keeps_the_lock_until_it_ends_and_not_a_moment_longer(self):
+        jobs, held = harvest.Jobs(boot="t"), []
+        self.start(jobs, spawn=held.append)
+        with pytest.raises(harvest.Busy):
+            self.start(jobs, spawn=held.append)
+        held[0]()
+        assert self.start(jobs)["id"] == "t-2"
+
+
 class TestHowFresh:
     def test_last_harvest_is_plain_json_and_the_newest_row(self, tmp_path, monkeypatch):
         import sqlite3
@@ -504,7 +699,8 @@ class TestTheRoutes:
         assert state["enabled"] is True and state["running"] is False and state["job"] is None
         assert state["last"]["id"] == "t-1" and state["last"]["ok"] is True
         assert state["last"]["short"] == "Updated: 3 transcripts read."
-        assert state["last_harvest"]["mode"] == "incremental" and state["kinds"] == ["incremental"]
+        assert state["last_harvest"]["mode"] == "incremental"
+        assert state["kinds"] == ["incremental", "tool-outcomes", "runs"]
 
     def test_busy_is_409_and_names_the_running_job(self, served, monkeypatch):
         held = []
@@ -543,7 +739,7 @@ class TestTheRoutes:
     def test_a_job_that_does_not_exist_is_400(self, served, body):
         answer = served.client.post("/api/store/harvest", json=body)
         assert answer.status_code == 400 and served.calls == []
-        assert answer.json()["detail"]["kinds"] == ["incremental"]
+        assert answer.json()["detail"]["kinds"] == list(harvest.KINDS)
 
     def test_the_route_empties_the_response_cache_when_the_job_ends(self, served):
         cache.put("pane", ("v",), b"{}")
@@ -575,6 +771,33 @@ class TestTheRoutes:
         assert harvest.in_progress() is False
 
 
+    def test_a_dry_run_of_the_fold_over_http_carries_the_numbers_the_page_asks_with(
+            self, served, monkeypatch):
+        calls = []
+        monkeypatch.setattr(harvest, "_default_run", runner(
+            ran(json.dumps(runs_report(wrote=False, links_after=13))), calls=calls))
+        answer = served.client.post("/api/store/harvest", json={"kind": "runs", "dry_run": True})
+        assert answer.status_code == 202
+        assert calls[0][0][2:] == ["--backfill-runs", "--dry-run"]
+        last = served.client.get("/api/store/harvest").json()["last"]
+        assert last["kind"] == "runs" and last["dry_run"] is True and last["ok"] is True
+        assert last["summary"]["linked"] == 4 and last["summary"]["batched"] == 9
+        assert last["summary"]["misses"] == 185 and last["summary"]["heads"] == 1
+
+    def test_a_one_off_pass_with_no_store_is_409_and_starts_nothing(self, served):
+        (served.root / "data" / "context.db").unlink()
+        forget_cached_rows()
+        answer = served.client.post("/api/store/harvest", json={"kind": "tool-outcomes"})
+        assert answer.status_code == 409 and served.calls == []
+        assert answer.json()["detail"]["reason"] == "no-store"
+        assert "Update data first" in answer.json()["detail"]["error"]
+
+    def test_a_dry_run_asked_of_tool_outcomes_is_400_and_never_reaches_the_harvester(self, served):
+        answer = served.client.post("/api/store/harvest",
+                                    json={"kind": "tool-outcomes", "dry_run": True})
+        assert answer.status_code == 400 and served.calls == []
+
+
 class TestTheContractWithTheHarvester:
     def test_the_parser_reads_only_keys_the_harvester_prints(self):
         source = (ROOT / "tools" / "harvest.mjs").read_text(encoding="utf-8")
@@ -600,7 +823,30 @@ class TestTheContractWithTheHarvester:
         touched = set(re.findall(r"""raw(?:\.get\(|\[)\s*["']([a-z_]+)["']""", source))
         touched |= set(re.findall(r"""["']([a-z_]+)["'] in found""", source))
         assert len(touched) >= 10
-        assert touched <= harvest.READS, f"undeclared: {touched - harvest.READS}"
+        declared = harvest.READS | harvest.READS_TOOL_OUTCOMES | harvest.READS_RUNS
+        assert touched <= declared, f"undeclared: {touched - declared}"
+
+    @pytest.mark.parametrize("export,reads", [
+        ("TOOL_OUTCOMES_REPORT_KEYS", "READS_TOOL_OUTCOMES"), ("RUNS_REPORT_KEYS", "READS_RUNS")])
+    def test_the_one_off_passes_are_held_the_same_way(self, export, reads):
+        source = (ROOT / "tools" / "harvest.mjs").read_text(encoding="utf-8")
+        block = re.search(r"export const " + export + r" = Object\.freeze\(\[(.*?)\]\);",
+                          source, re.DOTALL)
+        assert block, f"tools/harvest.mjs no longer exports {export}"
+        printed = set(re.findall(r"'([a-z_]+)'", block.group(1)))
+        declared = vars(harvest)[reads]
+        assert len(printed) >= 8 and declared <= printed, f"never printed: {declared - printed}"
+
+    def test_the_outcome_counts_inside_the_tool_outcomes_report_are_held_too(self):
+        source = (ROOT / "tools" / "harvest.mjs").read_text(encoding="utf-8")
+        block = re.search(r"TOOL_OUTCOMES_REPORT_NESTED = Object\.freeze\(\{\s*outcome: \[(.*?)\]",
+                          source, re.DOTALL)
+        assert block
+        printed = set(re.findall(r"'([a-z_]+)'", block.group(1)))
+        assert harvest.READS_OUTCOMES_NESTED["outcome"] <= printed
+        here = (ROOT / "c4x" / "harvest.py").read_text(encoding="utf-8")
+        read = set(re.findall(r"""outcome\.get\(\s*["']([a-z_]+)["']""", here))
+        assert read and read <= harvest.READS_OUTCOMES_NESTED["outcome"]
 
     def test_the_nested_keys_are_held_the_same_two_ways(self):
         source = (ROOT / "tools" / "harvest.mjs").read_text(encoding="utf-8")

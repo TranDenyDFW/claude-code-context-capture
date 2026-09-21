@@ -326,6 +326,44 @@ describe('UpdateData', () => {
     await waitFor(() => expect(state.mock.calls.length).toBeGreaterThan(before))
   })
 
+  it('a job that finished somewhere else reloads the page once, and a dry run does not', async () => {
+    // The maintenance strip's passes and an update run in another tab never pass through this
+    // control, and a quick one ends before anything sees it running. The server naming a
+    // finished job this page had not accounted for is the news.
+    let last: HarvestOutcome | null = null
+    vi.spyOn(api.harvest, 'state').mockImplementation(async () => status({ last }))
+    const run = vi.spyOn(api.harvest, 'run')
+    const onChanged = vi.fn()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+    render(
+      <QueryClientProvider client={client}>
+        <UpdateData onChanged={onChanged} pollMs={5} idleMs={60_000} noteMs={60_000} />
+      </QueryClientProvider>,
+    )
+    await button()
+    last = outcome({ id: 'b-8', kind: 'incremental', dry_run: true })
+    await client.refetchQueries({ queryKey: ['harvest'] })
+    // GIVEN TIME TO BE WRONG. The reload happens in an effect, after the refetch resolves and
+    // the component renders; asserting at once passed for a build that did reload here.
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    expect(onChanged).not.toHaveBeenCalled()
+    last = outcome({ id: 'b-9' })
+    await client.refetchQueries({ queryKey: ['harvest'] })
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1))
+    await client.refetchQueries({ queryKey: ['harvest'] })
+    expect(onChanged).toHaveBeenCalledTimes(1)
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('a job that had already finished when the page opened is history, not news', async () => {
+    vi.spyOn(api.harvest, 'state').mockResolvedValue(status({ last: outcome({ id: 'b-3' }) }))
+    const onChanged = vi.fn()
+    draw({ onChanged })
+    await button()
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    expect(onChanged).not.toHaveBeenCalled()
+  })
+
   it('catches up when the page is shown again: a hidden tab does not poll, and the return refetches', async () => {
     let calls = 0
     let finished = false

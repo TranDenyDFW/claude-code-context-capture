@@ -7,6 +7,26 @@ runner, CI and a linted tree.
 
 ### Added
 
+- **Store maintenance, on the Diagnostics tab: the two one-off passes, each asking first.**
+  Record tool outcomes and Fold headless runs, numbered in the order they must run. The fold
+  runs its dry run before it asks, so the question quotes the harvester's own numbers, the
+  runs it can place nowhere included, and says to record tool outcomes first when shell calls
+  still lack a result time (a link made on a loose span stays). Only the fold has a dry run:
+  `--backfill-tool-outcomes --dry-run` writes, so the server has no such job. A one-off pass
+  on an install with no store is refused rather than left to create an empty one and report
+  zeros. Found on the way: the page reloaded only when it watched a job go from running to
+  finished, which misses any job that ends before it is seen running (a quick fold, an update
+  in another tab), so the reload is now keyed on the server naming a finished job the page had
+  not accounted for; and the job lock is now freed on every path by whoever took it (a clock
+  that raised before the spawn left it held; freeing "whatever is locked" could free a later
+  job's). The two backfills' reports are pinned contracts like `run()`'s
+  (`TOOL_OUTCOMES_REPORT_KEYS`, `RUNS_REPORT_KEYS`), and the tool-outcomes pass takes its
+  transcripts root as a parameter so the self-test can run it. The first live run of the
+  fold's question said "0 runs can be placed nowhere" about a store with 271 of them: the
+  harvester's `misses` counts only what this pass recorded and the rest are `unchanged`, so
+  the question now quotes their sum. Tests: `tests/test_harvest.py` (98), the harvester
+  self-test (345), vitest `StoreMaintenance.test.tsx` (10), `UpdateData.test.tsx` (23),
+  `harvest.test.ts` (21), `App.test.tsx`, `a11y.test.tsx`.
 - **Update data, in the header.** The user, on learning the store could only be updated from a
   terminal: "there's no button for this in the app?" One click starts the same incremental
   harvest the hooks run, says what came of it beside the button, and reloads every pane; the

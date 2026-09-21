@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { HarvestOutcome, HarvestStatus } from '@/api'
-import { HOW_TO_HARVEST, ago, freshness, hoverFor, noteFor } from './harvest'
+import { DOING, HOW_TO_HARVEST, OUTCOMES_QUESTION, ago, freshness, hoverFor, noteFor, runsQuestion } from './harvest'
 
 /**
  * The words of the Update data control. What matters: the freshness line never claims to know
@@ -123,6 +123,55 @@ describe('noteFor', () => {
     // Only when nothing named the run: a 409 whose body carried no job. Every other path
     // records the id it follows (useHarvest), so this is the rare case, not the adopted one.
     expect(noteFor(outcome({ id: 'b-12' }), null).text).toBe('Updated: 3 transcripts read.')
+  })
+})
+
+describe('runsQuestion', () => {
+  const dry = { linked: 4, heads: 1, batched: 9, projects: 2, unlinked: 0, misses: 185, calls_without_result_ts: 0 }
+
+  it('quotes the dry run, says what stays unplaced and what folding means, and ends in Continue?', () => {
+    const asked = runsQuestion(dry)
+    expect(asked.question).toBe(
+      'This would fold 4 runs under the 1 chat that spawned them and 9 under 2 projects, and leave 185 it can ' +
+      'place nowhere. Folded runs stop being listed as chats of their own. Nothing is closed or restarted. Continue?')
+    expect(asked.detail).toBeUndefined()
+    expect(asked.nothing).toBe(false)
+  })
+
+  it('counts every run it can place nowhere, not only the ones this pass recorded', () => {
+    // Seen live: `misses` was 0 and 271 runs were unplaced, all of them known from before.
+    expect(runsQuestion({ ...dry, misses: 0, unplaced: 271 }).question).toContain('leave 271 it can place nowhere')
+    expect(runsQuestion({ ...dry, linked: 0, batched: 0, misses: 0, unplaced: 271 }).question)
+      .toBe('Nothing to fold: no run would change (271 runs can be placed nowhere). Continue anyway?')
+  })
+
+  it('says which links would be dropped, in the singular when it is one', () => {
+    expect(runsQuestion({ ...dry, unlinked: 1 }).question).toContain(', drop 1 link that no longer holds,')
+  })
+
+  it('names tool outcomes first when calls have no result time, one or many', () => {
+    expect(runsQuestion({ ...dry, calls_without_result_ts: 41 }).detail)
+      .toContain('41 shell calls have no result time yet')
+    expect(runsQuestion({ ...dry, calls_without_result_ts: 1 }).detail)
+      .toContain('1 shell call has no result time yet')
+    expect(runsQuestion({ ...dry, calls_without_result_ts: 1 }).detail)
+      .toContain('Cancel and run Record tool outcomes first')
+  })
+
+  it('says so when nothing would change, and reads a missing summary as nothing', () => {
+    const idle = runsQuestion({ ...dry, linked: 0, batched: 0 })
+    expect(idle.nothing).toBe(true)
+    expect(idle.question).toBe('Nothing to fold: no run would change (185 runs can be placed nowhere). Continue anyway?')
+    expect(runsQuestion(null).nothing).toBe(true)
+    expect(runsQuestion({ linked: 'four' }).nothing).toBe(true)
+  })
+})
+
+describe('the words of the one-off passes', () => {
+  it('every kind says what it is doing, and the tool outcomes question says nothing restarts', () => {
+    expect(Object.keys(DOING).sort()).toEqual(['incremental', 'runs', 'tool-outcomes'])
+    expect(OUTCOMES_QUESTION).toContain('nothing is closed or restarted')
+    expect(OUTCOMES_QUESTION.endsWith('Continue?')).toBe(true)
   })
 })
 

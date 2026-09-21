@@ -288,6 +288,19 @@ describe('the header, as the user asked for it', () => {
     expect(window.location.search).toContain('tab=tab-cost')
   })
 
+  it('offers store maintenance on the Diagnostics tab and nowhere else', async () => {
+    show('/?tab=tab-diagnostics')
+    expect(await screen.findByRole('region', { name: 'Store maintenance' })).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Fold headless runs…' })).not.toBeNull()
+  })
+
+  it('keeps store maintenance out of every other tab, the header included', async () => {
+    show('/?tab=tab-cost')
+    await screen.findByRole('button', { name: 'Update data' })
+    expect(screen.queryByRole('region', { name: 'Store maintenance' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Fold headless runs…' })).toBeNull()
+  })
+
   it('puts Adopted Chats after the server controls, set apart by a divider', async () => {
     vi.mocked(api.adopt.state).mockResolvedValue({
       supported: true, why_not: '', pair: { account: 'a', org: 'o', root: 'R', source: 's' },

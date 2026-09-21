@@ -45,7 +45,28 @@ on its own. It will only ever update the install's own store: the harvester read
 machine's real transcripts, so a server started on a copy or a fixture (`--db`), on a redacted
 copy, or with `--no-writes` shows the button off with the reason and the remedy on hover, and
 the child process is never told which store is served, so it can open no other
-(`c4x/harvest.py`; `POST` and `GET /api/store/harvest`).
+(`c4x/harvest.py`; `POST` and `GET /api/store/harvest`). The page reloads whenever the server
+names a finished job it had not accounted for, whoever ran it: this button, the maintenance
+strip below, another tab. A dry run reloads nothing, and what had already finished when the
+page opened is history, not news.
+
+**Store maintenance, on the Diagnostics tab.** The two one-off passes a store needs after an
+upgrade that taught the harvester something, numbered in the order they must run: **Record
+tool outcomes...** (how each tool call ended and when its result came back, for rows from
+before the store kept those; it only fills empty columns) and **Fold headless runs...** (a
+harness's one-shots folded under the chat that spawned them, or under the project above a
+batch). Unlike Update data these ask first: not because anything is closed or restarted
+(nothing is, and the questions say so) but because one re-reads every transcript and the
+other changes what the lists show. The fold runs its dry run BEFORE it asks, so the question
+quotes the harvester's own numbers, the runs it can place nowhere included ("This would fold 4
+runs under the 1 chat that spawned them and 9 under 2 projects, and leave 185 it can place
+nowhere."); when the dry run finds shell calls with no result time it says to cancel and
+record tool outcomes first, because a link made on a loose span stays. Only the fold has a
+dry run: `--backfill-tool-outcomes --dry-run` would WRITE (the harvester dispatches on the
+first flag), so the server has no such job and refuses the request. Both need a store that
+exists (409 otherwise: the harvester would create an empty one and report zeros). Not in the
+header, which says less; this is the tab about whether the capture is healthy. On a server
+that will not harvest the strip says why in a sentence.
 
 The header says less and shows it on hover: the population list (the unlabelled dropdown after
 Search) names a folder holding one chat by that chat's title and a folder holding several by its

@@ -18,6 +18,13 @@ import { noteFor, type Note } from './harvest'
  * the moment the POST is accepted, because a harvest usually finishes (p50 under a second)
  * before the first poll could ever see it running.
  *
+ * A FINISHED JOB IS NEWS WHOEVER RAN IT. The reload was first keyed on watching a job go from
+ * running to not running, which misses any job that ends before this instance sees it running:
+ * a quick fold started by the maintenance strip, an update run in another tab. So the last
+ * finished job's id is remembered, and a new one the instance was not following reloads the
+ * page all the same (once, and never for a dry run, which wrote nothing). What the page found
+ * already finished when it opened is history, not news.
+ *
  * EVERY RUN THIS FOLLOWS IS HELD TO ITS ID, whoever started it: the run this page posted, a run
  * it found already under way, a run a 409 pointed it at. The id names the server process too, so
  * a run that a restart killed is never reported with the result of some later run.
@@ -47,6 +54,9 @@ export function useHarvest({
   // the common case, and dropping the run there left the page saying the outcome was unknown
   // for ever and never reloading data the run did write.
   const lost = useRef(false)
+  // The id of the last finished job this instance has accounted for; undefined until the
+  // first status arrives.
+  const seen = useRef<string | null | undefined>(undefined)
   const waiter = useRef<((outcome: HarvestOutcome | null) => void) | null>(null)
   const changed = useRef(onChanged)
   useEffect(() => { changed.current = onChanged }, [onChanged])
@@ -74,6 +84,7 @@ export function useHarvest({
   const finish = useCallback((outcome: HarvestOutcome | null) => {
     const result = noteFor(outcome, expected.current)
     expected.current = null
+    if (outcome) seen.current = outcome.id
     lost.current = false
     setFollowing(false)
     setNote(result)
@@ -107,6 +118,13 @@ export function useHarvest({
     }
     if (was.current && !now) finish(status.last ?? null)
     was.current = now
+    const lastId = status.last?.id ?? null
+    if (seen.current === undefined) {
+      seen.current = lastId
+    } else if (lastId !== seen.current) {
+      seen.current = lastId
+      if (status.last && !status.last.dry_run) changed.current?.()
+    }
   }, [status, query.dataUpdatedAt, query.isError, finish])
 
   // The server stopped answering while a job ran: say so and stop looking busy, but keep the

@@ -997,7 +997,8 @@ async function backfillTitles(dbPath = DB_PATH) {
  * name. `AND outcome IS NULL` also makes a second run nearly free and makes .changes a true
  * count of rows filled rather than rows visited.
  */
-export async function backfillToolOutcomes(dbPath = DB_PATH, { quiet = false } = {}) {
+export async function backfillToolOutcomes(dbPath = DB_PATH, { quiet = false, projects = PROJECTS,
+                                                              print = console.log } = {}) {
   const db = openDb(dbPath);
   // IT ALSO REPAIRS WHAT THE INGEST COULD NOT MATCH. A tool_result can appear on an EARLIER line
   // than its tool_use: measured, 16 rows on this store. The incremental walk sees the result
@@ -1030,7 +1031,7 @@ export async function backfillToolOutcomes(dbPath = DB_PATH, { quiet = false } =
     filled: counted('SELECT COUNT(*) n FROM tool_calls WHERE outcome IS NOT NULL'),
   };
 
-  const files = listTranscripts(PROJECTS);
+  const files = listTranscripts(projects);
   let scanned = 0, skipped = 0, filled = 0, timed = 0;
   const perFile = [];
   // BATCHED. backfillAgents writes hundreds of rows in autocommit; this writes a quarter of a
@@ -1138,7 +1139,7 @@ export async function backfillToolOutcomes(dbPath = DB_PATH, { quiet = false } =
                                          GROUP BY 1 ORDER BY n DESC`).all(),
     busiest_files: perFile.sort((a, c) => c.filled - a.filled).slice(0, 5),
   };
-  if (!quiet) console.log(JSON.stringify(report, null, 2));
+  if (!quiet) print(JSON.stringify(report, null, 2));
   db.close();
   return report.rows_unchanged ? 0 : 1;
 }
@@ -3952,6 +3953,23 @@ export const RUN_REPORT_NESTED = Object.freeze({
   sidecars: ['read', 'failed'],
   desktop_records: ['deleted', 'gone', 'returned', 'failed'],
 });
+// The two one-off passes the page can ask for (Store maintenance, on the Diagnostics tab) print
+// reports `c4x/harvest.py` parses too. The same contract: the self-test holds the real report
+// to these lists, and tests/test_harvest.py holds the Python parser to them.
+export const TOOL_OUTCOMES_REPORT_KEYS = Object.freeze([
+  'files_scanned', 'files_unreadable', 'files_that_contributed', 'rows_before', 'rows_after',
+  'rows_unchanged', 'written_by_other_writers_meanwhile', 'outcome', 'result_ts_filled',
+  'transcripts_no_longer_on_disk', 'calls_still_without_an_outcome', 'by_outcome',
+  'by_denial_kind', 'busiest_files',
+]);
+export const TOOL_OUTCOMES_REPORT_NESTED = Object.freeze({
+  outcome: ['before', 'after', 'filled_from_transcripts', 'filled_from_the_stored_flag'],
+});
+export const RUNS_REPORT_KEYS = Object.freeze([
+  'db', 'directories', 'sessions', 'one_shots', 'already', 'unchanged', 'unlinked', 'linked',
+  'batched', 'misses', 'by_how', 'heads', 'projects', 'links_before', 'links_after',
+  'calls_without_result_ts', 'wrote', 'ms',
+]);
 
 // THE INPUTS ARE PARAMETERS SO THE SELF-TEST CAN RUN THIS FUNCTION, which had no coverage at all
 // while being the one thing every hook, every terminal and now the page runs. Every default is
@@ -5729,6 +5747,9 @@ async function selfTest() {
     checks.push(['backfill-runs: --dry-run reports and writes nothing (gate can fail)',
       dryRep2.linked === 2 && dryRep2.batched === 9 && dryRep2.wrote === false && ucount() === 0
       && dryRep2.calls_without_result_ts === 1, JSON.stringify(dryRep2)]);
+    checks.push(['backfill-runs: the report has exactly the keys RUNS_REPORT_KEYS lists (gate can fail)',
+      JSON.stringify(Object.keys(dryRep2).sort()) === JSON.stringify([...RUNS_REPORT_KEYS].sort()),
+      Object.keys(dryRep2).filter((k) => !RUNS_REPORT_KEYS.includes(k)).join(',')]);
     const rep2 = await backfillRuns(upath, { quiet: true, write: true });
     checks.push(['backfill-runs: the links and the batches land, counted by how',
       rep2.linked === 2 && rep2.batched === 9 && rep2.by_how.under === 2 && rep2.by_how.batch === 9
@@ -6593,6 +6614,22 @@ async function selfTest() {
       absent.length === 0, absent.join(',')]);
     checks.push(['run: and every one of them but `failed` is a number', notNumbers.length === 0,
       notNumbers.join(',')]);
+    {
+      let printedOutcomes = '';
+      const code = await backfillToolOutcomes(join(runTmp, 'run.db'),
+        { projects: runProjects, print: (text) => { printedOutcomes += text; } });
+      let outcomes = null;
+      try { outcomes = JSON.parse(printedOutcomes); } catch { outcomes = null; }
+      checks.push(['backfill-tool-outcomes: prints one report and exits 0 when it rewrote no row',
+        code === 0 && outcomes !== null && outcomes.rows_unchanged === true && outcomes.files_scanned === 1,
+        JSON.stringify({ code, scanned: outcomes?.files_scanned })]);
+      checks.push(['backfill-tool-outcomes: the report has exactly the keys TOOL_OUTCOMES_REPORT_KEYS lists (gate can fail)',
+        outcomes !== null && JSON.stringify(Object.keys(outcomes).sort())
+          === JSON.stringify([...TOOL_OUTCOMES_REPORT_KEYS].sort()),
+        outcomes ? Object.keys(outcomes).filter((k) => !TOOL_OUTCOMES_REPORT_KEYS.includes(k)).join(',') : 'no report']);
+      checks.push(['backfill-tool-outcomes: and the nested keys it lists',
+        outcomes !== null && TOOL_OUTCOMES_REPORT_NESTED.outcome.every((k) => k in (outcomes.outcome ?? {}))]);
+    }
     const second = await drive();
     checks.push(['run: a second run sees the transcript and reads nothing, which is what "nothing new" is',
       second.report?.files_seen === 1 && second.report?.files_read === 0,
