@@ -37,6 +37,6 @@
     ]
   },
   "devDependencies": {
-    "eslint": "10.9.1"
+    "eslint": "10.10.0"
   }
 }
