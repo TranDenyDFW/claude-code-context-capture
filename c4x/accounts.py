@@ -28,12 +28,30 @@ resolves the directory with `stat` rather than filtering directory entries by ty
 is the one that decides the feature, it was measured rather than argued, and it can change in any
 release: `verify()` exists to notice when it does.
 
-THREE COSTS, none of them hidden:
+AND IT CHANGED. Measured on this machine on 2026-10-10, desktop build 2.26454.0.0: a record LOADS
+through a junction and will not SAVE through one. Every write into a linked pair fails with
+`PlantDetectedError`, "Refusing non-directory at private dir path (symlink/file plant)", thrown
+from `ensureStorageDir` before `writeSessionToDisk`. 2,843 such lines sit in the app's log across
+16 days from 2026-09-14, naming the three junctioned pairs an account had signed into and never the
+real one, for 73 distinct sessions. The line above that decides the feature therefore now reads the
+other way, and `verify()` could not see it: it checks link targets and record listings, which are
+reads. `c4x.applog` reads the refusals out of the app's own log, `verify()` reports them, and
+`share_all()` refuses to run while any are there.
+
+WHAT THAT COSTS A USER, and why it is not cosmetic: the chat list is the directory listing, so
+everything still appears, and an archive, a rename or a brand new chat under a linked account is
+accepted on screen and dropped. The report that found this was one chat archived under two accounts
+in one afternoon because the first archive never reached disk.
+
+FOUR COSTS, none of them hidden:
 
   - One directory holds one `scheduled-tasks.json` and one `archived-sessions.idx`. The copies
     belonging to the pairs that become junctions are moved into the backup, never merged.
   - Either account can rewrite, or delete, the other's chats. That is what sharing means.
   - The app must be closed while the directories move, and started again afterwards.
+  - On a build that refuses a write through a reparse point, every account but the one holding the
+    real directory loses every write it makes, silently. That is fatal to the feature, not a cost
+    to weigh, which is why `share_all()` will not start while `applog` sees a refusal.
 """
 import json
 import os
@@ -392,6 +410,18 @@ def state():
         current_listed = who["mine"] if signed else None
     except Exception:  # noqa: BLE001 - no store, no frame; the hover keeps the app's numbers
         pass
+    # THE CHEAP HALF OF THE REFUSAL CHECK. The page asks on every load, and the app's logs run to
+    # tens of megabytes, so this reads the newest file's tail; `verify()` reads them all.
+    recent_refusals: dict = {}
+    try:
+        from c4x import applog
+        said = applog.recent()
+        if said.get("count"):
+            recent_refusals = {"count": said["count"], "pairs": dict(said["pairs"]),
+                               "last": said.get("last"), "file": said.get("file"),
+                               "said": applog.sentence(said)}
+    except (OSError, ValueError):            # no log to read says nothing either way
+        pass
     meant = intent(linked=bool(linked))
     # THE PAIRS SHARING DOES NOT COVER YET, while sharing is meant: the ones the app created
     # since. The page says how many, and `reconcile` folds them in when Claude next closes.
@@ -402,6 +432,10 @@ def state():
         # WHAT WAS ASKED FOR, beside what is on disk. They disagree when a migration has undone the
         # sharing, and that difference is the whole of what `verify` reports.
         "mode": mode, "intended": meant["mode"], "intended_source": meant["source"],
+        # WRITES THE APP REFUSED through a link, from the newest log's tail. Empty is the normal
+        # answer; anything here means the accounts other than the one holding the real directory
+        # are losing every change they make.
+        "refused_writes": recent_refusals,
         "roots": roots, "pairs": len(every), "linked": len(sharing),
         "chats_visible": sum(p["records"] for p in every if not p["link_to"]),
         "signed_in": signed, "current_chats": current, "uncovered": uncovered,
@@ -460,10 +494,17 @@ def _recorded_links() -> list:
         return []
 
 
-def _write_marker(links, by="share_all"):
+def _write_marker(links, by="share_all", mode=ALL):
+    """Record the INTENDED mode, so a stray link later reads as a problem and not as the intent.
+
+    `current` is written rather than the marker deleted: with no marker, `intent()` falls back to
+    the disk, and one link that a failed undo left behind would then BE the intent again and the
+    watchdog would fold every pair back in. A marker that says `current` makes `verify()` say
+    "sharing is off and 1 pair(s) are still links" instead.
+    """
     marker_path().parent.mkdir(parents=True, exist_ok=True)
     marker_path().write_text(json.dumps({
-        "mode": ALL, "set_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "mode": mode, "set_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "by": by, "links": links}, indent=1), encoding="utf-8")
 
 
@@ -686,12 +727,41 @@ def _relink_pair(pair, head, backup, dry_run=False) -> dict:
     return out
 
 
-def share_all(dry_run=False):
-    """Point every pair on each root at that root's fullest pair. Returns a report."""
+def refused_writes(report=None) -> dict:
+    """What the app's log says about record writes it REFUSED through a link. `{}` when none.
+
+    The read side cannot see this (see the module docstring): a junction lists its records
+    perfectly and the save is what fails. A log is evidence of the past, so a caller treats any
+    count at all as a reason to stop rather than a number to compare.
+    """
+    from c4x import applog
+    try:
+        said = applog.scan() if report is None else report
+    except OSError as exc:                   # a log directory that cannot be read says nothing
+        return {"error": str(exc)}
+    if not said.get("count"):
+        return {}
+    return {"count": said["count"], "pairs": dict(said["pairs"]),
+            "sessions": len(said.get("sessions") or []), "first": said.get("first"),
+            "last": said.get("last"), "said": applog.sentence(said)}
+
+
+def share_all(dry_run=False, force=False):
+    """Point every pair on each root at that root's fullest pair. Returns a report.
+
+    REFUSES ON A BUILD THAT WILL NOT WRITE THROUGH A LINK. `force` is for after someone has
+    measured that a write through a junction lands again, never for getting past the message.
+    """
     from c4x import store
     ok, why = supported()
     if not ok:
         raise RuntimeError(why)
+    refused = refused_writes()
+    if refused.get("count") and not force:
+        raise RuntimeError(
+            "this machine's desktop app refuses to write a chat record through a link, so sharing "
+            "would silently drop every archive, rename and new chat made under the other accounts: "
+            f"{refused['said']}. Nothing was changed.")
     if app_running():
         raise RuntimeError(
             "Claude is running, and a directory it has open cannot be moved. Quit Claude and try "
@@ -766,6 +836,17 @@ def reconcile(dry_run=False) -> dict:
         report["why"] = "sharing is off; nothing to cover"
         report["state"] = state()
         return report
+    # THE AUTOMATIC PATH IS THE DANGEROUS ONE. This runs from the watchdog sixty seconds after the
+    # app closes, so on a build that refuses a write through a link it would quietly re-create the
+    # condition that loses every write, over and over. It stops instead and says so in the report
+    # the server logs, and the remedy is `share_current`.
+    refused = refused_writes()
+    report["refused_writes"] = refused
+    if refused.get("count"):
+        report["why"] = ("the app refuses to write records through a link on this machine, so "
+                         f"nothing was linked: {refused['said']}")
+        report["state"] = state()
+        return report
     pending = [p for ps in pairs_by_root.values() for p in uncovered_pairs(ps)]
     report["pending"] = [_brief(p) for p in pending]
     if app_running():
@@ -819,12 +900,80 @@ def reconcile(dry_run=False) -> dict:
     return report
 
 
+def _split_pair(pair, head, dry_run=False) -> dict:
+    """Replace one link with a real directory holding a COPY of the shared records.
+
+    The undo of last resort, for a machine whose backup manifest is gone: provenance is what the
+    manifest held, and without it nothing can say which account a record was made under, so the
+    choice is between leaving the links (every account but one losing its writes on a build that
+    refuses them) and giving each account the list it can see today. This is the second.
+
+    THE LINK IS REMOVED AND NEVER ITS TARGET (`_remove_link`). A copy that fails part way takes its
+    half written directory away and puts the link back, because a pair with neither a link nor a
+    full list is the one state the app fills in by itself at the next sign-in. The caller holds the
+    app closed; a directory the app has open cannot be replaced.
+    """
+    here = Path(pair["path"])
+    source = Path(head["path"])
+    names = sorted([p.name for p in source.glob(f"{RECORD}*.json")]
+                   + [n for n in PER_PAIR if (source / n).is_file()])
+    out: dict[str, Any] = {
+        "pair": f"{pair['account'][:8]}\\{pair['org'][:8]}", "path": str(here),
+        "from": str(source), "files": len(names), "copied": 0,
+        "bytes": sum((source / n).stat().st_size for n in names)}
+    if dry_run:
+        return out
+    was = link_target(here)
+    _remove_link(here)
+    try:
+        here.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            shutil.copy2(str(source / name), str(here / name))
+            out["copied"] += 1
+    except (OSError, shutil.Error) as exc:
+        shutil.rmtree(str(here), ignore_errors=True)
+        if was is not None and not os.path.lexists(here):
+            _raw_link(here, was)
+            out["restored"] = True
+        raise RuntimeError(
+            f"could not seed {here} from {source} ({out['copied']} of {len(names)} file(s) "
+            f"copied): {exc}"
+            + ("; the link was put back" if out.get("restored") else "")) from exc
+    return out
+
+
+def _undo_splits(done, head) -> list:
+    """Put the links back for pairs already split, after a later one failed. Best effort.
+
+    ALL OR NOTHING MATTERS HERE for one reason: with a `current` marker a leftover link is only a
+    reported problem, but a half split machine has some accounts writing into their own directory
+    and some into the shared one, and no later run can tell which record belongs where. Each
+    problem this cannot fix is returned and named, never swallowed.
+    """
+    problems: list[str] = []
+    for out in reversed(done):
+        here = Path(out["path"])
+        try:
+            if link_target(here) is None and here.is_dir():
+                shutil.rmtree(str(here))
+            if not os.path.lexists(here):
+                _make_link(here, head["path"])
+        except (OSError, RuntimeError) as exc:
+            problems.append(f"{here}: {exc}")
+    return problems
+
+
 def share_current(dry_run=False):
     """Undo it: remove every link and put each file back under the pair it came from.
 
     The LINK is removed and never the target, which on Windows is what `rmdir` on a junction does.
     Files come back by name from the newest backup's manifest, so a record the app has written
     since is moved with its current contents rather than the copy in the backup.
+
+    WITH NO MANIFEST, the links are still undone: each becomes a real directory seeded with a copy
+    of the shared records (`_split_pair`). This used to raise and change nothing, which on a build
+    that refuses writes through a link left the only working remedy unreachable; a reset of `data/`
+    is enough to lose the manifest while the junctions stay where they are.
     """
     from c4x import store
     ok, why = supported()
@@ -835,15 +984,35 @@ def share_current(dry_run=False):
             "Claude is running, and these directories cannot be moved while it is. Quit Claude "
             "and try again; nothing has been changed.")
     manifest = _newest_manifest()
-    if manifest is None:
-        raise RuntimeError("no backup to restore the layout from, so nothing was changed")
-    where = _record_owners(manifest)
-    stamps = sorted(backups_dir().glob("*/manifest.json"))
+    where = _record_owners(manifest) if manifest else None
+    stamps = sorted(backups_dir().glob("*/manifest.json")) if manifest else []
     report: dict[str, Any] = {"mode": CURRENT, "dry_run": bool(dry_run), "restored": [],
-                              "left": [], "restart_required": True,
-                              "from_backup": str(stamps[-1].parent)}
+                              "left": [], "restart_required": True, "seeded": [],
+                              "from_backup": str(stamps[-1].parent) if stamps else None}
     for root in store.sessions_roots():
-        for pair in pairs_on(root):
+        pairs = pairs_on(root)
+        if where is None:
+            # NO PROVENANCE TO RESTORE: every link becomes a real directory holding a copy of the
+            # shared list, and a failure puts back every link this root has already undone.
+            linked = [p for p in pairs if p["link_to"]]
+            head = canonical_pair(pairs)
+            if linked and head is None:
+                raise RuntimeError(
+                    f"{root}: every pair is a link, so there is no directory to copy from; "
+                    "nothing was changed")
+            done: list = []
+            for pair in linked:
+                try:
+                    seeded = _split_pair(pair, head, dry_run)
+                except RuntimeError as exc:
+                    stuck = _undo_splits(done, head) if not dry_run else []
+                    raise RuntimeError(
+                        f"{exc}. {len(done)} pair(s) already split were put back"
+                        + (f", except: {'; '.join(stuck)}" if stuck else "")) from exc
+                done.append(seeded)
+                report["seeded"].append(seeded)
+            continue
+        for pair in pairs:
             if not pair["link_to"]:
                 continue
             here = Path(pair["path"])
@@ -868,7 +1037,10 @@ def share_current(dry_run=False):
                     else:
                         report["left"].append({"name": name, "why": "not found to move back"})
     if not dry_run:
-        _clear_marker()
+        # THE MODE IS RECORDED, NOT ERASED: see `_write_marker`. A link a failed undo left behind
+        # must read as a problem rather than as the intent to share.
+        _write_marker([], by="share_current", mode=CURRENT)
+    report["refused_writes"] = refused_writes()
     report["state"] = state()
     return report
 
@@ -931,6 +1103,17 @@ def verify():
         holding = [p for p in pairs if not p["link_to"] and p["records"]]
         out["roots"].append({"root": str(root), "linked": len(linked), "holding": len(holding),
                              "uncovered": len(missing)})
+    # THE WRITE SIDE, which nothing above can see: the links can be perfect and every save through
+    # them still refused. Read from the app's own log, every file of it, since this is the call a
+    # person makes when they want to know.
+    refused = refused_writes()
+    out["refused_writes"] = refused
+    if refused.get("count"):
+        out["ok"] = False
+        out["problems"].append(
+            "the desktop app refuses to write a chat record through a link on this machine, so "
+            "every archive, rename and new chat made under a linked account is dropped without a "
+            f"word on screen: {refused['said']}")
     return out
 
 

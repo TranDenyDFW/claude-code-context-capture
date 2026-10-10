@@ -5,6 +5,42 @@ runner, CI and a linted tree.
 
 ## Unreleased
 
+### Fixed
+
+- **The desktop app refuses to write a chat record through a sharing junction, and nothing said
+  so.** The user archived a chat called n8n, signed into another account, found it unarchived,
+  and archived it again. The app's log says why: since 2026-09-14, build 2.26454.0.0 fails every
+  record write into a linked account directory with `PlantDetectedError`, "Refusing non-directory
+  at private dir path (symlink/file plant)", thrown in `ensureStorageDir` before the write. 2,843
+  such lines, 73 distinct sessions, three linked pairs named and never the real one. Reads are
+  fine, and the chat list IS the directory listing, so everything appears and every archive,
+  rename and new chat under a linked account is dropped with nothing on screen. That first
+  archive, at 03:26, never reached disk; the app reloaded 104 archived chats at the account
+  switch and the second archive, under the account that holds the real directory, landed.
+  - New `c4x/applog.py` reads the refusals out of the app's own log: by pair, by day and by
+    session, counted once per failure rather than once per mention (the refused path appears a
+    second time inside the escaped stack on the same line). `accounts.verify()` reports them over
+    every log file, `accounts.state()` over the newest log's tail, since the page asks on every
+    load and these run to tens of megabytes.
+  - `share_all()` refuses to run while any refusal is there, and so does the watchdog's
+    `reconcile()`, which would otherwise re-create the condition a minute after the app closes,
+    over and over. `force=True` exists for after someone has measured that a write through a
+    junction lands again.
+  - `share_current()`, the documented undo, raised "no backup to restore the layout from" on a
+    machine whose `data/` had been reset, which left the only remedy unreachable. With no manifest
+    each link now becomes a real directory seeded with a copy of the shared list, a failure part
+    way puts back every link already undone, and the mode is recorded as `current` rather than the
+    marker deleted, so a leftover link reads as a problem and not as the intent to share.
+  - The header's Account row says so in red, with the count, the log line on hover and a Separate
+    them button that opens the same confirm the Current switch does.
+  - `tools/recover_refused.py` names what the refusals cost: of the 73 sessions, 63 have a record
+    today, 9 have a transcript and no record (so the app does not list them) grouped by the folder
+    to adopt them from, and 1 has neither. It writes nothing; adopting stays a separate step.
+  - `accounts.py`'s own docstring said the app "listed all 17 records and rewrote three of them
+    through the link" and that `verify()` existed to notice when that changed. It changed, and
+    `verify()` could not notice: it checks link targets and record listings, which are the read
+    side. Both it and `docs/desktop-records.md` now carry the measurement and the fourth cost.
+
 ### Added
 
 - **The same prompt again: one plugin's SDK one-shots fold under their project.** The user

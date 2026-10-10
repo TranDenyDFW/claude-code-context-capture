@@ -44,6 +44,11 @@ export const RESTART_NOTE =
   'Claude is started again afterwards; it reads these directories when it starts.'
 export const QUIT_NOTE = 'Switching closes every Claude window and starts Claude again; you are asked first.'
 export const COVER_NOTE = 'covered when Claude next closes'
+export const REFUSED_HOVER =
+  'The desktop app loads records through a linked account directory and refuses to save through ' +
+  'one, so every archive, rename and new chat made under a linked account is dropped with ' +
+  'nothing said on screen. Measured on build 2.26454.0.0. Separating the directories is the ' +
+  'remedy; each account then keeps the list it can see today.'
 export const COVER_HOVER =
   'A pair the app created at a sign-in since sharing began. That account reads a list of its ' +
   'own until it is covered. The server covers it a minute after Claude closes, or now, after ' +
@@ -87,6 +92,11 @@ export function AccountSharing({
   // (measured: fifteen chats). The server covers such a pair a minute after Claude closes; the
   // line says so, and the button does it now, after asking.
   const uncovered = mode === 'all' ? (state.uncovered ?? []) : []
+  // WRITES THE APP REFUSED THROUGH THESE LINKS. The chat list is the directory listing, so a
+  // linked account sees everything and saves nothing: an archive, a rename or a new chat is taken
+  // on screen and dropped, and the app says so only in its log. Shown whatever the mode says,
+  // because the links can still be on the disk while the marker reads Current.
+  const refused = state.refused_writes?.count ? state.refused_writes : null
 
   const does: Record<Ask, string> = {
     all: 'links the account directories so every account reads the same chats',
@@ -191,6 +201,32 @@ export function AccountSharing({
           ))}
         </div>
       </div>
+      {refused ? (
+        <p
+          data-refused={refused.count}
+          title={REFUSED_HOVER + '\n' + refused.said + (refused.file ? '\n' + refused.file : '')}
+          className="flex items-center gap-2 text-xs text-bad"
+        >
+          <span>
+            The app refused {refused.count} write{refused.count === 1 ? '' : 's'} through these
+            links; every change made under a linked account is lost
+          </span>
+          <button
+            type="button"
+            disabled={!writesEnabled || asking !== null}
+            title={
+              !writesEnabled
+                ? 'This server was started without writes'
+                : 'Un-link the account directories now, after asking, so writes land again'
+            }
+            onClick={() => setAsking('current')}
+            className="rounded-md border border-bad/40 bg-page px-2 py-0.5 text-xs text-bad
+                       transition-colors hover:bg-bad/5 disabled:opacity-50"
+          >
+            Separate them
+          </button>
+        </p>
+      ) : null}
       {uncovered.length ? (
         <p
           data-uncovered={uncovered.length}
