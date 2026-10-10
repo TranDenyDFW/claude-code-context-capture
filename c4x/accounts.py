@@ -71,6 +71,11 @@ RECORD = "local_"
 PER_PAIR = ("scheduled-tasks.json", "archived-sessions.idx")
 
 ALL, CURRENT, MIXED = "all", "current", "mixed"
+# THE ONE PER-PAIR FILE THAT DESCRIBES THE RECORDS, so it travels with a copy of them: without it
+# every chat the shared list had archived comes back unarchived in the pair that was split off. The
+# other per-pair file is a schedule, and a copy of it would run that account's tasks again under
+# every account, so it stays where it is.
+ARCHIVED_IDX = "archived-sessions.idx"
 
 
 def supported():
@@ -912,11 +917,17 @@ def _split_pair(pair, head, dry_run=False) -> dict:
     half written directory away and puts the link back, because a pair with neither a link nor a
     full list is the one state the app fills in by itself at the next sign-in. The caller holds the
     app closed; a directory the app has open cannot be replaced.
+
+    WHAT TRAVELS: every record, `archived-sessions.idx`, which names which of them are archived,
+    and the `deleted_<uuid>` markers, which are how the app knows a chat was deleted on purpose
+    rather than lost. `scheduled-tasks.json` does not: it is one account's schedule, and a copy
+    under every account would run those tasks again per account.
     """
     here = Path(pair["path"])
     source = Path(head["path"])
     names = sorted([p.name for p in source.glob(f"{RECORD}*.json")]
-                   + [n for n in PER_PAIR if (source / n).is_file()])
+                   + [p.name for p in source.glob("deleted_*") if p.is_file()]
+                   + ([ARCHIVED_IDX] if (source / ARCHIVED_IDX).is_file() else []))
     out: dict[str, Any] = {
         "pair": f"{pair['account'][:8]}\\{pair['org'][:8]}", "path": str(here),
         "from": str(source), "files": len(names), "copied": 0,

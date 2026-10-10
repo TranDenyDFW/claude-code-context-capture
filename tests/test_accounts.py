@@ -218,6 +218,24 @@ class TestTheUndoWithNoBackup:
         one = report["seeded"][0]
         assert one["copied"] == one["files"] and one["bytes"] > 0
 
+    def test_the_archived_index_travels_and_the_schedule_does_not(self, machine):
+        """The index names which records are archived, so a copy of the records needs it or every
+        archived chat comes back; a schedule is one account's own and a copy of it runs twice."""
+        (machine / A / ORG_A / accounts.ARCHIVED_IDX).write_text(
+            '{"v":1,"archived":["local_a0"]}', encoding="utf-8")
+        (machine / A / ORG_A / "deleted_a9").write_text("1760000000000", encoding="utf-8")
+        accounts.share_all()
+        shutil.rmtree(accounts.backups_dir())
+        accounts.share_current()
+        here = machine / B / ORG_B
+        assert (here / accounts.ARCHIVED_IDX).is_file(), "the archived set travelled"
+        assert "local_a0" in (here / accounts.ARCHIVED_IDX).read_text(encoding="utf-8")
+        assert (here / "deleted_a9").is_file(), (
+            "the delete markers travelled: they are how the app knows a chat was deleted on "
+            "purpose rather than lost")
+        assert not (here / "scheduled-tasks.json").exists(), (
+            "B's own schedule was set aside by the share and must not be replaced by A's")
+
     def test_a_dry_run_copies_nothing_and_still_reports_what_it_would_cost(self, machine):
         accounts.share_all()
         shutil.rmtree(accounts.backups_dir())
