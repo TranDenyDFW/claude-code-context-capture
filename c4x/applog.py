@@ -293,7 +293,8 @@ def sentence(report) -> str:
         return "no refused writes in the app's log"
     pairs = ", ".join(f"{name} {n}" for name, n in
                       sorted(report["pairs"].items(), key=lambda kv: (-kv[1], kv[0])))
-    kinds = f"{report.get('records', 0)} of them chat record(s) for {len(report['sessions'])} chat(s)"
+    kinds = (f"{report.get('records', 0)} of them chat record(s) for "
+             f"{len(report['sessions'])} chat(s)")
     if report.get("other"):
         kinds += f" and {report['other']} the app's own scheduled task file"
     return (f"{report['count']} write(s) the app refused through a link, {kinds}, "

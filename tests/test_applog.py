@@ -19,8 +19,9 @@ if str(ROOT) not in sys.path:
 
 from c4x import applog  # noqa: E402
 
-PAIR = r"C:\Users\Shake\AppData\Roaming\Claude\claude-code-sessions\ba7ccf25-6e12-4287-b331-2d7eff00cdf8\2108d9a2-5d2f-4a2a-9f6b-7f0f9b2d1a55"
-REAL = r"C:\Users\Shake\AppData\Roaming\Claude\claude-code-sessions\54e8e2c2-6d3a-4c51-8ab7-5b84c31e6e4a\5f6eb959-46b3-4fa4-8ce4-79017924010c"
+ROOT_DIR = r"C:\Users\Shake\AppData\Roaming\Claude\claude-code-sessions"
+PAIR = ROOT_DIR + r"\ba7ccf25-6e12-4287-b331-2d7eff00cdf8\2108d9a2-5d2f-4a2a-9f6b-7f0f9b2d1a55"
+REAL = ROOT_DIR + r"\54e8e2c2-6d3a-4c51-8ab7-5b84c31e6e4a\5f6eb959-46b3-4fa4-8ce4-79017924010c"
 
 
 def refusal(stamp="2026-10-10 12:47:50", session="local_bf4d3e5e-0000-4000-8000-000000000000",
@@ -176,7 +177,7 @@ class TestWhereItLooks:
         monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
         said = [str(p) for p in applog._default_candidates()]
         assert said[0] == str(tmp_path / "local" / "Claude" / "Logs")
-        assert len(said) == len(set(os.path.normcase(s) for s in said)), "no spelling twice"
+        assert len(said) == len({os.path.normcase(s) for s in said}), "no spelling twice"
 
     def test_the_files_it_reads_are_the_log_files_sorted(self, tmp_path):
         for name in ("main1.log", "main.log", "notes.txt"):
