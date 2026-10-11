@@ -577,6 +577,22 @@ def _record_owners(manifest) -> dict:
     return where
 
 
+def has_provenance(where) -> bool:
+    """Does this manifest say which pair each record came from, or was it taken AFTER sharing?
+
+    THE QUESTION `share_current` RESTS ON. `_backup` prunes links, so a backup taken while the
+    pairs were already linked files EVERY record under the canonical pair, and restoring from it
+    moves those records to where they already are and hands every other account an EMPTY directory.
+    Measured on the author's machine on 2026-10-10: the newest manifest, written by `reconcile` on
+    2026-09-15 with the links already in place, files all 190 records under one pair while nine
+    pairs exist. A manifest with one home is therefore no provenance at all, and the copy seeded
+    undo is the honest answer for it.
+    """
+    homes = {(account, org) for name, (_root, account, org) in where.items()
+             if name.startswith(RECORD)}
+    return len(homes) > 1
+
+
 def canonical_pair(pairs):
     """The pair every other one points at: the one the links already point at, else the one
     holding the most chats.
@@ -996,9 +1012,16 @@ def share_current(dry_run=False):
             "and try again; nothing has been changed.")
     manifest = _newest_manifest()
     where = _record_owners(manifest) if manifest else None
+    # A MANIFEST IS NOT PROVENANCE. One taken after the links existed files every record under the
+    # canonical pair, and restoring from it would give every other account an empty directory.
+    provenance = "manifest" if where and has_provenance(where) else None
+    if provenance is None:
+        where = None
     stamps = sorted(backups_dir().glob("*/manifest.json")) if manifest else []
     report: dict[str, Any] = {"mode": CURRENT, "dry_run": bool(dry_run), "restored": [],
                               "left": [], "restart_required": True, "seeded": [],
+                              "provenance": provenance or "none: no backup names a second pair, "
+                              "so each link is seeded with a copy of the shared list",
                               "from_backup": str(stamps[-1].parent) if stamps else None}
     for root in store.sessions_roots():
         pairs = pairs_on(root)
