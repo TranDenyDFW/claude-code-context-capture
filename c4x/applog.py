@@ -25,9 +25,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# The message the app logs when it will not write into a directory that is a reparse point. The
-# path is captured up to the object that follows it, because the same path appears a second time
-# inside the escaped stack on the very same line and a count of matches would be double.
+# The message the app logs when it will not write into a directory that is a reparse point. ONE
+# MATCH PER LINE is what keeps the count honest, and it is `search` returning the first match that
+# does it, not the lazy capture: the same path appears a second time inside the escaped stack on
+# the very same line, so `findall` answers 2 for every single failure (measured on this machine's
+# own log: 5,686 matches for 2,843 refusals).
 REFUSED = re.compile(
     r"Refusing non-directory at private dir path \(symlink/file plant\): (.+?)(?:\s\{|$)")
 SESSION = re.compile(r"Failed to save session (local_[0-9a-f][0-9a-f-]*)")
@@ -66,11 +68,40 @@ def _default_candidates() -> list:
     return kept
 
 
-def log_dirs(candidates=None, exists=None) -> list:
-    """The candidate log directories that are actually there, newest location first."""
+def _identity(path):
+    """`(device, inode)` for a directory, or None when the platform cannot say.
+
+    ONE DIRECTORY UNDER TWO NAMES IS THE NORMAL CASE HERE. The Store build virtualises
+    `%APPDATA%\\Claude` into its package's `LocalCache` for itself and every process it spawns, so
+    both spellings open the same directory and a string comparison keeps both: `scan()` would then
+    read every log file twice and SUM, and `verify()`, the page and the refusal message would all
+    quote double. Windows answers inode 0 for some objects, and two of those would compare equal,
+    so a zero inode is no answer at all. `accounts._same_path` settles the same question the same
+    way for the records root.
+    """
+    try:
+        st = os.stat(str(path))
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino) if st.st_ino else None
+
+
+def log_dirs(candidates=None, exists=None, identity=None) -> list:
+    """The candidate log directories that are there, newest location first, each one ONCE."""
     isdir = os.path.isdir if exists is None else exists
-    return [Path(p) for p in (_default_candidates() if candidates is None else candidates)
-            if isdir(str(p))]
+    ident = _identity if identity is None else identity
+    out: list[Path] = []
+    seen: set = set()
+    for p in (_default_candidates() if candidates is None else candidates):
+        if not isdir(str(p)):
+            continue
+        key = ident(str(p))
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(Path(p))
+    return out
 
 
 def log_files(dirs=None, glob=None) -> list:
@@ -108,8 +139,8 @@ def refusals(lines) -> dict:
     text answers twice per failure. Returns zeroes for a log that holds none, which is the answer a
     machine that was never shared should give.
     """
-    out: dict[str, Any] = {"count": 0, "pairs": {}, "days": {}, "sessions": [],
-                           "first": None, "last": None}
+    out: dict[str, Any] = {"count": 0, "records": 0, "other": 0, "pairs": {}, "days": {},
+                           "sessions": [], "first": None, "last": None}
     sessions: dict[str, int] = {}
     for line in lines:
         hit = REFUSED.search(line)
@@ -127,7 +158,14 @@ def refusals(lines) -> dict:
             out["last"] = when if out["last"] is None or when > out["last"] else out["last"]
         said = SESSION.search(line)
         if said:
+            out["records"] += 1
             sessions[said.group(1)] = sessions.get(said.group(1), 0) + 1
+        else:
+            # NOT EVERY REFUSAL IS A CHAT. Six of this machine's 2,843 are
+            # `[CCDScheduledTasks] Failed to save scheduled tasks`, which names no session, and one
+            # of those is the earliest refusal of all, so a sentence that calls the whole count
+            # "record writes" is wrong about both the number and the date.
+            out["other"] += 1
     out["sessions"] = sorted(sessions)
     out["session_counts"] = sessions
     return out
@@ -152,7 +190,8 @@ def scan(paths=None, read=None) -> dict:
             total["files"].append({"path": str(f), "error": str(exc)})
             continue
         total["files"].append({"path": str(f), "count": one["count"]})
-        total["count"] += one["count"]
+        for key in ("count", "records", "other"):
+            total[key] += one[key]
         for key in ("pairs", "days", "session_counts"):
             for name, n in one[key].items():
                 total[key][name] = total[key].get(name, 0) + n
@@ -244,12 +283,20 @@ def recent(limit=2_000_000, newest=None, tail=None) -> dict:
 
 
 def sentence(report) -> str:
-    """One line for a log, a report or the page: what was refused, where, and when."""
+    """One line for a log, a report or the page: what was refused, where, and when.
+
+    SAYS WHICH OF THEM WERE CHATS. The count includes the app's own scheduled task file, which
+    names no session, so calling the whole number record writes overstates the chats and can date
+    the first one wrongly.
+    """
     if not report.get("count"):
-        return "no refused record writes in the app's log"
+        return "no refused writes in the app's log"
     pairs = ", ".join(f"{name} {n}" for name, n in
                       sorted(report["pairs"].items(), key=lambda kv: (-kv[1], kv[0])))
-    return (f"{report['count']} refused record write(s) for {len(report['sessions'])} session(s), "
+    kinds = f"{report.get('records', 0)} of them chat record(s) for {len(report['sessions'])} chat(s)"
+    if report.get("other"):
+        kinds += f" and {report['other']} the app's own scheduled task file"
+    return (f"{report['count']} write(s) the app refused through a link, {kinds}, "
             f"{report['first']} to {report['last']}, by pair: {pairs}")
 
 

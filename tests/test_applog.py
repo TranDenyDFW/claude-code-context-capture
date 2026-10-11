@@ -98,7 +98,18 @@ class TestWhatMustNotCount:
 
     def test_a_clean_log_reads_as_clean_rather_than_as_unknown(self):
         out = applog.refusals(["2026-10-10 12:00:00 [info] nothing to see"])
-        assert applog.sentence(out) == "no refused record writes in the app's log"
+        assert applog.sentence(out) == "no refused writes in the app's log"
+
+    def test_the_app_s_own_scheduled_task_file_is_a_refusal_but_not_a_chat(self):
+        """Six of this machine's 2,843 are this line, and the EARLIEST refusal is one of them, so
+        a count that calls them all record writes is wrong about the number and the date."""
+        line = ("2026-09-14 23:31:41 [error] [CCDScheduledTasks] Failed to save scheduled tasks: "
+                "Refusing non-directory at private dir path (symlink/file plant): "
+                f"{PAIR} {{ name: 'PlantDetectedError' }}")
+        out = applog.refusals([line, refusal()])
+        assert (out["count"], out["records"], out["other"]) == (2, 1, 1)
+        assert len(out["sessions"]) == 1, "the scheduled task refusal names no chat"
+        assert "the app's own scheduled task file" in applog.sentence(out)
 
 
 class TestAcrossTheLogFiles:
@@ -125,7 +136,8 @@ class TestAcrossTheLogFiles:
         log.write_text("\n".join([refusal(stamp="2026-09-14 10:00:00"),
                                   refusal(stamp="2026-10-10 12:47:50")]), encoding="utf-8")
         said = applog.sentence(applog.scan([log]))
-        assert "2 refused record write(s)" in said
+        assert "2 write(s) the app refused through a link" in said
+        assert "2 of them chat record(s) for 1 chat(s)" in said
         assert "2026-09-14 10:00:00 to 2026-10-10 12:47:50" in said
         assert "ba7ccf25" in said
 
@@ -136,6 +148,28 @@ class TestWhereItLooks:
         here.mkdir()
         dirs = applog.log_dirs(candidates=[here, gone], exists=lambda p: Path(p).is_dir())
         assert [str(d) for d in dirs] == [str(here)]
+
+    def test_one_directory_under_two_names_is_read_once(self, tmp_path):
+        """THE DEFECT THIS RECORDS, found by an independent review. The Store build virtualises
+        `%APPDATA%\\Claude` into its package's `LocalCache`, so both spellings open the same
+        directory; the string comparison that deduped the candidates kept both, and `scan()` read
+        every log twice and SUMMED. Dormant only because the app stopped logging there before the
+        refusals began. Identity, not spelling, decides."""
+        here = tmp_path / "Logs"
+        here.mkdir()
+        twice = [here, tmp_path / "Packages" / "LocalCache" / "Logs"]
+        (tmp_path / "Packages" / "LocalCache").mkdir(parents=True)
+        (tmp_path / "Packages" / "LocalCache" / "Logs").mkdir()
+        same = applog.log_dirs(candidates=twice, identity=lambda p: ("one", "directory"))
+        assert len(same) == 1, "two spellings of one directory are one candidate"
+        apart = applog.log_dirs(candidates=twice, identity=lambda p: (p, 1))
+        assert len(apart) == 2, "two real directories are still two candidates"
+
+    def test_a_directory_the_platform_cannot_identify_is_still_offered(self, tmp_path):
+        """Windows answers inode 0 for some objects, and two of those would compare equal."""
+        here = tmp_path / "Logs"
+        here.mkdir()
+        assert applog.log_dirs(candidates=[here], identity=lambda p: None) == [here]
 
     def test_the_newest_location_is_offered_first(self, monkeypatch, tmp_path):
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))

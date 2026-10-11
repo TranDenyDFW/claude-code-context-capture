@@ -12,7 +12,8 @@ runner, CI and a linted tree.
   and archived it again. The app's log says why: since 2026-09-14, build 2.26454.0.0 fails every
   record write into a linked account directory with `PlantDetectedError`, "Refusing non-directory
   at private dir path (symlink/file plant)", thrown in `ensureStorageDir` before the write. 2,843
-  such lines, 73 distinct sessions, three linked pairs named and never the real one. Reads are
+  such lines, of which 2,837 are chat records for 73 distinct sessions and 6 are the app's own
+  scheduled task file; three linked pairs named and never the real one. Reads are
   fine, and the chat list IS the directory listing, so everything appears and every archive,
   rename and new chat under a linked account is dropped with nothing on screen. That first
   archive, at 03:26, never reached disk; the app reloaded 104 archived chats at the account

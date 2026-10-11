@@ -513,10 +513,6 @@ def _write_marker(links, by="share_all", mode=ALL):
         "by": by, "links": links}, indent=1), encoding="utf-8")
 
 
-def _clear_marker():
-    marker_path().unlink(missing_ok=True)
-
-
 def backups_dir():
     """Beside the store, the way `snapshots_dir` is: a fixture run backs up beside the fixture."""
     from c4x import store
@@ -836,7 +832,11 @@ def reconcile(dry_run=False) -> dict:
     report: dict[str, Any] = {"ran": False, "dry_run": bool(dry_run), "intended": meant["mode"],
                               "intended_source": meant["source"], "app_running": False,
                               "why": "", "pending": [], "backup": None, "roots": [],
-                              "marker_written": False, "restart_required": False}
+                              "marker_written": False, "restart_required": False,
+                              # ALWAYS PRESENT, never a full log scan when sharing is off: the
+                              # branch that can create a link fills it in, and every other exit
+                              # keeps the shape the server's log line and the page read.
+                              "refused_writes": {}}
     if meant["mode"] != ALL:
         report["why"] = "sharing is off; nothing to cover"
         report["state"] = state()
@@ -848,8 +848,8 @@ def reconcile(dry_run=False) -> dict:
     refused = refused_writes()
     report["refused_writes"] = refused
     if refused.get("count"):
-        report["why"] = ("the app refuses to write records through a link on this machine, so "
-                         f"nothing was linked: {refused['said']}")
+        report["why"] = ("the app refuses to write through a link on this machine, so nothing was "
+                         f"linked: {refused['said']}")
         report["state"] = state()
         return report
     pending = [p for ps in pairs_by_root.values() for p in uncovered_pairs(ps)]

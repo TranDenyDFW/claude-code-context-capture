@@ -285,10 +285,12 @@ Failed to save session local_<uuid>: Refusing non-directory at private dir path
 
 2,843 of those lines sit in `%LOCALAPPDATA%\Claude\Logs\main.log` (the log moved there from the
 app data directory on 2026-08-20), from 2026-09-14 23:31 to 2026-10-10 12:32, naming the three
-linked pairs an account had signed into and never the real one, for 73 distinct sessions. Of those
-73, 63 have a record today because the write landed later under the real directory, 9 have a
-transcript and no record at all, so the app does not list them, and 1 has neither
-(`tools/recover_refused.py` reports this and names every session it cannot place).
+linked pairs an account had signed into and never the real one. 2,837 are chat records, for 73
+distinct sessions, and 6 are the app's own `scheduled-tasks.json`, which names no session and
+which the earliest refusal of all happens to be. Of those 73 sessions, 63 have a record today
+because the write landed later under the real directory, 9 have a transcript and no record at all,
+so the app does not list them, and 1 has neither (`tools/recover_refused.py` reports this and names
+every session it cannot place).
 
 The failure is invisible from the interface: the chat list IS the directory listing, so everything
 appears, and an archive, a rename or a new chat under a linked account is taken on screen and
