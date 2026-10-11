@@ -43,6 +43,13 @@ def records_on_disk(pair_dirs) -> tuple:
     by_id: dict[str, str] = {}
     by_session: dict[str, str] = {}
     for d in pair_dirs:
+        for marker in sorted(Path(d).glob("deleted_*")):
+            # DELETED ON PURPOSE, NOT LOST. The app leaves `deleted_<uuid>` when a chat is deleted
+            # in the interface, and the uuid is the record's. Measured on this machine: two of the
+            # refused sessions were app scratch workspaces the user had deleted, and the first
+            # version of this tool offered both for adoption, which would have resurrected them.
+            # `c4x.adopt` refuses them for the same reason, so it never offered those folders.
+            by_id.setdefault("local_" + marker.name[len("deleted_"):], "deleted:" + str(marker))
         for path in sorted(Path(d).glob("local_*.json")):
             by_id.setdefault(path.stem, str(path))
             try:
@@ -94,14 +101,21 @@ def report(pair_dirs=None, transcripts=None, refused=None, paired=None) -> dict:
         pair_dirs = [p["path"] for r in store.sessions_roots() for p in accounts.pairs_on(r)]
     by_id, have = records_on_disk(pair_dirs)
     out: dict = {"refused": refused["count"], "sessions": len(refused["sessions"]),
+                 # CARRIED, so the printed summary is the detector's own sentence rather than one
+                 # rebuilt from a thinner dict: the first version dropped these two and printed
+                 # "0 of them chat record(s)" over 2,837 of them.
+                 "records": refused.get("records", 0), "other": refused.get("other", 0),
                  "pairs": refused["pairs"], "first": refused["first"], "last": refused["last"],
-                 "recovered_already": [], "to_adopt": {}, "unrecoverable": []}
+                 "recovered_already": [], "to_adopt": {}, "deleted_on_purpose": [],
+                 "unrecoverable": []}
     for record_id in refused["sessions"]:
         # THE RECORD ITSELF FIRST. A refusal is not a loss when the same id landed later, under
         # the real directory, and that is the common case for a chat the user kept using.
         if record_id in by_id:
-            out["recovered_already"].append({"record": record_id, "session": paired.get(record_id),
-                                             "record_file": by_id[record_id]})
+            where = by_id[record_id]
+            group = "deleted_on_purpose" if where.startswith("deleted:") else "recovered_already"
+            out[group].append({"record": record_id, "session": paired.get(record_id),
+                               "record_file": where})
             continue
         cli = paired.get(record_id)
         if cli is None:
@@ -156,6 +170,8 @@ def self_test() -> int:
         # pairing has since rotated away. It is in the app's list; only its own id can find it.
         (pair / "local_nopair.json").write_text(json.dumps({"cliSessionId": "s-unseen",
                                                             "title": "n8n"}), encoding="utf-8")
+        # A chat the user DELETED in the app: the record is gone on purpose and the marker says so.
+        (pair / "deleted_gonebyhand").write_text("1760000000000", encoding="utf-8")
         projects = box / "projects"
         (projects / "P--thing").mkdir(parents=True)
         (projects / "P--thing" / "s-orphan.jsonl").write_text(
@@ -165,7 +181,8 @@ def self_test() -> int:
             json.dumps({"type": "summary", "summary": "no cwd here"}) + "\n", encoding="utf-8")
         refused = {"count": 9, "records": 9, "other": 0, "pairs": {"acct\\org": 9}, "days": {},
                    "sessions": ["local_landed", "local_renamed", "local_orphan", "local_gone",
-                                "local_unpaired", "local_nocwd", "local_nopair"],
+                                "local_unpaired", "local_nocwd", "local_nopair",
+                                "local_gonebyhand"],
                    "first": "2026-09-14 23:31:41", "last": "2026-10-10 12:32:40"}
         paired = {"local_landed": "s-landed", "local_renamed": "s-renamed",
                   "local_orphan": "s-orphan", "local_gone": "s-vanished",
@@ -180,6 +197,11 @@ def self_test() -> int:
            "local_nopair" in got, True)
         ok("and it is not in the unrecoverable list",
            "local_nopair" in {i["record"] for i in said["unrecoverable"]}, False)
+        ok("a chat deleted in the app is named as that, not offered for adoption",
+           [i["record"] for i in said["deleted_on_purpose"]], ["local_gonebyhand"])
+        ok("so it is not in the adoption list either",
+           "local_gonebyhand" in {i["record"] for v in said["to_adopt"].values() for i in v},
+           False)
         ok("the session with a transcript and no record is offered for adoption",
            {i["record"] for v in said["to_adopt"].values() for i in v}, {"local_orphan"})
         ok("grouped by the folder its transcript records", list(said["to_adopt"]), [r"P:\thing"])
@@ -191,10 +213,11 @@ def self_test() -> int:
         ok("a transcript with no cwd is named rather than dropped",
            (why.get("local_nocwd") or "").startswith("no cwd in"), True)
         every = (len(said["recovered_already"]) + sum(len(v) for v in said["to_adopt"].values())
-                 + len(said["unrecoverable"]))
+                 + len(said["deleted_on_purpose"]) + len(said["unrecoverable"]))
         ok("every refused session is in exactly one group", every, len(refused["sessions"]))
-        ok("the refusal totals are carried through", (said["refused"], said["sessions"]),
-           (9, len(refused["sessions"])))
+        ok("the refusal totals are carried through, the kinds among them",
+           (said["refused"], said["sessions"], said["records"], said["other"]),
+           (9, len(refused["sessions"]), 9, 0))
         ok("the transcript lookup finds one by name",
            Path(transcript_of("s-orphan", projects)).name, "s-orphan.jsonl")
         ok("and answers None for one that is not there", transcript_of("s-missing", projects), None)
@@ -203,8 +226,10 @@ def self_test() -> int:
         ok("a transcript with no cwd answers None",
            cwd_of(projects / "P--thing" / "s-nocwd.jsonl"), None)
         by_id, by_session = records_on_disk([pair])
-        ok("records are indexed by their own id", sorted(by_id),
-           ["local_landed", "local_nopair", "local_other"])
+        ok("records are indexed by their own id, and a delete marker counts as one",
+           sorted(by_id), ["local_gonebyhand", "local_landed", "local_nopair", "local_other"])
+        ok("the marker is told apart from a record by what it points at",
+           by_id["local_gonebyhand"].startswith("deleted:"), True)
         ok("and by the session they name", sorted(by_session),
            ["s-landed", "s-renamed", "s-unseen"])
         ok("a directory with no records is empty rather than an error",
@@ -227,10 +252,14 @@ def main(argv=None):
         print(json.dumps(said, indent=1))
         return 0
     print(applog.sentence({"count": said["refused"], "pairs": said["pairs"],
+                           "records": said["records"], "other": said["other"],
                            "sessions": [None] * said["sessions"],
                            "first": said["first"], "last": said["last"]}))
     print(f"  {len(said['recovered_already'])} of those sessions has a record now "
           "(the write landed later, under the real directory)")
+    if said["deleted_on_purpose"]:
+        print(f"  {len(said['deleted_on_purpose'])} were deleted in the app afterwards, so their "
+              "record is gone on purpose and nothing should bring them back")
     missing = sum(len(v) for v in said["to_adopt"].values())
     print(f"  {missing} session(s) in {len(said['to_adopt'])} folder(s) have a transcript and no "
           "record, so the app does not list them:")
