@@ -236,6 +236,33 @@ class TestTheUndoWithNoBackup:
         assert not (here / "scheduled-tasks.json").exists(), (
             "B's own schedule was set aside by the share and must not be replaced by A's")
 
+    def test_a_backup_taken_after_sharing_is_not_provenance(self, machine):
+        """THE DEFECT THIS RECORDS, found on the live machine after the first version shipped.
+        `_backup` prunes links, so a backup taken while the pairs were linked files every record
+        under the canonical pair. The undo read that as provenance, restored each record to where
+        it already was, and would have handed every other account an EMPTY directory. Measured
+        there: the newest manifest filed all 190 records under one pair, nine pairs existing."""
+        accounts.share_all()
+        shutil.rmtree(accounts.backups_dir())
+        accounts._backup([str(machine)], "after sharing, so it knows nothing about who owned what")
+        assert accounts._newest_manifest() is not None, "a manifest exists, which is the trap"
+        report = accounts.share_current()
+        assert report["provenance"].startswith("none"), report["provenance"]
+        pairs = {p["account"]: p for p in accounts.pairs_on(machine)}
+        assert pairs[B]["records"] == 4, (
+            "B was handed an empty directory by a manifest that knew nothing")
+        assert pairs[A]["records"] == 4 and all(p["link_to"] is None for p in pairs.values())
+
+    def test_a_backup_taken_before_sharing_is_still_used(self, machine):
+        """The provenance path must stay the one that runs when the backup really holds it."""
+        report = accounts.share_all()
+        assert report["backup"], "share_all backs up BEFORE it moves anything"
+        back = accounts.share_current()
+        assert back["provenance"] == "manifest"
+        pairs = {p["account"]: p for p in accounts.pairs_on(machine)}
+        assert pairs[A]["records"] == 3 and pairs[B]["records"] == 1, (
+            "each account got its own chats back, which is what provenance buys")
+
     def test_a_dry_run_copies_nothing_and_still_reports_what_it_would_cost(self, machine):
         accounts.share_all()
         shutil.rmtree(accounts.backups_dir())
