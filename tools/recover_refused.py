@@ -80,11 +80,16 @@ def cwd_of(transcript) -> str | None:
     return None
 
 
-def report(pair_dirs=None, transcripts=None) -> dict:
-    """Refused records, each with what became of it. Nothing is written."""
+def report(pair_dirs=None, transcripts=None, refused=None, paired=None) -> dict:
+    """Refused records, each with what became of it. Nothing is written.
+
+    EVERY DOOR INJECTABLE, so `--self-test` can drive it on a fixture tree: the log scan, the
+    pairing map, the pair directories and the transcripts root. Left alone they come from this
+    machine.
+    """
     from c4x import accounts, store
-    refused = applog.scan()
-    paired = applog.trace()
+    refused = applog.scan() if refused is None else refused
+    paired = applog.trace() if paired is None else paired
     if pair_dirs is None:
         pair_dirs = [p["path"] for r in store.sessions_roots() for p in accounts.pairs_on(r)]
     by_id, have = records_on_disk(pair_dirs)
@@ -122,8 +127,90 @@ def report(pair_dirs=None, transcripts=None) -> dict:
     return out
 
 
+def self_test() -> int:
+    """Drive `report` on a fixture tree, including the case that made it lie.
+
+    THE DEFECT THIS PINS. The first version asked the log for a pairing line before asking whether
+    a record exists, so every session whose refused write landed later, keeping its own id, was
+    reported as a loss: 63 of 73 on the machine this was written for, the chat that started the
+    investigation among them. A record present on disk is the first question now.
+    """
+    import tempfile
+    checks: list = []
+
+    def ok(name, got, want):
+        checks.append((name, got == want, got, want))
+
+    with tempfile.TemporaryDirectory() as box:
+        box = Path(box)
+        pair = box / "records" / "acct" / "org"
+        pair.mkdir(parents=True)
+        # A record whose own id was refused and landed later, keeping that id.
+        (pair / "local_landed.json").write_text(json.dumps({"cliSessionId": "s-landed"}),
+                                                encoding="utf-8")
+        # A record for a session whose refused id differs (a fork writes a new desktop id).
+        (pair / "local_other.json").write_text(json.dumps({"cliSessionId": "s-renamed"}),
+                                               encoding="utf-8")
+        projects = box / "projects"
+        (projects / "P--thing").mkdir(parents=True)
+        (projects / "P--thing" / "s-orphan.jsonl").write_text(
+            json.dumps({"type": "user", "cwd": r"P:\thing", "sessionId": "s-orphan"}) + "\n",
+            encoding="utf-8")
+        (projects / "P--thing" / "s-nocwd.jsonl").write_text(
+            json.dumps({"type": "summary", "summary": "no cwd here"}) + "\n", encoding="utf-8")
+        refused = {"count": 9, "records": 9, "other": 0, "pairs": {"acct\\org": 9}, "days": {},
+                   "sessions": ["local_landed", "local_renamed", "local_orphan", "local_gone",
+                                "local_unpaired", "local_nocwd"],
+                   "first": "2026-09-14 23:31:41", "last": "2026-10-10 12:32:40"}
+        paired = {"local_landed": "s-landed", "local_renamed": "s-renamed",
+                  "local_orphan": "s-orphan", "local_gone": "s-vanished",
+                  "local_nocwd": "s-nocwd"}
+        said = report(pair_dirs=[pair], transcripts=projects, refused=refused, paired=paired)
+
+        got = {i["record"] for i in said["recovered_already"]}
+        ok("a refused id whose record is on disk is not a loss", "local_landed" in got, True)
+        ok("a record naming the session under another id is not a loss either",
+           "local_renamed" in got, True)
+        ok("the session with a transcript and no record is offered for adoption",
+           {i["record"] for v in said["to_adopt"].values() for i in v}, {"local_orphan"})
+        ok("grouped by the folder its transcript records", list(said["to_adopt"]), [r"P:\thing"])
+        why = {i["record"]: i["why"] for i in said["unrecoverable"]}
+        ok("a pairing line with no transcript is named", why.get("local_gone"),
+           "no transcript on disk")
+        ok("a session the log never paired is named", why.get("local_unpaired"),
+           "no record on disk and no pairing line in the log")
+        ok("a transcript with no cwd is named rather than dropped",
+           (why.get("local_nocwd") or "").startswith("no cwd in"), True)
+        every = (len(said["recovered_already"]) + sum(len(v) for v in said["to_adopt"].values())
+                 + len(said["unrecoverable"]))
+        ok("every refused session is in exactly one group", every, len(refused["sessions"]))
+        ok("the refusal totals are carried through", (said["refused"], said["sessions"]),
+           (9, len(refused["sessions"])))
+        ok("the transcript lookup finds one by name",
+           Path(transcript_of("s-orphan", projects)).name, "s-orphan.jsonl")
+        ok("and answers None for one that is not there", transcript_of("s-missing", projects), None)
+        ok("the cwd comes from the first line that carries one",
+           cwd_of(projects / "P--thing" / "s-orphan.jsonl"), r"P:\thing")
+        ok("a transcript with no cwd answers None",
+           cwd_of(projects / "P--thing" / "s-nocwd.jsonl"), None)
+        by_id, by_session = records_on_disk([pair])
+        ok("records are indexed by their own id", sorted(by_id), ["local_landed", "local_other"])
+        ok("and by the session they name", sorted(by_session), ["s-landed", "s-renamed"])
+        ok("a directory with no records is empty rather than an error",
+           records_on_disk([box / "nowhere"]), ({}, {}))
+
+    bad = [c for c in checks if not c[1]]
+    for name, passed, got, want in checks:
+        if not passed:
+            print(f"  FAIL {name}: got {got!r}, wanted {want!r}")
+    print(f"SELF-TEST {'FAIL' if bad else 'PASS'} ({len(checks)} checks)")
+    return 1 if bad else 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "--self-test" in argv:
+        return self_test()
     said = report()
     if "--json" in argv:
         print(json.dumps(said, indent=1))
