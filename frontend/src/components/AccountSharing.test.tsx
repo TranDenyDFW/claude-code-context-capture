@@ -1,7 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
-import { AccountSharing, COVER_HOVER, COVER_NOTE, QUIT_NOTE, RESTART_NOTE } from './AccountSharing'
+import {
+  AccountSharing, COVER_HOVER, COVER_NOTE, QUIT_NOTE, REFUSED_HOVER, RESTART_NOTE,
+} from './AccountSharing'
 import { api, ApiError } from '@/api'
 import type { AccountPair, AccountsState } from '@/api'
 
@@ -410,5 +412,72 @@ describe('one number for the signed-in account', () => {
     expect(current.getAttribute('title')).toContain("Only the signed-in account's own chats: 12\n")
     expect(screen.getByRole('button', { name: 'All' }).getAttribute('title')).toContain(
       "Every account's chats: 187 across 2 account directories")
+  })
+})
+
+describe('writes the app refused through the links', () => {
+  /**
+   * The failure that founded this row: the app lists records through a linked account directory
+   * and refuses to save through one, so an archive is taken on screen and dropped. It appears
+   * only in the app's own log, which the server reads; the row is the first place a reader can
+   * see it. It shows whatever the mode says, because the links can still be on the disk while the
+   * marker reads Current, and that is exactly the state that keeps losing writes.
+   */
+  const refused = {
+    count: 2843,
+    pairs: { 'ba7ccf25\\2108d9a2': 2521, 'ba7ccf25\\5f6eb959': 322 },
+    last: '2026-10-10 12:47:50',
+    file: 'C:\\Users\\Shake\\AppData\\Local\\Claude\\Logs\\main.log',
+    said: '2843 refused record write(s) for 73 session(s)',
+  }
+
+  it('says nothing when the log holds none', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ intended: 'all', mode: 'all' }))
+    draw()
+    await screen.findByRole('button', { name: 'All' })
+    expect(screen.queryByText(/refused/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Separate them' })).toBeNull()
+  })
+
+  it('names the count, carries the log line on hover, and offers the remedy', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', mode: 'all', linked: 8, refused_writes: refused }))
+    draw()
+    const line = await screen.findByText(/refused 2843 writes through these links/)
+    const row = line.closest('p') as HTMLElement
+    expect(row.getAttribute('data-refused')).toBe('2843')
+    expect(row.getAttribute('title')).toContain(REFUSED_HOVER)
+    expect(row.getAttribute('title')).toContain('73 session(s)')
+    expect(row.getAttribute('title')).toContain('Logs\\main.log')
+    expect((screen.getByRole('button', { name: 'Separate them' }) as HTMLButtonElement).disabled)
+      .toBe(false)
+  })
+
+  it('shows it even while the marker reads Current, since the links are what lose the writes',
+    async () => {
+      vi.spyOn(api.accounts, 'state').mockResolvedValue(
+        state({ intended: 'current', mode: 'mixed', linked: 1, refused_writes: refused }))
+      draw()
+      expect((await screen.findByText(/refused 2843 writes/)).textContent).toContain(
+        'every change made under a linked account is lost')
+    })
+
+  it('the remedy asks first, and the question is the un-linking one', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', mode: 'all', refused_writes: refused }))
+    draw()
+    fireEvent.click(await screen.findByRole('button', { name: 'Separate them' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog.textContent).toContain('un-links the account directories')
+    expect(dialog.textContent).toContain('takes chats away from every other account')
+  })
+
+  it('cannot be acted on by a server started without writes', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(
+      state({ intended: 'all', mode: 'all', refused_writes: refused }))
+    draw({ writesEnabled: false })
+    const button = await screen.findByRole('button', { name: 'Separate them' })
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+    expect(button.getAttribute('title')).toBe('This server was started without writes')
   })
 })

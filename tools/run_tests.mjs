@@ -229,6 +229,11 @@ const PY = [
   // Had a self-test since it was written; the runner simply never called it.
   ['tools/pty-control-arm.py', ['--self-test'], 'the status-line control arm, parsing only',
    'SELF-TEST PASS', { noStore: true }],
+  // What the app's refused record writes cost: which chats lost their record and what to adopt.
+  // The self-test drives it on a fixture tree, and pins the case that made the first version lie
+  // (a refused id whose record landed later was reported as a loss, 63 of 73 on one machine).
+  ['tools/recover_refused.py', ['--self-test'], 'which chats a refused write cost, and what to '
+   + 'adopt', 'SELF-TEST PASS', { noStore: true }],
   // Does constraints-ci.txt still pin everything the requirements files name? Offline, so it
   // runs anywhere. It exists because mypy sat unpinned in that file from the commit that
   // created it through the commit that made the mypy step blocking, and the file's own

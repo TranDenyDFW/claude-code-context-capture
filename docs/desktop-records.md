@@ -274,10 +274,48 @@ while `stat` reports a directory, so the arrangement rests on the app resolving 
 than filtering directory entries by type. On the test laptop it resolved it: 17 records listed
 under an account that owned one of them, and three records rewritten through the link.
 
-**Three costs, none of them hidden.** One directory holds one `scheduled-tasks.json` and one
+**And then the app stopped writing through them.** Measured on the author's machine on 2026-10-10,
+desktop build 2.26454.0.0: a record LOADS through a junction and will not SAVE through one. Every
+write into a linked pair fails before it starts, in `ensureStorageDir`:
+
+```
+Failed to save session local_<uuid>: Refusing non-directory at private dir path
+(symlink/file plant): <records root>\<account>\<org> { name: 'PlantDetectedError', ... }
+```
+
+2,843 of those lines sit in `%LOCALAPPDATA%\Claude\Logs\main.log` (the log moved there from the
+app data directory on 2026-08-20), from 2026-09-14 23:31 to 2026-10-10 12:32, naming the three
+linked pairs an account had signed into and never the real one. 2,837 are chat records, for 73
+distinct sessions, and 6 are the app's own `scheduled-tasks.json`, which names no session and
+which the earliest refusal of all happens to be. Of those 73 sessions, 63 have a record today
+because the write landed later under the real directory, 9 have a transcript and no record at all,
+so the app does not list them, and 1 has neither (`tools/recover_refused.py` reports this and names
+every session it cannot place).
+
+The failure is invisible from the interface: the chat list IS the directory listing, so everything
+appears, and an archive, a rename or a new chat under a linked account is taken on screen and
+dropped. It surfaced as one chat archived twice in an afternoon, once per account, because the
+first archive never reached disk. `verify()` could not see it either: it checks link targets and
+record listings, which are reads. `c4x/applog.py` reads the refusals out of the app's own log,
+`verify()` and the header's Account row report them, and `share_all()` and the watchdog's
+`reconcile()` both refuse to create a link while any are there.
+
+**Four costs, none of them hidden.** One directory holds one `scheduled-tasks.json` and one
 `archived-sessions.idx`, so the copies belonging to the pairs that become links are moved into the
-backup rather than merged. Either account can rewrite or delete the other's chats. And the app
-must be closed while the directories move, then started again.
+backup rather than merged. Either account can rewrite or delete the other's chats. The app must be
+closed while the directories move, then started again. And on a build that refuses a write through
+a reparse point, every account except the one holding the real directory loses every write it
+makes, silently, which is fatal to the feature rather than a cost to weigh.
+
+**Undoing it needs no backup any more.** `share_current` restored each file to the pair the newest
+backup manifest filed it under, and raised when there was no manifest, which a reset of `data/`
+is enough to cause while the junctions stay where they are. On a build that refuses writes that
+left the only working remedy unreachable, so with no manifest every link now becomes a real
+directory seeded with a copy of the shared list (`_split_pair`): the accounts diverge from that
+moment, each keeping the list it could see. A failure part way puts back every link it had already
+undone, since a half split machine is the one state nothing afterwards can sort out. The undo
+records the mode as `current` rather than deleting the marker, so a link a failure leaves behind
+reads as a problem instead of as the intent to share.
 
 **It can be undone from the outside.** `claude-code-sessions` is named in the app's own migration
 list, and this machine already holds two records roots because that migration has run. A migration

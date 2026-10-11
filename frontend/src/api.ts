@@ -572,6 +572,22 @@ export interface AccountsState {
    * which it does when Claude next closes, or on `reconcile` now.
    */
   uncovered: AccountPair[]
+  /**
+   * Record writes the desktop app REFUSED because the directory was a link, read out of its own
+   * log (newest file's tail here; `/api/accounts/verify` reads them all). Absent or empty is the
+   * normal answer. Anything here means every account except the one holding the real directory is
+   * losing every archive, rename and new chat it makes, with nothing said on screen, so sharing
+   * cannot be used on that build: measured 2026-10-10 on 2.26454.0.0, `PlantDetectedError` out of
+   * the app's `ensureStorageDir`.
+   */
+  refused_writes?: {
+    count: number
+    /** `<account>\<org>` to the number of refusals for it. */
+    pairs: Record<string, number>
+    last?: string | null
+    file?: string | null
+    said: string
+  } | null
 }
 
 /** What `/api/accounts/sharing` answers. `restart_required` is always true on a change. */

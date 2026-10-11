@@ -12,6 +12,7 @@ every test runs on every leg.
 """
 import json
 import os
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -22,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from c4x import accounts  # noqa: E402
+from c4x import accounts, applog  # noqa: E402
 
 A, B = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
 ORG_A, ORG_B = "11111111-3333-4333-8333-111111111111", "22222222-4444-4444-8444-222222222222"
@@ -55,6 +56,10 @@ def machine(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "data" / "context.db")
     (tmp_path / "data").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(accounts, "app_running", lambda: False)
+    # NO LOG, SO NO REFUSALS. `share_all`, `reconcile` and `state` now ask the desktop app's log
+    # whether it has refused a write through a link, and the developer's own machine has thousands
+    # of those in it: a fixture that read them would refuse to share and prove nothing.
+    monkeypatch.setattr(applog, "log_files", lambda *args, **kw: [])
     return root
 
 
@@ -89,9 +94,16 @@ class TestTheGuards:
             accounts.share_current()
         assert accounts.state()["mode"] == accounts.CURRENT, "and nothing moved"
 
-    def test_it_refuses_to_restore_with_no_backup(self, machine):
-        with pytest.raises(RuntimeError, match="no backup"):
+    def test_it_refuses_when_every_pair_is_a_link_and_there_is_nothing_to_copy_from(
+            self, machine, monkeypatch):
+        """With no manifest the undo copies from the shared directory, so it needs one to exist."""
+        accounts.share_all()
+        monkeypatch.setattr(accounts, "canonical_pair", lambda pairs: None)
+        shutil.rmtree(accounts.backups_dir())
+        with pytest.raises(RuntimeError, match="no directory to copy from"):
             accounts.share_current()
+        assert all(p["link_to"] for p in accounts.pairs_on(machine) if p["account"] == B), (
+            "and nothing was changed")
 
     def test_every_platform_can_point_one_directory_at_another(self):
         """A junction on Windows, a directory symlink elsewhere, and the module says so.
@@ -179,6 +191,163 @@ class TestSharingAndPuttingItBack:
         answer = accounts.verify()
         assert not answer["ok"]
         assert any("migration" in p for p in answer["problems"]), answer["problems"]
+
+
+C = "cccccccc-5555-4555-8555-cccccccccccc"
+ORG_C = "33333333-6666-4666-8666-333333333333"
+
+
+class TestTheUndoWithNoBackup:
+    """A reset of `data/` takes the manifest with it and leaves the junctions where they are.
+
+    That used to be a dead end: `share_current` raised "no backup to restore the layout from" and
+    changed nothing, so on a build that refuses a write through a link the only working remedy was
+    unreachable. Each link becomes a real directory seeded with a copy of the shared list instead,
+    and the accounts diverge from there, which is what separate accounts mean.
+    """
+
+    def test_every_link_becomes_a_real_directory_holding_the_shared_records(self, machine):
+        accounts.share_all()
+        shutil.rmtree(accounts.backups_dir())
+        report = accounts.share_current()
+        pairs = {p["account"]: p for p in accounts.pairs_on(machine)}
+        assert all(p["link_to"] is None for p in pairs.values()), "no link survives"
+        assert pairs[A]["records"] == 4 and pairs[B]["records"] == 4, (
+            "each account keeps the list it could see while shared")
+        assert [s["pair"] for s in report["seeded"]] == [f"{B[:8]}\\{ORG_B[:8]}"]
+        one = report["seeded"][0]
+        assert one["copied"] == one["files"] and one["bytes"] > 0
+
+    def test_the_archived_index_travels_and_the_schedule_does_not(self, machine):
+        """The index names which records are archived, so a copy of the records needs it or every
+        archived chat comes back; a schedule is one account's own and a copy of it runs twice."""
+        (machine / A / ORG_A / accounts.ARCHIVED_IDX).write_text(
+            '{"v":1,"archived":["local_a0"]}', encoding="utf-8")
+        (machine / A / ORG_A / "deleted_a9").write_text("1760000000000", encoding="utf-8")
+        accounts.share_all()
+        shutil.rmtree(accounts.backups_dir())
+        accounts.share_current()
+        here = machine / B / ORG_B
+        assert (here / accounts.ARCHIVED_IDX).is_file(), "the archived set travelled"
+        assert "local_a0" in (here / accounts.ARCHIVED_IDX).read_text(encoding="utf-8")
+        assert (here / "deleted_a9").is_file(), (
+            "the delete markers travelled: they are how the app knows a chat was deleted on "
+            "purpose rather than lost")
+        assert not (here / "scheduled-tasks.json").exists(), (
+            "B's own schedule was set aside by the share and must not be replaced by A's")
+
+    def test_a_dry_run_copies_nothing_and_still_reports_what_it_would_cost(self, machine):
+        accounts.share_all()
+        shutil.rmtree(accounts.backups_dir())
+        report = accounts.share_current(dry_run=True)
+        assert report["seeded"][0]["bytes"] > 0 and report["seeded"][0]["copied"] == 0
+        assert any(p["link_to"] for p in accounts.pairs_on(machine)), "the link is still a link"
+
+    def test_the_mode_is_recorded_as_current_rather_than_the_marker_deleted(self, machine):
+        """A deleted marker lets `intent()` read the disk, where one stray link means ALL again."""
+        accounts.share_all()
+        shutil.rmtree(accounts.backups_dir())
+        accounts.share_current()
+        assert accounts.marker_path().is_file()
+        assert accounts.intent() == {"mode": accounts.CURRENT, "source": "marker"}
+        assert accounts.reconcile()["why"] == "sharing is off; nothing to cover"
+
+    def test_a_copy_that_fails_puts_that_link_back(self, machine, monkeypatch):
+        accounts.share_all()
+        shutil.rmtree(accounts.backups_dir())
+        real, seen = shutil.copy2, {"n": 0}
+
+        def flaky(src, dst, *args, **kw):
+            seen["n"] += 1
+            if seen["n"] == 2:
+                raise OSError("no space left on device")
+            return real(src, dst, *args, **kw)
+
+        monkeypatch.setattr(shutil, "copy2", flaky)
+        with pytest.raises(RuntimeError, match="could not seed"):
+            accounts.share_current()
+        pairs = {p["account"]: p for p in accounts.pairs_on(machine)}
+        assert pairs[B]["link_to"], "the link was put back"
+        assert pairs[B]["records"] == 4, "and it reads the shared list again"
+
+    def test_a_later_failure_puts_back_the_pairs_already_split(self, machine, monkeypatch):
+        """Half split is the one outcome worse than linked: nothing afterwards can tell which
+        account a record belongs to, so a failure undoes the pairs that already succeeded."""
+        record(machine / C / ORG_C, "c0")
+        accounts.share_all()
+        shutil.rmtree(accounts.backups_dir())
+        first = len(list((machine / A / ORG_A).iterdir()))
+        real, seen = shutil.copy2, {"n": 0}
+
+        def flaky(src, dst, *args, **kw):
+            seen["n"] += 1
+            if seen["n"] == first + 1:       # the first file of the SECOND pair
+                raise OSError("no space left on device")
+            return real(src, dst, *args, **kw)
+
+        monkeypatch.setattr(shutil, "copy2", flaky)
+        with pytest.raises(RuntimeError, match="already split were put back"):
+            accounts.share_current()
+        pairs = {p["account"]: p for p in accounts.pairs_on(machine)}
+        assert pairs[B]["link_to"] and pairs[C]["link_to"], "both links are back"
+        assert pairs[A]["link_to"] is None, "and the shared directory is untouched"
+
+
+class TestWhenTheAppRefusesWrites:
+    """Build 2.26454.0.0 loads records through a junction and refuses to save through one, logging
+    `PlantDetectedError` and nothing else. That makes sharing fatal rather than costly, so every
+    path that would create a link stops, including the watchdog's own.
+    """
+
+    @pytest.fixture
+    def refusing(self, machine, tmp_path, monkeypatch):
+        log = tmp_path / "logs" / "main.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            "2026-10-10 03:26:34 [error] Failed to save session local_aa4b01d4-0000-4000-8000-"
+            "000000000000: Refusing non-directory at private dir path (symlink/file plant): "
+            f"{machine / B / ORG_B} {{ name: 'PlantDetectedError', code: undefined }}",
+            encoding="utf-8")
+        monkeypatch.setattr(applog, "log_files", lambda *args, **kw: [log])
+        return log
+
+    def test_sharing_refuses_and_changes_nothing(self, machine, refusing):
+        with pytest.raises(RuntimeError, match="refuses to write"):
+            accounts.share_all()
+        assert all(p["link_to"] is None for p in accounts.pairs_on(machine))
+
+    def test_force_is_the_only_way_past_it(self, machine, refusing):
+        """For after someone has measured that a write through a junction lands again."""
+        accounts.share_all(force=True)
+        assert any(p["link_to"] for p in accounts.pairs_on(machine))
+
+    def test_the_watchdog_reconcile_stops_instead_of_linking_a_new_pair(self, machine, refusing):
+        accounts.share_all(force=True)
+        later = "99999999-7777-4777-8777-999999999999"
+        record(machine / B / later, "b9")
+        report = accounts.reconcile()
+        assert report["ran"] is False
+        assert "refuses to write" in report["why"], report["why"]
+        new = [p for p in accounts.pairs_on(machine) if p["org"] == later]
+        assert new and new[0]["link_to"] is None, "the new pair was left alone"
+
+    def test_verify_says_so_and_counts_it(self, machine, refusing):
+        answer = accounts.verify()
+        assert not answer["ok"]
+        assert answer["refused_writes"]["count"] == 1
+        assert answer["refused_writes"]["sessions"] == 1
+        assert any("refuses to write" in p for p in answer["problems"]), answer["problems"]
+
+    def test_the_page_carries_it_from_the_newest_log_alone(self, machine, refusing):
+        said = accounts.state()["refused_writes"]
+        assert said["count"] == 1
+        assert B[:8] in said["said"] and said["file"] == str(refusing)
+
+    def test_a_clean_log_leaves_every_path_open(self, machine):
+        assert accounts.state()["refused_writes"] == {}
+        assert accounts.verify()["refused_writes"] == {}
+        accounts.share_all()
+        assert any(p["link_to"] for p in accounts.pairs_on(machine))
 
 
 class TestAppRunning:
