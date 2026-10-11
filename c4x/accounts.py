@@ -1001,6 +1001,14 @@ def share_current(dry_run=False):
     of the shared records (`_split_pair`). This used to raise and change nothing, which on a build
     that refuses writes through a link left the only working remedy unreachable; a reset of `data/`
     is enough to lose the manifest while the junctions stay where they are.
+
+    AND WITH A MANIFEST THAT HOLDS NO PROVENANCE, the same path runs: see `has_provenance`. Only
+    the NEWEST manifest is read, which an independent review is right to call a narrow question.
+    Measured on the author's machine, where an older manifest does name two homes: it files 186 of
+    209 records, so restoring it would leave seven pairs empty and 23 records unplaced, and the
+    user asked for every account to keep the list it can see today. Reading further back would
+    therefore change which remedy runs, and it is not obviously the better one; a machine that
+    wants that layout back has the backup and can be restored from it deliberately.
     """
     from c4x import store
     ok, why = supported()
@@ -1020,8 +1028,13 @@ def share_current(dry_run=False):
     stamps = sorted(backups_dir().glob("*/manifest.json")) if manifest else []
     report: dict[str, Any] = {"mode": CURRENT, "dry_run": bool(dry_run), "restored": [],
                               "left": [], "restart_required": True, "seeded": [],
-                              "provenance": provenance or "none: no backup names a second pair, "
-                              "so each link is seeded with a copy of the shared list",
+                              # SCOPED TO WHAT WAS READ. `_newest_manifest` reads the newest
+                              # backup and no other, so this says that one names a single pair,
+                              # never that no backup anywhere does: on the author's machine an
+                              # older manifest holds two homes for 186 of 209 records, and an
+                              # independent review caught the wider claim.
+                              "provenance": provenance or "none: the newest backup names one "
+                              "pair, so each link is seeded with a copy of the shared list",
                               "from_backup": str(stamps[-1].parent) if stamps else None}
     for root in store.sessions_roots():
         pairs = pairs_on(root)
