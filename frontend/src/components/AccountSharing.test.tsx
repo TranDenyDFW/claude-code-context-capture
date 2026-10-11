@@ -425,9 +425,9 @@ describe('writes the app refused through the links', () => {
    */
   const refused = {
     count: 2843,
-    pairs: { 'ba7ccf25\2108d9a2': 2521, 'ba7ccf25\5f6eb959': 322 },
+    pairs: { 'ba7ccf25\\2108d9a2': 2521, 'ba7ccf25\\5f6eb959': 322 },
     last: '2026-10-10 12:47:50',
-    file: 'C:\Users\Shake\AppData\Local\Claude\Logs\main.log',
+    file: 'C:\\Users\\Shake\\AppData\\Local\\Claude\\Logs\\main.log',
     said: '2843 refused record write(s) for 73 session(s)',
   }
 
@@ -448,7 +448,7 @@ describe('writes the app refused through the links', () => {
     expect(row.getAttribute('data-refused')).toBe('2843')
     expect(row.getAttribute('title')).toContain(REFUSED_HOVER)
     expect(row.getAttribute('title')).toContain('73 session(s)')
-    expect(row.getAttribute('title')).toContain('Logs\main.log')
+    expect(row.getAttribute('title')).toContain('Logs\\main.log')
     expect((screen.getByRole('button', { name: 'Separate them' }) as HTMLButtonElement).disabled)
       .toBe(false)
   })
