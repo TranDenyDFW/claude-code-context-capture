@@ -151,6 +151,11 @@ def self_test() -> int:
         # A record for a session whose refused id differs (a fork writes a new desktop id).
         (pair / "local_other.json").write_text(json.dumps({"cliSessionId": "s-renamed"}),
                                                encoding="utf-8")
+        # THE CASE THAT MADE THE FIRST VERSION LIE, and the one the fixture first lacked: a record
+        # on disk whose id the log never paired with a session, because the log that held the
+        # pairing has since rotated away. It is in the app's list; only its own id can find it.
+        (pair / "local_nopair.json").write_text(json.dumps({"cliSessionId": "s-unseen",
+                                                            "title": "n8n"}), encoding="utf-8")
         projects = box / "projects"
         (projects / "P--thing").mkdir(parents=True)
         (projects / "P--thing" / "s-orphan.jsonl").write_text(
@@ -160,7 +165,7 @@ def self_test() -> int:
             json.dumps({"type": "summary", "summary": "no cwd here"}) + "\n", encoding="utf-8")
         refused = {"count": 9, "records": 9, "other": 0, "pairs": {"acct\\org": 9}, "days": {},
                    "sessions": ["local_landed", "local_renamed", "local_orphan", "local_gone",
-                                "local_unpaired", "local_nocwd"],
+                                "local_unpaired", "local_nocwd", "local_nopair"],
                    "first": "2026-09-14 23:31:41", "last": "2026-10-10 12:32:40"}
         paired = {"local_landed": "s-landed", "local_renamed": "s-renamed",
                   "local_orphan": "s-orphan", "local_gone": "s-vanished",
@@ -171,6 +176,10 @@ def self_test() -> int:
         ok("a refused id whose record is on disk is not a loss", "local_landed" in got, True)
         ok("a record naming the session under another id is not a loss either",
            "local_renamed" in got, True)
+        ok("a record the log never paired is found by its OWN id, not called a loss",
+           "local_nopair" in got, True)
+        ok("and it is not in the unrecoverable list",
+           "local_nopair" in {i["record"] for i in said["unrecoverable"]}, False)
         ok("the session with a transcript and no record is offered for adoption",
            {i["record"] for v in said["to_adopt"].values() for i in v}, {"local_orphan"})
         ok("grouped by the folder its transcript records", list(said["to_adopt"]), [r"P:\thing"])
@@ -194,8 +203,10 @@ def self_test() -> int:
         ok("a transcript with no cwd answers None",
            cwd_of(projects / "P--thing" / "s-nocwd.jsonl"), None)
         by_id, by_session = records_on_disk([pair])
-        ok("records are indexed by their own id", sorted(by_id), ["local_landed", "local_other"])
-        ok("and by the session they name", sorted(by_session), ["s-landed", "s-renamed"])
+        ok("records are indexed by their own id", sorted(by_id),
+           ["local_landed", "local_nopair", "local_other"])
+        ok("and by the session they name", sorted(by_session),
+           ["s-landed", "s-renamed", "s-unseen"])
         ok("a directory with no records is empty rather than an error",
            records_on_disk([box / "nowhere"]), ({}, {}))
 
