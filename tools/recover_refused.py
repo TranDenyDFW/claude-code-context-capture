@@ -45,10 +45,16 @@ def records_on_disk(pair_dirs) -> tuple:
     for d in pair_dirs:
         for marker in sorted(Path(d).glob("deleted_*")):
             # DELETED ON PURPOSE, NOT LOST. The app leaves `deleted_<uuid>` when a chat is deleted
-            # in the interface, and the uuid is the record's. Measured on this machine: two of the
-            # refused sessions were app scratch workspaces the user had deleted, and the first
-            # version of this tool offered both for adoption, which would have resurrected them.
-            # `c4x.adopt` refuses them for the same reason, so it never offered those folders.
+            # in the interface, and the uuid is the record's. Measured on this machine: three of
+            # the refused sessions had been deleted, two of them app scratch workspaces, and the
+            # first version of this tool offered them for adoption, which would have resurrected
+            # them.
+            #
+            # THIS READ IS THE PROTECTION, not `c4x.adopt`'s. Adopt asks the STORE which chats were
+            # deleted in the app (`store.deleted_in_app`), and an independent review measured that
+            # live as EMPTY: 193 rows with 0 `deleted_at` against 40 markers on disk, because
+            # harvest last ran before those markers were written. So adopt happened to agree today
+            # for a different reason, and a reader of this tool should not count on it.
             by_id.setdefault("local_" + marker.name[len("deleted_"):], "deleted:" + str(marker))
         for path in sorted(Path(d).glob("local_*.json")):
             by_id.setdefault(path.stem, str(path))
