@@ -101,6 +101,10 @@ def report(pair_dirs=None, transcripts=None, refused=None, paired=None) -> dict:
         pair_dirs = [p["path"] for r in store.sessions_roots() for p in accounts.pairs_on(r)]
     by_id, have = records_on_disk(pair_dirs)
     out: dict = {"refused": refused["count"], "sessions": len(refused["sessions"]),
+                 # CARRIED, so the printed summary is the detector's own sentence rather than one
+                 # rebuilt from a thinner dict: the first version dropped these two and printed
+                 # "0 of them chat record(s)" over 2,837 of them.
+                 "records": refused.get("records", 0), "other": refused.get("other", 0),
                  "pairs": refused["pairs"], "first": refused["first"], "last": refused["last"],
                  "recovered_already": [], "to_adopt": {}, "deleted_on_purpose": [],
                  "unrecoverable": []}
@@ -211,8 +215,9 @@ def self_test() -> int:
         every = (len(said["recovered_already"]) + sum(len(v) for v in said["to_adopt"].values())
                  + len(said["deleted_on_purpose"]) + len(said["unrecoverable"]))
         ok("every refused session is in exactly one group", every, len(refused["sessions"]))
-        ok("the refusal totals are carried through", (said["refused"], said["sessions"]),
-           (9, len(refused["sessions"])))
+        ok("the refusal totals are carried through, the kinds among them",
+           (said["refused"], said["sessions"], said["records"], said["other"]),
+           (9, len(refused["sessions"]), 9, 0))
         ok("the transcript lookup finds one by name",
            Path(transcript_of("s-orphan", projects)).name, "s-orphan.jsonl")
         ok("and answers None for one that is not there", transcript_of("s-missing", projects), None)
@@ -247,6 +252,7 @@ def main(argv=None):
         print(json.dumps(said, indent=1))
         return 0
     print(applog.sentence({"count": said["refused"], "pairs": said["pairs"],
+                           "records": said["records"], "other": said["other"],
                            "sessions": [None] * said["sessions"],
                            "first": said["first"], "last": said["last"]}))
     print(f"  {len(said['recovered_already'])} of those sessions has a record now "
