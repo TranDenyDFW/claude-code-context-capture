@@ -221,8 +221,10 @@ def self_test() -> int:
         ok("a transcript with no cwd answers None",
            cwd_of(projects / "P--thing" / "s-nocwd.jsonl"), None)
         by_id, by_session = records_on_disk([pair])
-        ok("records are indexed by their own id", sorted(by_id),
-           ["local_landed", "local_nopair", "local_other"])
+        ok("records are indexed by their own id, and a delete marker counts as one",
+           sorted(by_id), ["local_gonebyhand", "local_landed", "local_nopair", "local_other"])
+        ok("the marker is told apart from a record by what it points at",
+           by_id["local_gonebyhand"].startswith("deleted:"), True)
         ok("and by the session they name", sorted(by_session),
            ["s-landed", "s-renamed", "s-unseen"])
         ok("a directory with no records is empty rather than an error",
