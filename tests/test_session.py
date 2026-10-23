@@ -111,12 +111,37 @@ def test_an_empty_range_reports_nothing_rather_than_a_zero(app, session_id, turn
     assert "Move the two handles apart" in panel or "no" in panel.lower()
 
 
-def test_the_delta_carries_its_sign(app, session_id, turns):
+@pytest.fixture(scope="module")
+def falling(app, q, session_id):
+    """A chat whose resident curve ends BELOW its peak, which is what a negative delta needs.
+
+    ITS OWN SUBJECT, not the shared `session_id`. That fixture answers a different question: the
+    chat the pickers list, so the comparison pane can name it. Measured on a real store, those two
+    needs do not meet: 13 chats were listed, none of them ended below its peak, and every
+    compacted session was a review run the pickers leave out. Asking one id to satisfy both made
+    this test fail on "could not be exercised" while the panel it checks was fine.
+    """
+    seen = [session_id] if session_id else []
+    df = q("""SELECT session_id, COUNT(*) AS n FROM turns
+               GROUP BY session_id ORDER BY n DESC, session_id LIMIT 200""")
+    for sid in dict.fromkeys(seen + list(df["session_id"])):
+        frame = app.session_turns(sid)
+        if frame.empty or "total_resident" not in frame:
+            continue
+        col = frame["total_resident"].astype(float)
+        if len(col) and col.iloc[-1] < col.max():
+            return sid, frame
+    pytest.fail("no session in this store ends below its peak, so a negative delta could not be "
+                "exercised, which is a failure rather than a pass")
+
+
+def test_the_delta_carries_its_sign(app, falling):
     """A falling range must show a negative, not an unsigned magnitude.
 
     The range is chosen from the peak to the end, so a fall is guaranteed by the high-water mark
     rather than by a fixed pair of turns that might happen to rise.
     """
+    session_id, turns = falling
     peak_at = int(turns["total_resident"].astype(float).idxmax()) + 1
     lo, hi = peak_at, len(turns)
     if lo >= hi:

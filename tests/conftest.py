@@ -211,29 +211,84 @@ def has_store(q):
     return True
 
 
+def _falls(frame) -> bool:
+    """Does this chat's resident curve end below its high-water mark?
+
+    THE SAME FRAME THE TEST READS. `store.session_turns` follows the chat's chain and drops
+    sidechain turns, so a SQL predicate over raw `turns` rows answers a different question: the
+    first version of this chose a session SQL called falling and the panel test still found a
+    range that rises.
+    """
+    if frame is None or frame.empty or "total_resident" not in frame:
+        return False
+    col = frame["total_resident"].astype(float)
+    return bool(len(col)) and col.iloc[-1] < col.max()
+
+
+def _listed(q, store, rows, sql, exclude=None, limit=40):
+    """The ids this query offers, in its order, that the PICKERS list.
+
+    A CHAT, NOT ANY SESSION. `_session_rows_uncached` drops review runs and chats the desktop app
+    deleted, and `store.session_name` answers "" for anything outside that frame, so a test that
+    compares two sessions by name needs ids the frame holds. Against the fixture every session
+    qualifies and this changes nothing; against a real store the busiest session can easily be a
+    review run, which is the difference between testing the compare pane and testing an empty
+    string. With no frame at all the plain busiest row is still offered, since there is nothing to
+    be listed in.
+    """
+    df = q(sql)
+    if df.empty:
+        return []
+    known = set(rows["session_id"]) if rows is not None and not rows.empty else set()
+    out = []
+    for sid in df["session_id"]:
+        if sid == exclude:
+            continue
+        if known and store.chat_head(sid) not in known:
+            continue
+        out.append(sid)
+        if len(out) >= limit:
+            break
+    if not out and not known:
+        out = [s for s in df["session_id"] if s != exclude][:1]
+    return out
+
+
+_COMPACTED = """SELECT session_id, COUNT(*) AS n FROM compactions
+                 GROUP BY session_id ORDER BY n DESC, session_id"""
+_BUSIEST = """SELECT session_id, COUNT(*) AS n FROM turns
+               GROUP BY session_id ORDER BY n DESC, session_id"""
+
+
 @pytest.fixture(scope="session")
-def session_id(q, has_store):
+def session_id(q, has_store, store, rows):
     """One session, chosen by a rule rather than hardcoded.
 
     The most-compacted session, because it exercises the parts a quiet session cannot: compaction
     rows, several model segments, and a resident curve that falls as well as rises. A hardcoded id
-    would rot the moment the store changed.
+    would rot the moment the store changed; one the pickers do not list cannot be named; and one
+    whose curve never falls cannot exercise a negative delta, so all three are asked for here
+    rather than assumed, in that order of preference.
     """
-    df = q("""SELECT session_id, COUNT(*) AS n FROM compactions
-               GROUP BY session_id ORDER BY n DESC, session_id LIMIT 1""")
-    if not df.empty:
-        return df.iloc[0]["session_id"]
-    df = q("""SELECT session_id, COUNT(*) AS n FROM turns
-               GROUP BY session_id ORDER BY n DESC, session_id LIMIT 1""")
-    return df.iloc[0]["session_id"]
+    compacted = _listed(q, store, rows, _COMPACTED)
+    for sid in compacted:
+        if _falls(store.session_turns(sid)):
+            return sid
+    busiest = _listed(q, store, rows, _BUSIEST)
+    for sid in busiest:
+        if _falls(store.session_turns(sid)):
+            return sid
+    if compacted:
+        return compacted[0]
+    return busiest[0] if busiest else None
 
 
 @pytest.fixture(scope="session")
-def other_session_id(q, session_id):
-    """A second session, for the Compare tab. Never the same one as `session_id`."""
-    df = q("""SELECT session_id, COUNT(*) AS n FROM turns WHERE session_id <> ?
-               GROUP BY session_id ORDER BY n DESC, session_id LIMIT 1""", (session_id,))
-    return None if df.empty else df.iloc[0]["session_id"]
+def other_session_id(q, store, rows, session_id):
+    """A second session, for the Compare tab. Never the same one as `session_id`, and one the
+    pickers list, for the reason `_listed` gives."""
+    found = _listed(q, store, rows, _BUSIEST, exclude=session_id)
+    return found[0] if found else None
 
 
 @pytest.fixture(scope="session")

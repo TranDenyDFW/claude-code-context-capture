@@ -8,6 +8,8 @@ the moment someone reimplements a query in the API "for speed", the parity check
 `extract.describe` is used to read BOTH sides, so a difference reported here is a difference in the
 data, not in how two test helpers happened to walk it.
 """
+import re
+
 import pytest
 
 from c4x.cli import extract
@@ -953,10 +955,13 @@ def test_a_project_option_is_its_leaf_folder_and_carries_its_path(client):
         path = o["value"].split("::", 1)[1]
         assert o["path"] == path
         assert not o["label"].startswith("Project: ") and not o["label"].startswith(".../")
-        assert o["label"].endswith(" listed)"), o["label"]
+        # "(3 listed)", or "(3 listed, 2 runs)" where the project carries runs: `store.py` writes
+        # that suffix on purpose and `tests/test_store_runs.py` pins it. The fixture has no runs,
+        # so only a real store told this assertion apart from the shape it meant to describe.
+        assert re.search(r"\(\d[\d,]* listed(, \d[\d,]* runs)?\)$", o["label"]), o["label"]
         # A folder holding SEVERAL chats is named by its folder (a folder holding one is named by
         # its chat, which the next test pins).
-        if not is_folderless(path) and not o["label"].endswith("(1 listed)"):
+        if not is_folderless(path) and not re.search(r"\(1 listed(,|\))", o["label"]):
             leaf = short_path(path, 1, mark="")
             assert leaf in o["label"], (o["label"], leaf)
     assert client.get("/api/cohorts").json() == options

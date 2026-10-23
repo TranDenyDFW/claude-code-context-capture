@@ -22,10 +22,22 @@ def metrics_of(payload):
 
 
 @pytest.fixture(scope="module")
-def two_sessions(session_id, other_session_id):
+def two_sessions(session_id, other_session_id, q):
+    """Two arms that exercise every metric the table claims, compactions included.
+
+    ITS OWN PAIR, for the reason the Session tab's falling-curve fixture gives: the shared
+    `session_id` answers "a chat the pickers list", so that a comparison can be NAMED, and the two
+    needs can miss each other. Measured on a real store: of 13 listed chats none had a single
+    compaction, so the table dropped that row and the checks below asked for a metric that was
+    rightly absent. A pair with compactions is preferred, and the shared ids remain the fallback.
+    """
     if other_session_id is None:
         pytest.fail("the store holds only one session, so Compare could not be exercised, "
                     "which is a failure rather than a pass")
+    compacted = q("""SELECT c.session_id, COUNT(*) AS n FROM compactions c
+                      GROUP BY c.session_id ORDER BY n DESC, c.session_id LIMIT 2""")
+    if len(compacted) == 2:
+        return compacted.iloc[0]["session_id"], compacted.iloc[1]["session_id"]
     return session_id, other_session_id
 
 
@@ -117,14 +129,33 @@ def test_api_calls_is_deduped_and_is_not_the_turn_count(compared, two_sessions, 
     assert int(compared["API calls"]["A"]) != raw_rows
 
 
+def _printed_step(text) -> float:
+    """Half of the last place a number is printed to: what its own display could be hiding."""
+    said = str(text).strip().replace(",", "")
+    places = len(said.split(".")[1]) if "." in said else 0
+    return 0.5 * (10 ** -places)
+
+
 def test_the_ratio_is_b_over_a(compared):
-    """Every ratio is recomputed from the two numbers printed beside it."""
+    """Every ratio is consistent with the two numbers printed beside it.
+
+    CONSISTENT, NOT EQUAL. The page divides the real values and prints the result; this can only
+    divide what was printed, and each of those carries its own rounding. Measured on a real store:
+    a cost row printed 263.6 over 12.3 and a ratio of 21.39, where dividing the printed pair gives
+    21.4309. The page is right and the old absolute tolerance of 0.006 was describing the fixture's
+    small numbers, not the arithmetic. So the check is that the ratio falls inside the interval the
+    two printed values allow, widened by the ratio's own last place.
+    """
     for metric, row in compared.items():
         a, b, shown = float(row["A"]), float(row["B"]), row.get("B / A")
         if shown in (None, "") or a == 0:
             continue
-        assert float(shown) == pytest.approx(b / a, abs=0.006), (
-            f"{metric}: shows {shown}, but {b} / {a} = {b / a:.4f}")
+        da, db = _printed_step(row["A"]), _printed_step(row["B"])
+        lo, hi = (b - db) / (a + da), (b + db) / max(a - da, 1e-9)
+        slack = _printed_step(shown) + 1e-9
+        assert lo - slack <= float(shown) <= hi + slack, (
+            f"{metric}: shows {shown}, which {row['B']} / {row['A']} cannot produce "
+            f"(allowed {lo:.4f} to {hi:.4f})")
 
 
 def test_the_rebilled_multiple_is_cache_reads_over_peak(compared):
