@@ -5,6 +5,29 @@ runner, CI and a linted tree.
 
 ## Unreleased
 
+### Added
+
+- **Every account's chat list holds every chat.** The user archived a chat, the app switched to
+  another account, and it was gone from the sidebar, the Sessions pane and the command palette.
+  Nothing was lost: the app lists only the records in the directory of the account and organisation
+  signed in, and that chat's record had only ever been written into another one. Measured on that
+  machine: 13 chats existed in one pair and nowhere else, one archived, while 223 chats had a
+  record somewhere.
+  - New `c4x/merge.py` copies records until every real pair holds the union. Add only: a record a
+    pair already has is never overwritten, a chat deleted in the app never comes back, a pair that
+    is a link is skipped (this build refuses to write through one), and a record whose own
+    `sessionId` disagrees with its filename is refused, because the app lists by the field.
+  - An archived chat and its `archived-sessions.idx` entry travel together or not at all. The index
+    can only be merged with the app closed, so with the app open those are held back rather than
+    arriving in the Active list.
+  - `GET /api/accounts/merge` surveys what each pair holds and lacks; `POST /api/accounts/merge`
+    does it, with `restart` to quit and start Claude around it. The header's Account row says how
+    many chats the signed-in account cannot see and offers the merge.
+  - The server's watchdog runs it when Claude closes, beside the reconcile: the app is shut then,
+    which is what the index needs, and it reads its list at the next start.
+  - One mechanism covers all three surfaces, because the sidebar, the Sessions pane and the palette
+    share one in-memory list filled from that one directory.
+
 ### Fixed
 
 - **The desktop app refuses to write a chat record through a sharing junction, and nothing said
