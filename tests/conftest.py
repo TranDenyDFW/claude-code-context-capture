@@ -250,13 +250,24 @@ def session_id(q, has_store, store, rows):
     rows, several model segments, and a resident curve that falls as well as rises. A hardcoded id
     would rot the moment the store changed, and one the pickers do not list cannot be named.
     """
-    return _busiest_listed(
-        q, store, rows,
-        """SELECT session_id, COUNT(*) AS n FROM compactions
-            GROUP BY session_id ORDER BY n DESC, session_id""") or _busiest_listed(
-        q, store, rows,
-        """SELECT session_id, COUNT(*) AS n FROM turns
-            GROUP BY session_id ORDER BY n DESC, session_id""")
+    # THE CURVE THAT FALLS IS PART OF THE PROMISE ABOVE, and filtering to listed chats broke it
+    # silently: the first listed candidate ended AT its peak, and the test that needs a negative
+    # delta failed on "could not be exercised". So the falling ones are asked for first, by the
+    # same high-water rule that test uses, and the plain orderings remain as fallbacks.
+    falling = """SELECT c.session_id, COUNT(*) AS n FROM compactions c
+                  WHERE c.session_id IN (
+                        SELECT t.session_id FROM turns t GROUP BY t.session_id
+                         HAVING MAX(t.total_resident) > (SELECT x.total_resident FROM turns x
+                                                          WHERE x.session_id = t.session_id
+                                                          ORDER BY x.ts DESC LIMIT 1))
+                  GROUP BY c.session_id ORDER BY n DESC, c.session_id"""
+    return (_busiest_listed(q, store, rows, falling)
+            or _busiest_listed(q, store, rows,
+                               """SELECT session_id, COUNT(*) AS n FROM compactions
+                                   GROUP BY session_id ORDER BY n DESC, session_id""")
+            or _busiest_listed(q, store, rows,
+                               """SELECT session_id, COUNT(*) AS n FROM turns
+                                   GROUP BY session_id ORDER BY n DESC, session_id"""))
 
 
 @pytest.fixture(scope="session")
