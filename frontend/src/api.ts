@@ -566,7 +566,7 @@ export interface MergeReport {
   /** Archived chats held back until Claude closes, so they arrive archived and not in Active. */
   deferred_archived: string[]
   restart_required: boolean
-  restart?: RestartOutcome
+  restart?: RestartReport | null
   said: string
 }
 
