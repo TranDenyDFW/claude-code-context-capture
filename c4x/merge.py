@@ -156,7 +156,7 @@ def plan_merge(indexes, only=None) -> dict:
     if only and chosen is None:
         out["skipped"]["unknown_id"] = only
         return out
-    for rid, src in sorted(source.items()):
+    for rid in sorted(source):
         holders = [i for i in indexes if rid in i["records"]]
         sizes = {i["sizes"][rid] for i in holders}
         if len(sizes) > 1:
