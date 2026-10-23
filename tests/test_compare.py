@@ -22,10 +22,22 @@ def metrics_of(payload):
 
 
 @pytest.fixture(scope="module")
-def two_sessions(session_id, other_session_id):
+def two_sessions(session_id, other_session_id, q):
+    """Two arms that exercise every metric the table claims, compactions included.
+
+    ITS OWN PAIR, for the reason the Session tab's falling-curve fixture gives: the shared
+    `session_id` answers "a chat the pickers list", so that a comparison can be NAMED, and the two
+    needs can miss each other. Measured on a real store: of 13 listed chats none had a single
+    compaction, so the table dropped that row and the checks below asked for a metric that was
+    rightly absent. A pair with compactions is preferred, and the shared ids remain the fallback.
+    """
     if other_session_id is None:
         pytest.fail("the store holds only one session, so Compare could not be exercised, "
                     "which is a failure rather than a pass")
+    compacted = q("""SELECT c.session_id, COUNT(*) AS n FROM compactions c
+                      GROUP BY c.session_id ORDER BY n DESC, c.session_id LIMIT 2""")
+    if len(compacted) == 2:
+        return compacted.iloc[0]["session_id"], compacted.iloc[1]["session_id"]
     return session_id, other_session_id
 
 
