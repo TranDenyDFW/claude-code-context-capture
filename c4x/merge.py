@@ -257,7 +257,15 @@ def merge(dry_run=False, only=None, roots=None, running=None, indexes=None,
     if only and said["resolved"] is None:
         report["why"] = f"no record id starts with {only!r}, or more than one does"
         return report
+    # AN ARCHIVED RECORD AND ITS INDEX ENTRY TRAVEL TOGETHER, OR NOT AT ALL. The index is the hint
+    # the app reads first, and it can only be rewritten with the app closed (below), so copying an
+    # archived record now would put it in the Active list until the next merge. There are about a
+    # hundred archived chats per pair, and that is not a list to flood.
+    archived_now = {rid for ids in said["idx_adds"].values() for rid in ids}
+    report["deferred_archived"] = sorted(archived_now) if alive else []
     for item in said["copies"]:
+        if alive and item["id"] in archived_now:
+            continue
         if dry_run:
             report["written"].append(dict(item, done=False, why="dry run"))
             continue
@@ -293,7 +301,10 @@ def sentence(report) -> str:
     said = f"{wrote} record(s) copied into {len(report['targets'])} pair(s)"
     if report["failed"]:
         said += f", {len(report['failed'])} failed"
-    if report["idx_pending"]:
+    if report.get("deferred_archived"):
+        said += (f", {len(set(report['deferred_archived']))} archived chat(s) held back until "
+                 "Claude closes, so they arrive archived rather than in Active")
+    elif report["idx_pending"]:
         said += (f", {sum(len(v) for v in report['idx_pending'].values())} archived entr(ies) "
                  "pending until Claude closes")
     return said

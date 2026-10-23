@@ -179,15 +179,19 @@ class TestTheMerge:
         assert "no space" in said["failed"][0]["why"]
         assert not list(Path(machine["b"]["path"]).glob(f"*{merge.PART}"))
 
-    def test_the_index_is_merged_only_while_the_app_is_closed(self, machine):
-        """The app rewrites that file wholesale from its own set, so a merge into it while the app
-        runs is a write one side loses. The records still land; the entries wait."""
+    def test_an_archived_chat_waits_for_the_app_to_close_rather_than_landing_in_active(
+            self, machine):
+        """The index is the hint the app reads first and can only be rewritten with the app shut,
+        so an archived record copied in now would sit in Active until the next merge. About a
+        hundred chats per pair are archived, which is not a list to flood. The live ones still
+        land, the way adopt writes a record with the app open."""
         said = merge.merge(indexes=machine["indexes"], running=True)
-        assert said["idx_pending"][f"{B[:8]}\\{ORG[:8]}"] == ["local_archived_one"]
+        assert said["deferred_archived"] == ["local_archived_one"]
+        assert not (Path(machine["b"]["path"]) / "local_archived_one.json").exists()
+        assert (Path(machine["b"]["path"]) / "local_only_in_a.json").is_file(), (
+            "the chat that is not archived arrives straight away")
         assert said["idx_written"] == []
-        assert merge.read_idx(machine["b"]["path"]) == set(), "nothing written while it is open"
-        assert (Path(machine["b"]["path"]) / "local_archived_one.json").is_file(), (
-            "the record itself still arrives, the way adopt writes one with the app open")
+        assert merge.read_idx(machine["b"]["path"]) == set(), "no index write while it is open"
 
     def test_with_the_app_closed_the_index_becomes_the_union(self, machine):
         idx(machine["b"], ["local_only_in_b"])
@@ -234,4 +238,4 @@ class TestWhatItReports:
         said = merge.merge(indexes=machine["indexes"], running=True)
         line = merge.sentence(said)
         assert "record(s) copied into" in line
-        assert "pending until Claude closes" in line
+        assert "held back until Claude closes" in line
