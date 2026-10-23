@@ -323,6 +323,46 @@ that replaces a junction with a real directory ends the sharing silently, which 
 mode is recorded beside the store and `--verify` compares the two rather than reading the disk
 alone.
 
+## 6b. Giving every account the same list, by copying rather than linking
+
+**THE PROBLEM SHARING WAS FOR, SOLVED THE OTHER WAY.** The directory listing is the session list,
+so an account sees only the chats whose records sit in its own pair. Junctions made every pair one
+directory; this build refuses to write through a reparse point, so that is over, and the unfold of
+2026-10-10 left nine real directories each holding a copy of what the shared one held that evening.
+Every account has written only into its own since, so they drift apart. Measured 2026-10-22: one
+pair held 220 records, the signed-in pair held 212, and 13 chats existed in the first and nowhere
+else, one of them archived. A chat archived under one account that afternoon was simply not in the
+list the next account read.
+
+**WHAT READS THAT LIST.** All three surfaces share one in-memory list, filled only from the
+signed-in pair: the left sidebar, the Sessions pane with its Active and Archived tabs, and the
+command palette, whose content search scans the same set plus the transcripts. There is no sqlite,
+leveldb or index file holding a second copy. The list is rebuilt when the app starts, when a window
+is created and on an account or organisation change, and nothing watches the directory, so a record
+copied in appears at the next reload. Beside those local rows the pane and the palette show server
+rows from `/v1/code/sessions`, scoped to the active organisation by a request header, which nothing
+here can change.
+
+**`c4x/merge.py`** copies record files until every real pair holds the union of them all.
+
+  - Add only. A record a pair already holds is never overwritten, so two accounts that titled one
+    chat differently each keep their own; the report names the ids that differ (72 of 223 on the
+    author's machine, because a record grows as its chat continues and the 2026-10-10 copies are
+    frozen).
+  - A chat with a `deleted_<uuid>` marker in ANY pair is never copied anywhere.
+  - A pair that is a link is skipped, since the app refuses writes through one.
+  - The id is the record's own `sessionId` field. The index keys on the filename for speed, and a
+    file whose field disagrees with its name is refused at the copy, because the app lists by the
+    field.
+  - An archived chat and its `archived-sessions.idx` entry travel together or not at all. The index
+    can only be merged with the app closed (the app rewrites it wholesale from its own set), so
+    with the app open the archived ones are held back rather than landing in Active.
+
+**When it runs.** From the header's Account row (`POST /api/accounts/merge`, with `restart` to quit
+and start Claude around it, which is also what makes the copies visible), and from the server's
+watchdog when Claude closes, beside the reconcile: that is the one moment the app is shut, which is
+what the index needs and what puts the copies in place before the next start.
+
 ## 7. Adopting a session the app has no record of
 
 A reinstall (a renamed data directory, a new device identity) keeps every transcript under

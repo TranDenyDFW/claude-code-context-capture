@@ -123,7 +123,34 @@ def _reconcile_summary(report) -> str:
     return "; ".join(parts)
 
 
-def reconcile_then_stop(reason, *, reconcile=None, stop=None, log=_say):
+def merge_records(*, run=None, log=_say, when="at stop"):
+    """Give every account's pair the union of the records, with the app closed.
+
+    WHY HERE, beside the reconcile. The app lists only the records in the pair it is signed into,
+    so a chat made under one account is invisible under every other; junctions used to hide that
+    and this build refuses to write through one. Copying the records is the remedy, and the moment
+    to do it is the same moment the reconcile wants: the app shut, sixty seconds after the last
+    Claude process. It matters most HERE because the app reads its list when it starts, so a merge
+    at close is in place before the next start, and because the archived index can only be merged
+    with the app closed (`c4x.merge`). Logged, never raised: the stop runs whatever this did.
+    """
+    if os.environ.get("C4X_NO_WRITES"):
+        log(f"[merge] {when}: skipped (--no-writes)")
+        return None
+    try:
+        if run is None:
+            from c4x import merge
+            run = merge.merge
+        report = run()
+        from c4x import merge as _merge
+        log(f"[merge] {when}: {_merge.sentence(report)}")
+        return report
+    except Exception as exc:  # noqa: BLE001 - a merge that failed must not hold the server up
+        log(f"[merge] {when}: failed: {exc}")
+        return None
+
+
+def reconcile_then_stop(reason, *, reconcile=None, stop=None, log=_say, merge=None):
     """The watchdog's stop: cover the pairs the app created since sharing, then shut down.
 
     WHY HERE. Sharing every account's records is done with junctions, and a junction covers the
@@ -151,6 +178,10 @@ def reconcile_then_stop(reason, *, reconcile=None, stop=None, log=_say):
     except Exception as exc:  # noqa: BLE001 - the stop must run whatever the fold did
         log(f"[reconcile] failed: {exc}")
     finally:
+        # THE APP IS CLOSED RIGHT NOW, which is the only moment the archived index can be merged,
+        # and the next thing the app does on start is read its list. Injectable like the rest, so
+        # a test of the stop never copies a record on the machine it runs on.
+        merge_records(run=merge, log=log)
         stop(reason)
 
 
