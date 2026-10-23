@@ -530,6 +530,46 @@ export interface AccountPair {
  * `mode` is what is on disk and `intended` is what was asked for. They disagree after an app
  * update migrates these directories, which is the one failure the arrangement has.
  */
+/**
+ * What `/api/accounts/merge` answers: what each account and organisation pair holds, and how many
+ * chats it is missing. The app lists only the records in the pair it is signed into, so a chat
+ * made under another account is invisible until its record is copied across.
+ */
+export interface MergeSurvey {
+  pairs: {
+    pair: string
+    path: string
+    /** A pair that is a link is left alone: this build refuses to write through one. */
+    link: boolean
+    records: number
+    archived: number
+    deleted_markers: number
+    /** Records this pair does not have and would receive. */
+    missing: number
+  }[]
+  /** Chats with a record in any pair. */
+  ids: number
+  /** Copies that would make every pair hold them all. */
+  to_copy: number
+  /** Ids whose copies differ between pairs; add only leaves each pair its own. */
+  divergent: { id: string; pairs: string[]; bytes: number[] }[]
+}
+
+/** What `POST /api/accounts/merge` answers. `restart_required` is true when anything was copied. */
+export interface MergeReport {
+  dry_run: boolean
+  app_running: boolean
+  targets: string[]
+  written: { id: string; pair: string; bytes: number; done: boolean }[]
+  failed: { id: string; pair: string; why: string }[]
+  idx_written: { pair: string; added: string[]; entries: number }[]
+  /** Archived chats held back until Claude closes, so they arrive archived and not in Active. */
+  deferred_archived: string[]
+  restart_required: boolean
+  restart?: RestartReport | null
+  said: string
+}
+
 export interface AccountsState {
   supported: boolean
   why_not: string
@@ -1079,6 +1119,14 @@ export const api = {
     /** Cover now: the fold the server runs when Claude closes, on demand. 409 while it is open,
      * unless `restart` has the server quit and start Claude around it. */
     reconcile: (restart = false) => post<ReconcileReport>('/api/accounts/reconcile', { restart }),
+    /** What each account's pair holds and how many chats it lacks. Read only. */
+    mergeState: () => get<MergeSurvey>('/api/accounts/merge'),
+    /**
+     * Copy the records so every account's pair holds every chat. Add only: nothing is overwritten
+     * and a chat deleted in the app never comes back. `restart` is what makes the copies visible,
+     * since the app reads its chat list when it starts.
+     */
+    merge: (restart = false) => post<MergeReport>('/api/accounts/merge', { restart }),
   },
 
   /**

@@ -1809,6 +1809,44 @@ def accounts_verify():
     return accounts.verify()
 
 
+@api.get("/api/accounts/merge")
+def accounts_merge_state():
+    """What each account's pair holds, and how many chats it is missing. Read only.
+
+    The app lists only the records in the pair it is signed into, so a chat made under another
+    account is invisible until its record is copied across (`c4x.merge`). This is the question the
+    header's row asks on every page load.
+    """
+    from c4x import merge
+    return merge.survey()
+
+
+@api.post("/api/accounts/merge")
+def accounts_merge(body: dict | None = None):
+    """Give every pair the union of the records, so no account switch hides a chat.
+
+    Add only: a record a pair already holds is never overwritten, a chat deleted in the app is
+    never brought back, and a pair that is a link is left alone. An archived chat waits for Claude
+    to close, because its index entry can only be merged then and it would otherwise arrive in
+    Active. `{"dry_run": true}` reports the plan and writes nothing; `{"restart": true}` has the
+    server quit Claude and start it again, which is also what makes the copies visible, since the
+    app reads its list when it starts.
+    """
+    from c4x import merge
+    _require_writes()
+    said = body or {}
+    dry = said.get("dry_run") is True
+    wanted = said.get("restart") is True and not dry
+    only = said.get("only") if isinstance(said.get("only"), str) else None
+    try:
+        report = _with_restart(wanted, lambda: merge.merge(dry_run=dry, only=only),
+                               quit_first=True)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+    report["said"] = merge.sentence(report)
+    return report
+
+
 @api.get("/api/adopt")
 def adopt_state(include_cli: bool = Query(False)):
     """Sessions the desktop app has no record for, grouped by folder, and where a record would land.
