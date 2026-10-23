@@ -141,10 +141,10 @@ def plan_merge(indexes, only=None) -> dict:
     """
     source: dict[str, dict] = {}
     deleted: set = set()
-    archived: set = set()
+    archived_in: dict[str, set] = {}
     for i in indexes:
         deleted |= i["deleted"]
-        archived |= i["archived"]
+        archived_in[i["pair"]] = i["archived"]
         for rid, path in i["records"].items():
             if rid not in source or i["sizes"][rid] > source[rid]["bytes"]:
                 source[rid] = {"from": path, "bytes": i["sizes"][rid], "pair": i["pair"]}
@@ -183,7 +183,12 @@ def plan_merge(indexes, only=None) -> dict:
             out["copies"].append({"id": rid, "from": src["from"], "pair": i["pair"],
                                   "to": str(Path(i["path"]) / f"{rid}.json"),
                                   "bytes": src["bytes"]})
-            if rid in archived:
+            # THE INDEX ENTRY FOLLOWS THE BYTES THAT TRAVEL, not the union across every pair. The
+            # record carries its own `isArchived` and the copy is byte for byte, so asking any
+            # other pair whether the chat is archived could file a record that says active under an
+            # index that says archived. An independent review measured 7 of 223 ids archived under
+            # one account and active under another, which is exactly that disagreement.
+            if rid in archived_in.get(src["pair"], set()):
                 out["idx_adds"].setdefault(i["pair"], []).append(rid)
     return out
 
@@ -289,14 +294,24 @@ def sentence(report) -> str:
     if report.get("why"):
         return report["why"]
     wrote = len([w for w in report["written"] if w.get("done")])
+    # WHAT IS WAITING COUNTS AS WORK OUTSTANDING. An independent review found the line below
+    # answering "every pair already holds every chat" to a real run that had deferred eight copies,
+    # because the count of what was written is zero in exactly that case. The same misreport was
+    # fixed once for the dry run alone; it is the deferral, not the dry run, that makes a zero
+    # count mean something other than "nothing to do".
+    held = len(set(report.get("deferred_archived") or []))
     if report.get("dry_run"):
-        # A DRY RUN HAS WRITTEN NOTHING BY DEFINITION, so counting what it wrote said "every pair
-        # already holds every chat" over a plan of 112 copies. It reports the plan instead.
-        waiting = sum(len(v) for v in report["idx_pending"].values())
         said = (f"dry run: {len(report['written'])} record(s) would be copied into "
                 f"{len(report['targets'])} pair(s)")
-        return said + (f", {waiting} of them archived" if waiting else "")
+        if held:
+            said += (f", and {held} archived chat(s) would wait for Claude to close"
+                     if report["written"] else
+                     f"; {held} archived chat(s) wait for Claude to close")
+        return said
     if not wrote and not report["failed"]:
+        if held:
+            return (f"nothing copied now: {held} archived chat(s) wait for Claude to close, so "
+                    "they arrive archived rather than in Active")
         return "every pair already holds every chat"
     said = f"{wrote} record(s) copied into {len(report['targets'])} pair(s)"
     if report["failed"]:

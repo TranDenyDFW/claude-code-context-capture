@@ -234,6 +234,41 @@ class TestWhatItReports:
         assert said.startswith("dry run: ") and "would be copied" in said
         assert "already holds every chat" not in said
 
+    def test_nothing_copied_now_does_not_read_as_nothing_to_do(self, machine):
+        """THE DEFECT THIS RECORDS, found by an independent review against the live store. The
+        sentence answered "every pair already holds every chat" to a REAL run whose only work was
+        deferred: the count of what was written is zero in exactly that case, and the early return
+        sat above the clause that knows about the deferral. The same misreport had been fixed for
+        the dry run alone, which is the half that is easy to see."""
+        only_archived = merge.merge(indexes=machine["indexes"], running=True,
+                                    only="local_archived_one")
+        assert only_archived["written"] == [] and only_archived["deferred_archived"] == [
+            "local_archived_one"]
+        said = merge.sentence(only_archived)
+        assert "already holds every chat" not in said, said
+        assert "wait for Claude to close" in said
+
+    def test_a_dry_run_with_everything_deferred_says_so_too(self, machine):
+        said = merge.sentence(merge.merge(indexes=machine["indexes"], running=True, dry_run=True,
+                                          only="local_archived_one"))
+        assert said.startswith("dry run: 0 record(s)") and "wait for Claude to close" in said
+
+    def test_the_index_entry_follows_the_record_that_travels(self, machine):
+        """An id archived in a THIRD pair but not in the one the bytes come from must not arrive
+        with an archived index entry: the record carries its own isArchived and the copy is byte
+        for byte, so the union would file an active record under an archived index. The review
+        measured 7 of 223 ids split that way on the live machine."""
+        record(machine["b"], "local_split", title="active here", archived=False)
+        record(machine["c"], "local_split", title="archived over there", archived=True, pad=99)
+        idx(machine["c"], ["local_split"])
+        indexes = [merge.index_pair(p) for p in (machine["a"], machine["b"], machine["c"])]
+        said = merge.plan_merge(indexes)
+        into_a = [c for c in said["copies"] if c["pair"].startswith(A[:8])
+                  and c["id"] == "local_split"]
+        assert into_a, "the chat still travels"
+        assert "local_split" not in said["idx_adds"].get(f"{A[:8]}\\{ORG[:8]}", []), (
+            "it came from the pair that calls it active, so it must not arrive archived")
+
     def test_the_sentence_names_the_work_and_what_is_waiting(self, machine):
         said = merge.merge(indexes=machine["indexes"], running=True)
         line = merge.sentence(said)
