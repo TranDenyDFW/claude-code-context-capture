@@ -132,8 +132,10 @@ class TestThePlan:
     def test_one_id_can_be_picked_by_a_prefix(self, machine):
         said = merge.plan_merge(machine["indexes"], only="local_only_in_a")
         assert {c["id"] for c in said["copies"]} == {"local_only_in_a"}
-        assert merge.plan_merge(machine["indexes"], only="local_only_in_a"[:14])["resolved"] == (
-            "local_only_in_a")
+        # A prefix only one id starts with. `local_only_in_` would match the chat in the other
+        # pair too, and the module is right to refuse that: see the ambiguity case below.
+        assert merge.plan_merge(machine["indexes"], only="local_arch")["resolved"] == (
+            "local_archived_one")
 
     def test_an_ambiguous_or_unknown_prefix_resolves_to_nothing(self, machine):
         assert merge.plan_merge(machine["indexes"], only="local_only")["resolved"] is None
