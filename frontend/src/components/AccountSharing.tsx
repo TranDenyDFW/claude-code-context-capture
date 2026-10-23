@@ -54,7 +54,15 @@ export const COVER_HOVER =
   'own until it is covered. The server covers it a minute after Claude closes, or now, after ' +
   'asking, with Claude closed and started again.'
 
-type Ask = 'all' | 'current' | 'cover'
+type Ask = 'all' | 'current' | 'cover' | 'merge'
+
+export const MERGE_HOVER =
+  'The app lists only the chats whose record files sit in the directory of the account and ' +
+  'organisation signed in, so a chat made under another account is invisible rather than lost. ' +
+  'This copies the records so every account holds every chat: nothing is overwritten, a chat ' +
+  'deleted in the app never comes back, and an archived one waits for Claude to close so it ' +
+  'arrives archived rather than in Active. The app reads its list when it starts, which is why ' +
+  'this offers to restart it.'
 
 export function AccountSharing({
   writesEnabled,
@@ -71,6 +79,15 @@ export function AccountSharing({
   const query = useQuery({
     queryKey: ['accounts'],
     queryFn: api.accounts.state,
+    refetchOnWindowFocus: true,
+    retry: false,
+  })
+  // WHAT THE OTHER ACCOUNTS HOLD THAT THIS ONE DOES NOT. A directory listing per pair, so it is
+  // cheap enough to ask on a page load, and it is the only way a reader learns that chats they
+  // cannot see exist at all.
+  const gap = useQuery({
+    queryKey: ['accounts', 'merge'],
+    queryFn: api.accounts.mergeState,
     refetchOnWindowFocus: true,
     retry: false,
   })
@@ -97,21 +114,41 @@ export function AccountSharing({
   // on screen and dropped, and the app says so only in its log. Shown whatever the mode says,
   // because the links can still be on the disk while the marker reads Current.
   const refused = state.refused_writes?.count ? state.refused_writes : null
+  // WHAT THIS ACCOUNT CANNOT SEE. The signed-in pair's own shortfall, not the total across every
+  // pair: a reader cares how many chats are missing from the list in front of them.
+  const signedIn = state.signed_in
+  const here = signedIn
+    ? (gap.data?.pairs ?? []).find(
+        (p) => p.pair === `${signedIn.account.slice(0, 8)}\\${signedIn.org.slice(0, 8)}`,
+      )
+    : undefined
+  const missingHere = here?.missing ?? 0
 
   const does: Record<Ask, string> = {
     all: 'links the account directories so every account reads the same chats',
     current: 'un-links the account directories so each account goes back to its own chats',
     cover: 'moves the uncovered account directories into the shared one and links them',
+    merge: "copies the chat records so every account's list holds every chat",
   }
   const did: Record<Ask, string> = {
     all: 'The directories are linked.',
     current: 'The directories are separate again.',
     cover: 'The pairs are covered.',
+    merge: 'Every account holds every chat.',
   }
 
   async function run(which: Ask) {
     setError(null)
     setRestart(false)
+    if (which === 'merge') {
+      // THE REPORT IS THE MESSAGE. A merge says what it copied and what it held back for the
+      // close, which is more than "done" can carry, and the accounts queries re-read afterwards.
+      const report = await api.accounts.merge(true)
+      setRestart(report.restart_required)
+      await client.invalidateQueries({ queryKey: ['accounts'] })
+      onChanged?.()
+      return restartOutcome(report.restart, report.said)
+    }
     const report =
       which === 'cover' ? await api.accounts.reconcile(true) : await api.accounts.share(which, true)
     client.setQueryData(['accounts'], report.state)
@@ -201,6 +238,32 @@ export function AccountSharing({
           ))}
         </div>
       </div>
+      {missingHere ? (
+        <p
+          data-missing={missingHere}
+          title={MERGE_HOVER}
+          className="flex items-center gap-2 text-xs text-warn"
+        >
+          <span>
+            {missingHere} chat{missingHere === 1 ? '' : 's'} made under another account{' '}
+            {missingHere === 1 ? 'is' : 'are'} not in this one&apos;s list
+          </span>
+          <button
+            type="button"
+            disabled={!writesEnabled || asking !== null}
+            title={
+              !writesEnabled
+                ? 'This server was started without writes'
+                : 'Copy the records so every account holds every chat, after asking'
+            }
+            onClick={() => setAsking('merge')}
+            className="rounded-md border border-edge bg-page px-2 py-0.5 text-xs text-ink-dim
+                       transition-colors hover:text-ink disabled:opacity-50"
+          >
+            Merge
+          </button>
+        </p>
+      ) : null}
       {refused ? (
         <p
           data-refused={refused.count}
