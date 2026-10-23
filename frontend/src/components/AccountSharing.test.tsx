@@ -2,10 +2,11 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import {
-  AccountSharing, COVER_HOVER, COVER_NOTE, QUIT_NOTE, REFUSED_HOVER, RESTART_NOTE,
+  AccountSharing, COVER_HOVER, COVER_NOTE, MERGE_HOVER, QUIT_NOTE, REFUSED_HOVER,
+  RESTART_NOTE,
 } from './AccountSharing'
 import { api, ApiError } from '@/api'
-import type { AccountPair, AccountsState } from '@/api'
+import type { AccountPair, AccountsState, MergeSurvey } from '@/api'
 
 /**
  * The toggle that decides whether every account signed into this machine reads one chat list.
@@ -479,5 +480,99 @@ describe('writes the app refused through the links', () => {
     const button = await screen.findByRole('button', { name: 'Separate them' })
     expect((button as HTMLButtonElement).disabled).toBe(true)
     expect(button.getAttribute('title')).toBe('This server was started without writes')
+  })
+})
+
+describe('chats this account cannot see', () => {
+  /**
+   * The failure that founded this row: a chat was archived under one account, the app switched to
+   * another, and the sidebar, the Sessions pane and the palette all stopped listing it, because
+   * every one of them reads the records of the pair signed in and nothing else. The row is where a
+   * reader learns that chats they cannot see exist at all.
+   */
+  const SIGNED_IN = { account: 'ba7ccf25-6e12-4287-b331-2d7eff00cdf8', org: '2108d9a2-a997-4f8e' }
+
+  function pairRow(over: Partial<MergeSurvey['pairs'][number]> = {}) {
+    return {
+      pair: 'ba7ccf25\\2108d9a2', path: 'C:\\r\\ba7ccf25\\2108d9a2', link: false,
+      records: 212, archived: 111, deleted_markers: 40, missing: 13, ...over,
+    }
+  }
+
+  function survey(over: Partial<MergeSurvey> = {}): MergeSurvey {
+    return { pairs: [pairRow()], ids: 223, to_copy: 112, divergent: [], ...over }
+  }
+
+  it('says nothing when this account already holds every chat', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ signed_in: SIGNED_IN }))
+    vi.spyOn(api.accounts, 'mergeState').mockResolvedValue(
+      survey({ pairs: [pairRow({ missing: 0 })], to_copy: 0 }))
+    draw()
+    await screen.findByRole('button', { name: 'All' })
+    expect(screen.queryByRole('button', { name: 'Merge' })).toBeNull()
+  })
+
+  it('counts what the signed-in pair lacks, not the total across every pair', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ signed_in: SIGNED_IN }))
+    vi.spyOn(api.accounts, 'mergeState').mockResolvedValue(
+      survey({ pairs: [pairRow({ missing: 13 }), pairRow({ pair: 'e3506f07\\c851f706', missing: 99 })] }))
+    draw()
+    const line = await screen.findByText(/13 chats made under another account/)
+    const row = line.closest('p') as HTMLElement
+    expect(row.getAttribute('data-missing')).toBe('13')
+    expect(row.getAttribute('title')).toContain(MERGE_HOVER)
+    expect(row.textContent).toContain("not in this one's list")
+  })
+
+  it('reads as one chat in the singular', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ signed_in: SIGNED_IN }))
+    vi.spyOn(api.accounts, 'mergeState').mockResolvedValue(
+      survey({ pairs: [pairRow({ missing: 1 })] }))
+    draw()
+    expect((await screen.findByText(/1 chat made under another account/)).textContent).toContain(
+      'is not in this one')
+  })
+
+  it('asks before it copies anything, and says what the merge does', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ signed_in: SIGNED_IN }))
+    vi.spyOn(api.accounts, 'mergeState').mockResolvedValue(survey())
+    draw()
+    fireEvent.click(await screen.findByRole('button', { name: 'Merge' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog.textContent).toContain("copies the chat records so every account's list holds")
+  })
+
+  it('reports what the merge itself said, including what it held back', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ signed_in: SIGNED_IN }))
+    vi.spyOn(api.accounts, 'mergeState').mockResolvedValue(survey())
+    const ran = vi.spyOn(api.accounts, 'merge').mockResolvedValue({
+      dry_run: false, app_running: false, targets: ['ba7ccf25\\2108d9a2'],
+      written: [{ id: 'local_a', pair: 'ba7ccf25\\2108d9a2', bytes: 10, done: true }],
+      failed: [], idx_written: [], deferred_archived: [], restart_required: true,
+      restart: { ok: true, why: null },
+      said: '96 record(s) copied into 9 pair(s), 8 archived chat(s) held back until Claude closes',
+    } as never)
+    draw()
+    fireEvent.click(await screen.findByRole('button', { name: 'Merge' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(ran).toHaveBeenCalledWith(true))
+    expect(await screen.findByText(/held back until Claude closes/)).toBeTruthy()
+  })
+
+  it('cannot be acted on by a server started without writes', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ signed_in: SIGNED_IN }))
+    vi.spyOn(api.accounts, 'mergeState').mockResolvedValue(survey())
+    draw({ writesEnabled: false })
+    const button = await screen.findByRole('button', { name: 'Merge' })
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+    expect(button.getAttribute('title')).toBe('This server was started without writes')
+  })
+
+  it('says nothing when the survey cannot be read', async () => {
+    vi.spyOn(api.accounts, 'state').mockResolvedValue(state({ signed_in: SIGNED_IN }))
+    vi.spyOn(api.accounts, 'mergeState').mockRejectedValue(new Error('no server'))
+    draw()
+    await screen.findByRole('button', { name: 'All' })
+    expect(screen.queryByRole('button', { name: 'Merge' })).toBeNull()
   })
 })
