@@ -146,17 +146,40 @@ class TestTheStopThatCoversFirst:
         base.update(over)
         return base
 
-    def test_the_stop_reconciles_then_shuts_down(self, monkeypatch):
+    @staticmethod
+    def _merged():
+        """A real, empty merge report, so the log line under test is the real sentence."""
+        from c4x import merge
+        return merge.merge(indexes=[], running=False)
+
+    def test_the_stop_reconciles_then_merges_then_shuts_down(self, monkeypatch):
+        """The app is closed at this moment and nowhere else, which is what both steps need: a
+        directory it holds cannot be moved, and the archived index cannot be merged while it runs.
+        The app reads its chat list when it starts, so a merge here is in place for the next one."""
         from c4x.api import __main__ as server_main
         monkeypatch.delenv("C4X_NO_WRITES", raising=False)
         order, lines = [], []
         server_main.reconcile_then_stop(
             "no Claude for 60 s",
             reconcile=lambda: order.append("reconcile") or self._report(),
+            merge=lambda: order.append("merge") or self._merged(),
             stop=lambda why: order.append(("stop", why)), log=lines.append)
-        assert order == ["reconcile", ("stop", "no Claude for 60 s")]
+        assert order == ["reconcile", "merge", ("stop", "no Claude for 60 s")]
         assert lines == ["[reconcile] covered 1 pair(s); 1 linked, 2 moved, 0 set aside; "
-                         "backup B; marker written"]
+                         "backup B; marker written",
+                         "[merge] at stop: every pair already holds every chat"]
+
+    def test_a_merge_that_raises_still_stops_once(self, monkeypatch):
+        from c4x.api import __main__ as server_main
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        stops, lines = [], []
+
+        def boom():
+            raise OSError("no space left on device")
+        server_main.reconcile_then_stop("why", reconcile=self._report, merge=boom,
+                                        stop=stops.append, log=lines.append)
+        assert stops == ["why"], "the server goes down whatever the merge did"
+        assert lines[-1] == "[merge] at stop: failed: no space left on device"
 
     def test_a_reconcile_that_raises_still_stops_once(self, monkeypatch):
         from c4x.api import __main__ as server_main
@@ -165,19 +188,22 @@ class TestTheStopThatCoversFirst:
 
         def boom():
             raise RuntimeError("could not link X")
-        server_main.reconcile_then_stop("why", reconcile=boom, stop=stops.append,
-                                        log=lines.append)
+        server_main.reconcile_then_stop("why", reconcile=boom, merge=self._merged,
+                                        stop=stops.append, log=lines.append)
         assert stops == ["why"]
-        assert lines == ["[reconcile] failed: could not link X"]
+        assert lines == ["[reconcile] failed: could not link X",
+                         "[merge] at stop: every pair already holds every chat"]
 
     def test_no_writes_skips_the_reconcile_and_still_stops(self, monkeypatch):
         from c4x.api import __main__ as server_main
         monkeypatch.setenv("C4X_NO_WRITES", "1")
         stops, lines, calls = [], [], []
         server_main.reconcile_then_stop("why", reconcile=lambda: calls.append(1),
+                                        merge=lambda: calls.append("merge"),
                                         stop=stops.append, log=lines.append)
-        assert calls == [] and stops == ["why"]
-        assert lines == ["[reconcile] skipped: --no-writes"]
+        assert calls == [] and stops == ["why"], "a read only server copies nothing either"
+        assert lines == ["[reconcile] skipped: --no-writes",
+                         "[merge] at stop: skipped (--no-writes)"]
 
     def test_a_skipped_reconcile_is_logged_with_its_reason(self, monkeypatch):
         from c4x.api import __main__ as server_main
@@ -186,8 +212,10 @@ class TestTheStopThatCoversFirst:
         server_main.reconcile_then_stop(
             "why",
             reconcile=lambda: self._report(ran=False, why="sharing is off; nothing to cover"),
-            stop=lambda why: None, log=lines.append)
-        assert lines == ["[reconcile] skipped: sharing is off; nothing to cover"]
+            merge=self._merged, stop=lambda why: None, log=lines.append)
+        assert lines == ["[reconcile] skipped: sharing is off; nothing to cover",
+                         "[merge] at stop: every pair already holds every chat"], (
+            "sharing being off is exactly when the merge matters: the pairs are separate")
 
     def test_the_server_wires_the_watchdog_to_the_covering_stop(self):
         import inspect
