@@ -222,6 +222,14 @@ class TestWhatItReports:
         assert by_pair[f"{C[:8]}\\{ORG[:8]}"]["link"] is True
         assert said["ids"] == 5 and said["to_copy"] >= 2
 
+    def test_a_dry_run_says_what_it_would_do_rather_than_that_there_is_nothing_to_do(self, machine):
+        """THE DEFECT THIS RECORDS. The sentence counted what was WRITTEN, and a dry run writes
+        nothing, so it answered "every pair already holds every chat" over a plan of 112 copies on
+        the live machine, which is the one answer that stops a person running it."""
+        said = merge.sentence(merge.merge(indexes=machine["indexes"], running=False, dry_run=True))
+        assert said.startswith("dry run: ") and "would be copied" in said
+        assert "already holds every chat" not in said
+
     def test_the_sentence_names_the_work_and_what_is_waiting(self, machine):
         said = merge.merge(indexes=machine["indexes"], running=True)
         line = merge.sentence(said)

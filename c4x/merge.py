@@ -281,6 +281,13 @@ def sentence(report) -> str:
     if report.get("why"):
         return report["why"]
     wrote = len([w for w in report["written"] if w.get("done")])
+    if report.get("dry_run"):
+        # A DRY RUN HAS WRITTEN NOTHING BY DEFINITION, so counting what it wrote said "every pair
+        # already holds every chat" over a plan of 112 copies. It reports the plan instead.
+        waiting = sum(len(v) for v in report["idx_pending"].values())
+        said = (f"dry run: {len(report['written'])} record(s) would be copied into "
+                f"{len(report['targets'])} pair(s)")
+        return said + (f", {waiting} of them archived" if waiting else "")
     if not wrote and not report["failed"]:
         return "every pair already holds every chat"
     said = f"{wrote} record(s) copied into {len(report['targets'])} pair(s)"
