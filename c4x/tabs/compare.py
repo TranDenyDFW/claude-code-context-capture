@@ -26,7 +26,13 @@ def default_arm_b(session_id=None, cohort=None):
     if session_id:
         # Every session of arm A's chat, not just the id in hand: a resumed chat's older sessions
         # would otherwise be offered as "the other arm" and compare a chat with its own prefix.
-        members = chat_members(session_id)
+        #
+        # ITS RUNS AND REVIEWS TOO (`reviews=True`), because the line below folds whatever it picks
+        # with `chat_head`, and that maps a review or a child run onto the chat it belongs to. With
+        # them left in, the newest row was a run of arm A's own chat and arm B resolved straight
+        # back to arm A: measured on a real store, where `chat_members` answered `[750f1006]` while
+        # `chat_head` answered `750f1006` for a session that list did not hold.
+        members = chat_members(session_id, reviews=True)
         where += f" AND session_id NOT IN ({','.join('?' * len(members))})"
         args.extend(members)
     df = q(f"""SELECT session_id FROM turns WHERE 1=1 {where}
