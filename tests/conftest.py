@@ -211,29 +211,55 @@ def has_store(q):
     return True
 
 
+def _busiest_listed(q, store, rows, sql, exclude=None):
+    """The busiest session the PICKERS list, by the ordering the query gives.
+
+    A CHAT, NOT ANY SESSION. `_session_rows_uncached` drops review runs and chats the desktop app
+    deleted (`hidden_sessions_sql`), and `store.session_name` answers "" for anything outside that
+    frame, so a test that compares two sessions by name needs ids the frame holds. Against the
+    fixture every session qualifies and this changes nothing; against a real store, where the
+    busiest session can easily be a review run, it is the difference between testing the compare
+    pane and testing an empty string. Falls back to the plain busiest row when the frame is empty,
+    so a store with no listed chats still yields the id it always did.
+    """
+    df = q(sql)
+    if df.empty:
+        return None
+    listed = set(rows["session_id"]) if rows is not None and not rows.empty else set()
+    for sid in df["session_id"]:
+        if sid == exclude:
+            continue
+        if not listed or store.chat_head(sid) in listed:
+            return sid
+    first = [s for s in df["session_id"] if s != exclude]
+    return first[0] if first else None
+
+
 @pytest.fixture(scope="session")
-def session_id(q, has_store):
+def session_id(q, has_store, store, rows):
     """One session, chosen by a rule rather than hardcoded.
 
     The most-compacted session, because it exercises the parts a quiet session cannot: compaction
     rows, several model segments, and a resident curve that falls as well as rises. A hardcoded id
-    would rot the moment the store changed.
+    would rot the moment the store changed, and one the pickers do not list cannot be named.
     """
-    df = q("""SELECT session_id, COUNT(*) AS n FROM compactions
-               GROUP BY session_id ORDER BY n DESC, session_id LIMIT 1""")
-    if not df.empty:
-        return df.iloc[0]["session_id"]
-    df = q("""SELECT session_id, COUNT(*) AS n FROM turns
-               GROUP BY session_id ORDER BY n DESC, session_id LIMIT 1""")
-    return df.iloc[0]["session_id"]
+    return _busiest_listed(
+        q, store, rows,
+        """SELECT session_id, COUNT(*) AS n FROM compactions
+            GROUP BY session_id ORDER BY n DESC, session_id""") or _busiest_listed(
+        q, store, rows,
+        """SELECT session_id, COUNT(*) AS n FROM turns
+            GROUP BY session_id ORDER BY n DESC, session_id""")
 
 
 @pytest.fixture(scope="session")
-def other_session_id(q, session_id):
-    """A second session, for the Compare tab. Never the same one as `session_id`."""
-    df = q("""SELECT session_id, COUNT(*) AS n FROM turns WHERE session_id <> ?
-               GROUP BY session_id ORDER BY n DESC, session_id LIMIT 1""", (session_id,))
-    return None if df.empty else df.iloc[0]["session_id"]
+def other_session_id(q, store, rows, session_id):
+    """A second session, for the Compare tab. Never the same one as `session_id`, and one the
+    pickers list, for the reason `_busiest_listed` gives."""
+    return _busiest_listed(
+        q, store, rows,
+        """SELECT session_id, COUNT(*) AS n FROM turns
+            GROUP BY session_id ORDER BY n DESC, session_id""", exclude=session_id)
 
 
 @pytest.fixture(scope="session")
