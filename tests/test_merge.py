@@ -258,14 +258,16 @@ class TestWhatItReports:
         with an archived index entry: the record carries its own isArchived and the copy is byte
         for byte, so the union would file an active record under an archived index. The review
         measured 7 of 223 ids split that way on the live machine."""
-        record(machine["b"], "local_split", title="active here", archived=False)
-        record(machine["c"], "local_split", title="archived over there", archived=True, pad=99)
+        record(machine["b"], "local_split", title="active here", archived=False, pad=99)
+        record(machine["c"], "local_split", title="archived over there", archived=True)
         idx(machine["c"], ["local_split"])
         indexes = [merge.index_pair(p) for p in (machine["a"], machine["b"], machine["c"])]
         said = merge.plan_merge(indexes)
         into_a = [c for c in said["copies"] if c["pair"].startswith(A[:8])
                   and c["id"] == "local_split"]
         assert into_a, "the chat still travels"
+        assert into_a[0]["from"] == str(Path(machine["b"]["path"]) / "local_split.json"), (
+            "the bytes come from the fullest copy, which here is the one that calls it active")
         assert "local_split" not in said["idx_adds"].get(f"{A[:8]}\\{ORG[:8]}", []), (
             "it came from the pair that calls it active, so it must not arrive archived")
 
