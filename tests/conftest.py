@@ -231,6 +231,13 @@ def _busiest_listed(q, store, rows, sql, exclude=None):
             continue
         if not listed or store.chat_head(sid) in listed:
             return sid
+    # NONE OF THESE IS LISTED, so say so and let the caller try its next query. Returning the
+    # busiest unlisted one instead, which this did at first, put the filter in the code and the
+    # old answer in the fixture: the most compacted session was still a review run, and the
+    # comparison still had no name to show. The plain busiest row is the answer only when the
+    # frame itself is empty, where there is nothing to be listed in.
+    if listed:
+        return None
     first = [s for s in df["session_id"] if s != exclude]
     return first[0] if first else None
 
