@@ -103,21 +103,28 @@ def test_a_compaction_always_reduces_the_window(pane_all, q):
     assert int(bad) == 0, f"{bad} compactions report a larger window afterwards"
 
 
-def test_importing_the_store_shells_out_to_nothing():
-    """`import c4x.store` must not run node, or anything else.
+def test_importing_the_store_runs_nothing_over_the_store():
+    """`import c4x.store` may read the math, and must not touch the store.
 
     It used to resolve every compaction's window at import, a node pass over the whole store under
-    a 120 s cap. Everything that imports the store paid it: the account merge imports it for one
-    path, and on a 4.1 GB store the pass went past the cap, so the import itself raised
-    TimeoutExpired. That took out `python -m c4x.merge` and a restarted server, which died before
-    binding its port with the reason only in `data/raw/dashboard.log`.
+    the runner's 120 s cap. Everything that imports the store paid it: the account merge imports it
+    for one path lookup, and on a 4.1 GB store the pass went past the cap, so the import itself
+    raised TimeoutExpired. That took out `python -m c4x.merge` and a restarted dashboard, which
+    died before binding its port with the reason only in `data/raw/dashboard.log`.
+
+    ONE shell-out is expected and allowed: `load_math` runs a `node -e` snippet that reads the
+    thresholds out of `tools/mirror-core.mjs`, so the math has a single source. It imports one
+    small module and never opens the store, so its cost does not grow with the store. Asserting
+    the exact list rather than a count keeps that distinction: a script file passed to node at
+    import time is a pass over the store, and fails here.
     """
     root = Path(__file__).resolve().parent.parent
     done = subprocess.run([sys.executable, "-c", _IMPORT_PROBE], cwd=str(root),
                           capture_output=True, text=True, timeout=900, env=dict(os.environ))
     assert done.returncode == 0, f"importing the store failed: {done.stderr[-2000:]}"
     calls = json.loads(done.stdout.strip().splitlines()[-1])
-    assert calls == [], f"importing c4x.store ran {calls}"
+    assert [c[1] for c in calls if len(c) > 1] == ["-e"], (
+        f"importing c4x.store shelled out to {calls}")
 
 
 def test_the_windows_are_resolved_once_and_only_when_asked(monkeypatch):
