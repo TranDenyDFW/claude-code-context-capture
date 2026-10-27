@@ -3002,9 +3002,14 @@ def load_compaction_windows():
     """Window per compaction, resolved by model segment in one node pass.
 
     The window is a property of the model in use, not of the session, so a session that switched
-    models has more than one. Resolved once at startup rather than per row.
+    models has more than one. Resolved once per process rather than per row, on first use.
+
+    ITS OWN TIMEOUT, well past the runner's default. This is a pass over every compaction in the
+    store, so its cost grows with the store while the default 120 s does not: at 4.1 GB the pass
+    passed that cap and the call raised TimeoutExpired.
     """
-    return _node_json_argv([str(ROOT / "tools" / "segments.mjs"), "--windows-for-compactions"])
+    return _node_json_argv([str(ROOT / "tools" / "segments.mjs"), "--windows-for-compactions"],
+                           timeout=600)
 
 
 def segments_for(session_id: str):
@@ -3020,7 +3025,27 @@ MATH = load_math()
 THRESHOLDS = {t["window"]: t for t in MATH["thresholds"]}
 
 
-COMPACTION_WINDOWS = load_compaction_windows()
+# The window per compaction, filled on FIRST USE and kept for the process. Same shape of cache
+# slot as `_rows_cache` above, and refreshed no more often than the constant it replaced was.
+_windows_cache: dict = {"map": None}
+
+
+def compaction_windows() -> dict:
+    """The window per compaction, resolved when something asks for it.
+
+    NOT AT IMPORT, which is what this used to be. `load_compaction_windows` shells out to node for
+    a pass over the whole store, and a module-level call made every importer of this module pay for
+    it whether or not anything drew the compactions tab: the account merge, the accounts commands
+    and the server's own start all import the store for a path or a query. On this machine's 4.1 GB
+    store that pass went past the runner's 120 s cap, so `import c4x.store` raised TimeoutExpired:
+    it killed `python -m c4x.merge` twice, and it killed a restarted server before it could bind,
+    which left the dashboard down with the reason only in `data/raw/dashboard.log`.
+
+    One reader, `c4x/tabs/compactions.py`, and it is the one that needs the node pass.
+    """
+    if _windows_cache["map"] is None:
+        _windows_cache["map"] = load_compaction_windows()
+    return _windows_cache["map"]
 
 
 def fit_window(pre_tokens: int):
