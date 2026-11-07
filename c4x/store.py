@@ -32,7 +32,12 @@ from c4x.labels import (
     short_path,
     titled_path,
 )
-from c4x.paths import claude_config_dir, install_root, node_exe, ro_uri  # noqa: F401  (ro_uri: re-exported)
+from c4x.paths import (  # noqa: F401  (ro_uri: re-exported)
+    claude_config_dir,
+    install_root,
+    node_exe,
+    ro_uri,
+)
 
 # The install, not this file's directory: they differ once the API is frozen into an exe, and
 # this is the root the store and the node tools are found under. See c4x/paths.py.
