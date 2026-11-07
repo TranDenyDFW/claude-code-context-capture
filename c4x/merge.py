@@ -256,7 +256,8 @@ def write_idx(folder, ids, write=None) -> None:
 
 
 def merge(dry_run=False, only=None, roots=None, running=None, indexes=None,
-          copy=None, replace=None, write=None) -> dict:
+          copy=None, replace=None, write=None, deletions=True, backup=None,
+          remove=None) -> dict:
     """Make every real pair hold the union. Returns a report naming every file written.
 
     THE APP MAY BE OPEN FOR THE RECORDS, which are new files it will read at its next start, the
@@ -303,6 +304,16 @@ def merge(dry_run=False, only=None, roots=None, running=None, indexes=None,
         report["idx_written"].append({"pair": pair_name, "added": sorted(ids),
                                       "entries": len(union)})
     report["restart_required"] = bool(report["written"]) and not dry_run
+    # ADDING AND REMOVING ARE THE SAME JOB. Copying a chat into every pair without carrying its
+    # deletion across is what made a deleted chat come back the moment someone switched accounts:
+    # this module had put the copies there, and only the signed-in pair ever heard about the
+    # delete. Acts only on an id some pair really carries a marker for, and backs every pair up
+    # before it removes anything.
+    if deletions:
+        # NOT `write=write`: that door is the index writer, which takes a folder and a set. The
+        # marker writer takes a path and bytes, and its default is the one wanted here.
+        report["deletions"] = propagate_deletions(
+            seen, roots=roots, dry_run=dry_run, backup=backup, remove=remove)
     # THE ROOT THE WORK WAS DONE AGAINST, derived from the pairs actually merged rather than asked
     # for again, so the marker cannot claim a root this run never touched.
     report["root"] = sorted({str(Path(i["path"]).parent.parent) for i in seen})
@@ -313,6 +324,91 @@ def merge(dry_run=False, only=None, roots=None, running=None, indexes=None,
             write_marker(report)
         except OSError as exc:                 # a marker that cannot be written must not undo work
             report["marker_failed"] = str(exc)
+    return report
+
+
+def plan_deletions(indexes) -> dict:
+    """Which leftover record copies must go, because the app was told to delete that chat.
+
+    THE MARKER IS THE INSTRUCTION; a copy in another account is only this module's own doing. The
+    app deletes a chat by removing the record from the pair it is signed into and leaving a
+    `deleted_<uuid>` marker beside it. This module had already put a copy in every other pair, and
+    those copies are what brought the chat back the moment someone switched accounts. Measured
+    2026-11-07: 85 ids marked deleted on this machine, 27 of them still holding a record in 8 pairs
+    each.
+
+    A pair that is a link is never written into, for the reason `merge` gives.
+    """
+    marked: dict[str, str] = {}
+    for one in indexes:
+        for rid in one["deleted"]:
+            marked.setdefault(rid, str(Path(one["path"]) / (DELETED + rid[len(RECORD):])))
+    removals, marker_adds = [], []
+    for one in indexes:
+        if one["link"]:
+            continue
+        for rid, says in sorted(marked.items()):
+            if rid in one["records"]:
+                removals.append({"pair": one["pair"], "id": rid, "path": one["records"][rid]})
+            if rid not in one["deleted"]:
+                marker_adds.append({
+                    "pair": one["pair"], "id": rid, "says": says,
+                    "path": str(Path(one["path"]) / (DELETED + rid[len(RECORD):]))})
+    return {"marked": sorted(marked), "removals": removals, "marker_adds": marker_adds}
+
+
+def _marker_bytes(says) -> bytes:
+    """What the original marker said, or the time now, so the copy carries the same answer."""
+    import time
+    try:
+        text = Path(says).read_bytes().strip()
+    except OSError:
+        text = b""
+    return text if text.isdigit() else str(int(time.time() * 1000)).encode("ascii")
+
+
+def propagate_deletions(indexes, roots=None, dry_run=True, backup=None, remove=None,
+                        write=None) -> dict:
+    """Carry a deletion to every pair: take the leftover copies away, and say why where it is not
+    already said.
+
+    THE ONLY DESTRUCTIVE THING IN THIS MODULE, so it takes a full hashed backup of every pair
+    before it removes the first file, names every path it touched, and acts only on an id some pair
+    really carries a marker for. Nothing is inferred from a title, a date or an absence.
+    """
+    said = plan_deletions(indexes)
+    report: dict[str, Any] = {
+        "dry_run": bool(dry_run), "marked": said["marked"], "chats": len(said["marked"]),
+        "removed": [], "markers": [], "failed": [], "backup": None,
+        "would_remove": said["removals"], "would_mark": said["marker_adds"]}
+    if dry_run or not (said["removals"] or said["marker_adds"]):
+        return report
+    if backup is None:
+        from c4x import accounts
+        where = roots if roots is not None else sorted(
+            {str(Path(one["path"]).parent.parent) for one in indexes})
+
+        def backup():
+            return accounts._backup(where, "before carrying a deletion across the account pairs")
+    try:
+        report["backup"] = str(backup())
+    except OSError as exc:                     # no backup, no deletion. The order is the safety.
+        report["failed"].append({"backup": str(exc)})
+        return report
+    take = os.remove if remove is None else remove
+    put = (lambda path, data: Path(path).write_bytes(data)) if write is None else write
+    for item in said["removals"]:
+        try:
+            take(item["path"])
+            report["removed"].append(item)
+        except OSError as exc:
+            report["failed"].append({**item, "why": str(exc)})
+    for item in said["marker_adds"]:
+        try:
+            put(item["path"], _marker_bytes(item["says"]))
+            report["markers"].append(item)
+        except OSError as exc:
+            report["failed"].append({**item, "why": str(exc)})
     return report
 
 
@@ -404,6 +500,14 @@ def main(argv=None):
     if "--run" in argv or "--dry-run" in argv:
         said = merge(dry_run="--dry-run" in argv, only=only)
         print(json.dumps(said, indent=1) if as_json else sentence(said))
+        gone = said.get("deletions") or {}
+        removals = gone.get("removed") if not gone.get("dry_run") else gone.get("would_remove")
+        if removals:
+            where = "removed" if not gone.get("dry_run") else "would be removed"
+            print(f"  {len(removals)} leftover copy/copies of {gone['chats']} deleted "
+                  f"chat(s) {where}" + (f"; backup {gone['backup']}" if gone.get("backup")
+                                        else ""))
+
         return 1 if said["failed"] else 0
     said = survey()
     if as_json:
