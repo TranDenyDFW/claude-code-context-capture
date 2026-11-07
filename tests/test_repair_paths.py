@@ -175,3 +175,26 @@ class TestTheRewrite:
         assert said["moved"] == []
         assert (projects / repair_paths.slug(str(machine["gone"] / "Alpha")) / "x.jsonl").exists()
         assert said["folders"], "the move was still planned and reported, just not performed"
+
+
+class TestTheMachinesOwnMoves:
+    """`moves_for` adds the relocation the app itself performed, derived rather than written down."""
+
+    def test_the_scratch_workspaces_follow_the_data_directory(self, tmp_path):
+        was, here = tmp_path / "Roaming" / "Claude", tmp_path / "Claude-Data" / "claude_abc"
+        moves = repair_paths.moves_for(appdata=str(here), roaming=str(was))
+        (here / "scratch-workspaces" / "a" / "b").mkdir(parents=True)
+        gone = str(was / "scratch-workspaces" / "a" / "b")
+        assert repair_paths.resolve(gone, moves) == str(here / "scratch-workspaces" / "a" / "b")
+
+    def test_one_directory_under_two_names_adds_nothing(self, tmp_path):
+        """KNOWN BAD INPUT: the app never moved, so there is no relocation to add and inventing one
+        would map a live path onto itself."""
+        same = str(tmp_path / "Claude")
+        assert repair_paths.moves_for(appdata=same, roaming=same) == repair_paths.DEFAULT_MOVES
+
+    def test_the_second_gathering_under_projects_is_covered(self, tmp_path, monkeypatch):
+        """`R:\Local\PDrive` became `R:\Projects\Local\PDrive`, so a chat that already named
+        an `R:` path went missing in its turn."""
+        olds = [old for old, _ in repair_paths.DEFAULT_MOVES]
+        assert "R:\\" in olds, "the second gathering has no rule"

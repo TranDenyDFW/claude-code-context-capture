@@ -52,7 +52,28 @@ KEEP = ("sessionPermissionUpdates", "scratchPromptRecents")
 # every subfolder the records actually name.
 DEFAULT_MOVES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("P:\\", ("R:\\Projects\\", "R:\\")),
+    # The same tree was gathered under `Projects` a second time, so chats that already named `R:\`
+    # went missing too. Harmless where it does not apply: a path only moves when the original is
+    # gone AND the candidate is really there.
+    ("R:\\", ("R:\\Projects\\",)),
 )
+
+
+def moves_for(appdata=None, roaming=None, moves=DEFAULT_MOVES):
+    """The default moves plus this machine's own relocation of the app's scratch workspaces.
+
+    The desktop app keeps a scratch workspace per chat beside its records, so when the app moved
+    its data directory those paths died with the old one. Derived from the resolved roots rather
+    than written down, because the new name carries the install's publisher suffix.
+    """
+    from c4x import store
+    here = store.claude_appdata() if appdata is None else appdata
+    was = roaming if roaming is not None else os.path.join(
+        os.environ.get("APPDATA") or "", "Claude")
+    if not here or not was or os.path.normcase(str(here)) == os.path.normcase(str(was)):
+        return moves
+    return moves + ((os.path.join(str(was), "scratch-workspaces") + os.sep,
+                     (os.path.join(str(here), "scratch-workspaces") + os.sep,)),)
 
 
 def slug(path: str) -> str:
@@ -195,12 +216,12 @@ def move_folder(source, destination) -> dict[str, Any]:
     return {"from": str(source), "to": str(destination), "moved": moved, "kept_both": kept}
 
 
-def repair(root=None, projects=None, dry_run=True, moves=DEFAULT_MOVES, isdir=None,
+def repair(root=None, projects=None, dry_run=True, moves=None, isdir=None,
            folders=False) -> dict[str, Any]:
     """Point every record whose working folder moved at the folder that exists now."""
     from c4x import store
     where = store.sessions_root() if root is None else root
-    said = plan(where, projects, moves, isdir)
+    said = plan(where, projects, moves_for() if moves is None else moves, isdir)
     said.update({"root": str(where), "dry_run": bool(dry_run), "rewritten": 0,
                  "failed": [], "moved": []})
     if dry_run:
