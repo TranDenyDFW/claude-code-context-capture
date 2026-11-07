@@ -919,6 +919,7 @@ class TestWhetherTheRootIsStillTheRightOne:
 
     def mark(self, roots, days_ago=0):
         from datetime import UTC, datetime, timedelta
+
         from c4x import merge
         merge.write_marker({"root": [str(r) for r in roots], "pairs": list(roots), "ids": 1,
                             "copied": 0, "deferred_archived": []},
