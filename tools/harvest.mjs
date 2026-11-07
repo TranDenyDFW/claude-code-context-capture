@@ -38,7 +38,14 @@ import { homedir } from 'node:os';
 
 const ROOT = rootFrom(import.meta.url);
 const SELF_PATH = fileURLToPath(import.meta.url);
-const PROJECTS = join(homedir(), '.claude', 'projects');
+// CLAUDE_CONFIG_DIR is how Claude Code is told to keep its state somewhere other than
+// `~/.claude`, and this file had the default written in by hand, as did two places on the python
+// side. Honouring it here and nowhere else would only move the disagreement, so `c4x/appstate.py`
+// reads the same variable.
+const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+const PROJECTS = join(CLAUDE_DIR, 'projects');
+// The directory the desktop app keeps its per-chat records in, named once on this side too.
+const RECORDS_DIR = 'claude-code-sessions';
 // Store path, overridable so a run can target a copy instead of the live store. An independent
 // reviewer had to mutate the real database to verify --backfill-survivors, because there was no
 // way to point it elsewhere; a tool that can only be exercised against production data is a tool
@@ -1282,29 +1289,33 @@ export function resolveRecordsRoots(argv = [], env = process.env) {
   const i = argv.indexOf('--records');
   if (i >= 0 && argv[i + 1]) return explicit('--records', argv[i + 1]);
   if (env.C4X_SESSIONS_ROOT) return explicit('C4X_SESSIONS_ROOT', env.C4X_SESSIONS_ROOT);
-  const roots = [join(env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'Claude', 'claude-code-sessions')];
+  // DISCOVERED, NOT LISTED, and the same four shapes `c4x/store.py _ROOT_SHAPES` searches. Naming
+  // the layouts was the fault: build 4.23118.0.0 moved its records to a directory none of the
+  // names described, this function and the python one each held their own copy of the list, and
+  // because neither searched, neither could reveal the other. A shape with the product's name
+  // wildcarded finds the next move without an edit here.
+  const roaming = env.APPDATA || join(homedir(), 'AppData', 'Roaming');
   const local = env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
-  const packages = join(local, 'Packages');
-  let names = [];
-  try { names = readdirSync(packages); } catch { /* no package store on this machine */ }
-  for (const name of names) {
-    if (name.startsWith('Claude')) {
-      roots.push(join(packages, name, 'LocalCache', 'Roaming', 'Claude', 'claude-code-sessions'));
+  const dirsIn = (where) => {
+    try {
+      return readdirSync(where, { withFileTypes: true })
+        .filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch { return []; }                      // unreadable or absent says nothing, not an error
+  };
+  // The name a fresh install uses goes in first, so an empty machine still has an answer.
+  const roots = [join(roaming, 'Claude', RECORDS_DIR)];
+  for (const name of dirsIn(roaming)) roots.push(join(roaming, name, RECORDS_DIR));
+  for (const name of dirsIn(local)) {
+    roots.push(join(local, name, RECORDS_DIR));
+    for (const inner of dirsIn(join(local, name))) {
+      roots.push(join(local, name, inner, RECORDS_DIR));
     }
   }
-  // Build 4.23118.0.0 keeps its records under a third name that matches neither spelling above.
-  // This list has to agree with c4x/store.py `_claude_appdata_candidates`, or the page and the
-  // harvester disagree about which sessions are chats. Measured 2026-11-06: 9 account pairs here
-  // against 1 under the older name, so a harvest that skipped it read a stale directory, found
-  // nothing new, and reported success.
-  let dataNames = [];
-  try { dataNames = readdirSync(join(local, 'Claude-Data')); } catch { /* older build layout */ }
-  for (const name of dataNames) {
-    if (name.startsWith('claude_')) {
-      roots.push(join(local, 'Claude-Data', name, 'claude-code-sessions'));
-    }
+  for (const name of dirsIn(join(local, 'Packages'))) {
+    const base = join(local, 'Packages', name, 'LocalCache', 'Roaming');
+    for (const inner of dirsIn(base)) roots.push(join(base, inner, RECORDS_DIR));
   }
-  return roots.filter((r) => existsSync(r));
+  return [...new Set(roots)].filter((r) => existsSync(r));
 }
 
 // Map of cliSessionId to {fork, file} for every chat the app has a record of. A file without a

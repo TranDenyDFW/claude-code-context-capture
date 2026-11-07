@@ -5,6 +5,7 @@ and a patch after that would test nothing. One case patches the module constant 
 default path reads it.
 """
 import os
+from pathlib import Path
 
 import pytest
 
@@ -121,3 +122,22 @@ class TestTheNodeItRuns:
         got = paths.node_exe(tmp_path, exists=lambda p: asked.append(p) or True)
         assert asked and got == asked[0]
         assert got.endswith("node.exe" if os.name == "nt" else "node")
+
+
+class TestWhereClaudeCodeKeepsItsState:
+    """`CLAUDE_CONFIG_DIR` is the documented way to move `~/.claude`, and it was honoured nowhere.
+
+    The default was written out by hand in `c4x/appstate.py`, `c4x/store.py` and
+    `tools/harvest.mjs`. Three copies of one assumption is the same shape of fault as the records
+    root: a machine that moved it would have had three separate things quietly reading a directory
+    that was not the one in use.
+    """
+
+    def test_the_default_is_the_home_directory(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        assert paths.claude_config_dir() == Path.home() / ".claude"
+
+    def test_the_variable_moves_it(self, monkeypatch, tmp_path):
+        """KNOWN BAD INPUT for the old code, which ignored this entirely."""
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
+        assert paths.claude_config_dir() == tmp_path / "elsewhere"

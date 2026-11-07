@@ -32,7 +32,7 @@ from c4x.labels import (
     short_path,
     titled_path,
 )
-from c4x.paths import install_root, node_exe, ro_uri  # noqa: F401  (ro_uri: re-exported)
+from c4x.paths import claude_config_dir, install_root, node_exe, ro_uri  # noqa: F401  (ro_uri: re-exported)
 
 # The install, not this file's directory: they differ once the API is frozen into an exe, and
 # this is the root the store and the node tools are found under. See c4x/paths.py.
@@ -604,6 +604,10 @@ def invalidate():
     # The chain map, which a delete or an import can change: a removed prefix must stop folding
     # into its head, and an imported chain must start to.
     _links_cache.update({"at": 0.0, "head_of": None, "members_of": None})
+    # Which directories hold records at all. An install, an app update or a sign-in can add one,
+    # and a stale answer here is the whole class of fault this module has just been through: every
+    # read below it would go to a directory that is no longer the one the app uses.
+    _discovery_cache.update({"key": None, "at": 0.0, "found": None})
     _reviews_cache.update({"at": 0.0, "parent_of": None, "runs_of": None})
     _runs_cache.update({"at": 0.0, "parent_of": None, "runs_of": None, "project_of": None})
     _deleted_cache.update({"at": 0.0, "ids": None})
@@ -1077,6 +1081,53 @@ class _ArchivedCache(TypedDict):
 _archived_cache: _ArchivedCache = {"map": None, "at": 0.0, "root": None, "sig": None}
 
 
+# The directory the desktop app keeps its per-chat records in, under whichever root it is using.
+# Named once: the bug this module was carrying came from the same assumption being written down in
+# several places and only some of them being updated when the app moved.
+RECORDS_DIR = "claude-code-sessions"
+
+
+# The discovery is a handful of globs over two directories, measured at 82 ms here, and
+# `claude_appdata()` sits on the per-request path, so the answer is kept for a short while. Keyed
+# on the two environment variables the shapes are built from, because the suite points those at a
+# fake machine per test and a time-only cache would hand one test the previous test's machine. A
+# test that patches `_claude_appdata_candidates` itself never reaches this at all.
+_discovery_cache: dict = {"key": None, "at": 0.0, "found": None}
+DISCOVERY_TTL = 60.0
+
+# Where a records root has really been found, with the product's own name replaced by a wildcard.
+# Listing the layouts by name is what failed: the app moved to a directory none of the listed names
+# described, and because nothing searched, nothing noticed for weeks. Bounded globs, never a walk
+# of the disk.
+_ROOT_SHAPES = (
+    ("roaming", ("*", RECORDS_DIR)),
+    ("local", ("*", RECORDS_DIR)),
+    ("local", ("*", "*", RECORDS_DIR)),
+    ("local", ("Packages", "*", "LocalCache", "Roaming", "*", RECORDS_DIR)),
+)
+
+
+def _discover_record_roots(roaming, local) -> list:
+    """Every directory on this machine that holds a `claude-code-sessions`, as its PARENT.
+
+    Returns the parent because that is what the rest of this module calls an appdata root, and
+    what `claude_appdata()` joins `RECORDS_DIR` onto.
+    """
+    key = (os.path.normcase(str(roaming)), os.path.normcase(str(local)))
+    now = _time.time()
+    if (_discovery_cache["found"] is not None and _discovery_cache["key"] == key
+            and now - _discovery_cache["at"] < DISCOVERY_TTL):
+        return list(_discovery_cache["found"])
+    bases = {"roaming": roaming, "local": local}
+    found: list = []
+    for where, parts in _ROOT_SHAPES:
+        for hit in sorted(glob.glob(os.path.join(bases[where], *parts))):
+            if os.path.isdir(hit):
+                found.append(os.path.dirname(hit))
+    _discovery_cache.update({"key": key, "at": now, "found": list(found)})
+    return found
+
+
 def _claude_appdata_candidates():
     """Every directory the desktop app might keep its state in on this machine.
 
@@ -1107,11 +1158,19 @@ def _claude_appdata_candidates():
     """
     roaming = os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming")
     local = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
+    # THE DEFAULT NAME FIRST, so a machine with no records at all still has an answer: it is where
+    # a fresh install puts them, and `claude_appdata` falls back to the first candidate when there
+    # is no evidence to rank on.
     found = [os.path.join(roaming, "Claude")]
-    found.extend(sorted(glob.glob(os.path.join(
-        local, "Packages", "Claude*", "LocalCache", "Roaming", "Claude"))))
-    found.extend(sorted(glob.glob(os.path.join(local, "Claude-Data", "claude_*"))))
-    return found
+    # THEN WHATEVER IS ACTUALLY THERE, discovered rather than listed.
+    found.extend(_discover_record_roots(roaming, local))
+    seen, out = set(), []
+    for path in found:
+        key = os.path.normcase(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
 
 
 def _identity(path):
@@ -1182,7 +1241,7 @@ def claude_appdata():
         return candidates[0]
     best, best_score = candidates[0], None
     for path in candidates:
-        records = glob.glob(os.path.join(path, "claude-code-sessions", "*", "*", "local_*.json"))
+        records = glob.glob(os.path.join(path, RECORDS_DIR, "*", "*", "local_*.json"))
         newest = 0.0
         for record in records:
             try:
@@ -1206,7 +1265,7 @@ def sessions_root():
     override = os.environ.get("C4X_SESSIONS_ROOT")
     if override:
         return override
-    return os.path.join(claude_appdata(), "claude-code-sessions")
+    return os.path.join(claude_appdata(), RECORDS_DIR)
 
 
 def sessions_roots() -> list:
@@ -1227,7 +1286,7 @@ def sessions_roots() -> list:
     if override:
         return [override]
     here = sessions_root()
-    rest = [os.path.join(root, "claude-code-sessions") for root in claude_appdata_roots()]
+    rest = [os.path.join(root, RECORDS_DIR) for root in claude_appdata_roots()]
     return [here] + [one for one in rest
                      if os.path.normcase(one) != os.path.normcase(here)]
 
@@ -1467,7 +1526,7 @@ def transcript_ids(ttl: float = 45.0):
         return _transcript_cache["ids"]
     seen = _generation["n"]
     ids = set()
-    root = os.path.join(HOME, ".claude", "projects")
+    root = str(claude_config_dir() / "projects")
     try:
         projects = list(os.scandir(root))
     except OSError:

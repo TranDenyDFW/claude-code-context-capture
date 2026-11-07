@@ -39,7 +39,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # Resolved on THIS machine, at import, and never read from an export.
-CLAUDE_DIR = Path.home() / ".claude"
+from c4x.paths import claude_config_dir
+
+# `~/.claude` unless CLAUDE_CONFIG_DIR says otherwise. One place, shared with the store
+# and the harvester, so a machine that moves it cannot leave one of the three behind.
+CLAUDE_DIR = claude_config_dir()
 CONFIG_PATH = Path.home() / ".claude.json"
 
 TRANSCRIPT, MEMORY, TASKS, CONFIG, DESKTOP = (
