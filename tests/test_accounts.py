@@ -904,10 +904,12 @@ class TestWhetherTheRootIsStillTheRightOne:
         from c4x import store
         live = tmp_path / "live" / "claude-code-sessions"
         stale = tmp_path / "stale" / "claude-code-sessions"
+        # DIFFERENT chats per pair, because the health check asks whether the accounts hold the
+        # same chats, not merely whether a merge ever ran.
         for n in range(live_pairs):
-            record(live / f"acct{n}" / f"org{n}", "x")
+            record(live / f"acct{n}" / f"org{n}", f"live{n}")
         for n in range(stale_pairs):
-            record(stale / f"acct{n}" / f"org{n}", "x")
+            record(stale / f"acct{n}" / f"org{n}", f"stale{n}")
         monkeypatch.setattr(store, "DB_PATH", tmp_path / "data" / "context.db")
         (tmp_path / "data").mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(applog, "log_files", lambda *args, **kw: [])

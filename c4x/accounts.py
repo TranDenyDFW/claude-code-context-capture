@@ -1210,14 +1210,22 @@ def _merge_health() -> dict[str, Any]:
             f"c4x reads {here}, which holds {mine} account pair(s), while {where} holds {count}; "
             "the app's records have most likely moved and every record c4x writes is going "
             "somewhere the app no longer reads")
+    # THE SYMPTOM, NOT A PROXY FOR IT. "More than one pair and no merge" is not a fault: a machine
+    # whose accounts hold the same chats is fine however that came about, and a pair that is a link
+    # is already covered by sharing. What matters is two real pairs whose record sets differ, which
+    # is precisely "a chat exists under one account and not the other". Checking the proxy instead
+    # made five sharing tests fail, and they were right to.
+    real = [p for p in pairs_on(here) if not p["link_to"]]
+    holdings = {frozenset(f.name for f in Path(p["path"]).glob(f"{RECORD}*.json")) for p in real}
+    diverged = len(holdings) > 1
     last = merge_module.read_marker()
     out["last_merge"] = last
     if not last:
-        if mine > 1:
+        if diverged:
             out["ok"] = False
             out["problems"].append(
-                f"no merge has ever been recorded against {here}, so a chat made under one "
-                "account stays invisible under the others")
+                f"the accounts under {here} do not hold the same chats and no merge has ever "
+                "been recorded, so a chat made under one account is invisible under the others")
         return out
     recorded = [str(one) for one in (last.get("roots") or [])]
     if recorded and here not in recorded:
@@ -1226,7 +1234,7 @@ def _merge_health() -> dict[str, Any]:
             f"the last merge ran against {recorded[0]}; the app now reads {here}, so nothing has "
             "been merged where it counts since the records moved")
     days = _days_since(last.get("at"))
-    if days is not None and days > MERGE_STALE_DAYS and mine > 1:
+    if days is not None and days > MERGE_STALE_DAYS and diverged:
         out["ok"] = False
         out["problems"].append(
             f"the records under {here} have not been merged for {days} days (last run "
