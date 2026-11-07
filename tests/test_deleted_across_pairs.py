@@ -84,7 +84,8 @@ class TestTheMarkerIsFoundWhereverItIs:
         record(root / "acct" / "org", UUID_B)
         found = run_node(
             "const m = await import(H);"
-            "console.log(JSON.stringify({ids: [...m.deletedMarkerPaths([process.env.T_ROOT]).keys()]}));",
+            "const got = m.deletedMarkerPaths([process.env.T_ROOT]);"
+            "console.log(JSON.stringify({ids: [...got.keys()]}));",
             {"T_ROOT": str(root)})
         assert found["ids"] == []
 
