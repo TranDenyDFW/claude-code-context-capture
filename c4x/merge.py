@@ -303,7 +303,58 @@ def merge(dry_run=False, only=None, roots=None, running=None, indexes=None,
         report["idx_written"].append({"pair": pair_name, "added": sorted(ids),
                                       "entries": len(union)})
     report["restart_required"] = bool(report["written"]) and not dry_run
+    # THE ROOT THE WORK WAS DONE AGAINST, derived from the pairs actually merged rather than asked
+    # for again, so the marker cannot claim a root this run never touched.
+    report["root"] = sorted({str(Path(i["path"]).parent.parent) for i in seen})
+    report["pairs"] = [i["pair"] for i in seen]
+    report["copied"] = len(report["written"])
+    if not dry_run:
+        try:
+            write_marker(report)
+        except OSError as exc:                 # a marker that cannot be written must not undo work
+            report["marker_failed"] = str(exc)
     return report
+
+
+def marker_path():
+    """Where the last real merge is recorded, beside the store, the way sharing's marker is.
+
+    A merge that found nothing to do and a merge that looked in the wrong place print the same
+    sentence. This machine ran the second one for weeks and read it as the first. The marker is
+    what tells them apart afterwards, because it names the root the work was done against, and
+    `accounts.verify` compares that against the root the app reads now.
+    """
+    from c4x import store
+    return Path(store.DB_PATH).parent / "account-merge.json"
+
+
+def write_marker(said, at=None) -> None:
+    """Record that a merge ran, including one that copied nothing.
+
+    A successful no-op IS the fact worth keeping: it is the difference between "nothing to do" and
+    "nobody looked".
+    """
+    from datetime import UTC, datetime
+    roots = said.get("root") or []
+    if isinstance(roots, str):
+        roots = [roots]
+    body = {"at": (at or datetime.now(UTC)).isoformat(timespec="seconds"),
+            "roots": sorted(str(one) for one in roots),
+            "pairs": len(said.get("pairs") or []), "ids": said.get("ids", 0),
+            "copied": said.get("copied", 0),
+            "deferred": len(said.get("deferred_archived") or [])}
+    path = marker_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(body, indent=1), encoding="utf-8")
+
+
+def read_marker():
+    """The last recorded merge, or `{}` when none was recorded or it cannot be read."""
+    try:
+        body = json.loads(marker_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 def sentence(report) -> str:

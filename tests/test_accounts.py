@@ -890,3 +890,84 @@ class TestTheTags:
         signed_in_as(machine, monkeypatch, A, ORG_A)
         state = accounts.state()
         assert state["listed"] is None and state["current_listed"] is None
+
+
+class TestWhetherTheRootIsStillTheRightOne:
+    """The check that was missing while the app quietly moved its records.
+
+    Every other check in `verify()` assumes c4x is looking in the right directory. For weeks it was
+    not, every merge reported success against an abandoned one, and the only symptom was a person
+    noticing their own chats were not there.
+    """
+
+    def two_roots(self, tmp_path, monkeypatch, live_pairs=3, stale_pairs=1):
+        from c4x import store
+        live = tmp_path / "live" / "claude-code-sessions"
+        stale = tmp_path / "stale" / "claude-code-sessions"
+        for n in range(live_pairs):
+            record(live / f"acct{n}" / f"org{n}", "x")
+        for n in range(stale_pairs):
+            record(stale / f"acct{n}" / f"org{n}", "x")
+        monkeypatch.setattr(store, "DB_PATH", tmp_path / "data" / "context.db")
+        (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(applog, "log_files", lambda *args, **kw: [])
+        monkeypatch.setattr(store, "sessions_root", lambda: str(live))
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(live), str(stale)])
+        return live, stale
+
+    def mark(self, roots, days_ago=0):
+        from datetime import UTC, datetime, timedelta
+        from c4x import merge
+        merge.write_marker({"root": [str(r) for r in roots], "pairs": list(roots), "ids": 1,
+                            "copied": 0, "deferred_archived": []},
+                           at=datetime.now(UTC) - timedelta(days=days_ago))
+
+    def test_a_root_holding_fewer_pairs_than_another_is_the_alarm(self, tmp_path, monkeypatch):
+        """KNOWN BAD INPUT: c4x points at the root with ONE pair while another holds nine.
+
+        This is the shape the machine was really in, and it is the one state that makes every
+        other answer in this module wrong.
+        """
+        live, stale = self.two_roots(tmp_path, monkeypatch, live_pairs=1, stale_pairs=9)
+        self.mark([live])
+        answer = accounts.verify()
+        assert answer["ok"] is False
+        assert any(str(stale) in p and str(live) in p for p in answer["problems"]), (
+            f"the problem names neither root: {answer['problems']}")
+
+    def test_a_merge_recorded_against_another_root_is_a_problem(self, tmp_path, monkeypatch):
+        live, stale = self.two_roots(tmp_path, monkeypatch)
+        self.mark([stale])
+        answer = accounts.verify()
+        assert answer["ok"] is False
+        assert any("the app now reads" in p for p in answer["problems"])
+
+    def test_a_merge_that_has_not_run_for_a_week_is_a_problem(self, tmp_path, monkeypatch):
+        live, _stale = self.two_roots(tmp_path, monkeypatch)
+        self.mark([live], days_ago=accounts.MERGE_STALE_DAYS + 3)
+        answer = accounts.verify()
+        assert answer["ok"] is False
+        assert any("have not been merged for" in p for p in answer["problems"])
+
+    def test_never_having_merged_a_multi_account_machine_is_a_problem(self, tmp_path, monkeypatch):
+        self.two_roots(tmp_path, monkeypatch)
+        answer = accounts.verify()
+        assert answer["ok"] is False
+        assert any("no merge has ever been recorded" in p for p in answer["problems"])
+
+    def test_a_fresh_merge_on_the_right_root_raises_nothing(self, tmp_path, monkeypatch):
+        """The gate must be able to PASS as well as fail, or it says nothing either way."""
+        live, _stale = self.two_roots(tmp_path, monkeypatch)
+        self.mark([live])
+        answer = accounts.verify()
+        assert [p for p in answer["problems"] if "merge" in p or "pair(s)" in p] == []
+
+    def test_the_sharing_problems_are_not_lost_when_the_merge_is_healthy(self, tmp_path,
+                                                                        monkeypatch):
+        """KNOWN BAD INPUT for the splice itself: assigning the health dict over the report would
+        silently drop every problem found before it."""
+        live, _stale = self.two_roots(tmp_path, monkeypatch)
+        self.mark([live])
+        answer = accounts.verify()
+        assert "problems" in answer and isinstance(answer["problems"], list)
+        assert "last_merge" in answer and answer["last_merge"].get("roots") == [str(live)]

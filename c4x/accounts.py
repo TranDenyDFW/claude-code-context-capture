@@ -1161,6 +1161,77 @@ def verify():
             "the desktop app refuses to write a chat record through a link on this machine, so "
             "every archive, rename and new chat made under a linked account is dropped without a "
             f"word on screen: {refused['said']}")
+    # APPENDED, never assigned over: `update()` here would drop every problem found above, which
+    # is the kind of quiet loss this whole function exists to catch.
+    health = _merge_health()
+    out["last_merge"] = health.get("last_merge", {})
+    out["problems"] += health["problems"]
+    if not health["ok"]:
+        out["ok"] = False
+    return out
+
+
+# How long a records root may go unmerged before that is itself the problem.
+MERGE_STALE_DAYS = 7
+
+
+def _days_since(stamp):
+    """Whole days since an ISO stamp, or None when it cannot be read as one."""
+    from datetime import UTC, datetime
+    try:
+        when = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - when).days
+
+
+def _merge_health() -> dict[str, Any]:
+    """Is c4x still looking where the app actually keeps its records, and did a merge ever run?
+
+    THIS IS THE CHECK THAT WAS MISSING. The app moved its records to a new directory, c4x kept
+    reading the old one, and every merge reported success against a directory nobody writes to any
+    more. Nothing compared the two, so the only symptom was a person noticing their own chats were
+    not there. Each problem below names both paths, because the whole difficulty was that one path
+    looks exactly as healthy as the other.
+    """
+    from c4x import merge as merge_module
+    from c4x import store
+    out: dict[str, Any] = {"problems": [], "ok": True}
+    here = str(store.sessions_root())
+    mine = len(pairs_on(here))
+    others = {str(r): len(pairs_on(r)) for r in store.sessions_roots() if str(r) != here}
+    fuller = sorted((n, r) for r, n in others.items() if n > mine)
+    if fuller:
+        count, where = fuller[-1]
+        out["ok"] = False
+        out["problems"].append(
+            f"c4x reads {here}, which holds {mine} account pair(s), while {where} holds {count}; "
+            "the app's records have most likely moved and every record c4x writes is going "
+            "somewhere the app no longer reads")
+    last = merge_module.read_marker()
+    out["last_merge"] = last
+    if not last:
+        if mine > 1:
+            out["ok"] = False
+            out["problems"].append(
+                f"no merge has ever been recorded against {here}, so a chat made under one "
+                "account stays invisible under the others")
+        return out
+    recorded = [str(one) for one in (last.get("roots") or [])]
+    if recorded and here not in recorded:
+        out["ok"] = False
+        out["problems"].append(
+            f"the last merge ran against {recorded[0]}; the app now reads {here}, so nothing has "
+            "been merged where it counts since the records moved")
+    days = _days_since(last.get("at"))
+    if days is not None and days > MERGE_STALE_DAYS and mine > 1:
+        out["ok"] = False
+        out["problems"].append(
+            f"the records under {here} have not been merged for {days} days (last run "
+            f"{last.get('at')}), so anything made under one account since then is invisible "
+            "under the others")
     return out
 
 
