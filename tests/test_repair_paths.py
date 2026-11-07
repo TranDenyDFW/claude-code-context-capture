@@ -178,7 +178,11 @@ class TestTheRewrite:
 
 
 class TestTheMachinesOwnMoves:
-    """`moves_for` adds the relocation the app itself performed, derived rather than written down."""
+    """`moves_for` adds the relocation the app itself performed.
+
+    Derived from the resolved roots rather than written down, because the new name carries the
+    install's publisher suffix.
+    """
 
     def test_the_scratch_workspaces_follow_the_data_directory(self, tmp_path):
         was, here = tmp_path / "Roaming" / "Claude", tmp_path / "Claude-Data" / "claude_abc"
