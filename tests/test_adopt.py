@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from c4x import accounts, adopt, appstate, reviews, store  # noqa: E402
+from c4x import accounts, adopt, applog, appstate, reviews, store  # noqa: E402
 from tests.test_projects import build_store, forget_cached_rows  # noqa: E402
 
 A, B = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
@@ -58,6 +58,14 @@ def machine(tmp_path, monkeypatch):
     monkeypatch.setattr(appstate, "sessions_root", lambda: str(root))
     monkeypatch.setattr(store, "sessions_roots", lambda: [str(root)])
     monkeypatch.setattr(store, "sessions_root", lambda: str(root))
+    # THE APP LOG IS PART OF THE MACHINE TOO, and it was the one root this fixture left pointing at
+    # the real one. `accounts.share_all` asks `refused_writes`, which reads the desktop app's own
+    # logs, so on any machine that has really run the app these tests read ITS history: on the test
+    # laptop that is 595 refusals from September, and two of them failed with a message about real
+    # account pairs that appear nowhere in this fixture. `tests/test_accounts.py` already isolates
+    # it this way, and the tests that mean to exercise the refusal hand `log_files` a log of their
+    # own, so emptying it here removes a machine's history, not the guard.
+    monkeypatch.setattr(applog, "log_files", lambda *args, **kw: [])
     monkeypatch.setattr(accounts, "app_running", lambda: False)
 
     db = tmp_path / "data" / "context.db"
