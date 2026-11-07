@@ -541,6 +541,13 @@ def main(argv=None):
               "first covers any account pair the app created since sharing")
     # THE RECONCILE AT START: a server started with the app closed can cover the pairs now.
     reconcile_at_start()
+    # THE MERGE AT START, whether or not the app is open. One trigger was too few: the only one was
+    # the watchdog's stop, so a machine whose server was restarted rather than stopped could go
+    # weeks without a merge and say nothing. The records are new files the app reads at its next
+    # start, which is why this does not need the app closed; the archived index still waits, and
+    # `merge` defers it on its own. It also writes the marker `accounts.verify` reads, so a server
+    # that starts is a server that records where it looked.
+    merge_records(when="at start")
     if reload:
         print("  reloading on source changes")
     # THE SWEEP AT STARTUP, once the port answers. Exported as an environment variable too, so

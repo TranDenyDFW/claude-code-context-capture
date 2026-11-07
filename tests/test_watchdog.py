@@ -266,3 +266,42 @@ class TestTheStopThatCoversFirst:
             "relinked": [{"copied": [1], "restored": False}, {"copied": [], "restored": False}]}])
         assert server_main._reconcile_summary(report) == (
             "re-pointed 2 link(s); 2 re-pointed, 1 copied through; backup B; marker written")
+
+
+class TestTheMergeAtStart:
+    """One trigger was too few.
+
+    The merge ran only from the watchdog's stop, so a server that was restarted rather than
+    stopped could go weeks without one and say nothing. A start is the other moment it can run.
+    """
+
+    def test_the_server_merges_at_start_as_well_as_at_stop(self):
+        import inspect
+
+        from c4x.api import __main__ as server_main
+        source = inspect.getsource(server_main.main)
+        assert "merge_records(when=\"at start\")" in source
+        assert "reconcile_at_start()" in source
+
+    def test_the_start_merge_does_not_need_the_app_closed(self, monkeypatch):
+        """Unlike the reconcile: records are new files the app reads at its next start, and the
+        archived index is deferred by `merge` itself."""
+        from c4x.api import __main__ as server_main
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        lines, calls = [], []
+        server_main.merge_records(run=lambda: calls.append(1) or {
+            "written": [], "failed": [], "idx_pending": {}, "deferred_archived": [],
+            "dry_run": False, "app_running": True, "skipped": {}, "divergent": []},
+            log=lines.append, when="at start")
+        assert calls == [1], "the start merge was skipped while the app was open"
+        assert lines and lines[0].startswith("[merge] at start:")
+
+    def test_a_start_merge_that_raises_does_not_stop_the_server(self, monkeypatch):
+        from c4x.api import __main__ as server_main
+        monkeypatch.delenv("C4X_NO_WRITES", raising=False)
+        lines = []
+
+        def boom():
+            raise OSError("the records root vanished")
+        assert server_main.merge_records(run=boom, log=lines.append, when="at start") is None
+        assert lines[-1] == "[merge] at start: failed: the records root vanished"
