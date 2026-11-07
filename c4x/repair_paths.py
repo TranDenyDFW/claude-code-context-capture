@@ -134,7 +134,10 @@ def plan(root, projects=None, moves=DEFAULT_MOVES, isdir=None) -> dict[str, Any]
     """
     is_dir = os.path.isdir if isdir is None else isdir
     home = Path(projects) if projects is not None else Path.home() / ".claude" / "projects"
-    rewrites, unresolved, targets, kept = [], {}, {}, {}
+    rewrites: list[dict[str, Any]] = []
+    unresolved: dict[str, int] = {}
+    targets: dict[str, str] = {}
+    kept: dict[str, int] = {}
     for path in records_under(root):
         try:
             body = json.loads(Path(path).read_text(encoding="utf-8"))
