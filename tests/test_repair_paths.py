@@ -193,8 +193,12 @@ class TestTheMachinesOwnMoves:
         same = str(tmp_path / "Claude")
         assert repair_paths.moves_for(appdata=same, roaming=same) == repair_paths.DEFAULT_MOVES
 
-    def test_the_second_gathering_under_projects_is_covered(self, tmp_path, monkeypatch):
-        """`R:\Local\PDrive` became `R:\Projects\Local\PDrive`, so a chat that already named
-        an `R:` path went missing in its turn."""
-        olds = [old for old, _ in repair_paths.DEFAULT_MOVES]
-        assert "R:\\" in olds, "the second gathering has no rule"
+    def test_a_rule_exists_for_the_second_gathering_under_projects(self):
+        r"""`R:\Local\PDrive` became `R:\Projects\Local\PDrive`, so chats that already named an
+        `R:` path went missing in their turn.
+
+        This pins the rule's PRESENCE and says so: the behaviour it guards is covered by the
+        resolver tests above, which run against real directories, and a drive letter cannot be
+        exercised under tmp without pretending.
+        """
+        assert "R:\\" in [old for old, _ in repair_paths.DEFAULT_MOVES]
