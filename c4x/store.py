@@ -1214,11 +1214,22 @@ def sessions_roots() -> list:
 
     The readers' root list. A test that points `sessions_root` at a fixture must point this here
     too, or the page would read the fixture AND the machine's own records.
+
+    THE WRITE ROOT IS PUT FIRST, rather than hoped to be. `desktop_records` walks this list in
+    reverse so that the first entry lands last and wins a duplicate, and said so in a comment, but
+    the order came from the candidate list, which is alphabetical by layout and not by evidence.
+    With one root that never mattered. With two it decided: measured 2026-11-06, 254 chats had a
+    record under both roots, 18 disagreed about whether they were archived, and all 18 resolved to
+    the abandoned root's answer, so the page called chats archived on the strength of a directory
+    the app had stopped writing to.
     """
     override = os.environ.get("C4X_SESSIONS_ROOT")
     if override:
         return [override]
-    return [os.path.join(root, "claude-code-sessions") for root in claude_appdata_roots()]
+    here = sessions_root()
+    rest = [os.path.join(root, "claude-code-sessions") for root in claude_appdata_roots()]
+    return [here] + [one for one in rest
+                     if os.path.normcase(one) != os.path.normcase(here)]
 
 
 def records_fingerprint(root=None):

@@ -539,6 +539,37 @@ class TestWhichAppDataTheAppActuallyUses:
             tmp_path, monkeypatch, roaming_records=1, data_records=3, data_config=True)
         assert str(data) in store.claude_appdata_roots()
 
+    def test_the_write_root_is_the_first_root_the_readers_walk(self, tmp_path, monkeypatch):
+        """`desktop_records` walks this list in reverse so the first entry wins a duplicate.
+
+        The order used to come from the candidate list, which is by layout and not by evidence, so
+        the live root could be second and lose every disagreement.
+        """
+        store, roaming, _packaged, data = self.roots(
+            tmp_path, monkeypatch, roaming_records=300, roaming_config=True,
+            data_records=10, data_pairs=9, data_config=True)
+        roots = store.sessions_roots()
+        assert roots[0] == store.sessions_root() == str(data / "claude-code-sessions")
+        assert str(roaming / "claude-code-sessions") in roots, "the other root is still read"
+
+    def test_a_chat_with_a_record_in_both_roots_takes_the_live_answer(self, tmp_path, monkeypatch):
+        """KNOWN BAD INPUT: the abandoned root calls it archived, the live one does not.
+
+        Measured on this machine: 254 chats had a record in both roots, 18 disagreed, and every one
+        of the 18 resolved to the abandoned root.
+        """
+        store, roaming, _packaged, data = self.roots(
+            tmp_path, monkeypatch, roaming_records=300, roaming_config=True,
+            data_records=10, data_pairs=9, data_config=True)
+        both = [roaming / "claude-code-sessions" / "acct0" / "org0",
+                data / "claude-code-sessions" / "acct0" / "org0"]
+        for folder, archived, title in zip(both, (True, False), ("Stale name", "Current name"),
+                                           strict=True):
+            (folder / "local_dup.json").write_text(
+                json.dumps({"cliSessionId": "dup", "isArchived": archived, "title": title}),
+                encoding="utf-8")
+        assert store.desktop_records(ttl=0)["dup"] == (False, "Current name")
+
     def test_the_live_data_directory_wins_over_a_bigger_stale_pile(self, tmp_path, monkeypatch):
         """KNOWN BAD INPUT: the stale root is handed MORE records than the live one.
 
