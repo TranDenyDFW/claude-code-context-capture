@@ -1283,12 +1283,25 @@ export function resolveRecordsRoots(argv = [], env = process.env) {
   if (i >= 0 && argv[i + 1]) return explicit('--records', argv[i + 1]);
   if (env.C4X_SESSIONS_ROOT) return explicit('C4X_SESSIONS_ROOT', env.C4X_SESSIONS_ROOT);
   const roots = [join(env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'Claude', 'claude-code-sessions')];
-  const packages = join(env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'Packages');
+  const local = env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+  const packages = join(local, 'Packages');
   let names = [];
   try { names = readdirSync(packages); } catch { /* no package store on this machine */ }
   for (const name of names) {
     if (name.startsWith('Claude')) {
       roots.push(join(packages, name, 'LocalCache', 'Roaming', 'Claude', 'claude-code-sessions'));
+    }
+  }
+  // Build 4.23118.0.0 keeps its records under a third name that matches neither spelling above.
+  // This list has to agree with c4x/store.py `_claude_appdata_candidates`, or the page and the
+  // harvester disagree about which sessions are chats. Measured 2026-11-06: 9 account pairs here
+  // against 1 under the older name, so a harvest that skipped it read a stale directory, found
+  // nothing new, and reported success.
+  let dataNames = [];
+  try { dataNames = readdirSync(join(local, 'Claude-Data')); } catch { /* older build layout */ }
+  for (const name of dataNames) {
+    if (name.startsWith('claude_')) {
+      roots.push(join(local, 'Claude-Data', name, 'claude-code-sessions'));
     }
   }
   return roots.filter((r) => existsSync(r));

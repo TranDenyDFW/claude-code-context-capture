@@ -45,9 +45,26 @@ PART = ".c4x-part"
 
 
 def pairs(roots=None) -> list:
-    """Every `<account>\\<org>` directory the store knows, linked or not."""
+    """Every `<account>\\<org>` directory under the root the app WRITES to, linked or not.
+
+    ONE ROOT, NOT THE READERS' UNION, and the difference is the whole safety of this module. The
+    readers walk `sessions_roots()` because a record is worth reading wherever it was left. This
+    copies, so it must not treat two roots as one set of pairs: an abandoned root holds the same
+    `<account>\\<org>` names as the live one, and merging their union means copying a dead root's
+    contents into the app's own pairs and the app's chats back into the dead root.
+
+    Measured 2026-11-06, which is why this changed. The machine had a live root with 9 pairs and a
+    legacy `%APPDATA%\\Claude` root holding one pair of 282 records: an OLD-schema copy, 12 fields
+    per record against the live 38, with no `archived-sessions.idx`, no `scheduled-tasks.json` and
+    no backlog beside it. Across both roots the survey reported 10 pairs and 440 copies, and the 44
+    records found only in the legacy root all carried the same bulk-copy mtime while their own
+    `lastActivityAt` was months old. Merging that union would have pushed months-old records with
+    no archived state into every account, where they would have arrived in Active.
+
+    A stray record in another root is adopt's job, deliberately and one at a time, not this one's.
+    """
     from c4x import accounts, store
-    where = store.sessions_roots() if roots is None else roots
+    where = [store.sessions_root()] if roots is None else roots
     return [p for r in where for p in accounts.pairs_on(r)]
 
 

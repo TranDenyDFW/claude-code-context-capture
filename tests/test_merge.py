@@ -276,3 +276,40 @@ class TestWhatItReports:
         line = merge.sentence(said)
         assert "record(s) copied into" in line
         assert "held back until Claude closes" in line
+
+
+class TestWhichRootTheMergeWorksIn:
+    """A copy stays inside the root the app WRITES to, never the readers' union.
+
+    Measured 2026-11-06: this machine had a live root of 9 account pairs and a legacy
+    `%APPDATA%` root holding one old-schema pair of 282 records with no archived index beside
+    it. The readers walk both by design, because a record is worth reading wherever it was left.
+    Walking both HERE made the survey report 10 pairs and 440 copies: it would have pushed
+    months-old records carrying no archived state into every account, where they arrive in Active,
+    and pushed the app's live chats back into a directory it had abandoned.
+    """
+
+    def test_only_the_write_root_supplies_the_pairs(self, tmp_path, monkeypatch):
+        from c4x import store
+        live = tmp_path / "live" / "claude-code-sessions"
+        stale = tmp_path / "stale" / "claude-code-sessions"
+        for root in (live, stale):
+            pair_at(root, A)
+            pair_at(root, B)
+        monkeypatch.setattr(store, "sessions_root", lambda: str(live))
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(live), str(stale)])
+        found = merge.pairs()
+        assert {p["root"] for p in found} == {str(live)}, (
+            "the merge walked a root the app does not write to")
+        assert len(found) == 2, f"expected the live root's two pairs, got {len(found)}"
+
+    def test_an_explicit_root_list_is_still_honoured(self, tmp_path, monkeypatch):
+        """The parameter is how the tests and any deliberate recovery name their own roots."""
+        from c4x import store
+        live = tmp_path / "live" / "claude-code-sessions"
+        other = tmp_path / "other" / "claude-code-sessions"
+        pair_at(live, A)
+        pair_at(other, B)
+        monkeypatch.setattr(store, "sessions_root", lambda: str(live))
+        found = merge.pairs(roots=[str(live), str(other)])
+        assert {p["root"] for p in found} == {str(live), str(other)}

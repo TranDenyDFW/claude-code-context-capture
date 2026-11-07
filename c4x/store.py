@@ -1081,23 +1081,36 @@ def _claude_appdata_candidates():
     """Every directory the desktop app might keep its state in on this machine.
 
     A Microsoft Store (MSIX) install redirects `%APPDATA%` into its own package container, so there
-    are two names for what may or may not be one directory:
+    are two names for what may or may not be one directory, and a newer build keeps its state in a
+    third place of its own entirely:
 
         %APPDATA%\\Claude
         %LOCALAPPDATA%\\Packages\\Claude_<publisher>\\LocalCache\\Roaming\\Claude
+        %LOCALAPPDATA%\\Claude-Data\\claude_<publisher>
 
-    MEASURED ON TWO MACHINES, AND THEY DISAGREE. On this one the two are the SAME directory: a
-    record under each path returns identical device and inode numbers, and both list 184 records.
+    MEASURED ON TWO MACHINES, AND THEY DISAGREE. On this one the first two are the SAME directory:
+    a record under each path returns identical device and inode numbers, and both list 184 records.
     On the test laptop they are two different stores, 19 records and a `config.json` under the
     package container against 1 record and no config under `%APPDATA%`, so reading `%APPDATA%`
     there saw one twentieth of the sessions and would have filed an imported record where the app
     never looks.
+
+    THE THIRD NAME IS WHY THIS LIST EXISTS AT ALL. Build 4.23118.0.0 keeps its records under
+    `Claude-Data\\claude_<publisher>`, which matches neither pattern above and is a different inode
+    from both, so the identity collapse cannot rescue it. Measured 2026-11-06: that directory held
+    the 9 real account/org pairs while the two older names resolved to one stale directory holding a
+    single pair, and `config.json` beside the records was 12,375 bytes written that day against
+    1,000 bytes untouched since 5 March. Everything built on this list (the merge, adopt, the
+    archived marker, every record read) had been working on a directory the app no longer reads,
+    silently, because nothing compared the two. The publisher suffix ties the layouts together:
+    `Claude-Data\\claude_pzs8sxrjxfjjc` sits beside `Packages\\Claude_pzs8sxrjxfjjc`.
     """
     roaming = os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming")
     local = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
     found = [os.path.join(roaming, "Claude")]
     found.extend(sorted(glob.glob(os.path.join(
         local, "Packages", "Claude*", "LocalCache", "Roaming", "Claude"))))
+    found.extend(sorted(glob.glob(os.path.join(local, "Claude-Data", "claude_*"))))
     return found
 
 
@@ -1141,8 +1154,16 @@ def claude_appdata():
 
     Otherwise the candidates are collapsed by identity, so a redirected install counts once, and
     then ranked: a `config.json` beside the records is the strongest signal that the app writes
-    there, then how many records it holds, then how recent the newest one is. With no evidence at
-    all the `%APPDATA%` name is returned, which is where a fresh install puts things.
+    there, then how many account/org PAIRS it holds, then how recently that `config.json` was
+    written, then the record count, then how recent the newest record is. With no evidence at all
+    the `%APPDATA%` name is returned, which is where a fresh install puts things.
+
+    PAIRS AND THE CONFIG'S AGE RANK ABOVE THE RECORD COUNT, which they did not used to. A raw count
+    is the wrong shape once a root goes stale: measured 2026-11-06, the abandoned root held 282
+    records in ONE pair, the live one 9 pairs, and the last writes to both were ten minutes apart,
+    so neither the count nor recency separates them reliably. The number of pairs says the app signs
+    accounts in there, and `config.json` was 12,375 bytes that day against 1,000 bytes last touched
+    on 5 March, which is the app stating plainly where it lives.
     """
     override = os.environ.get("C4X_SESSIONS_ROOT")
     if override:
@@ -1168,7 +1189,13 @@ def claude_appdata():
                 newest = max(newest, os.path.getmtime(record))
             except OSError:
                 continue
-        score = (os.path.isfile(os.path.join(path, "config.json")), len(records), newest)
+        pairs = {os.path.dirname(record) for record in records}
+        config = os.path.join(path, "config.json")
+        try:
+            config_at = os.path.getmtime(config)
+        except OSError:
+            config_at = 0.0
+        score = (os.path.isfile(config), len(pairs), config_at, len(records), newest)
         if best_score is None or score > best_score:
             best, best_score = path, score
     return best

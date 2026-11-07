@@ -477,46 +477,80 @@ class TestWhichAppDataTheAppActuallyUses:
     """
 
     def roots(self, tmp_path, monkeypatch, packaged_records=0, packaged_config=False,
-              roaming_records=0, roaming_config=False):
+              roaming_records=0, roaming_config=False, roaming_pairs=1,
+              data_records=0, data_config=False, data_pairs=1):
         from c4x import store
         roaming = tmp_path / "Roaming" / "Claude"
         packaged = (tmp_path / "Local" / "Packages" / "Claude_abc" / "LocalCache" / "Roaming"
                     / "Claude")
-        for base, records, config in ((roaming, roaming_records, roaming_config),
-                                      (packaged, packaged_records, packaged_config)):
-            folder = base / "claude-code-sessions" / "acct" / "org"
-            folder.mkdir(parents=True)
-            for n in range(records):
-                (folder / f"local_{n}.json").write_text("{}", encoding="utf-8")
+        # The third layout, and it only exists when a test asks for it: a build that keeps its
+        # state here is a different machine from one that does not, and the tests above are about
+        # the machines that do not.
+        data = tmp_path / "Local" / "Claude-Data" / "claude_abc"
+        plan = [(roaming, roaming_records, roaming_config, roaming_pairs),
+                (packaged, packaged_records, packaged_config, 1)]
+        if data_records or data_config:
+            plan.append((data, data_records, data_config, data_pairs))
+        for base, records, config, pair_count in plan:
+            for p in range(pair_count):
+                folder = base / "claude-code-sessions" / f"acct{p}" / f"org{p}"
+                folder.mkdir(parents=True)
+                for n in range(records):
+                    (folder / f"local_{p}_{n}.json").write_text("{}", encoding="utf-8")
             if config:
                 (base / "config.json").write_text("{}", encoding="utf-8")
         monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
         monkeypatch.delenv("C4X_SESSIONS_ROOT", raising=False)
-        return store, roaming, packaged
+        return store, roaming, packaged, data
 
     def test_the_packaged_container_wins_when_it_is_the_one_holding_the_state(self, tmp_path,
                                                                              monkeypatch):
         """The laptop's arrangement, in numbers taken from it: 19 records and a config against 1."""
-        store, _roaming, packaged = self.roots(
+        store, _roaming, packaged, _data = self.roots(
             tmp_path, monkeypatch, packaged_records=19, packaged_config=True, roaming_records=1)
         assert store.sessions_root() == str(packaged / "claude-code-sessions")
 
     def test_roaming_wins_when_it_is_the_one_holding_the_state(self, tmp_path, monkeypatch):
-        store, roaming, _packaged = self.roots(
+        store, roaming, _packaged, _data = self.roots(
             tmp_path, monkeypatch, roaming_records=19, roaming_config=True, packaged_records=1)
         assert store.sessions_root() == str(roaming / "claude-code-sessions")
 
     def test_a_config_beside_the_records_outranks_a_bigger_pile_without_one(self, tmp_path,
                                                                            monkeypatch):
         """Record count alone is the wrong signal: an abandoned install can hold more of them."""
-        store, _roaming, packaged = self.roots(
+        store, _roaming, packaged, _data = self.roots(
             tmp_path, monkeypatch, packaged_records=2, packaged_config=True, roaming_records=40)
         assert store.sessions_root() == str(packaged / "claude-code-sessions")
 
     def test_with_no_evidence_anywhere_it_is_the_roaming_name(self, tmp_path, monkeypatch):
-        store, roaming, _packaged = self.roots(tmp_path, monkeypatch)
+        store, roaming, _packaged, _data = self.roots(tmp_path, monkeypatch)
         assert store.sessions_root() == str(roaming / "claude-code-sessions")
+
+    def test_the_builds_own_data_directory_is_a_candidate_at_all(self, tmp_path, monkeypatch):
+        """`%LOCALAPPDATA%\\Claude-Data\\claude_<publisher>`, which matches neither older name.
+
+        Measured on this machine 2026-11-06: the app kept its 9 account pairs there while the two
+        older names resolved to one stale directory holding a single pair. It was not in the
+        candidate list, so the merge, adopt and the archived marker all worked on a directory the
+        app had left behind, and nothing said so.
+        """
+        store, _roaming, _packaged, data = self.roots(
+            tmp_path, monkeypatch, roaming_records=1, data_records=3, data_config=True)
+        assert str(data) in store.claude_appdata_roots()
+
+    def test_the_live_data_directory_wins_over_a_bigger_stale_pile(self, tmp_path, monkeypatch):
+        """KNOWN BAD INPUT: the stale root is handed MORE records than the live one.
+
+        The shape that was really on disk, with the numbers inverted to make the ranking prove
+        itself: one abandoned pair against nine live ones. Ranked on the pile alone the abandoned
+        root wins and every write lands where the app never looks, so how many account pairs a root
+        holds has to outrank how many records are in it.
+        """
+        store, _roaming, _packaged, data = self.roots(
+            tmp_path, monkeypatch, roaming_records=300, roaming_config=True, roaming_pairs=1,
+            data_records=10, data_pairs=9, data_config=True)
+        assert store.sessions_root() == str(data / "claude-code-sessions")
 
     def test_one_directory_under_two_names_is_counted_once(self, tmp_path, monkeypatch):
         """THIS MACHINE's arrangement: both paths return the same device and inode.
