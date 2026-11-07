@@ -32,7 +32,12 @@ from c4x.labels import (
     short_path,
     titled_path,
 )
-from c4x.paths import install_root, node_exe, ro_uri  # noqa: F401  (ro_uri: re-exported)
+from c4x.paths import (  # noqa: F401  (ro_uri: re-exported)
+    claude_config_dir,
+    install_root,
+    node_exe,
+    ro_uri,
+)
 
 # The install, not this file's directory: they differ once the API is frozen into an exe, and
 # this is the root the store and the node tools are found under. See c4x/paths.py.
@@ -604,6 +609,10 @@ def invalidate():
     # The chain map, which a delete or an import can change: a removed prefix must stop folding
     # into its head, and an imported chain must start to.
     _links_cache.update({"at": 0.0, "head_of": None, "members_of": None})
+    # Which directories hold records at all. An install, an app update or a sign-in can add one,
+    # and a stale answer here is the whole class of fault this module has just been through: every
+    # read below it would go to a directory that is no longer the one the app uses.
+    _discovery_cache.update({"key": None, "at": 0.0, "found": None})
     _reviews_cache.update({"at": 0.0, "parent_of": None, "runs_of": None})
     _runs_cache.update({"at": 0.0, "parent_of": None, "runs_of": None, "project_of": None})
     _deleted_cache.update({"at": 0.0, "ids": None})
@@ -1077,28 +1086,96 @@ class _ArchivedCache(TypedDict):
 _archived_cache: _ArchivedCache = {"map": None, "at": 0.0, "root": None, "sig": None}
 
 
+# The directory the desktop app keeps its per-chat records in, under whichever root it is using.
+# Named once: the bug this module was carrying came from the same assumption being written down in
+# several places and only some of them being updated when the app moved.
+RECORDS_DIR = "claude-code-sessions"
+
+
+# The discovery is a handful of globs over two directories, measured at 82 ms here, and
+# `claude_appdata()` sits on the per-request path, so the answer is kept for a short while. Keyed
+# on the two environment variables the shapes are built from, because the suite points those at a
+# fake machine per test and a time-only cache would hand one test the previous test's machine. A
+# test that patches `_claude_appdata_candidates` itself never reaches this at all.
+_discovery_cache: dict = {"key": None, "at": 0.0, "found": None}
+DISCOVERY_TTL = 60.0
+
+# Where a records root has really been found, with the product's own name replaced by a wildcard.
+# Listing the layouts by name is what failed: the app moved to a directory none of the listed names
+# described, and because nothing searched, nothing noticed for weeks. Bounded globs, never a walk
+# of the disk.
+_ROOT_SHAPES = (
+    ("roaming", ("*", RECORDS_DIR)),
+    ("local", ("*", RECORDS_DIR)),
+    ("local", ("*", "*", RECORDS_DIR)),
+    ("local", ("Packages", "*", "LocalCache", "Roaming", "*", RECORDS_DIR)),
+)
+
+
+def _discover_record_roots(roaming, local) -> list:
+    """Every directory on this machine that holds a `claude-code-sessions`, as its PARENT.
+
+    Returns the parent because that is what the rest of this module calls an appdata root, and
+    what `claude_appdata()` joins `RECORDS_DIR` onto.
+    """
+    key = (os.path.normcase(str(roaming)), os.path.normcase(str(local)))
+    now = _time.time()
+    if (_discovery_cache["found"] is not None and _discovery_cache["key"] == key
+            and now - _discovery_cache["at"] < DISCOVERY_TTL):
+        return list(_discovery_cache["found"])
+    bases = {"roaming": roaming, "local": local}
+    found: list = []
+    for where, parts in _ROOT_SHAPES:
+        for hit in sorted(glob.glob(os.path.join(bases[where], *parts))):
+            if os.path.isdir(hit):
+                found.append(os.path.dirname(hit))
+    _discovery_cache.update({"key": key, "at": now, "found": list(found)})
+    return found
+
+
 def _claude_appdata_candidates():
     """Every directory the desktop app might keep its state in on this machine.
 
     A Microsoft Store (MSIX) install redirects `%APPDATA%` into its own package container, so there
-    are two names for what may or may not be one directory:
+    are two names for what may or may not be one directory, and a newer build keeps its state in a
+    third place of its own entirely:
 
         %APPDATA%\\Claude
         %LOCALAPPDATA%\\Packages\\Claude_<publisher>\\LocalCache\\Roaming\\Claude
+        %LOCALAPPDATA%\\Claude-Data\\claude_<publisher>
 
-    MEASURED ON TWO MACHINES, AND THEY DISAGREE. On this one the two are the SAME directory: a
-    record under each path returns identical device and inode numbers, and both list 184 records.
+    MEASURED ON TWO MACHINES, AND THEY DISAGREE. On this one the first two are the SAME directory:
+    a record under each path returns identical device and inode numbers, and both list 184 records.
     On the test laptop they are two different stores, 19 records and a `config.json` under the
     package container against 1 record and no config under `%APPDATA%`, so reading `%APPDATA%`
     there saw one twentieth of the sessions and would have filed an imported record where the app
     never looks.
+
+    THE THIRD NAME IS WHY THIS LIST EXISTS AT ALL. Build 4.23118.0.0 keeps its records under
+    `Claude-Data\\claude_<publisher>`, which matches neither pattern above and is a different inode
+    from both, so the identity collapse cannot rescue it. Measured 2026-11-06: that directory held
+    the 9 real account/org pairs while the two older names resolved to one stale directory holding a
+    single pair, and `config.json` beside the records was 12,375 bytes written that day against
+    1,000 bytes untouched since 5 March. Everything built on this list (the merge, adopt, the
+    archived marker, every record read) had been working on a directory the app no longer reads,
+    silently, because nothing compared the two. The publisher suffix ties the layouts together:
+    `Claude-Data\\claude_pzs8sxrjxfjjc` sits beside `Packages\\Claude_pzs8sxrjxfjjc`.
     """
     roaming = os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming")
     local = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
+    # THE DEFAULT NAME FIRST, so a machine with no records at all still has an answer: it is where
+    # a fresh install puts them, and `claude_appdata` falls back to the first candidate when there
+    # is no evidence to rank on.
     found = [os.path.join(roaming, "Claude")]
-    found.extend(sorted(glob.glob(os.path.join(
-        local, "Packages", "Claude*", "LocalCache", "Roaming", "Claude"))))
-    return found
+    # THEN WHATEVER IS ACTUALLY THERE, discovered rather than listed.
+    found.extend(_discover_record_roots(roaming, local))
+    seen, out = set(), []
+    for path in found:
+        key = os.path.normcase(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
 
 
 def _identity(path):
@@ -1141,8 +1218,16 @@ def claude_appdata():
 
     Otherwise the candidates are collapsed by identity, so a redirected install counts once, and
     then ranked: a `config.json` beside the records is the strongest signal that the app writes
-    there, then how many records it holds, then how recent the newest one is. With no evidence at
-    all the `%APPDATA%` name is returned, which is where a fresh install puts things.
+    there, then how many account/org PAIRS it holds, then how recently that `config.json` was
+    written, then the record count, then how recent the newest record is. With no evidence at all
+    the `%APPDATA%` name is returned, which is where a fresh install puts things.
+
+    PAIRS AND THE CONFIG'S AGE RANK ABOVE THE RECORD COUNT, which they did not used to. A raw count
+    is the wrong shape once a root goes stale: measured 2026-11-06, the abandoned root held 282
+    records in ONE pair, the live one 9 pairs, and the last writes to both were ten minutes apart,
+    so neither the count nor recency separates them reliably. The number of pairs says the app signs
+    accounts in there, and `config.json` was 12,375 bytes that day against 1,000 bytes last touched
+    on 5 March, which is the app stating plainly where it lives.
     """
     override = os.environ.get("C4X_SESSIONS_ROOT")
     if override:
@@ -1161,14 +1246,20 @@ def claude_appdata():
         return candidates[0]
     best, best_score = candidates[0], None
     for path in candidates:
-        records = glob.glob(os.path.join(path, "claude-code-sessions", "*", "*", "local_*.json"))
+        records = glob.glob(os.path.join(path, RECORDS_DIR, "*", "*", "local_*.json"))
         newest = 0.0
         for record in records:
             try:
                 newest = max(newest, os.path.getmtime(record))
             except OSError:
                 continue
-        score = (os.path.isfile(os.path.join(path, "config.json")), len(records), newest)
+        pairs = {os.path.dirname(record) for record in records}
+        config = os.path.join(path, "config.json")
+        try:
+            config_at = os.path.getmtime(config)
+        except OSError:
+            config_at = 0.0
+        score = (os.path.isfile(config), len(pairs), config_at, len(records), newest)
         if best_score is None or score > best_score:
             best, best_score = path, score
     return best
@@ -1179,7 +1270,7 @@ def sessions_root():
     override = os.environ.get("C4X_SESSIONS_ROOT")
     if override:
         return override
-    return os.path.join(claude_appdata(), "claude-code-sessions")
+    return os.path.join(claude_appdata(), RECORDS_DIR)
 
 
 def sessions_roots() -> list:
@@ -1187,11 +1278,22 @@ def sessions_roots() -> list:
 
     The readers' root list. A test that points `sessions_root` at a fixture must point this here
     too, or the page would read the fixture AND the machine's own records.
+
+    THE WRITE ROOT IS PUT FIRST, rather than hoped to be. `desktop_records` walks this list in
+    reverse so that the first entry lands last and wins a duplicate, and said so in a comment, but
+    the order came from the candidate list, which is alphabetical by layout and not by evidence.
+    With one root that never mattered. With two it decided: measured 2026-11-06, 254 chats had a
+    record under both roots, 18 disagreed about whether they were archived, and all 18 resolved to
+    the abandoned root's answer, so the page called chats archived on the strength of a directory
+    the app had stopped writing to.
     """
     override = os.environ.get("C4X_SESSIONS_ROOT")
     if override:
         return [override]
-    return [os.path.join(root, "claude-code-sessions") for root in claude_appdata_roots()]
+    here = sessions_root()
+    rest = [os.path.join(root, RECORDS_DIR) for root in claude_appdata_roots()]
+    return [here] + [one for one in rest
+                     if os.path.normcase(one) != os.path.normcase(here)]
 
 
 def records_fingerprint(root=None):
@@ -1429,7 +1531,7 @@ def transcript_ids(ttl: float = 45.0):
         return _transcript_cache["ids"]
     seen = _generation["n"]
     ids = set()
-    root = os.path.join(HOME, ".claude", "projects")
+    root = str(claude_config_dir() / "projects")
     try:
         projects = list(os.scandir(root))
     except OSError:
@@ -3002,9 +3104,14 @@ def load_compaction_windows():
     """Window per compaction, resolved by model segment in one node pass.
 
     The window is a property of the model in use, not of the session, so a session that switched
-    models has more than one. Resolved once at startup rather than per row.
+    models has more than one. Resolved once per process rather than per row, on first use.
+
+    ITS OWN TIMEOUT, well past the runner's default. This is a pass over every compaction in the
+    store, so its cost grows with the store while the default 120 s does not: at 4.1 GB the pass
+    passed that cap and the call raised TimeoutExpired.
     """
-    return _node_json_argv([str(ROOT / "tools" / "segments.mjs"), "--windows-for-compactions"])
+    return _node_json_argv([str(ROOT / "tools" / "segments.mjs"), "--windows-for-compactions"],
+                           timeout=600)
 
 
 def segments_for(session_id: str):
@@ -3020,7 +3127,27 @@ MATH = load_math()
 THRESHOLDS = {t["window"]: t for t in MATH["thresholds"]}
 
 
-COMPACTION_WINDOWS = load_compaction_windows()
+# The window per compaction, filled on FIRST USE and kept for the process. Same shape of cache
+# slot as `_rows_cache` above, and refreshed no more often than the constant it replaced was.
+_windows_cache: dict = {"map": None}
+
+
+def compaction_windows() -> dict:
+    """The window per compaction, resolved when something asks for it.
+
+    NOT AT IMPORT, which is what this used to be. `load_compaction_windows` shells out to node for
+    a pass over the whole store, and a module-level call made every importer of this module pay for
+    it whether or not anything drew the compactions tab: the account merge, the accounts commands
+    and the server's own start all import the store for a path or a query. On this machine's 4.1 GB
+    store that pass went past the runner's 120 s cap, so `import c4x.store` raised TimeoutExpired:
+    it killed `python -m c4x.merge` twice, and it killed a restarted server before it could bind,
+    which left the dashboard down with the reason only in `data/raw/dashboard.log`.
+
+    One reader, `c4x/tabs/compactions.py`, and it is the one that needs the node pass.
+    """
+    if _windows_cache["map"] is None:
+        _windows_cache["map"] = load_compaction_windows()
+    return _windows_cache["map"]
 
 
 def fit_window(pre_tokens: int):

@@ -38,7 +38,14 @@ import { homedir } from 'node:os';
 
 const ROOT = rootFrom(import.meta.url);
 const SELF_PATH = fileURLToPath(import.meta.url);
-const PROJECTS = join(homedir(), '.claude', 'projects');
+// CLAUDE_CONFIG_DIR is how Claude Code is told to keep its state somewhere other than
+// `~/.claude`, and this file had the default written in by hand, as did two places on the python
+// side. Honouring it here and nowhere else would only move the disagreement, so `c4x/appstate.py`
+// reads the same variable.
+const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+const PROJECTS = join(CLAUDE_DIR, 'projects');
+// The directory the desktop app keeps its per-chat records in, named once on this side too.
+const RECORDS_DIR = 'claude-code-sessions';
 // Store path, overridable so a run can target a copy instead of the live store. An independent
 // reviewer had to mutate the real database to verify --backfill-survivors, because there was no
 // way to point it elsewhere; a tool that can only be exercised against production data is a tool
@@ -1282,16 +1289,33 @@ export function resolveRecordsRoots(argv = [], env = process.env) {
   const i = argv.indexOf('--records');
   if (i >= 0 && argv[i + 1]) return explicit('--records', argv[i + 1]);
   if (env.C4X_SESSIONS_ROOT) return explicit('C4X_SESSIONS_ROOT', env.C4X_SESSIONS_ROOT);
-  const roots = [join(env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'Claude', 'claude-code-sessions')];
-  const packages = join(env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'Packages');
-  let names = [];
-  try { names = readdirSync(packages); } catch { /* no package store on this machine */ }
-  for (const name of names) {
-    if (name.startsWith('Claude')) {
-      roots.push(join(packages, name, 'LocalCache', 'Roaming', 'Claude', 'claude-code-sessions'));
+  // DISCOVERED, NOT LISTED, and the same four shapes `c4x/store.py _ROOT_SHAPES` searches. Naming
+  // the layouts was the fault: build 4.23118.0.0 moved its records to a directory none of the
+  // names described, this function and the python one each held their own copy of the list, and
+  // because neither searched, neither could reveal the other. A shape with the product's name
+  // wildcarded finds the next move without an edit here.
+  const roaming = env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+  const local = env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+  const dirsIn = (where) => {
+    try {
+      return readdirSync(where, { withFileTypes: true })
+        .filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch { return []; }                      // unreadable or absent says nothing, not an error
+  };
+  // The name a fresh install uses goes in first, so an empty machine still has an answer.
+  const roots = [join(roaming, 'Claude', RECORDS_DIR)];
+  for (const name of dirsIn(roaming)) roots.push(join(roaming, name, RECORDS_DIR));
+  for (const name of dirsIn(local)) {
+    roots.push(join(local, name, RECORDS_DIR));
+    for (const inner of dirsIn(join(local, name))) {
+      roots.push(join(local, name, inner, RECORDS_DIR));
     }
   }
-  return roots.filter((r) => existsSync(r));
+  for (const name of dirsIn(join(local, 'Packages'))) {
+    const base = join(local, 'Packages', name, 'LocalCache', 'Roaming');
+    for (const inner of dirsIn(base)) roots.push(join(base, inner, RECORDS_DIR));
+  }
+  return [...new Set(roots)].filter((r) => existsSync(r));
 }
 
 // Map of cliSessionId to {fork, file} for every chat the app has a record of. A file without a
@@ -1474,13 +1498,52 @@ export function markerTime(dir, uuid, now, roots = []) {
   const account = basename(dirname(dir));
   for (const root of roots) places.push(join(root, account, org, name));
   const path = places.find((p) => existsSync(p));
-  if (!path) return null;
+  return path ? timeFromMarker(path, now) : null;
+}
+
+/** The delete time a marker file states, or `now` when it says anything else. */
+export function timeFromMarker(path, now) {
   let text = '';
   try { text = readFileSync(path, 'utf8').trim(); } catch { return now; }
   if (!/^\d{10,16}$/.test(text)) return now;
   const n = Number(text);
   const when = new Date(n < 1e11 ? n * 1000 : n);
   return Number.isNaN(when.getTime()) ? now : when.toISOString();
+}
+
+/**
+ * Every record uuid the app has marked deleted ANYWHERE, as uuid -> that marker's path.
+ *
+ * `markerTime` looks only under the same `<account>/<org>` in each root, which was enough while a
+ * chat's record lived in one pair. The union merge now puts a copy of every chat in every
+ * account's pair, and deleting a chat removes the record from the signed-in pair alone, so the
+ * copies elsewhere read as "still on disk" and the deleted stamp was cleared on every pass.
+ * Measured 2026-11-07: 85 ids marked deleted on this machine, 27 of them still holding a record in
+ * 8 pairs each, which is a deleted chat back on the page and back in the import list.
+ */
+export function deletedMarkerPaths(roots) {
+  const found = new Map();
+  const dirsIn = (where) => {
+    try {
+      return readdirSync(where, { withFileTypes: true })
+        .filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch { return []; }
+  };
+  for (const root of roots) {
+    for (const account of dirsIn(root)) {
+      for (const org of dirsIn(join(root, account))) {
+        const dir = join(root, account, org);
+        let names = [];
+        try { names = readdirSync(dir); } catch { continue; }
+        for (const name of names) {
+          if (!name.startsWith('deleted_')) continue;
+          const uuid = name.slice('deleted_'.length).toLowerCase();
+          if (!found.has(uuid)) found.set(uuid, join(dir, name));
+        }
+      }
+    }
+  }
+  return found;
 }
 
 /**
@@ -1531,15 +1594,25 @@ export function reconcileDesktopRecords(db, roots, { ledgerPath = join(ROOT, 'da
       title = excluded.title, archived = excluded.archived, last_seen = excluded.last_seen,
       gone_at = NULL, deleted_at = NULL, source = 'disk'`);
   const was = db.prepare('SELECT gone_at, deleted_at FROM desktop_records WHERE record_uuid = ?');
+  // A MARKER ANYWHERE OUTLIVES A COPY ANYWHERE ELSE. The upsert below clears both stamps for any
+  // record found on disk, which is right when a chat lives in one pair and wrong now that the
+  // merge copies it into all of them: the copies kept resurrecting chats the app had been told to
+  // delete. The marker is the person's instruction; another account's copy is only c4x's doing.
+  const markers = deletedMarkerPaths(roots);
+  const stampDeleted = db.prepare(
+    'UPDATE desktop_records SET deleted_at = ? WHERE record_uuid = ? AND deleted_at IS NULL');
   const present = new Set();
   for (const r of records) {
     if (!r.uuid) continue;
     present.add(r.uuid);
+    const marker = markers.get(String(r.uuid).toLowerCase());
     const before = was.get(r.uuid);
-    if (before && (before.gone_at || before.deleted_at)) result.returned++;
+    // A record that carries a marker has not "returned"; it is a copy of something deleted.
+    if (before && (before.gone_at || before.deleted_at) && !marker) result.returned++;
     const owner = before ? null : ownerOf(r.uuid, r.dir);
     upsert.run(r.uuid, r.session_id, r.dir, r.title, r.archived, now, now,
                owner ? owner.account : null, owner ? owner.org : null, owner ? owner.source : null);
+    if (marker && stampDeleted.run(timeFromMarker(marker, now), r.uuid).changes) result.deleted++;
     result.seen++;
   }
   // THE LEDGER: the records c4x wrote, uuid and session together, so a record the app deleted
