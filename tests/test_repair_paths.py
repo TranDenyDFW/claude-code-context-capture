@@ -51,10 +51,23 @@ def record(machine, name, cwd, **extra):
 
 
 class TestWhereAFolderWent:
-    def test_a_folder_that_is_still_there_needs_no_repair(self, machine):
-        """IDEMPOTENCE LIVES HERE. A path that exists resolves to None, so a second run is a
-        no-op rather than a rewrite of what the first run wrote."""
+    def test_a_destination_that_has_already_been_written_needs_no_repair(self, machine):
+        """A path outside the old prefix resolves to None, so a second run rewrites nothing."""
         assert repair_paths.resolve(str(machine["kept"] / "Alpha"), machine["moves"]) is None
+
+    def test_a_path_under_the_old_prefix_that_still_exists_is_left_alone(self, machine):
+        """KNOWN BAD INPUT, and the first version of this file did not have it.
+
+        The check that matters is "is the folder actually missing", and the test above cannot fail
+        without it: a rewritten path no longer starts with the old prefix, so it resolves to None
+        whatever the code does. Removing the existence check from `resolve` left all 13 tests
+        green. A folder still sitting under the old prefix is the case that tells them apart, and
+        rewriting one would move a working chat to a different directory.
+        """
+        here = machine["gone"] / "Still"
+        here.mkdir(parents=True)
+        (machine["kept"] / "Still").mkdir()
+        assert repair_paths.resolve(str(here), machine["moves"]) is None
 
     def test_the_populated_candidate_is_preferred_over_the_empty_one(self, machine):
         """KNOWN BAD INPUT: both candidates exist, so "it exists" cannot be the whole rule.
