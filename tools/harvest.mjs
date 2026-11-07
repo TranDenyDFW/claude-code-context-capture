@@ -1498,13 +1498,52 @@ export function markerTime(dir, uuid, now, roots = []) {
   const account = basename(dirname(dir));
   for (const root of roots) places.push(join(root, account, org, name));
   const path = places.find((p) => existsSync(p));
-  if (!path) return null;
+  return path ? timeFromMarker(path, now) : null;
+}
+
+/** The delete time a marker file states, or `now` when it says anything else. */
+export function timeFromMarker(path, now) {
   let text = '';
   try { text = readFileSync(path, 'utf8').trim(); } catch { return now; }
   if (!/^\d{10,16}$/.test(text)) return now;
   const n = Number(text);
   const when = new Date(n < 1e11 ? n * 1000 : n);
   return Number.isNaN(when.getTime()) ? now : when.toISOString();
+}
+
+/**
+ * Every record uuid the app has marked deleted ANYWHERE, as uuid -> that marker's path.
+ *
+ * `markerTime` looks only under the same `<account>/<org>` in each root, which was enough while a
+ * chat's record lived in one pair. The union merge now puts a copy of every chat in every
+ * account's pair, and deleting a chat removes the record from the signed-in pair alone, so the
+ * copies elsewhere read as "still on disk" and the deleted stamp was cleared on every pass.
+ * Measured 2026-11-07: 85 ids marked deleted on this machine, 27 of them still holding a record in
+ * 8 pairs each, which is a deleted chat back on the page and back in the import list.
+ */
+export function deletedMarkerPaths(roots) {
+  const found = new Map();
+  const dirsIn = (where) => {
+    try {
+      return readdirSync(where, { withFileTypes: true })
+        .filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch { return []; }
+  };
+  for (const root of roots) {
+    for (const account of dirsIn(root)) {
+      for (const org of dirsIn(join(root, account))) {
+        const dir = join(root, account, org);
+        let names = [];
+        try { names = readdirSync(dir); } catch { continue; }
+        for (const name of names) {
+          if (!name.startsWith('deleted_')) continue;
+          const uuid = name.slice('deleted_'.length).toLowerCase();
+          if (!found.has(uuid)) found.set(uuid, join(dir, name));
+        }
+      }
+    }
+  }
+  return found;
 }
 
 /**
@@ -1555,15 +1594,25 @@ export function reconcileDesktopRecords(db, roots, { ledgerPath = join(ROOT, 'da
       title = excluded.title, archived = excluded.archived, last_seen = excluded.last_seen,
       gone_at = NULL, deleted_at = NULL, source = 'disk'`);
   const was = db.prepare('SELECT gone_at, deleted_at FROM desktop_records WHERE record_uuid = ?');
+  // A MARKER ANYWHERE OUTLIVES A COPY ANYWHERE ELSE. The upsert below clears both stamps for any
+  // record found on disk, which is right when a chat lives in one pair and wrong now that the
+  // merge copies it into all of them: the copies kept resurrecting chats the app had been told to
+  // delete. The marker is the person's instruction; another account's copy is only c4x's doing.
+  const markers = deletedMarkerPaths(roots);
+  const stampDeleted = db.prepare(
+    'UPDATE desktop_records SET deleted_at = ? WHERE record_uuid = ? AND deleted_at IS NULL');
   const present = new Set();
   for (const r of records) {
     if (!r.uuid) continue;
     present.add(r.uuid);
+    const marker = markers.get(String(r.uuid).toLowerCase());
     const before = was.get(r.uuid);
-    if (before && (before.gone_at || before.deleted_at)) result.returned++;
+    // A record that carries a marker has not "returned"; it is a copy of something deleted.
+    if (before && (before.gone_at || before.deleted_at) && !marker) result.returned++;
     const owner = before ? null : ownerOf(r.uuid, r.dir);
     upsert.run(r.uuid, r.session_id, r.dir, r.title, r.archived, now, now,
                owner ? owner.account : null, owner ? owner.org : null, owner ? owner.source : null);
+    if (marker && stampDeleted.run(timeFromMarker(marker, now), r.uuid).changes) result.deleted++;
     result.seen++;
   }
   // THE LEDGER: the records c4x wrote, uuid and session together, so a record the app deleted

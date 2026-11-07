@@ -894,3 +894,34 @@ class TestFindingARootNobodyListed:
         store.invalidate()
         store._claude_appdata_candidates()
         assert len(calls) > before, "invalidate left the previous search in place"
+
+    def test_the_harvester_searches_the_same_places(self, tmp_path, monkeypatch):
+        """The page and the harvester must agree about where the records are.
+
+        THE STRUCTURAL FAULT, not a detail. `c4x/store.py` and `tools/harvest.mjs` each held their
+        own copy of the layout list, so when the app moved, updating one would have left the other
+        reading a directory that no longer held anything, and nothing would have said so. This runs
+        the real node function against the same fake machine and compares the answers.
+        """
+        import json
+        import subprocess
+
+        store, _roaming, _packaged, _data, _unknown = self.roots(
+            tmp_path, monkeypatch, roaming_records=2, data_records=3, data_config=True,
+            unknown_records=4)
+        here = Path(__file__).resolve().parent.parent
+        harvest = (here / "tools" / "harvest.mjs").as_uri()
+        code = (f"const m = await import({json.dumps(harvest)});"
+                "console.log(JSON.stringify(m.resolveRecordsRoots([], "
+                "{APPDATA: process.env.T_APPDATA, LOCALAPPDATA: process.env.T_LOCAL})));")
+        done = subprocess.run(
+            ["node", "--input-type=module", "-e", code], capture_output=True, text=True,
+            timeout=120, cwd=str(here),
+            env={**os.environ, "T_APPDATA": str(tmp_path / "Roaming"),
+                 "T_LOCAL": str(tmp_path / "Local")})
+        assert done.returncode == 0, f"node failed: {done.stderr[-800:]}"
+        theirs = {os.path.normcase(p) for p in json.loads(done.stdout.strip().splitlines()[-1])}
+        mine = {os.path.normcase(r) for r in store.sessions_roots() if os.path.isdir(r)}
+        assert mine == theirs, (
+            f"the two sides disagree.\n  only python: {sorted(mine - theirs)}\n"
+            f"  only node:   {sorted(theirs - mine)}")
