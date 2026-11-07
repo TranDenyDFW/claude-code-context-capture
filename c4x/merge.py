@@ -391,10 +391,15 @@ def propagate_deletions(indexes, roots=None, dry_run=True, backup=None, remove=N
         def backup():
             return accounts._backup(where, "before carrying a deletion across the account pairs")
     try:
-        report["backup"] = str(backup())
+        taken = backup()
     except OSError as exc:                     # no backup, no deletion. The order is the safety.
         report["failed"].append({"backup": str(exc)})
         return report
+    # JUST THE PATH. `accounts._backup` hands back `(directory, manifest)`, and the manifest holds
+    # a row per file: stringifying the pair put 883 KB of sha256 into one report line.
+    if isinstance(taken, (tuple, list)) and taken:
+        taken = taken[0]
+    report["backup"] = str(taken)
     take = os.remove if remove is None else remove
     put = (lambda path, data: Path(path).write_bytes(data)) if write is None else write
     for item in said["removals"]:
