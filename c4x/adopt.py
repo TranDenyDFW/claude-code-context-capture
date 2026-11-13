@@ -20,10 +20,15 @@ the candidates by folder and reports how many deleted markers the pair holds, an
 preselects nothing.
 
 NEVER ACROSS PAIRS. A record is written only into the signed-in pair (`appstate.desktop_pair`,
-the same decision an import makes); a session whose record sits under another account's pair is
-counted as `other_account` and left alone. Under sharing All the signed-in pair is a junction and
-the bytes land in its target, which IS the shared list; the report says so. `c4x/accounts.py` is
-not touched by anything here.
+the same decision an import makes); a session whose record sits under another pair OF THE SAME
+ROOT is counted as `other_account` and left alone, because that root is the list the app reads and
+a second record would be a second chat. `c4x.merge` is what brings such a chat here. Under sharing
+All the signed-in pair is a junction and the bytes land in its target, which IS the shared list;
+the report says so. `c4x/accounts.py` is not touched by anything here.
+
+A RECORD UNDER ANOTHER ROOT IS NOT ANOTHER ACCOUNT. Roots other than the signed-in one are
+previous installs: their records name no chat the running app lists. Those sessions are counted as
+`other_install` and OFFERED. Withholding on them was wrong and it hid real chats (see `state`).
 
 EVERY RECORD CARRIES A NAME. The first cut wrote `title` only from the store's `custom` or `ai`
 kinds, on the theory that the app would name the rest by its own rule. It does: a record with no
@@ -165,7 +170,8 @@ def state(root=None, include_cli=False) -> dict:
     pair = appstate.desktop_pair(root)
     base: dict[str, Any] = {"supported": False, "why_not": "", "pair": None, "physical": None,
                             "groups": [], "candidates": 0, "cli_candidates": 0, "other_account": 0,
-                            "deleted_markers": 0, "app_running": False, "sharing": None}
+                            "other_install": 0, "deleted_markers": 0, "app_running": False,
+                            "sharing": None}
     if not pair:
         base["why_not"] = ("this machine has no desktop account and organisation to file a record "
                            "under, so an adopted session would not appear in the app")
@@ -173,13 +179,24 @@ def state(root=None, include_cli=False) -> dict:
     pair_dir = Path(root) / pair["account"] / pair["org"]
     physical = accounts.link_target(pair_dir) or str(pair_dir)
 
-    # EVERY root the app might read: a record under the root the app is not writing to is still a
-    # record (see store.claude_appdata_roots).
-    known: set = set()
-    for one in appstate.sessions_roots():
-        known.update(store.desktop_records(one, ttl=0))
+    # THE ROOT THE APP IS SIGNED INTO is what decides whether a chat already exists. A record
+    # under ANOTHER PAIR of that root is this same app's list under another account, so adopting
+    # would mint a second record for one chat: withheld, and `c4x.merge` is what copies it here.
+    #
+    # A record under a DIFFERENT ROOT is a previous install's leftover, NOT another account, and
+    # withholding on it hid real chats. Measured 2026-11-12 on this machine: four chats, one of
+    # them 2,779 turns, were withheld because their only record sat in an `AppData\\Roaming\\Claude`
+    # tree frozen since 2026-11-06, while the running app reads `AppData\\Local\\Claude-Data`. The
+    # drawer told the user they belonged to another account, and there was no other account.
+    # Counted as `other_install` and OFFERED, because no live list holds them.
+    here: set = set(store.desktop_records(root, ttl=0))
     mine = _records_in(pair_dir)
-    other_account = known - mine
+    other_account = here - mine
+    elsewhere: set = set()
+    for one in appstate.sessions_roots():
+        if os.path.normcase(str(one)) != os.path.normcase(str(root)):
+            elsewhere.update(store.desktop_records(one, ttl=0))
+    other_install = elsewhere - here - mine
 
     rows = _sessions()
     ids = [r["session_id"] for r in rows]
@@ -192,6 +209,7 @@ def state(root=None, include_cli=False) -> dict:
     eligible: list = []
     counted_cli = 0
     seen_other = 0
+    seen_install = 0
     deleted = 0
     for r in rows:
         sid = r["session_id"]
@@ -210,6 +228,10 @@ def state(root=None, include_cli=False) -> dict:
         if sid in other_account:
             seen_other += 1
             continue
+        # Counted, never skipped: the record that names it belongs to an install the app no
+        # longer reads, so nothing lists this chat today.
+        if sid in other_install:
+            seen_install += 1
         cli = not is_desktop(r["entrypoint"])
         if cli:
             counted_cli += 1
@@ -256,6 +278,7 @@ def state(root=None, include_cli=False) -> dict:
             "physical": physical, "groups": groups,
             "candidates": sum(1 for g in groups for s in g["sessions"] if not s["cli"]),
             "cli_candidates": counted_cli, "other_account": seen_other,
+            "other_install": seen_install,
             "deleted_markers": len(list(pair_dir.glob("deleted_*"))) if pair_dir.is_dir() else 0,
             "untitled_adopted": sum(1 for _e, rec, _p in ledger
                                     if rec is not None and not _titled(rec)),

@@ -776,7 +776,12 @@ export interface AdoptState {
   groups: AdoptGroup[]
   candidates: number
   cli_candidates: number
+  /** Chats already listed under another account of the SAME records root: withheld, because a
+   * second record would be a second chat. The Accounts pane's merge is what copies them here. */
   other_account: number
+  /** Chats whose only record sits under a PREVIOUS INSTALL's records root. Not another account,
+   * and not withheld: no live list holds them, so they are offered like any orphan. */
+  other_install: number
   deleted_markers: number
   /** Records c4x wrote that carry no name; the app shows each as "General coding session". */
   untitled_adopted: number

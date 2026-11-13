@@ -88,7 +88,8 @@ beforeEach(() => {
   // Nothing to adopt, so the header shows no adopt control in these tests.
   vi.mocked(api.adopt.state).mockResolvedValue({
     supported: true, why_not: '', pair: null, physical: null, groups: [], candidates: 0,
-    cli_candidates: 0, other_account: 0, deleted_markers: 0, untitled_adopted: 0,
+    cli_candidates: 0, other_account: 0, other_install: 0, deleted_markers: 0,
+    untitled_adopted: 0,
     review_runs: 0, review_records: 0, app_running: false, sharing: null,
   })
   vi.mocked(api.adopt.sweep).mockResolvedValue({ enabled: true, last: null })
@@ -304,7 +305,8 @@ describe('the header, as the user asked for it', () => {
   it('puts Adopted Chats after the server controls, set apart by a divider', async () => {
     vi.mocked(api.adopt.state).mockResolvedValue({
       supported: true, why_not: '', pair: { account: 'a', org: 'o', root: 'R', source: 's' },
-      physical: 'R/a/o', candidates: 1, cli_candidates: 0, other_account: 0, deleted_markers: 0,
+      physical: 'R/a/o', candidates: 1, cli_candidates: 0, other_account: 0,
+      other_install: 0, deleted_markers: 0,
       untitled_adopted: 0, review_runs: 0, review_records: 0, app_running: false, sharing: null,
       groups: [{ cwd: 'P:/Alpha', project: 'Alpha', count: 1, newest: '2026-08-01T00:04:00Z', sessions: [] }],
     })

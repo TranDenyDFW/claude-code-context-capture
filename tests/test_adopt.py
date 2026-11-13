@@ -158,6 +158,27 @@ class TestWhatIsOffered:
         assert state["other_account"] == 1, "s0-2 belongs to the other account"
         assert state["pair"]["account"] == A and state["pair"]["org"] == ORG_A
 
+    def test_a_record_under_a_previous_install_is_offered_not_blamed_on_another_account(
+            self, machine, tmp_path, monkeypatch):
+        """A root the app is NOT signed into is a previous install, never another account.
+
+        Measured on the author's machine 2026-11-12: four chats, one of them 2,779 turns, were
+        withheld because their only record sat in an `AppData\\Roaming\\Claude` tree frozen since
+        2026-11-06 while the running app read `AppData\\Local\\Claude-Data`. The drawer told the
+        user they belonged to another account, and there was no other account: every pair of the
+        live root held the same records.
+        """
+        old = tmp_path / "previous-install" / "claude-code-sessions"
+        record(old / A / ORG_A, "s3-1")
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(machine), str(old)])
+        forget_cached_rows()
+        state = adopt.state()
+        assert "s3-1" in candidate_ids(state), (
+            "a previous install's record must not withhold a chat no live list holds")
+        assert state["other_install"] == 1, "counted, so the drawer can say why it is offered"
+        assert state["other_account"] == 1, (
+            "s0-2 sits under another pair of THIS root and is still withheld")
+
     def test_cli_sessions_are_offered_only_when_asked(self, machine):
         state = adopt.state(include_cli=True)
         assert candidate_ids(state) == ["s0-0", "s1-1", "s2-0", "s3-0", "s3-1"]
