@@ -1,7 +1,32 @@
 """The Compactions tab: counts, overshoot, and the claim the tab makes about its own chart."""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from c4x.cli import extract
+
+# Run in a child, with `subprocess.run` recorded BEFORE the store is imported. `c4x.proc.run`
+# looks the name up on the module at call time, so a spy installed here sees every shell-out the
+# import makes, whichever helper issues it.
+_IMPORT_PROBE = """
+import json, subprocess
+seen = []
+real = subprocess.run
+
+
+def spy(args, **kw):
+    seen.append([str(a) for a in list(args)[:2]])
+    return real(args, **kw)
+
+
+subprocess.run = spy
+import c4x.store  # noqa: E402
+print(json.dumps(seen))
+"""
 
 
 @pytest.fixture(scope="module")
@@ -76,3 +101,40 @@ def test_a_compaction_always_reduces_the_window(pane_all, q):
                 WHERE pre_tokens IS NOT NULL AND post_tokens IS NOT NULL
                   AND post_tokens > pre_tokens""").iloc[0]["n"]
     assert int(bad) == 0, f"{bad} compactions report a larger window afterwards"
+
+
+def test_importing_the_store_runs_nothing_over_the_store():
+    """`import c4x.store` may read the math, and must not touch the store.
+
+    It used to resolve every compaction's window at import, a node pass over the whole store under
+    the runner's 120 s cap. Everything that imports the store paid it: the account merge imports it
+    for one path lookup, and on a 4.1 GB store the pass went past the cap, so the import itself
+    raised TimeoutExpired. That took out `python -m c4x.merge` and a restarted dashboard, which
+    died before binding its port with the reason only in `data/raw/dashboard.log`.
+
+    ONE shell-out is expected and allowed: `load_math` runs a `node -e` snippet that reads the
+    thresholds out of `tools/mirror-core.mjs`, so the math has a single source. It imports one
+    small module and never opens the store, so its cost does not grow with the store. Asserting
+    the exact list rather than a count keeps that distinction: a script file passed to node at
+    import time is a pass over the store, and fails here.
+    """
+    root = Path(__file__).resolve().parent.parent
+    done = subprocess.run([sys.executable, "-c", _IMPORT_PROBE], cwd=str(root),
+                          capture_output=True, text=True, timeout=900, env=dict(os.environ))
+    assert done.returncode == 0, f"importing the store failed: {done.stderr[-2000:]}"
+    calls = json.loads(done.stdout.strip().splitlines()[-1])
+    assert [c[1] for c in calls if len(c) > 1] == ["-e"], (
+        f"importing c4x.store shelled out to {calls}")
+
+
+def test_the_windows_are_resolved_once_and_only_when_asked(monkeypatch):
+    """First use loads them, later uses do not load them again."""
+    from c4x import store
+    calls = []
+    monkeypatch.setattr(store, "load_compaction_windows",
+                        lambda: calls.append(1) or {"uuid-1": {"window": 200000}})
+    # setitem, so the process keeps whatever it had already resolved once this test is over.
+    monkeypatch.setitem(store._windows_cache, "map", None)
+    assert store.compaction_windows() == {"uuid-1": {"window": 200000}}
+    assert store.compaction_windows() == {"uuid-1": {"window": 200000}}
+    assert calls == [1], f"the map was loaded {len(calls)} time(s)"

@@ -26,6 +26,7 @@ function state(over: Partial<AdoptState> = {}): AdoptState {
     candidates: 3,
     cli_candidates: 4,
     other_account: 1,
+    other_install: 0,
     deleted_markers: 0,
     untitled_adopted: 0,
     review_runs: 0,
@@ -326,7 +327,23 @@ describe('AdoptSessions', () => {
     await opened()
     expect(screen.getByText(/Claude has deleted 17 chats/).textContent)
       .toContain('adopt only folders you recognise')
-    expect(screen.getByText(/1 chat belong to another account/)).not.toBeNull()
+    // One chat reads "lists ... copies it here": the verb and the pronoun agree with the count,
+    // which the first wording got wrong in the live drawer.
+    expect(screen.getByText(/1 chat already lists under another account/).textContent)
+      .toContain('Accounts pane copies it here')
+  })
+
+  it('a record under a previous install is explained, never called another account', async () => {
+    // The drawer withheld four real chats on the author's machine and blamed an account that did
+    // not exist: their only record sat under a records root the running app does not read.
+    vi.spyOn(api.adopt, 'state').mockResolvedValue(state({ other_install: 4, other_account: 0 }))
+    render(<AdoptSessions writesEnabled />)
+    await opened()
+    const line = await screen.findByTestId('other-install')
+    expect(line.textContent).toContain('4 chats')
+    expect(line.textContent).toContain('previous install')
+    expect(line.textContent).toContain('not another account')
+    expect(screen.queryByText(/under another account/)).toBeNull()
   })
 
   it('adopts the ticked folders, then asks for a restart and refreshes', async () => {

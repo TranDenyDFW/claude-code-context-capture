@@ -54,6 +54,20 @@ def bundle_root() -> Path:
     return REPO_ROOT
 
 
+def claude_config_dir() -> Path:
+    """Where Claude Code keeps its own state: `~/.claude`, unless told otherwise.
+
+    `CLAUDE_CONFIG_DIR` is the documented way to move it, and the default was written out by hand
+    in three places (`c4x/appstate.py`, `c4x/store.py` and `tools/harvest.mjs`), none of which read
+    the variable. That is the same shape of fault as the records root: one assumption copied into
+    several files, so a machine that moved it would have had three separate things quietly looking
+    at a directory that was not the one in use. Named once here, and the node side reads the same
+    variable.
+    """
+    named = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(named) if named else Path.home() / ".claude"
+
+
 def node_exe(root: Path | None = None, exists=None) -> str:
     """The node to run: the one the install carries, else whatever `node` PATH resolves to.
 

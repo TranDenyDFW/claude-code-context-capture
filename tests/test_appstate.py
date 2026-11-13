@@ -477,46 +477,118 @@ class TestWhichAppDataTheAppActuallyUses:
     """
 
     def roots(self, tmp_path, monkeypatch, packaged_records=0, packaged_config=False,
-              roaming_records=0, roaming_config=False):
+              roaming_records=0, roaming_config=False, roaming_pairs=1,
+              data_records=0, data_config=False, data_pairs=1,
+              unknown_records=0, unknown_config=False, unknown_pairs=1,
+              unknown_at=("Claude-Nextgen", "claude_zzz")):
         from c4x import store
         roaming = tmp_path / "Roaming" / "Claude"
         packaged = (tmp_path / "Local" / "Packages" / "Claude_abc" / "LocalCache" / "Roaming"
                     / "Claude")
-        for base, records, config in ((roaming, roaming_records, roaming_config),
-                                      (packaged, packaged_records, packaged_config)):
-            folder = base / "claude-code-sessions" / "acct" / "org"
-            folder.mkdir(parents=True)
-            for n in range(records):
-                (folder / f"local_{n}.json").write_text("{}", encoding="utf-8")
+        # The third layout, and it only exists when a test asks for it: a build that keeps its
+        # state here is a different machine from one that does not, and the tests above are about
+        # the machines that do not.
+        data = tmp_path / "Local" / "Claude-Data" / "claude_abc"
+        # A layout NOBODY HAS LISTED, named so that none of the old hardcoded globs could match it.
+        unknown = tmp_path / "Local" / unknown_at[0] / unknown_at[1]
+        plan = [(roaming, roaming_records, roaming_config, roaming_pairs),
+                (packaged, packaged_records, packaged_config, 1)]
+        if data_records or data_config:
+            plan.append((data, data_records, data_config, data_pairs))
+        if unknown_records or unknown_config:
+            plan.append((unknown, unknown_records, unknown_config, unknown_pairs))
+        for base, records, config, pair_count in plan:
+            for p in range(pair_count):
+                folder = base / "claude-code-sessions" / f"acct{p}" / f"org{p}"
+                folder.mkdir(parents=True)
+                for n in range(records):
+                    (folder / f"local_{p}_{n}.json").write_text("{}", encoding="utf-8")
             if config:
                 (base / "config.json").write_text("{}", encoding="utf-8")
         monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
         monkeypatch.delenv("C4X_SESSIONS_ROOT", raising=False)
-        return store, roaming, packaged
+        store.invalidate()                      # the discovery is cached; this is a new machine
+        return store, roaming, packaged, data, unknown
 
     def test_the_packaged_container_wins_when_it_is_the_one_holding_the_state(self, tmp_path,
                                                                              monkeypatch):
         """The laptop's arrangement, in numbers taken from it: 19 records and a config against 1."""
-        store, _roaming, packaged = self.roots(
+        store, _roaming, packaged, _data, _unknown = self.roots(
             tmp_path, monkeypatch, packaged_records=19, packaged_config=True, roaming_records=1)
         assert store.sessions_root() == str(packaged / "claude-code-sessions")
 
     def test_roaming_wins_when_it_is_the_one_holding_the_state(self, tmp_path, monkeypatch):
-        store, roaming, _packaged = self.roots(
+        store, roaming, _packaged, _data, _unknown = self.roots(
             tmp_path, monkeypatch, roaming_records=19, roaming_config=True, packaged_records=1)
         assert store.sessions_root() == str(roaming / "claude-code-sessions")
 
     def test_a_config_beside_the_records_outranks_a_bigger_pile_without_one(self, tmp_path,
                                                                            monkeypatch):
         """Record count alone is the wrong signal: an abandoned install can hold more of them."""
-        store, _roaming, packaged = self.roots(
+        store, _roaming, packaged, _data, _unknown = self.roots(
             tmp_path, monkeypatch, packaged_records=2, packaged_config=True, roaming_records=40)
         assert store.sessions_root() == str(packaged / "claude-code-sessions")
 
     def test_with_no_evidence_anywhere_it_is_the_roaming_name(self, tmp_path, monkeypatch):
-        store, roaming, _packaged = self.roots(tmp_path, monkeypatch)
+        store, roaming, _packaged, _data, _unknown = self.roots(tmp_path, monkeypatch)
         assert store.sessions_root() == str(roaming / "claude-code-sessions")
+
+    def test_the_builds_own_data_directory_is_a_candidate_at_all(self, tmp_path, monkeypatch):
+        """`%LOCALAPPDATA%\\Claude-Data\\claude_<publisher>`, which matches neither older name.
+
+        Measured on this machine 2026-11-06: the app kept its 9 account pairs there while the two
+        older names resolved to one stale directory holding a single pair. It was not in the
+        candidate list, so the merge, adopt and the archived marker all worked on a directory the
+        app had left behind, and nothing said so.
+        """
+        store, _roaming, _packaged, data, _unknown = self.roots(
+            tmp_path, monkeypatch, roaming_records=1, data_records=3, data_config=True)
+        assert str(data) in store.claude_appdata_roots()
+
+    def test_the_write_root_is_the_first_root_the_readers_walk(self, tmp_path, monkeypatch):
+        """`desktop_records` walks this list in reverse so the first entry wins a duplicate.
+
+        The order used to come from the candidate list, which is by layout and not by evidence, so
+        the live root could be second and lose every disagreement.
+        """
+        store, roaming, _packaged, data, _unknown = self.roots(
+            tmp_path, monkeypatch, roaming_records=300, roaming_config=True,
+            data_records=10, data_pairs=9, data_config=True)
+        roots = store.sessions_roots()
+        assert roots[0] == store.sessions_root() == str(data / "claude-code-sessions")
+        assert str(roaming / "claude-code-sessions") in roots, "the other root is still read"
+
+    def test_a_chat_with_a_record_in_both_roots_takes_the_live_answer(self, tmp_path, monkeypatch):
+        """KNOWN BAD INPUT: the abandoned root calls it archived, the live one does not.
+
+        Measured on this machine: 254 chats had a record in both roots, 18 disagreed, and every one
+        of the 18 resolved to the abandoned root.
+        """
+        store, roaming, _packaged, data, _unknown = self.roots(
+            tmp_path, monkeypatch, roaming_records=300, roaming_config=True,
+            data_records=10, data_pairs=9, data_config=True)
+        both = [roaming / "claude-code-sessions" / "acct0" / "org0",
+                data / "claude-code-sessions" / "acct0" / "org0"]
+        for folder, archived, title in zip(both, (True, False), ("Stale name", "Current name"),
+                                           strict=True):
+            (folder / "local_dup.json").write_text(
+                json.dumps({"cliSessionId": "dup", "isArchived": archived, "title": title}),
+                encoding="utf-8")
+        assert store.desktop_records(ttl=0)["dup"] == (False, "Current name")
+
+    def test_the_live_data_directory_wins_over_a_bigger_stale_pile(self, tmp_path, monkeypatch):
+        """KNOWN BAD INPUT: the stale root is handed MORE records than the live one.
+
+        The shape that was really on disk, with the numbers inverted to make the ranking prove
+        itself: one abandoned pair against nine live ones. Ranked on the pile alone the abandoned
+        root wins and every write lands where the app never looks, so how many account pairs a root
+        holds has to outrank how many records are in it.
+        """
+        store, _roaming, _packaged, data, _unknown = self.roots(
+            tmp_path, monkeypatch, roaming_records=300, roaming_config=True, roaming_pairs=1,
+            data_records=10, data_pairs=9, data_config=True)
+        assert store.sessions_root() == str(data / "claude-code-sessions")
 
     def test_one_directory_under_two_names_is_counted_once(self, tmp_path, monkeypatch):
         """THIS MACHINE's arrangement: both paths return the same device and inode.
@@ -764,3 +836,92 @@ class TestTheSecondRecordsRoot:
 def test_the_module_self_test_passes():
     assert appstate.self_test() == 0
 
+
+
+class TestFindingARootNobodyListed:
+    r"""The records root is SEARCHED FOR, not looked up in a list of known layouts.
+
+    Listing them is what failed: build 4.23118.0.0 moved its records to
+    `%LOCALAPPDATA%\Claude-Data\claude_<publisher>`, which matched none of the listed names, and
+    the python side and the node harvester each held their own copy of the list, so neither could
+    reveal the other. These tests use a layout name that appears nowhere in the source.
+    """
+
+    def roots(self, tmp_path, monkeypatch, **kw):
+        return TestWhichAppDataTheAppActuallyUses().roots(tmp_path, monkeypatch, **kw)
+
+    def test_a_layout_nobody_listed_is_found_anyway(self, tmp_path, monkeypatch):
+        """KNOWN BAD INPUT: records under a directory name that no glob in the source mentions."""
+        store, _roaming, _packaged, _data, unknown = self.roots(
+            tmp_path, monkeypatch, roaming_records=1, unknown_records=4, unknown_config=True)
+        assert str(unknown) in store.claude_appdata_roots(), (
+            f"the search missed it: {store.claude_appdata_roots()}")
+
+    def test_it_is_chosen_when_it_holds_the_accounts(self, tmp_path, monkeypatch):
+        store, _roaming, _packaged, _data, unknown = self.roots(
+            tmp_path, monkeypatch, roaming_records=300, roaming_config=True,
+            unknown_records=10, unknown_pairs=9, unknown_config=True)
+        assert store.sessions_root() == str(unknown / "claude-code-sessions")
+
+    def test_an_empty_machine_still_answers_with_the_default_name(self, tmp_path, monkeypatch):
+        """Searching must not mean "no answer when there is nothing to find"."""
+        store, roaming, _packaged, _data, _unknown = self.roots(tmp_path, monkeypatch)
+        assert store.sessions_root() == str(roaming / "claude-code-sessions")
+
+    def test_the_search_is_not_repeated_on_every_call(self, tmp_path, monkeypatch):
+        """It globs two directory trees, and `claude_appdata()` sits on the per-request path."""
+        store, _roaming, _packaged, _data, _unknown = self.roots(
+            tmp_path, monkeypatch, unknown_records=2)
+        calls = []
+        real = store.glob.glob
+        monkeypatch.setattr(store.glob, "glob", lambda *a, **k: calls.append(1) or real(*a, **k))
+        store._claude_appdata_candidates()
+        first = len(calls)
+        assert first, "the first call did not search at all"
+        store._claude_appdata_candidates()
+        assert len(calls) == first, "the search ran again instead of using the cached answer"
+
+    def test_invalidate_makes_it_search_again(self, tmp_path, monkeypatch):
+        """An install, an app update or a sign-in can add a root, and a stale answer here is the
+        whole fault this module has just been through."""
+        store, _roaming, _packaged, _data, _unknown = self.roots(
+            tmp_path, monkeypatch, unknown_records=2)
+        calls = []
+        real = store.glob.glob
+        monkeypatch.setattr(store.glob, "glob", lambda *a, **k: calls.append(1) or real(*a, **k))
+        store._claude_appdata_candidates()
+        before = len(calls)
+        store.invalidate()
+        store._claude_appdata_candidates()
+        assert len(calls) > before, "invalidate left the previous search in place"
+
+    def test_the_harvester_searches_the_same_places(self, tmp_path, monkeypatch):
+        """The page and the harvester must agree about where the records are.
+
+        THE STRUCTURAL FAULT, not a detail. `c4x/store.py` and `tools/harvest.mjs` each held their
+        own copy of the layout list, so when the app moved, updating one would have left the other
+        reading a directory that no longer held anything, and nothing would have said so. This runs
+        the real node function against the same fake machine and compares the answers.
+        """
+        import json
+        import subprocess
+
+        store, _roaming, _packaged, _data, _unknown = self.roots(
+            tmp_path, monkeypatch, roaming_records=2, data_records=3, data_config=True,
+            unknown_records=4)
+        here = Path(__file__).resolve().parent.parent
+        harvest = (here / "tools" / "harvest.mjs").as_uri()
+        code = (f"const m = await import({json.dumps(harvest)});"
+                "console.log(JSON.stringify(m.resolveRecordsRoots([], "
+                "{APPDATA: process.env.T_APPDATA, LOCALAPPDATA: process.env.T_LOCAL})));")
+        done = subprocess.run(
+            ["node", "--input-type=module", "-e", code], capture_output=True, text=True,
+            timeout=120, cwd=str(here),
+            env={**os.environ, "T_APPDATA": str(tmp_path / "Roaming"),
+                 "T_LOCAL": str(tmp_path / "Local")})
+        assert done.returncode == 0, f"node failed: {done.stderr[-800:]}"
+        theirs = {os.path.normcase(p) for p in json.loads(done.stdout.strip().splitlines()[-1])}
+        mine = {os.path.normcase(r) for r in store.sessions_roots() if os.path.isdir(r)}
+        assert mine == theirs, (
+            f"the two sides disagree.\n  only python: {sorted(mine - theirs)}\n"
+            f"  only node:   {sorted(theirs - mine)}")

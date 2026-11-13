@@ -622,8 +622,17 @@ identity ("Can't reach your computer"), which after adoption are ghosts of chats
 locally under their folders. c4x can see neither kind; archiving the ghosts in the app is the fix.
 
 **Never across pairs.** The record goes into the signed-in account's pair, the one an import writes
-to (`appstate.desktop_pair`); a session whose record sits under another account's pair is counted
-and left alone. Under sharing All that pair is a junction and the bytes land in its target, which
+to (`appstate.desktop_pair`); a session whose record sits under another pair OF THE SAME ROOT is
+counted as `other_account` and left alone, because that root is the list the app reads and a second
+record would be a second chat. `c4x.merge` is what brings such a chat into this account.
+
+**A record under another root is not another account.** Roots other than the signed-in one are
+previous installs, and their records name nothing the running app lists. Those sessions are counted
+as `other_install` and offered like any other orphan. The first rule looked at every root at once:
+measured 2026-11-12, four chats (one of 2,779 turns) were withheld because their only record sat in
+an `AppData\Roaming\Claude` tree frozen since 2026-11-06, while the app read
+`AppData\Local\Claude-Data`, and the drawer told the user they belonged to an account that did not
+exist. Under sharing All that pair is a junction and the bytes land in its target, which
 is the shared list; the report names both directories and says the records stay there if sharing
 is turned off. A signed-in pair that sharing does not cover is refused rather than started as a
 second list. Every record c4x wrote is named in `data/adopted-records.json`, with the path as the

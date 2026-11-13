@@ -8,7 +8,7 @@ from dash import dcc, html
 from c4x.dash_compat import DataTable
 from c4x.frames import records
 from c4x.labels import stamp
-from c4x.store import COMPACTION_WINDOWS, THRESHOLDS, all_compactions, fit_window
+from c4x.store import THRESHOLDS, all_compactions, compaction_windows, fit_window
 from c4x.theme import (
     BORDER,
     DANGER,
@@ -33,8 +33,9 @@ def compactions_layout(session_id=None, scope="main", cohort=None):
     # the token count alone and SAY SO in the confidence column rather than hiding the weaker
     # basis behind an identical-looking number.
     windows, confidences = [], []
+    resolved = compaction_windows()
     for uuid, pre in zip(df["uuid"], df["pre_tokens"], strict=True):
-        res = COMPACTION_WINDOWS.get(uuid) or {}
+        res = resolved.get(uuid) or {}
         if res.get("window"):
             windows.append(res["window"])
             confidences.append(res.get("confidence", "?"))

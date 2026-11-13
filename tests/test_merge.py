@@ -276,3 +276,118 @@ class TestWhatItReports:
         line = merge.sentence(said)
         assert "record(s) copied into" in line
         assert "held back until Claude closes" in line
+
+
+class TestWhichRootTheMergeWorksIn:
+    """A copy stays inside the root the app WRITES to, never the readers' union.
+
+    Measured 2026-11-06: this machine had a live root of 9 account pairs and a legacy
+    `%APPDATA%` root holding one old-schema pair of 282 records with no archived index beside
+    it. The readers walk both by design, because a record is worth reading wherever it was left.
+    Walking both HERE made the survey report 10 pairs and 440 copies: it would have pushed
+    months-old records carrying no archived state into every account, where they arrive in Active,
+    and pushed the app's live chats back into a directory it had abandoned.
+    """
+
+    def test_only_the_write_root_supplies_the_pairs(self, tmp_path, monkeypatch):
+        from c4x import store
+        live = tmp_path / "live" / "claude-code-sessions"
+        stale = tmp_path / "stale" / "claude-code-sessions"
+        for root in (live, stale):
+            pair_at(root, A)
+            pair_at(root, B)
+        monkeypatch.setattr(store, "sessions_root", lambda: str(live))
+        monkeypatch.setattr(store, "sessions_roots", lambda: [str(live), str(stale)])
+        found = merge.pairs()
+        assert {p["root"] for p in found} == {str(live)}, (
+            "the merge walked a root the app does not write to")
+        assert len(found) == 2, f"expected the live root's two pairs, got {len(found)}"
+
+    def test_an_explicit_root_list_is_still_honoured(self, tmp_path, monkeypatch):
+        """The parameter is how the tests and any deliberate recovery name their own roots."""
+        from c4x import store
+        live = tmp_path / "live" / "claude-code-sessions"
+        other = tmp_path / "other" / "claude-code-sessions"
+        pair_at(live, A)
+        pair_at(other, B)
+        monkeypatch.setattr(store, "sessions_root", lambda: str(live))
+        found = merge.pairs(roots=[str(live), str(other)])
+        assert {p["root"] for p in found} == {str(live), str(other)}
+
+
+class TestCarryingADeletionAcross:
+    """A chat the app deleted must not survive as a copy in another account's pair.
+
+    The app deletes a chat by removing the record from the pair it is signed into and leaving a
+    marker there. This module had already put a copy in every other pair, so switching accounts
+    brought the chat straight back. Measured 2026-11-07: 85 ids marked deleted on the real machine,
+    27 of them still holding a record in 8 pairs each.
+    """
+
+    def test_the_leftover_copy_is_listed_for_removal(self, machine):
+        said = merge.plan_deletions(machine["indexes"])
+        assert said["marked"] == ["local_deleted_one"]
+        removals = [r for r in said["removals"] if r["id"] == "local_deleted_one"]
+        assert [r["pair"] for r in removals] == [f"{A[:8]}\\{ORG[:8]}"], (
+            "the copy in the pair that never heard about the delete was not listed")
+
+    def test_the_pair_that_was_never_told_is_given_the_marker(self, machine):
+        said = merge.plan_deletions(machine["indexes"])
+        told = {m["pair"] for m in said["marker_adds"] if m["id"] == "local_deleted_one"}
+        assert f"{A[:8]}\\{ORG[:8]}" in told
+        assert f"{B[:8]}\\{ORG[:8]}" not in told, "the pair that already knew was told twice"
+
+    def test_a_pair_that_is_a_link_is_never_written_into(self, machine):
+        said = merge.plan_deletions(machine["indexes"])
+        touched = ({r["pair"] for r in said["removals"]}
+                   | {m["pair"] for m in said["marker_adds"]})
+        assert f"{C[:8]}\\{ORG[:8]}" not in touched
+
+    def test_a_chat_with_no_marker_anywhere_is_untouched(self, machine):
+        """KNOWN BAD INPUT for the whole feature: it must act ONLY on a real marker."""
+        said = merge.plan_deletions(machine["indexes"])
+        ids = {r["id"] for r in said["removals"]} | {m["id"] for m in said["marker_adds"]}
+        assert "local_only_in_a" not in ids
+        assert "local_shared" not in ids
+
+    def test_a_dry_run_removes_nothing(self, machine):
+        before = Path(machine["a"]["path"]) / "local_deleted_one.json"
+        assert before.exists()
+        said = merge.propagate_deletions(machine["indexes"], dry_run=True)
+        assert said["removed"] == [] and said["would_remove"]
+        assert before.exists(), "a dry run deleted a record"
+
+    def test_no_backup_means_no_deletion(self, machine):
+        """The order IS the safety: nothing is removed until every pair has been copied."""
+        gone = []
+
+        def refuse():
+            raise OSError("no space for a backup")
+        said = merge.propagate_deletions(machine["indexes"], dry_run=False, backup=refuse,
+                                         remove=gone.append)
+        assert gone == [], "records were removed with no backup taken"
+        assert said["failed"] and "backup" in said["failed"][0]
+
+    def test_it_removes_the_copy_and_writes_the_marker(self, machine):
+        taken, written = [], []
+        said = merge.propagate_deletions(
+            machine["indexes"], dry_run=False, backup=lambda: "a-backup",
+            remove=taken.append, write=lambda path, data: written.append((path, data)))
+        assert said["backup"] == "a-backup"
+        assert [Path(t).name for t in taken] == ["local_deleted_one.json"]
+        assert [Path(p).name for p, _ in written] == ["deleted_deleted_one"]
+        assert written[0][1] == b"1760000000000", "the copied marker lost the original delete time"
+
+    def test_the_merge_carries_deletions_by_default(self, machine):
+        taken = []
+        said = merge.merge(indexes=machine["indexes"], running=True, dry_run=False,
+                           copy=lambda *a, **k: True, replace=lambda *a, **k: None,
+                           backup=lambda: "b", remove=taken.append,
+                           write=lambda *a, **k: None)
+        assert "deletions" in said
+        assert [Path(t).name for t in taken] == ["local_deleted_one.json"]
+
+    def test_it_can_be_turned_off(self, machine):
+        said = merge.merge(indexes=machine["indexes"], running=True, dry_run=True,
+                           deletions=False)
+        assert "deletions" not in said

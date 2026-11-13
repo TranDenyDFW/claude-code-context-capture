@@ -344,7 +344,10 @@ export function AdoptSessions({
             <>
               {state.other_account > 0 ? (
                 <span className="mr-auto text-xs text-ink-faint">
-                  {plural(state.other_account, 'chat')} belong to another account and are left alone
+                  {plural(state.other_account, 'chat')} already{' '}
+                  {state.other_account === 1 ? 'lists' : 'list'} under another account, so the
+                  Accounts pane copies {state.other_account === 1 ? 'it' : 'them'} here rather than
+                  this one adopting {state.other_account === 1 ? 'it' : 'them'} twice
                 </span>
               ) : null}
               <button
@@ -475,6 +478,15 @@ export function AdoptSessions({
                 Claude has deleted {plural(state.deleted_markers, 'chat')} from this account; their
                 records are gone and they cannot be told from the chats below, so adopt only folders
                 you recognise.
+              </p>
+            ) : null}
+            {(state.other_install ?? 0) > 0 ? (
+              <p className="text-xs text-ink-faint" data-testid="other-install">
+                {plural(state.other_install ?? 0, 'chat')} below{' '}
+                {state.other_install === 1 ? 'has a record' : 'have records'} under a previous
+                install&apos;s folder, which this Claude does not read. That is not another account,{' '}
+                and{' '}
+                {state.other_install === 1 ? 'it is' : 'they are'} offered like any other.
               </p>
             ) : null}
             <div className="flex flex-wrap items-center gap-3 text-xs">

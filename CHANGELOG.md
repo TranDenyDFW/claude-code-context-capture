@@ -5,6 +5,18 @@ runner, CI and a linted tree.
 
 ## Unreleased
 
+### Fixed
+
+- **A record under a previous install is no longer blamed on another account.** The adopt drawer
+  built its "already a chat" set from EVERY records root at once, so a session whose only record
+  sat under an install the app no longer reads was counted as another account's and withheld. There
+  was no other account: measured 2026-11-12, every pair of the live root held the same records,
+  while four chats (`pause`, 2,779 turns; `CC_Extensions`; `HVAC Exam (old)`; one from
+  `L:\Books\Courses`) were withheld on the strength of an `AppData\Roaming\Claude` tree frozen since
+  2026-11-06. The skip set now comes from the signed-in root alone: another pair of THAT root still
+  withholds (a second record would be a second chat, and `c4x.merge` is what copies it here), and a
+  record under any other root is counted as `other_install` and offered, with the drawer saying so.
+
 ### Added
 
 - **Every account's chat list holds every chat.** The user archived a chat, the app switched to
