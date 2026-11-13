@@ -327,8 +327,10 @@ describe('AdoptSessions', () => {
     await opened()
     expect(screen.getByText(/Claude has deleted 17 chats/).textContent)
       .toContain('adopt only folders you recognise')
-    expect(screen.getByText(/1 chat already list under another account/).textContent)
-      .toContain('Accounts pane copies them here')
+    // One chat reads "lists ... copies it here": the verb and the pronoun agree with the count,
+    // which the first wording got wrong in the live drawer.
+    expect(screen.getByText(/1 chat already lists under another account/).textContent)
+      .toContain('Accounts pane copies it here')
   })
 
   it('a record under a previous install is explained, never called another account', async () => {

@@ -344,8 +344,10 @@ export function AdoptSessions({
             <>
               {state.other_account > 0 ? (
                 <span className="mr-auto text-xs text-ink-faint">
-                  {plural(state.other_account, 'chat')} already list under another account, so the
-                  Accounts pane copies them here rather than this one adopting them twice
+                  {plural(state.other_account, 'chat')} already{' '}
+                  {state.other_account === 1 ? 'lists' : 'list'} under another account, so the
+                  Accounts pane copies {state.other_account === 1 ? 'it' : 'them'} here rather than
+                  this one adopting {state.other_account === 1 ? 'it' : 'them'} twice
                 </span>
               ) : null}
               <button
